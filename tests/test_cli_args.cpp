@@ -96,10 +96,12 @@ void test_cursor_positional() {
 
 void test_registry_compile_time() {
   static_assert(CliRegistry::find("ohm") != nullptr);
+  static_assert(CliRegistry::find("s0") != nullptr);
   static_assert(CliRegistry::find("nope") == nullptr);
-  static_assert(CliRegistry::all().size() == 1);
+  static_assert(CliRegistry::all().size() == 2);
   static_assert(!CliRegistry::all()[0].usage.empty());
   assert(CliRegistry::find("ohm")->run != nullptr);
+  assert(CliRegistry::find("s0")->run != nullptr);
 }
 
 void test_ohm_handler() {
@@ -160,6 +162,8 @@ void test_shell_integration() {
   assert(sh.execute("help ohm", out) == 0);
   assert(sh.execute("nopecmd", out) == 1);
   assert(sh.execute("ohm --help", out) == 0);
+  assert(sh.execute("s0 convert --const 1000imp/kWh", out) == 0);
+  assert(sh.execute("s0 --help", out) == 0);
   assert(sh.execute("exit", out) == -1);
 }
 

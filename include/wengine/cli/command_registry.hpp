@@ -8,6 +8,6 @@
 
 namespace wengine::cli {
 
-using CliRegistry = Registry<commands::OhmSpec>;
+using CliRegistry = Registry<commands::OhmSpec, commands::S0Spec>;
 
 } // namespace wengine::cli

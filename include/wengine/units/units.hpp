@@ -23,6 +23,9 @@ using ElectricPotential = Dimension<2, -3, 1, -1, 0, 0, 0>;
 using ElectricCurrent = Dimension<0, 0, 0, 1, 0, 0, 0>;
 using ElectricCharge = Dimension<0, 1, 0, 1, 0, 0, 0>;
 using ElectricResistance = Dimension<2, -3, 1, -2, 0, 0, 0>;
+using Frequency = Dimension<0, -1, 0, 0, 0, 0, 0>;
+using Count = Dimension<0, 0, 0, 0, 0, 0, 0>; // dimensionless: pulse / impulse counts
+using MeterConstant = Dimension<-2, 2, -1, 0, 0, 0, 0>; // Count / Energy (imp per joule, SI base)
 
 template <typename Dim1, typename Dim2>
 using DimensionMultiply = Dimension<Dim1::length + Dim2::length, Dim1::time + Dim2::time,
@@ -85,6 +88,42 @@ constexpr Value<ElectricResistance> operator""_Ohm(long double val) {
 
 constexpr Value<ElectricPotential> operator""_V(long double val) {
   return Value<ElectricPotential>(static_cast<double>(val));
+}
+
+constexpr Value<Power> operator""_W(long double val) {
+  return Value<Power>(static_cast<double>(val));
+}
+
+constexpr Value<Power> operator""_kW(long double val) {
+  return Value<Power>(static_cast<double>(val) * 1000.0);
+}
+
+constexpr Value<Energy> operator""_J(long double val) {
+  return Value<Energy>(static_cast<double>(val));
+}
+
+constexpr Value<Energy> operator""_Wh(long double val) {
+  return Value<Energy>(static_cast<double>(val) * 3600.0);
+}
+
+constexpr Value<Energy> operator""_kWh(long double val) {
+  return Value<Energy>(static_cast<double>(val) * 3600000.0);
+}
+
+constexpr Value<Frequency> operator""_Hz(long double val) {
+  return Value<Frequency>(static_cast<double>(val));
+}
+
+constexpr Value<Time> operator""_s(long double val) {
+  return Value<Time>(static_cast<double>(val));
+}
+
+constexpr Value<Time> operator""_h(long double val) {
+  return Value<Time>(static_cast<double>(val) * 3600.0);
+}
+
+constexpr Value<Count> operator""_imp(long double val) {
+  return Value<Count>(static_cast<double>(val));
 }
 
 } // namespace wengine::units::literals

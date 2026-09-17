@@ -248,6 +248,72 @@ inline constexpr std::array<detail::SuffixScale, 7> kResistanceSuffixes{{
   return detail::parse_scaled_impl(s, kResistanceSuffixes);
 }
 
+// Power (base W), energy (base J == Ws), frequency (base Hz),
+// time (base s), meter constant (base imp/kWh), pulse counts (dimensionless).
+inline constexpr std::array<detail::SuffixScale, 4> kPowerSuffixes{{
+    {"W", 1.0},
+    {"mW", 1e-3},
+    {"kW", 1e3},
+    {"MW", 1e6},
+}};
+inline constexpr std::array<detail::SuffixScale, 7> kEnergySuffixes{{
+    {"J", 1.0},
+    {"Ws", 1.0},
+    {"kJ", 1e3},
+    {"Wh", 3600.0},
+    {"kWh", 3600000.0},
+    {"MWh", 3600000000.0},
+    {"MJ", 1e6},
+}};
+inline constexpr std::array<detail::SuffixScale, 3> kFrequencySuffixes{{
+    {"Hz", 1.0},
+    {"mHz", 1e-3},
+    {"kHz", 1e3},
+}};
+inline constexpr std::array<detail::SuffixScale, 6> kTimeSuffixes{{
+    {"s", 1.0},
+    {"sec", 1.0},
+    {"ms", 1e-3},
+    {"us", 1e-6},
+    {"min", 60.0},
+    {"h", 3600.0},
+}};
+// Canonical result: impulses per kWh.
+inline constexpr std::array<detail::SuffixScale, 6> kMeterConstantSuffixes{{
+    {"imp/kWh", 1.0},
+    {"imp/Wh", 1000.0},
+    {"imp/J", 3600000.0},
+    {"imp/Ws", 3600000.0},
+    {"imp/kJ", 3600.0},
+    {"imp/MWh", 0.001},
+}};
+inline constexpr std::array<detail::SuffixScale, 5> kPulseSuffixes{{
+    {"imp", 1.0},
+    {"imps", 1.0},
+    {"pulse", 1.0},
+    {"pulses", 1.0},
+    {"cnt", 1.0},
+}};
+
+[[nodiscard]] inline ParseResult<double> parse_power(std::string_view s) noexcept {
+  return detail::parse_scaled_impl(s, kPowerSuffixes);
+}
+[[nodiscard]] inline ParseResult<double> parse_energy(std::string_view s) noexcept {
+  return detail::parse_scaled_impl(s, kEnergySuffixes);
+}
+[[nodiscard]] inline ParseResult<double> parse_frequency(std::string_view s) noexcept {
+  return detail::parse_scaled_impl(s, kFrequencySuffixes);
+}
+[[nodiscard]] inline ParseResult<double> parse_time(std::string_view s) noexcept {
+  return detail::parse_scaled_impl(s, kTimeSuffixes);
+}
+[[nodiscard]] inline ParseResult<double> parse_meter_const(std::string_view s) noexcept {
+  return detail::parse_scaled_impl(s, kMeterConstantSuffixes);
+}
+[[nodiscard]] inline ParseResult<double> parse_pulses(std::string_view s) noexcept {
+  return detail::parse_scaled_impl(s, kPulseSuffixes);
+}
+
 // --------------------------------------------------------------- ArgCursor
 // Universal cursor over token span with consumed-bitmask (up to 64 tokens).
 // Supports mixed positional + named/flag styles without allocation:

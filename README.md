@@ -58,6 +58,23 @@ P = 6.696 W
 > ohm --help
 ```
 
+S0 pulse output (energy meter, constant `C` in `imp/kWh`):
+
+```text
+> s0 convert --const 1000imp/kWh     # imp/Wh, imp/J (= imp/Ws), J/Wh/kWh per imp
+> s0 rate --power 2kW --const 1000imp/kWh        # f [Hz], T [s], imp/min, imp/h
+> s0 power --freq 0.5556Hz --const 1000imp/kWh   # inverse: pulse rate -> W/kW
+> s0 energy --pulses 500 --const 1000imp/kWh     # inverse: pulses -> kWh/Wh/J
+> s0 pulses --power 2kW --time 1h --const 1000imp/kWh
+> s0 pulses --energy 2kWh --const 1000imp/kWh    # energy batch -> pulse count
+> s0 full --u 230V --i 10A [--pf 1.0] --const 1000imp/kWh [--time 1h]
+```
+
+Core identity: `f = P * C / 3_600_000` (`P` in W, `f` in Hz == imp/s);
+`N = E_kWh * C`. Meter-constant forms accepted: `imp/kWh`, `imp/Wh`,
+`imp/J` (== `imp/Ws`), `imp/kJ`, `imp/MWh`. Energy units: `J`/`Ws`/`kJ`/
+`Wh`/`kWh`; power `W`/`kW`; time `s`/`ms`/`min`/`h`.
+
 Argument forms (see `wengine/cli/args.hpp`): positional values with unit
 suffixes (`12V`, `0.5A`, `4Ohm`, bare numbers = SI units), named options
 `--key value` / `--key=value` / `-k value` (`--u/-U/--voltage`,
@@ -80,7 +97,7 @@ tests/  benchmarks/  examples/
 |---|---|---|
 | `math` | `wengine/math/vector_*.hpp` | `Vector2D<T>`/`Vector3D<T>` header-only structs, no virtuals |
 | `units` | `wengine/units/units.hpp`, `converter.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, `_V`/`_A`/`_Ohm` literals |
-| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp` | Pure `static constexpr` functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur` — no I/O |
+| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp` | Pure `static constexpr` functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time` — no I/O |
 | `core` | `wengine/core/status.hpp`, `solver.hpp` | `Status`/`StatusCode` (no exceptions/strings in hot path), `ISolver::step(dt)` interface |
 | `world` | `wengine/world/state.hpp` | `State` (SoA vectors, `sim_time`, `step_index`), `Snapshot` + `take_snapshot()` |
 | `emit` | `wengine/emit/sink.hpp` | `ISink::on_snapshot()` — how external apps/GUI consume the sim |
@@ -101,9 +118,9 @@ CMake targets mirror this: `wengine_math`, `wengine_units`,
 `wengine_solvers`, `wengine_world`, `wengine_emit` (all `INTERFACE`) combine
 into `wengine_core` (`wengine::core` alias; `PhysicsEngineCore` is a legacy
 alias). `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
-`src/cli/commands/ohm.cpp`) links `wengine_core`; `PhysicsSimApp` links
+`src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`) links `wengine_core`; `PhysicsSimApp` links
 `wengine_cli`. Tests: `test_ohm_law`, `test_math_units` (link core),
-`test_cli_args` (links cli). Benchmark: `bench_ohm`.
+`test_cli_args`, `test_s0` (link cli). Benchmark: `bench_ohm`.
 
 ## Flow
 
@@ -169,6 +186,6 @@ benchmarks/bench_ohm.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,math,physics,solvers,units,world}/
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0}.cpp
 cmake/ docs/ external/ (reserved/empty)
 ```
