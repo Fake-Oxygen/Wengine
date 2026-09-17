@@ -102,6 +102,10 @@ if(BUILD_TESTS)
     add_executable(test_math_units tests/test_math_units.cpp)
     target_link_libraries(test_math_units PRIVATE wengine_core)
     add_test(NAME math_units COMMAND test_math_units)
+
+    add_executable(test_cli_args tests/test_cli_args.cpp)
+    target_link_libraries(test_cli_args PRIVATE wengine_cli)
+    add_test(NAME cli_args COMMAND test_cli_args)
 endif()
 
 if(BUILD_BENCHMARKS)

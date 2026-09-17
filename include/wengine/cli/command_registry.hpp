@@ -1,14 +1,13 @@
 #pragma once
 
+// Single place to add commands: append your Spec to the Registry list.
+// Validation (unique names, non-empty) happens at compile time.
+
 #include "wengine/cli/commands.hpp"
-#include "wengine/cli/shell.hpp"
+#include "wengine/cli/command.hpp"
 
 namespace wengine::cli {
 
-inline constexpr Command kCommands[] = {
-    {.name = "ohm",
-     .description = "Solve resistor (Ohm's law demo)",
-     .function = &commands::ohm},
-};
+using CliRegistry = Registry<commands::OhmSpec>;
 
 } // namespace wengine::cli

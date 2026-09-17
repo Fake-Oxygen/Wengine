@@ -1,0 +1,179 @@
+#include "wengine/cli/args.hpp"
+#include "wengine/cli/command_registry.hpp"
+#include "wengine/cli/shell.hpp"
+
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <iostream>
+#include <sstream>
+
+using namespace wengine::cli;
+
+namespace {
+
+void test_tokenizer() {
+  // Basic split, zero-copy views into input.
+  std::string line = "ohm 12.4V  0.54A";
+  auto toks = tokenize_view(line);
+  assert(toks.size() == 3);
+  assert(toks[0] == "ohm" && toks[1] == "12.4V" && toks[2] == "0.54A");
+
+  // Quotes group whitespace.
+  std::string q = R"(cmd "hello world" 'a b' bare)";
+  auto qt = tokenize_view(q);
+  assert(qt.size() == 4);
+  assert(qt[1] == "hello world");
+  assert(qt[2] == "a b");
+
+  // Empty / whitespace only.
+  assert(tokenize_view("").empty());
+  assert(tokenize_view("   \t ").empty());
+
+  // tokenize_into counts overflow without writing OOB.
+  std::array<std::string_view, 2> small{};
+  std::size_t n = tokenize_into("a b c d", small);
+  assert(n == 4);
+  assert(small[0] == "a" && small[1] == "b");
+}
+
+void test_scalars() {
+  assert(parse_double("12.4").ok && std::fabs(parse_double("12.4").value - 12.4) < 1e-12);
+  assert(!parse_double("").ok);
+  assert(!parse_double("12V").ok); // suffix belongs to unit parsers
+  assert(!parse_double("abc").ok);
+
+  assert(parse_i64("-42").ok && parse_i64("-42").value == -42);
+  assert(!parse_i64("3.5").ok);
+
+  assert(parse_bool("true").value && parse_bool("1").value);
+  assert(!parse_bool("0").value && !parse_bool("off").value);
+  assert(!parse_bool("maybe").ok);
+}
+
+void test_units() {
+  auto v = parse_voltage("12.4V");
+  assert(v.ok && std::fabs(v.value - 12.4) < 1e-12);
+  assert(std::fabs(parse_voltage("1kV").value - 1000.0) < 1e-9);
+  assert(std::fabs(parse_voltage("500mV").value - 0.5) < 1e-12);
+  assert(std::fabs(parse_voltage("3").value - 3.0) < 1e-12); // bare SI
+  assert(!parse_voltage("5A").ok);
+  assert(!parse_voltage("abc").ok);
+
+  assert(std::fabs(parse_current("0.54A").value - 0.54) < 1e-12);
+  assert(std::fabs(parse_current("2mA").value - 0.002) < 1e-12);
+  assert(!parse_current("5V").ok);
+
+  assert(std::fabs(parse_resistance("4Ohm").value - 4.0) < 1e-12);
+  assert(std::fabs(parse_resistance("2kOhm").value - 2000.0) < 1e-9);
+  assert(!parse_resistance("7V").ok);
+}
+
+void test_cursor_options() {
+  std::array<std::string_view, 4> t{"--u", "12V", "--i=0.5A", "-R"};
+  ArgCursor c{t};
+  auto u = c.take_option({"--u", "-U"});
+  assert(u && *u == "12V");
+  auto i = c.take_option({"--i", "--current"});
+  assert(i && *i == "0.5A"); // --key=value form
+  assert(c.has_flag({"-R"}));
+  assert(c.take_flag({"-R"}));
+  assert(!c.has_remaining());
+}
+
+void test_cursor_positional() {
+  std::array<std::string_view, 4> t{"12V", "--u", "9V", "0.5A"};
+  ArgCursor c{t};
+  // take_option consumes "--u 9V"
+  auto u = c.take_option({"--u"});
+  assert(u && *u == "9V");
+  auto p0 = c.next_positional();
+  assert(p0 && *p0 == "12V");
+  auto p1 = c.next_positional();
+  assert(p1 && *p1 == "0.5A");
+  assert(!c.has_remaining());
+}
+
+void test_registry_compile_time() {
+  static_assert(CliRegistry::find("ohm") != nullptr);
+  static_assert(CliRegistry::find("nope") == nullptr);
+  static_assert(CliRegistry::all().size() == 1);
+  static_assert(!CliRegistry::all()[0].usage.empty());
+  assert(CliRegistry::find("ohm")->run != nullptr);
+}
+
+void test_ohm_handler() {
+  auto run = [](std::string line) {
+    std::array<std::string_view, kMaxArgs> buf{};
+    // Keep owned storage alive: tokenize views into `line`, then copy
+    // views into a stable vector<string_view> is unnecessary here since
+    // ArgCursor only lives for the call.
+    std::size_t n = tokenize_into(line, buf);
+    std::span<const std::string_view> args{buf.data(), n};
+    ArgCursor cur{args};
+    std::ostringstream out;
+    int rc = commands::OhmSpec::run(cur, out);
+    return std::pair<int, std::string>{rc, out.str()};
+  };
+
+  {
+    auto [rc, s] = run("12V 3A");
+    assert(rc == 0);
+    assert(s.find("R = 4") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("--u 12V --i 3A");
+    assert(rc == 0 && s.find("P = 36") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("--i 2A --r 5Ohm");
+    assert(rc == 0 && s.find("U = 10") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("--u 12V --r 4Ohm");
+    assert(rc == 0 && s.find("I = 3") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("--u=12V --i=3A");
+    assert(rc == 0);
+  }
+  {
+    auto [rc, s] = run("12V");
+    assert(rc == 2); // need exactly 2
+  }
+  {
+    auto [rc, s] = run("--u 12V --bogus 3");
+    assert(rc == 2);
+  }
+  {
+    auto [rc, s] = run("--help");
+    assert(rc == 0 && s.find("Usage") != std::string::npos);
+  }
+}
+
+void test_shell_integration() {
+  Shell sh;
+  std::ostringstream out;
+  assert(sh.execute("", out) == 0);
+  assert(sh.execute("ohm 12V 3A", out) == 0);
+  assert(out.str().find("R = 4") != std::string::npos);
+  assert(sh.execute("help ohm", out) == 0);
+  assert(sh.execute("nopecmd", out) == 1);
+  assert(sh.execute("ohm --help", out) == 0);
+  assert(sh.execute("exit", out) == -1);
+}
+
+} // namespace
+
+int main() {
+  test_tokenizer();
+  test_scalars();
+  test_units();
+  test_cursor_options();
+  test_cursor_positional();
+  test_registry_compile_time();
+  test_ohm_handler();
+  test_shell_integration();
+  std::cout << "test_cli_args: OK\n";
+  return 0;
+}
