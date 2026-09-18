@@ -4,6 +4,10 @@
 #include <array>
 #include <optional>
 #include <ostream>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace wengine::cli::commands {
 
@@ -229,6 +233,52 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
   out << "R = " << st.resistance.get() << " Ohm\n";
   out << "P = " << st.power.get() << " W\n";
   return 0;
+}
+
+namespace {
+
+constexpr std::array<std::string_view, 13> kOhmOptions{{
+    "--voltage", "--volt", "--u", "-U", "--current", "--i", "-I", "--resistance", "--r",
+    "-R", "--from", "--help", "-h",
+}};
+
+constexpr std::array<std::string_view, 6> kFromValues{{
+    "ui", "ur", "ir", "iu", "ru", "ri",
+}};
+
+void push_matches(std::string_view partial,
+                  std::span<const std::string_view> options, std::vector<std::string> &out) {
+  for (std::string_view o : options) {
+    if (o.substr(0, partial.size()) == partial) {
+      out.emplace_back(o);
+    }
+  }
+}
+
+} // namespace
+
+void OhmSpec::complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                       std::vector<std::string> &out) {
+  // Values for a preceding "--from".
+  if (!prior_args.empty() && prior_args.back() == "--from") {
+    push_matches(partial, kFromValues, out);
+    return;
+  }
+  // "--from=<prefix>" form.
+  constexpr std::string_view kFromEq = "--from=";
+  if (partial.substr(0, kFromEq.size()) == kFromEq) {
+    const std::string_view sub = partial.substr(kFromEq.size());
+    for (std::string_view v : kFromValues) {
+      if (v.substr(0, sub.size()) == sub) {
+        out.emplace_back(std::string{kFromEq} + std::string{v});
+      }
+    }
+    return;
+  }
+  if (!partial.empty() && partial.front() == '-') {
+    push_matches(partial, kOhmOptions, out);
+  }
+  // Positional bare/suffixed numbers: nothing sensible to complete.
 }
 
 } // namespace wengine::cli::commands

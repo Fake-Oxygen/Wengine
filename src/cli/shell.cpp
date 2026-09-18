@@ -6,6 +6,7 @@
 #include <exception>
 #include <iostream>
 #include <string>
+#include <utility>
 
 namespace wengine::cli {
 
@@ -65,17 +66,20 @@ int Shell::execute(std::string_view line, std::ostream &out) {
 }
 
 void Shell::run(std::istream &in, std::ostream &out) {
-  std::string line;
   while (true) {
-    out << "> " << std::flush;
-    if (!std::getline(in, line)) {
-      break;
+    auto line = reader_.read_line("> ", in, out);
+    if (!line) {
+      break; // EOF (Ctrl-D / closed stdin)
     }
-    const int rc = execute(line, out);
+    const int rc = execute(*line, out);
     if (rc == -1) {
       break;
     }
   }
+}
+
+void Shell::set_history_file(std::string path) {
+  reader_.set_history_file(std::move(path));
 }
 
 void Shell::print_help(std::ostream &out) const {

@@ -72,8 +72,11 @@ add_library(PhysicsEngineCore ALIAS wengine_core)
 if(BUILD_CLI)
     add_library(wengine_cli STATIC
         src/cli/shell.cpp
+        src/cli/line_reader.cpp
+        src/cli/complete.cpp
         src/cli/commands/ohm.cpp
         src/cli/commands/s0.cpp
+        src/cli/commands/i2c.cpp
     )
     target_include_directories(wengine_cli PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -111,6 +114,10 @@ if(BUILD_TESTS)
     add_executable(test_s0 tests/test_s0.cpp)
     target_link_libraries(test_s0 PRIVATE wengine_cli)
     add_test(NAME s0 COMMAND test_s0)
+
+    add_executable(test_i2c tests/test_i2c.cpp)
+    target_link_libraries(test_i2c PRIVATE wengine_cli)
+    add_test(NAME i2c COMMAND test_i2c)
 endif()
 
 if(BUILD_BENCHMARKS)

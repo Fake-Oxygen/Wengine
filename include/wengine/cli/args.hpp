@@ -270,13 +270,15 @@ inline constexpr std::array<detail::SuffixScale, 3> kFrequencySuffixes{{
     {"mHz", 1e-3},
     {"kHz", 1e3},
 }};
-inline constexpr std::array<detail::SuffixScale, 6> kTimeSuffixes{{
+inline constexpr std::array<detail::SuffixScale, 8> kTimeSuffixes{{
     {"s", 1.0},
     {"sec", 1.0},
     {"ms", 1e-3},
     {"us", 1e-6},
+    {"ns", 1e-9},
     {"min", 60.0},
     {"h", 3600.0},
+    {"ps", 1e-12},
 }};
 // Canonical result: impulses per kWh.
 inline constexpr std::array<detail::SuffixScale, 6> kMeterConstantSuffixes{{
@@ -293,6 +295,14 @@ inline constexpr std::array<detail::SuffixScale, 5> kPulseSuffixes{{
     {"pulse", 1.0},
     {"pulses", 1.0},
     {"cnt", 1.0},
+}};
+// Canonical result: farads.
+inline constexpr std::array<detail::SuffixScale, 5> kCapacitanceSuffixes{{
+    {"F", 1.0},
+    {"mF", 1e-3},
+    {"uF", 1e-6},
+    {"nF", 1e-9},
+    {"pF", 1e-12},
 }};
 
 [[nodiscard]] inline ParseResult<double> parse_power(std::string_view s) noexcept {
@@ -312,6 +322,9 @@ inline constexpr std::array<detail::SuffixScale, 5> kPulseSuffixes{{
 }
 [[nodiscard]] inline ParseResult<double> parse_pulses(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, kPulseSuffixes);
+}
+[[nodiscard]] inline ParseResult<double> parse_capacitance(std::string_view s) noexcept {
+  return detail::parse_scaled_impl(s, kCapacitanceSuffixes);
 }
 
 // --------------------------------------------------------------- ArgCursor

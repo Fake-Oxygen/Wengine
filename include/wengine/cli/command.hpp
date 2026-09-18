@@ -9,6 +9,9 @@
 //     static constexpr std::string_view kDescription = "Solve resistor";
 //     static constexpr std::string_view kUsage = "ohm [U] [I] [--u V] ...";
 //     static int run(ArgCursor &args, std::ostream &out);
+//     // optional Tab completion for arguments:
+//     static void complete(std::span<const std::string_view> prior_args,
+//                          std::string_view partial, std::vector<std::string> &out);
 //   };
 //   using CliRegistry = Registry<OhmSpec, ...>;
 //
@@ -23,17 +26,26 @@
 #include <array>
 #include <concepts>
 #include <ostream>
+#include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace wengine::cli {
 
 using Handler = int (*)(ArgCursor &, std::ostream &);
+
+// Completes one argument: prior tokens after the command name, the partial
+// token under the cursor, output candidates (without trailing space).
+using CompleteFn = void (*)(std::span<const std::string_view> prior_args,
+                            std::string_view partial, std::vector<std::string> &out);
 
 struct CommandDef {
   std::string_view name;
   std::string_view description;
   std::string_view usage;
   Handler run;
+  CompleteFn complete = nullptr; // optional: Tab completion for arguments
 };
 
 template <typename S>
@@ -60,7 +72,16 @@ template <CommandSpec S>
   if constexpr (requires { S::kUsage; }) {
     usage = S::kUsage;
   }
-  return {.name = S::kName, .description = S::kDescription, .usage = usage, .run = &S::run};
+  CompleteFn complete = nullptr;
+  if constexpr (requires(std::span<const std::string_view> a, std::string_view p,
+                         std::vector<std::string> &o) { S::complete(a, p, o); }) {
+    complete = &S::complete;
+  }
+  return {.name = S::kName,
+          .description = S::kDescription,
+          .usage = usage,
+          .run = &S::run,
+          .complete = complete};
 }
 
 template <std::size_t N>

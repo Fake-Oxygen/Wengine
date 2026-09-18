@@ -26,6 +26,7 @@ using ElectricResistance = Dimension<2, -3, 1, -2, 0, 0, 0>;
 using Frequency = Dimension<0, -1, 0, 0, 0, 0, 0>;
 using Count = Dimension<0, 0, 0, 0, 0, 0, 0>; // dimensionless: pulse / impulse counts
 using MeterConstant = Dimension<-2, 2, -1, 0, 0, 0, 0>; // Count / Energy (imp per joule, SI base)
+using Capacitance = Dimension<-2, 4, -1, 2, 0, 0, 0>; // s^4*A^2 / (kg*m^2), base unit F
 
 template <typename Dim1, typename Dim2>
 using DimensionMultiply = Dimension<Dim1::length + Dim2::length, Dim1::time + Dim2::time,
@@ -82,8 +83,16 @@ constexpr Value<ElectricCurrent> operator""_A(long double val) {
   return Value<ElectricCurrent>(static_cast<double>(val));
 }
 
+constexpr Value<ElectricCurrent> operator""_mA(long double val) {
+  return Value<ElectricCurrent>(static_cast<double>(val) * 1e-3);
+}
+
 constexpr Value<ElectricResistance> operator""_Ohm(long double val) {
   return Value<ElectricResistance>(static_cast<double>(val));
+}
+
+constexpr Value<ElectricResistance> operator""_kOhm(long double val) {
+  return Value<ElectricResistance>(static_cast<double>(val) * 1e3);
 }
 
 constexpr Value<ElectricPotential> operator""_V(long double val) {
@@ -118,12 +127,44 @@ constexpr Value<Time> operator""_s(long double val) {
   return Value<Time>(static_cast<double>(val));
 }
 
+constexpr Value<Time> operator""_ms(long double val) {
+  return Value<Time>(static_cast<double>(val) * 1e-3);
+}
+
+constexpr Value<Time> operator""_us(long double val) {
+  return Value<Time>(static_cast<double>(val) * 1e-6);
+}
+
+constexpr Value<Time> operator""_ns(long double val) {
+  return Value<Time>(static_cast<double>(val) * 1e-9);
+}
+
 constexpr Value<Time> operator""_h(long double val) {
   return Value<Time>(static_cast<double>(val) * 3600.0);
 }
 
 constexpr Value<Count> operator""_imp(long double val) {
   return Value<Count>(static_cast<double>(val));
+}
+
+constexpr Value<Capacitance> operator""_F(long double val) {
+  return Value<Capacitance>(static_cast<double>(val));
+}
+
+constexpr Value<Capacitance> operator""_mF(long double val) {
+  return Value<Capacitance>(static_cast<double>(val) * 1e-3);
+}
+
+constexpr Value<Capacitance> operator""_uF(long double val) {
+  return Value<Capacitance>(static_cast<double>(val) * 1e-6);
+}
+
+constexpr Value<Capacitance> operator""_nF(long double val) {
+  return Value<Capacitance>(static_cast<double>(val) * 1e-9);
+}
+
+constexpr Value<Capacitance> operator""_pF(long double val) {
+  return Value<Capacitance>(static_cast<double>(val) * 1e-12);
 }
 
 } // namespace wengine::units::literals

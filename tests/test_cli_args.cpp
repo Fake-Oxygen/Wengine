@@ -1,12 +1,16 @@
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/command_registry.hpp"
+#include "wengine/cli/complete.hpp"
 #include "wengine/cli/shell.hpp"
 
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 using namespace wengine::cli;
 
@@ -97,11 +101,16 @@ void test_cursor_positional() {
 void test_registry_compile_time() {
   static_assert(CliRegistry::find("ohm") != nullptr);
   static_assert(CliRegistry::find("s0") != nullptr);
+  static_assert(CliRegistry::find("i2c") != nullptr);
   static_assert(CliRegistry::find("nope") == nullptr);
-  static_assert(CliRegistry::all().size() == 2);
+  static_assert(CliRegistry::all().size() == 3);
   static_assert(!CliRegistry::all()[0].usage.empty());
+  static_assert(CliRegistry::find("ohm")->complete != nullptr);
+  static_assert(CliRegistry::find("s0")->complete != nullptr);
+  static_assert(CliRegistry::find("i2c")->complete != nullptr);
   assert(CliRegistry::find("ohm")->run != nullptr);
   assert(CliRegistry::find("s0")->run != nullptr);
+  assert(CliRegistry::find("i2c")->run != nullptr);
 }
 
 void test_ohm_handler() {
@@ -155,6 +164,7 @@ void test_ohm_handler() {
 
 void test_shell_integration() {
   Shell sh;
+  sh.set_history_file(""); // no file I/O in tests
   std::ostringstream out;
   assert(sh.execute("", out) == 0);
   assert(sh.execute("ohm 12V 3A", out) == 0);
@@ -167,6 +177,135 @@ void test_shell_integration() {
   assert(sh.execute("exit", out) == -1);
 }
 
+void test_completion() {
+  const auto all = CliRegistry::all();
+  auto has = [](const std::vector<std::string> &v, std::string_view s) {
+    for (const auto &e : v) {
+      if (e == s) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Command names (registry + builtins).
+  {
+    const auto c = complete_line("", 0, all);
+    assert(has(c, "ohm") && has(c, "s0") && has(c, "i2c") && has(c, "help") &&
+           has(c, "exit") && has(c, "quit"));
+  }
+  assert(complete_line("o", 1, all) == std::vector<std::string>{"ohm"});
+  assert(complete_line("s", 1, all) == std::vector<std::string>{"s0"});
+  assert(complete_line("i", 1, all) == std::vector<std::string>{"i2c"});
+  assert(complete_line("h", 1, all) == std::vector<std::string>{"help"});
+  assert(complete_line("zzz", 3, all).empty());
+  // Only text before the cursor counts.
+  assert(complete_line("ohm --u 12V", 4, all).empty());
+
+  // Ohm options and --from values.
+  {
+    const auto c = complete_line("ohm --", 6, all);
+    assert(has(c, "--u") && has(c, "--from") && !has(c, "-U"));
+  }
+  assert(complete_line("ohm --u", 7, all) == std::vector<std::string>{"--u"});
+  {
+    const auto c = complete_line("ohm --from ", 11, all);
+    assert(c.size() == 6 && has(c, "ui") && has(c, "ir"));
+  }
+  assert(complete_line("ohm --from=u", 12, all) ==
+         (std::vector<std::string>{"--from=ui", "--from=ur"}));
+  assert(complete_line("ohm 12V", 7, all).empty()); // numeric positional
+
+  // S0 modes and options.
+  {
+    const auto c = complete_line("s0 ", 3, all);
+    assert(c.size() == 6 && has(c, "rate") && has(c, "full"));
+  }
+  assert(complete_line("s0 r", 4, all) == std::vector<std::string>{"rate"});
+  {
+    const auto c = complete_line("s0 --", 5, all);
+    assert(has(c, "--power") && has(c, "--const") && has(c, "--mode"));
+  }
+  assert(complete_line("s0 --mode ", 10, all).size() == 6);
+
+  // I2C modes, speeds and options.
+  {
+    const auto c = complete_line("i2c ", 4, all);
+    assert(c.size() == 3 && has(c, "pullup") && has(c, "series") && has(c, "full"));
+  }
+  assert(complete_line("i2c p", 5, all) == std::vector<std::string>{"pullup"});
+  {
+    const auto c = complete_line("i2c --", 6, all);
+    assert(has(c, "--vdd") && has(c, "--cb") && has(c, "--speed") && has(c, "--rp"));
+  }
+  {
+    const auto c = complete_line("i2c pullup --speed ", 20, all);
+    assert(c.size() == 3 && has(c, "std") && has(c, "fast") && has(c, "fmp"));
+  }
+  assert(complete_line("help ", 5, all).size() == complete_line("", 0, all).size());
+  assert(complete_line("help o", 6, all) == std::vector<std::string>{"ohm"});
+  assert(complete_line("nope ", 5, all).empty());
+
+  // Common prefix.
+  {
+    const std::vector<std::string> empty;
+    assert(common_prefix(empty) == "");
+  }
+  assert(common_prefix({{"--power", "--power-factor"}}) == "--power");
+  assert(common_prefix({{"rate", "power"}}) == "");
+}
+
+void test_shell_run_fallback() {
+  // Non-TTY streams (pipes/tests) use the plain getline path.
+  Shell sh;
+  sh.set_history_file("");
+  std::istringstream in("ohm 12V 3A\nnopecmd\nexit\n");
+  std::ostringstream out;
+  sh.run(in, out);
+  const std::string s = out.str();
+  assert(s.find("R = 4") != std::string::npos);
+  assert(s.find("Unknown command: nopecmd") != std::string::npos);
+}
+
+void test_history() {
+  History h(3);
+  assert(h.empty());
+  assert(h.add("ohm 12V 3A"));
+  assert(h.add("s0 rate --power 2kW --const 1000imp/kWh"));
+  assert(!h.add(""));                            // empty ignored
+  assert(!h.add("s0 rate --power 2kW --const 1000imp/kWh")); // dup ignored
+  assert(h.size() == 2);
+  assert(h.add("a") && h.add("b")); // over capacity: drops oldest
+  assert(h.size() == 3);
+  assert(h.at(0) == "s0 rate --power 2kW --const 1000imp/kWh");
+
+  // Persistence round-trip.
+  const std::string path = "/tmp/wengine_test_history.txt";
+  std::remove(path.c_str());
+  assert(h.save(path));
+  History loaded;
+  assert(loaded.load(path) == 3);
+  assert(loaded.at(2) == "b");
+  assert(loaded.add("c"));
+  assert(loaded.append_to_file(path, "c"));
+  History reloaded;
+  assert(reloaded.load(path) == 4);
+  std::remove(path.c_str());
+  assert(reloaded.load("/tmp/wengine_no_such_file_xyz.txt") == 0); // missing OK
+
+  // LineReader honors disabled persistence and plain-stream reads.
+  LineReader reader;
+  reader.set_history_file("");
+  assert(reader.history().empty());
+  std::istringstream in("hello\n");
+  std::ostringstream out;
+  auto line = reader.read_line("> ", in, out);
+  assert(line && *line == "hello");
+  assert(out.str() == "> ");
+  std::istringstream eof_in("");
+  assert(!reader.read_line("> ", eof_in, out));
+}
+
 } // namespace
 
 int main() {
@@ -177,7 +316,10 @@ int main() {
   test_cursor_positional();
   test_registry_compile_time();
   test_ohm_handler();
+  test_completion();
   test_shell_integration();
+  test_shell_run_fallback();
+  test_history();
   std::cout << "test_cli_args: OK\n";
   return 0;
 }

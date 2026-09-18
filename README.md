@@ -45,6 +45,22 @@ REPL commands: `help [cmd]`, `exit`/`quit`, plus registered solvers.
 Return codes: `0` ok, `1` runtime/unknown-command error, `2` argument/usage
 error, `-1` internal exit signal.
 
+Interactive input (TTY) has shell-style line editing with persistent
+history: `Up`/`Down` recall previous commands (current draft is kept while
+browsing), `Left`/`Right` move the cursor, `Backspace`/`Del` delete,
+`Home`/`End` (or `Ctrl-A`/`Ctrl-E`) jump, `Ctrl-U`/`Ctrl-K`/`Ctrl-W` kill
+text, `Ctrl-L` clears the screen, `Ctrl-C` cancels the line, `Ctrl-D` on an
+empty line exits. `Tab` autocompletes: command names (`o` → `ohm `),
+`help` arguments, modes (`s0 r` → `s0 rate `), option names
+(`s0 --` lists `--power --const …`) and option values (`ohm --from=`
+lists `ui ur ir …`). One match completes plus a space; several complete the
+common prefix or list candidates in columns. Each command provides its
+vocabulary via an optional `complete` spec member (checked into the
+compile-time registry). History (cap 500, skips blanks and consecutive duplicates)
+is stored at `$XDG_CACHE_HOME/wengine/history` (fallback
+`~/.cache/wengine/history`). Piped input keeps plain `getline` behavior, so
+`printf 'ohm 12V 3A\nexit\n' | ./build/PhysicsSimApp` still works.
+
 ```text
 > ohm 12.4V 0.54A
 U = 12.4 V
@@ -73,7 +89,22 @@ S0 pulse output (energy meter, constant `C` in `imp/kWh`):
 Core identity: `f = P * C / 3_600_000` (`P` in W, `f` in Hz == imp/s);
 `N = E_kWh * C`. Meter-constant forms accepted: `imp/kWh`, `imp/Wh`,
 `imp/J` (== `imp/Ws`), `imp/kJ`, `imp/MWh`. Energy units: `J`/`Ws`/`kJ`/
-`Wh`/`kWh`; power `W`/`kW`; time `s`/`ms`/`min`/`h`.
+`Wh`/`kWh`; power `W`/`kW`; time `s`/`ms`/`us`/`ns`/`min`/`h`.
+
+I2C bus resistors (NXP UM10204 §7.1 pull-up sizing + series checks):
+
+```text
+> i2c pullup --vdd 3.3V --cb 200pF            # Rp window, rec, E12, tr/I/P
+> i2c series --vdd 3.3V --cb 200pF --rp 1.2kOhm --rs 100Ohm
+> i2c full --vdd 3.3V --cb 200pF --rp 1.2kOhm --rs 100Ohm   # + PASS/FAIL
+```
+
+Core identities: `Rp(min) = (VDD − VOL) / IOL`,
+`Rp(max) = tr / (0.8473 · Cb)`; `Rs ≤ min((0.3·VDD − VOL)/IOL, Rp(max) − Rp)`.
+Speed presets (`--speed std|fast|fmp`, default `fast`): tr 1000/300/120 ns,
+Cb max 400/400/550 pF, IOL 3/3/30 mA. `--vol/--iol/--tr` override any preset.
+Hs-mode is rejected (current-source pull-ups, UM10204 §5). Capacitance units:
+`F`/`mF`/`uF`/`nF`/`pF`; resistance `Ohm`/`kOhm`; time `s`/`ms`/`us`/`ns`.
 
 Argument forms (see `wengine/cli/args.hpp`): positional values with unit
 suffixes (`12V`, `0.5A`, `4Ohm`, bare numbers = SI units), named options
@@ -96,13 +127,13 @@ tests/  benchmarks/  examples/
 | Module | Path | Role |
 |---|---|---|
 | `math` | `wengine/math/vector_*.hpp` | `Vector2D<T>`/`Vector3D<T>` header-only structs, no virtuals |
-| `units` | `wengine/units/units.hpp`, `converter.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, `_V`/`_A`/`_Ohm` literals |
-| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp` | Pure `static constexpr` functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time` — no I/O |
+| `units` | `wengine/units/units.hpp`, `converter.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals |
+| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp` | Pure `static constexpr` functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series` — no I/O |
 | `core` | `wengine/core/status.hpp`, `solver.hpp` | `Status`/`StatusCode` (no exceptions/strings in hot path), `ISolver::step(dt)` interface |
 | `world` | `wengine/world/state.hpp` | `State` (SoA vectors, `sim_time`, `step_index`), `Snapshot` + `take_snapshot()` |
 | `emit` | `wengine/emit/sink.hpp` | `ISink::on_snapshot()` — how external apps/GUI consume the sim |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
-| `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `shell.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL |
+| `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion |
 
 Dependency direction (never reversed):
 
@@ -118,9 +149,10 @@ CMake targets mirror this: `wengine_math`, `wengine_units`,
 `wengine_solvers`, `wengine_world`, `wengine_emit` (all `INTERFACE`) combine
 into `wengine_core` (`wengine::core` alias; `PhysicsEngineCore` is a legacy
 alias). `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
-`src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`) links `wengine_core`; `PhysicsSimApp` links
+`src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
+`src/cli/commands/i2c.cpp`) links `wengine_core`; `PhysicsSimApp` links
 `wengine_cli`. Tests: `test_ohm_law`, `test_math_units` (link core),
-`test_cli_args`, `test_s0` (link cli). Benchmark: `bench_ohm`.
+`test_cli_args`, `test_s0`, `test_i2c` (link cli). Benchmark: `bench_ohm`.
 
 ## Flow
 
@@ -186,6 +218,6 @@ benchmarks/bench_ohm.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,math,physics,solvers,units,world}/
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c}.cpp
 cmake/ docs/ external/ (reserved/empty)
 ```

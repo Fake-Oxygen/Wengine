@@ -4,7 +4,10 @@
 #include <array>
 #include <optional>
 #include <ostream>
+#include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace wengine::cli::commands {
 
@@ -425,6 +428,62 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
   out << "N = " << r.pulses << " imp\n";
   out << "E/imp = " << r.j_per_imp << " J\n";
   return 0;
+}
+
+namespace {
+
+constexpr std::array<std::string_view, 6> kS0Modes{{
+    "rate", "power", "energy", "pulses", "convert", "full",
+}};
+
+constexpr std::array<std::string_view, 27> kS0Options{{
+    "--power", "-P", "--freq", "--frequency", "-f", "--pulses", "--count", "-n", "--const",
+    "--meter", "-c", "--time", "-t", "--energy", "-e", "--voltage", "--u", "-U", "--current",
+    "--i", "-I", "--pf", "--power-factor", "--mode", "-m", "--help", "-h",
+}};
+
+void push_matches(std::string_view partial, std::span<const std::string_view> options,
+                  std::vector<std::string> &out) {
+  for (std::string_view o : options) {
+    if (o.substr(0, partial.size()) == partial) {
+      out.emplace_back(o);
+    }
+  }
+}
+
+void complete_modes(std::string_view partial, std::vector<std::string> &out) {
+  push_matches(partial, kS0Modes, out);
+}
+
+} // namespace
+
+void S0Spec::complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                      std::vector<std::string> &out) {
+  // Values for a preceding "--mode"/"-m".
+  if (!prior_args.empty() && (prior_args.back() == "--mode" || prior_args.back() == "-m")) {
+    complete_modes(partial, out);
+    return;
+  }
+  // "--mode=<prefix>" / "-m=<prefix>" forms.
+  for (std::string_view key : {"--mode=", "-m="}) {
+    if (partial.substr(0, key.size()) == key) {
+      const std::string_view sub = partial.substr(key.size());
+      for (std::string_view m : kS0Modes) {
+        if (m.substr(0, sub.size()) == sub) {
+          out.emplace_back(std::string{key} + std::string{m});
+        }
+      }
+      return;
+    }
+  }
+  if (!partial.empty() && partial.front() == '-') {
+    push_matches(partial, kS0Options, out);
+    return;
+  }
+  if (prior_args.empty()) {
+    complete_modes(partial, out); // first positional = mode
+  }
+  // Later positionals are numeric values: nothing to complete.
 }
 
 } // namespace wengine::cli::commands

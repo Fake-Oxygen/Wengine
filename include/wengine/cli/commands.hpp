@@ -4,7 +4,10 @@
 #include "wengine/cli/command.hpp"
 
 #include <ostream>
+#include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace wengine::cli::commands {
 
@@ -20,6 +23,8 @@ struct OhmSpec {
       "  ohm --help";
 
   static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                       std::vector<std::string> &out);
 };
 
 struct S0Spec {
@@ -39,6 +44,26 @@ struct S0Spec {
       "  imp/kWh (also imp/Wh, imp/J == imp/Ws), pulses as bare/imp.";
 
   static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                       std::vector<std::string> &out);
+};
+
+struct I2cSpec {
+  static constexpr std::string_view kName = "i2c";
+  static constexpr std::string_view kDescription = "I2C bus resistors (pull-up Rp + series Rs)";
+  static constexpr std::string_view kUsage =
+      "i2c <mode> --vdd <V> --cb <F> [options]   (NXP UM10204 section 7.1)\n"
+      "  i2c pullup --vdd 3.3V --cb 200pF [--speed fast] [--rp 1.5kOhm]\n"
+      "  i2c series --vdd 3.3V --cb 200pF --rp 1.5kOhm [--rs 100Ohm]\n"
+      "  i2c full   --vdd 3.3V --cb 200pF [--rp 1.5kOhm] [--rs 100Ohm]\n"
+      "Speeds: std (100 kHz), fast (400 kHz, default), fmp (1 MHz).\n"
+      "Overrides: --vol <V>, --iol <A>, --tr <s>. Hs-mode not sized\n"
+      "(UM10204 section 5 uses current-source pull-ups, not resistors).\n"
+      "Units: V, F/pF/nF/uF, s/ns/us, A/mA, Ohm/kOhm.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                       std::vector<std::string> &out);
 };
 
 } // namespace wengine::cli::commands
