@@ -15,7 +15,8 @@ constexpr bool near(double a, double b, double eps = 1e-12) {
   return std::fabs(a - b) <= eps * (1.0 + std::fabs(b));
 }
 
-// Dummy stepped solver: counts calls, records order, mutates state.
+// Dummy stepped solver: counts calls, records order, spawns one particle
+// per step so shared-state mutation is visible to all solvers.
 struct CountingSolver : core::ISolver {
   int calls{0};
   std::vector<std::string> *order{nullptr};
@@ -27,7 +28,9 @@ struct CountingSolver : core::ISolver {
     if (order != nullptr) {
       order->emplace_back(name());
     }
-    s.pos_x.push_back(dt);
+    const world::Entity e = s.spawn_entity();
+    s.particles.attach(e.index);
+    s.particles.pos_x[e.index] = dt;
     return core::Status::success();
   }
 };
@@ -67,7 +70,9 @@ void test_exact_stepping() {
   assert(a.calls == 10 && b.calls == 10);
   assert(runner.state().step_index == 10);
   assert(near(runner.state().sim_time, 0.1));
-  assert(runner.state().pos_x.size() == 20); // both solvers see shared state
+  // Both solvers see shared state: 20 live particles with dt stamped.
+  assert(runner.state().entities.alive_count() == 20);
+  assert(runner.state().particles.live_count == 20);
   assert(order.size() == 20);
   for (std::size_t k = 0; k < order.size(); k += 2) {
     assert(order[k] == "count" && order[k + 1] == "count"); // registration order
@@ -87,9 +92,7 @@ void test_determinism() {
   };
   const core::Runner r1 = drive();
   const core::Runner r2 = drive();
-  assert(r1.state().step_index == r2.state().step_index);
-  assert(r1.state().sim_time == r2.state().sim_time);
-  assert(r1.state().pos_x == r2.state().pos_x);
+  assert(r1.state() == r2.state()); // full state equality: clock + entities + pools
 }
 
 void test_emit_decimation() {
