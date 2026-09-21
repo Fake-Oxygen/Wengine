@@ -139,8 +139,8 @@ tests/  benchmarks/  examples/
 | `units` | `wengine/units/units.hpp`, `converter.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals |
 | `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp` | Pure `static constexpr` functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series` — no I/O |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp` | `Status`/`StatusCode` (no exceptions/strings in hot path), `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
-| `world` | `wengine/world/state.hpp` | `State` (SoA vectors, `sim_time`, `step_index`), `Snapshot` + `take_snapshot()` |
-| `emit` | `wengine/emit/sink.hpp` | `ISink::on_snapshot()` — how external apps/GUI consume the sim |
+| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `State` (clock + entities + pools), deep-copy `Snapshot`, versioned binary save/load |
+| `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion |
 
@@ -186,6 +186,20 @@ with an accumulator for real-time loops. Each step calls registered
 `ISolver::step(state, dt)` implementations in order, then `take_snapshot()`
 hands an immutable `Snapshot` to attached `emit::ISink` observers
 (decimated via `emit_every`). Engine code never knows its consumers.
+
+### Emit transport decision (recorded)
+
+Evaluated for getting snapshots to external apps / future GUI:
+file+CSV replay, stdout piping, TCP/UDP sockets, POSIX shared-memory
+seqlock ring, ZeroMQ, gRPC. **Decision: shared-memory seqlock snapshot bus
+(`wengine-link`) for realtime local consumers; CSV/file as the durable
+log + replay format.** Rationale: the GUI is local, performance is the
+project's identity, and the no-dependency policy holds — SHM gives sub-µs
+zero-copy publish with drop-oldest semantics fitting visualization, while
+the file log covers determinism, replay, and debugging for free. Sockets /
+message queues are deferred until a networked consumer actually exists.
+Tracked as a separate Plane epic (link protocol, writer, reader, replay
+bridge, versioning).
 
 ## Conventions
 

@@ -126,6 +126,10 @@ if(BUILD_TESTS)
     add_executable(test_world tests/test_world.cpp)
     target_link_libraries(test_world PRIVATE wengine_core)
     add_test(NAME world COMMAND test_world)
+
+    add_executable(test_emit tests/test_emit.cpp)
+    target_link_libraries(test_emit PRIVATE wengine_core)
+    add_test(NAME emit COMMAND test_emit)
 endif()
 
 if(BUILD_BENCHMARKS)
