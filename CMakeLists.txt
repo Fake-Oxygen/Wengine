@@ -118,6 +118,10 @@ if(BUILD_TESTS)
     add_executable(test_i2c tests/test_i2c.cpp)
     target_link_libraries(test_i2c PRIVATE wengine_cli)
     add_test(NAME i2c COMMAND test_i2c)
+
+    add_executable(test_runner tests/test_runner.cpp)
+    target_link_libraries(test_runner PRIVATE wengine_core)
+    add_test(NAME runner COMMAND test_runner)
 endif()
 
 if(BUILD_BENCHMARKS)

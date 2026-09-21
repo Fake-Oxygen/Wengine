@@ -38,12 +38,21 @@ ctest --test-dir build --output-on-failure
 ## Run (CLI)
 
 ```sh
-./build/PhysicsSimApp
+./build/PhysicsSimApp                  # interactive REPL
+./build/PhysicsSimApp ohm 12V 3A       # headless: run once and exit
+./build/PhysicsSimApp s0 rate --power 2kW --const 1000imp/kWh
+./build/PhysicsSimApp --help
 ```
 
+Headless mode passes `argv` straight to the command — no shell startup, no
+re-tokenizing (an argument containing spaces stays one argument), exit code
+is the command result (`0` ok, `1` runtime/check failure, `2` usage error;
+`exit`/`quit` map to `0`). With no arguments the interactive REPL starts.
+
 REPL commands: `help [cmd]`, `exit`/`quit`, plus registered solvers.
-Return codes: `0` ok, `1` runtime/unknown-command error, `2` argument/usage
-error, `-1` internal exit signal.
+`--help`/`-h` also print help. Return codes: `0` ok, `1`
+runtime/unknown-command error, `2` argument/usage error, `-1` internal exit
+signal (REPL loop only).
 
 Interactive input (TTY) has shell-style line editing with persistent
 history: `Up`/`Down` recall previous commands (current draft is kept while
@@ -129,7 +138,7 @@ tests/  benchmarks/  examples/
 | `math` | `wengine/math/vector_*.hpp` | `Vector2D<T>`/`Vector3D<T>` header-only structs, no virtuals |
 | `units` | `wengine/units/units.hpp`, `converter.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals |
 | `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp` | Pure `static constexpr` functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series` — no I/O |
-| `core` | `wengine/core/status.hpp`, `solver.hpp` | `Status`/`StatusCode` (no exceptions/strings in hot path), `ISolver::step(dt)` interface |
+| `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp` | `Status`/`StatusCode` (no exceptions/strings in hot path), `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
 | `world` | `wengine/world/state.hpp` | `State` (SoA vectors, `sim_time`, `step_index`), `Snapshot` + `take_snapshot()` |
 | `emit` | `wengine/emit/sink.hpp` | `ISink::on_snapshot()` — how external apps/GUI consume the sim |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
@@ -171,10 +180,12 @@ main -> Shell::run
      -> print to ostream
 ```
 
-Planned simulation path (stubs exist): solvers step `world::State`
-(`ISolver::step`), `take_snapshot()` produces an immutable `Snapshot`,
-`emit::ISink` implementations (file/IPC/network/GUI) consume it. Engine
-code never knows its consumers.
+Simulation path: `core::Runner` owns `world::State` and advances it in
+fixed-`dt` steps — `run(N)` for exact batch/headless runs, `advance(frame_dt)`
+with an accumulator for real-time loops. Each step calls registered
+`ISolver::step(state, dt)` implementations in order, then `take_snapshot()`
+hands an immutable `Snapshot` to attached `emit::ISink` observers
+(decimated via `emit_every`). Engine code never knows its consumers.
 
 ## Conventions
 

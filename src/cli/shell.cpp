@@ -18,31 +18,39 @@ int Shell::execute(std::string_view line, std::ostream &out) {
 
   std::array<std::string_view, kMaxArgs> buf{};
   const std::size_t n = tokenize_into(owned, buf);
-  if (n == 0) {
-    return 0;
-  }
   if (n > buf.size()) {
     out << "Error: too many arguments (max " << buf.size() << ")\n";
     return 1;
   }
+  return execute_argv(std::span<const std::string_view>{buf.data(), n}, out);
+}
 
-  std::string_view cmd_name = buf[0];
-  std::span<const std::string_view> args{buf.data() + 1, n - 1};
+int Shell::execute_argv(std::span<const std::string_view> tokens, std::ostream &out) {
+  if (tokens.empty()) {
+    return 0;
+  }
+  if (tokens.size() > kMaxArgs) {
+    out << "Error: too many arguments (max " << kMaxArgs << ")\n";
+    return 1;
+  }
+
+  std::string_view cmd_name = tokens[0];
+  std::span<const std::string_view> args{tokens.data() + 1, tokens.size() - 1};
 
   if (cmd_name == "exit" || cmd_name == "quit") {
     return -1;
   }
-  if (cmd_name == "help") {
+  if (cmd_name == "help" || cmd_name == "--help" || cmd_name == "-h") {
     // "help <cmd>" prints that command's usage.
-    if (n > 1) {
-      if (const auto *d = CliRegistry::find(buf[1])) {
+    if (!args.empty()) {
+      if (const auto *d = CliRegistry::find(args[0])) {
         out << d->name << " - " << d->description << '\n';
         if (!d->usage.empty()) {
           out << "Usage:\n" << d->usage << '\n';
         }
         return 0;
       }
-      out << "Unknown command: " << buf[1] << '\n';
+      out << "Unknown command: " << args[0] << '\n';
       return 1;
     }
     print_help(out);

@@ -267,6 +267,60 @@ void test_shell_run_fallback() {
   assert(s.find("Unknown command: nopecmd") != std::string::npos);
 }
 
+void test_shell_headless() {
+  Shell sh;
+  sh.set_history_file("");
+  std::ostringstream out;
+  // argv-style: pre-split tokens run verbatim.
+  {
+    const std::array<std::string_view, 3> argv{"ohm", "12V", "3A"};
+    assert(sh.execute_argv(argv, out) == 0);
+    assert(out.str().find("R = 4") != std::string::npos);
+  }
+  // No re-splitting: a spaced token stays ONE argument (invalid voltage).
+  {
+    const std::array<std::string_view, 2> argv{"ohm", "12V 3A"};
+    assert(sh.execute_argv(argv, out) == 2);
+  }
+  // REPL parity: same command via line and via argv agrees byte-for-byte.
+  {
+    std::ostringstream a, b;
+    const std::array<std::string_view, 4> argv{"s0", "convert", "--const",
+                                               "1000imp/kWh"};
+    assert(sh.execute("s0 convert --const 1000imp/kWh", a) == 0);
+    assert(sh.execute_argv(argv, b) == 0);
+    assert(a.str() == b.str());
+  }
+  // --help shares the help path (also in headless: `./app --help`).
+  {
+    const std::array<std::string_view, 1> argv{"--help"};
+    assert(sh.execute_argv(argv, out) == 0);
+    assert(out.str().find("Available commands") != std::string::npos);
+  }
+  {
+    const std::array<std::string_view, 2> argv{"help", "s0"};
+    assert(sh.execute_argv(argv, out) == 0);
+  }
+  {
+    const std::array<std::string_view, 1> argv{"nope"};
+    assert(sh.execute_argv(argv, out) == 1);
+  }
+  {
+    const std::array<std::string_view, 1> argv{"exit"};
+    assert(sh.execute_argv(argv, out) == -1); // main maps this to exit 0
+  }
+  {
+    const std::vector<std::string_view> empty;
+    assert(sh.execute_argv(empty, out) == 0);
+  }
+  {
+    // Over the token cap, like the REPL path.
+    std::vector<std::string_view> many(70, "x");
+    many[0] = "ohm";
+    assert(sh.execute_argv(many, out) == 1);
+  }
+}
+
 void test_history() {
   History h(3);
   assert(h.empty());
@@ -319,6 +373,7 @@ int main() {
   test_completion();
   test_shell_integration();
   test_shell_run_fallback();
+  test_shell_headless();
   test_history();
   std::cout << "test_cli_args: OK\n";
   return 0;
