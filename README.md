@@ -26,12 +26,19 @@ Options (all default `ON`):
 cmake -S . -B build -DBUILD_CLI=ON -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON
 ```
 
-Run tests and benchmark:
+Run tests and benchmarks:
 
 ```sh
 ctest --test-dir build --output-on-failure
 ./build/bench_ohm
+./build/bench_s0
+./build/bench_i2c
+./build/bench_projectile
 ```
+
+Benchmarks use runtime-generated (opaque) inputs so the `constexpr`
+solvers cannot be constant-folded away; each prints `ns/iter` (or
+`ns/particle-step` for the stepped path) plus a checksum sink.
 
 `compile_commands.json` is exported to `build/` for clangd/clang-tidy.
 
@@ -178,8 +185,10 @@ into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/s
 `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
 `src/cli/commands/i2c.cpp`, `src/cli/commands/sim.cpp`) links `wengine_core`;
 `PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
-(link core), `test_cli_args`, `test_s0`, `test_i2c`, `test_sim` (link cli).
-Benchmark: `bench_ohm`.
+(link core), `test_cli_args`, `test_s0`, `test_i2c`, `test_sim` (link cli),
+`test_solver_registry`, `test_runner`, `test_world`, `test_emit`,
+`test_determinism` (fixed-dt goldens, exact repeat, CSV replay). Benchmarks:
+`bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`.
 
 ## Flow
 
@@ -263,10 +272,10 @@ bridge, versioning).
 
 ```text
 apps/cli/main.cpp  apps/gui/ (empty)
-benchmarks/bench_ohm.cpp
+benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,math,physics,solvers,units,world}/
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism}.cpp
 cmake/ docs/ external/ (reserved/empty)
 ```

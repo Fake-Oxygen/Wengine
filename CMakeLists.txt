@@ -136,9 +136,22 @@ if(BUILD_TESTS)
     add_executable(test_emit tests/test_emit.cpp)
     target_link_libraries(test_emit PRIVATE wengine_core)
     add_test(NAME emit COMMAND test_emit)
+
+    add_executable(test_determinism tests/test_determinism.cpp)
+    target_link_libraries(test_determinism PRIVATE wengine_core)
+    add_test(NAME determinism COMMAND test_determinism)
 endif()
 
 if(BUILD_BENCHMARKS)
     add_executable(bench_ohm benchmarks/bench_ohm.cpp)
     target_link_libraries(bench_ohm PRIVATE wengine_core)
+
+    add_executable(bench_s0 benchmarks/bench_s0.cpp)
+    target_link_libraries(bench_s0 PRIVATE wengine_core)
+
+    add_executable(bench_i2c benchmarks/bench_i2c.cpp)
+    target_link_libraries(bench_i2c PRIVATE wengine_core)
+
+    add_executable(bench_projectile benchmarks/bench_projectile.cpp)
+    target_link_libraries(bench_projectile PRIVATE wengine_core)
 endif()
