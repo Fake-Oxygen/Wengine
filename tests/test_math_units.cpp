@@ -1,7 +1,8 @@
 #include "wengine/cli/args.hpp"
-#include "wengine/math/vector.hpp"
 #include "wengine/units/scales.hpp"
 #include "wengine/units/units.hpp"
+
+#include <glm/glm.hpp>
 
 #include <cassert>
 #include <iostream>
@@ -82,14 +83,15 @@ int main() {
   test_value_printing();
   test_scales_single_source();
 
-  const wengine::math::Vector2D<double> a{3.0, 4.0};
-  assert(a.length_squared() == 25.0);
-  assert(a.length() == 5.0);
+  const glm::dvec2 a{3.0, 4.0};
+  assert(glm::dot(a, a) == 25.0);
+  assert(glm::length(a) == 5.0);
 
-  const wengine::math::Vector3D<double> b{1.0, 2.0, 2.0};
-  assert(b.length() == 3.0);
+  const glm::dvec3 b{1.0, 2.0, 2.0};
+  assert(glm::length(b) == 3.0);
+  assert(b.x == 1.0 && b.y == 2.0 && b.z == 2.0);
 
-  static_assert(wengine::math::Vector2D<int>{3, 4}.length_squared() == 25);
+  static_assert(glm::dot(glm::dvec2{3.0, 4.0}, glm::dvec2{3.0, 4.0}) == 25.0);
 
   std::cout << "test_math_units: OK\n";
   return 0;

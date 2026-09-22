@@ -9,7 +9,9 @@ CLI adapter on top.
 
 - CMake >= 3.20
 - C++20 compiler (developed/tested with GCC 13.3)
-- No external dependencies (tests use plain `assert`, no gtest fetch)
+- GLM via the `external/glm` submodule (pinned 1.0.1) — clone with
+  `git clone --recursive` or run `git submodule update --init` after cloning.
+  Otherwise dependency-free (tests use plain `assert`, no gtest fetch)
 
 ## Build
 
@@ -160,7 +162,6 @@ tests/  benchmarks/  examples/
 
 | Module | Path | Role |
 |---|---|---|
-| `math` | `wengine/math/vector_*.hpp` | `Vector2D<T>`/`Vector3D<T>` header-only structs, no virtuals |
 | `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
 | `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `registry.hpp`, `solver_registry.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
@@ -172,14 +173,30 @@ tests/  benchmarks/  examples/
 Dependency direction (never reversed):
 
 ```text
-solvers -> units, math
+solvers -> units (+ glm directly where needed, no wrapper)
 world   -> (standalone state)
 emit    -> world
 cli     -> solvers, core   (thin adapter, owns all iostream use)
 apps    -> cli + core
 ```
 
-CMake targets mirror this: `wengine_math`, `wengine_units`,
+### Math core and dependency policy (revised 2026-09-22)
+
+**Decision: GLM (`external/glm` git submodule, pinned 1.0.1, MIT,
+header-only) as the math library — the engine's only third-party
+dependency.** This supersedes the same-day header-only decision: the
+hand-rolled `Vector2D/3D` core is scratched in favor of battle-proven
+library code. Rationale: GLM is C++-native with first-class `double`
+types (`dvec`/`dmat` match the engine's all-`double` convention),
+allocation-free, SIMD-friendly, and covers the roadmap needs (vectors,
+matrices, quaternions) without speculative home-grown algebra. GLM is
+consumed directly as `glm::` types — there is no `wengine/math` wrapper
+and no alias layer. Rules:
+the pin moves only by explicit decision; golden tests are implicitly
+pinned to the submodule commit (re-derive goldens on bumps, never widen
+tolerances); no second third-party dep without its own decision record.
+
+CMake targets mirror this: `wengine_glm` (third-party import), `wengine_units`,
 `wengine_solvers`, `wengine_world`, `wengine_emit` (all `INTERFACE`) combine
 into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
 `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
@@ -274,8 +291,9 @@ bridge, versioning).
 apps/cli/main.cpp  apps/gui/ (empty)
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp
-include/wengine/{cli,core,emit,math,physics,solvers,units,world}/
+include/wengine/{cli,core,emit,physics,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
 tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism}.cpp
-cmake/ docs/ external/ (reserved/empty)
+cmake/ docs/ (reserved/empty)
+external/glm/ (git submodule, pinned 1.0.1 — the only third-party dep, see policy above)
 ```

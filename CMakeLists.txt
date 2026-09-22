@@ -24,9 +24,12 @@ option(BUILD_BENCHMARKS "Build micro-benchmarks" ON)
 # Convention: one INTERFACE target per module, snake_case files,
 # PascalCase types, wengine::<module> namespaces, no I/O in solvers.
 # ------------------------------------------------------------------
-add_library(wengine_math INTERFACE)
-target_include_directories(wengine_math INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+# GLM (external/glm submodule, pinned 1.0.1, MIT, header-only): the only
+# third-party dependency, consumed directly as glm:: types (no wengine
+# alias layer). Targets that need it link wengine_glm explicitly.
+add_library(wengine_glm INTERFACE)
+target_include_directories(wengine_glm INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/glm>
     $<INSTALL_INTERFACE:include>
 )
 
@@ -41,7 +44,7 @@ target_include_directories(wengine_solvers INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(wengine_solvers INTERFACE wengine_math wengine_units)
+target_link_libraries(wengine_solvers INTERFACE wengine_units)
 
 add_library(wengine_world INTERFACE)
 target_include_directories(wengine_world INTERFACE
@@ -58,7 +61,7 @@ target_link_libraries(wengine_emit INTERFACE wengine_world)
 
 add_library(wengine_core INTERFACE)
 target_link_libraries(wengine_core INTERFACE
-    wengine_math wengine_units wengine_solvers wengine_world wengine_emit
+    wengine_glm wengine_units wengine_solvers wengine_world wengine_emit
 )
 add_library(wengine::core ALIAS wengine_core)
 
