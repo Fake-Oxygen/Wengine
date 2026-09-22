@@ -2,7 +2,7 @@
 // Same RunConfig must give bit-identical snapshots whether driven by
 // solvers::run_headless() (CLI) or by the controller (GUI panel).
 
-#include "sim_controller.hpp"
+#include "controllers/sim_controller.hpp"
 #include "wengine/solvers/run.hpp"
 
 #include <cassert>

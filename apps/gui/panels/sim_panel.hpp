@@ -9,7 +9,7 @@
 // the reason inline. New solvers appear in the combo by registry entry only.
 
 #include "imgui.h"
-#include "sim_controller.hpp"
+#include "controllers/sim_controller.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <cstddef>

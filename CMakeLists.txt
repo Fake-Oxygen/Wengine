@@ -123,7 +123,14 @@ if(BUILD_GUI)
     )
     target_link_libraries(wengine_imgui PUBLIC SDL2::SDL2 Vulkan::Vulkan)
 
-    add_executable(WEngineGui apps/gui/main.cpp)
+    add_executable(WEngineGui
+        apps/gui/main.cpp
+        apps/gui/backend/vk_context.cpp
+        apps/gui/panels/closed_form_panels.cpp
+    )
+    target_include_directories(WEngineGui PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
+    )
     target_link_libraries(WEngineGui PRIVATE wengine_core wengine_imgui)
     target_compile_options(WEngineGui PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
@@ -192,6 +199,15 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
     )
     add_test(NAME gui_sim_control COMMAND test_gui_sim_control)
+
+    # Closed-form panel models: engine-only header (+ registry declaration),
+    # no ImGui link needed.
+    add_executable(test_closed_form_panels tests/test_closed_form_panels.cpp)
+    target_link_libraries(test_closed_form_panels PRIVATE wengine_core)
+    target_include_directories(test_closed_form_panels PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
+    )
+    add_test(NAME closed_form_panels COMMAND test_closed_form_panels)
 endif()
 
 if(BUILD_BENCHMARKS)
