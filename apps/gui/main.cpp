@@ -18,6 +18,7 @@
 #include "backend/vk_context.hpp"
 #include "panels/closed_form_panels.hpp"
 #include "panels/sim_panel.hpp"
+#include "views/viewport3d_panel.hpp"
 #include "wengine/core/status.hpp"
 
 #include "imgui.h"
@@ -147,6 +148,7 @@ int main(int argc, char **argv) {
   wengine::gui::SimController sim;
   wengine::gui::SimPanel sim_panel;
   sim_panel.sync_from(sim.config());
+  wengine::gui::Viewport3dPanel viewport3d;
 
   wengine::gui::backend::set_clear_color(0.10F, 0.12F, 0.16F, 1.00F);
 
@@ -209,6 +211,9 @@ int main(int argc, char **argv) {
       ImGui::EndTabBar();
     }
     ImGui::End();
+
+    // Snapshot-driven and read-only: the camera cannot perturb the sim.
+    viewport3d.draw(sim.snapshot());
 
     ImGui::Render();
     ImDrawData *draw_data = ImGui::GetDrawData();

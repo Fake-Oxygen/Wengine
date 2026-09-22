@@ -221,7 +221,8 @@ into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/s
 `test_solver_registry`, `test_runner`, `test_world`, `test_emit`,
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
-`test_closed_form_panels` (GUI panel models match CLI text + goldens). Benchmarks:
+`test_closed_form_panels` (GUI panel models match CLI text + goldens),
+`test_viewport3d` (orbit camera projection, culling, grid, guards). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`.
 
 ## Flow
@@ -315,13 +316,13 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   apps/gui/controllers/sim_controller.hpp (engine-only RunConfig driver)
   apps/gui/models/closed_form_models.hpp (ohm/s0/i2c evaluate logic)
   apps/gui/panels/sim_panel.hpp + closed_form_panels.hpp/.cpp (ImGui UI)
-  apps/gui/views/ reserved for graphs, 2D canvas, 3D viewport (not created
-  until files land — no empty dirs)
+  apps/gui/views/ camera3d.hpp (orbit/project math) +
+  viewport3d_panel.hpp (ImGui 3D rasterization)
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,physics,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism,gui_sim_control,closed_form_panels}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism,gui_sim_control,closed_form_panels,viewport3d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

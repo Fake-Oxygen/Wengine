@@ -208,6 +208,14 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
     )
     add_test(NAME closed_form_panels COMMAND test_closed_form_panels)
+
+    # 3D viewport math: glm-double header, no ImGui/SDL/Vulkan needed.
+    add_executable(test_viewport3d tests/test_viewport3d.cpp)
+    target_link_libraries(test_viewport3d PRIVATE wengine_core)
+    target_include_directories(test_viewport3d PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
+    )
+    add_test(NAME viewport3d COMMAND test_viewport3d)
 endif()
 
 if(BUILD_BENCHMARKS)
