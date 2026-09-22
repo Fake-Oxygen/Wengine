@@ -18,6 +18,7 @@
 #include "backend/vk_context.hpp"
 #include "panels/closed_form_panels.hpp"
 #include "panels/sim_panel.hpp"
+#include "views/graphs_panel.hpp"
 #include "views/viewport3d_panel.hpp"
 #include "wengine/core/status.hpp"
 
@@ -149,6 +150,7 @@ int main(int argc, char **argv) {
   wengine::gui::SimPanel sim_panel;
   sim_panel.sync_from(sim.config());
   wengine::gui::Viewport3dPanel viewport3d;
+  wengine::gui::GraphsPanel graphs;
 
   wengine::gui::backend::set_clear_color(0.10F, 0.12F, 0.16F, 1.00F);
 
@@ -214,6 +216,10 @@ int main(int argc, char **argv) {
 
     // Snapshot-driven and read-only: the camera cannot perturb the sim.
     viewport3d.draw(sim.snapshot());
+
+    // Observer-fed series: every emitted snapshot appends points, pausing
+    // freezes the plots without touching sim timing.
+    graphs.draw(sim);
 
     ImGui::Render();
     ImDrawData *draw_data = ImGui::GetDrawData();

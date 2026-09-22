@@ -216,6 +216,17 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
     )
     add_test(NAME viewport3d COMMAND test_viewport3d)
+
+    # Graphs history: engine-only sink, no ImGui/SDL/Vulkan needed.
+    # (The fit_bounds math check includes panel + imgui headers only;
+    # nothing ImGui is linked, like the glm headers via wengine_core.)
+    add_executable(test_graphs tests/test_graphs.cpp)
+    target_link_libraries(test_graphs PRIVATE wengine_core)
+    target_include_directories(test_graphs PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui
+    )
+    add_test(NAME graphs COMMAND test_graphs)
 endif()
 
 if(BUILD_BENCHMARKS)

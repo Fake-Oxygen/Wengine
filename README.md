@@ -222,7 +222,9 @@ into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/s
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
-`test_viewport3d` (orbit camera projection, culling, grid, guards). Benchmarks:
+`test_viewport3d` (orbit camera projection, culling, grid, guards),
+`test_graphs` (ring bounds, reset clear, CSV-exactness, sink re-attach,
+plot bounds math). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`.
 
 ## Flow
@@ -315,14 +317,16 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   apps/gui/backend/vk_context.hpp/.cpp (SDL2 + Vulkan bootstrap, frames)
   apps/gui/controllers/sim_controller.hpp (engine-only RunConfig driver)
   apps/gui/models/closed_form_models.hpp (ohm/s0/i2c evaluate logic)
+  apps/gui/models/plot_history.hpp (bounded snapshot ring sink)
   apps/gui/panels/sim_panel.hpp + closed_form_panels.hpp/.cpp (ImGui UI)
   apps/gui/views/ camera3d.hpp (orbit/project math) +
-  viewport3d_panel.hpp (ImGui 3D rasterization)
+  viewport3d_panel.hpp (ImGui 3D rasterization) + graphs_panel.hpp
+  (ImGui time-series plots over a PlotHistory sink)
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,physics,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism,gui_sim_control,closed_form_panels,viewport3d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism,gui_sim_control,closed_form_panels,viewport3d,graphs}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

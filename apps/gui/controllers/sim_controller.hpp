@@ -20,12 +20,14 @@
 
 #include "wengine/core/run_config.hpp"
 #include "wengine/core/runner.hpp"
+#include "wengine/emit/sink.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 #include "wengine/world/state.hpp"
 
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace wengine::gui {
 
@@ -121,6 +123,15 @@ class SimController {
   void set_playing(bool playing) noexcept { playing_ = playing; }
   [[nodiscard]] bool playing() const noexcept { return playing_; }
 
+  // Attach a best-effort snapshot observer (graphs, future views). The
+  // controller never owns sinks: callers keep them alive for as long as
+  // the controller runs. Re-attached automatically on every rebuild, so
+  // config edits and resets never silently detach observers.
+  void add_sink(emit::ISink &sink) {
+    observers_.push_back(&sink);
+    runner_.add_sink(sink);
+  }
+
   [[nodiscard]] const core::RunConfig &config() const noexcept { return config_; }
   [[nodiscard]] const world::State &state() const noexcept {
     return runner_.state();
@@ -150,6 +161,9 @@ class SimController {
           ->set_gravity(config_.gravity);
     }
     runner_.add_solver(*solver_);
+    for (emit::ISink *sink : observers_) {
+      runner_.add_sink(*sink);
+    }
     // Population identical to solvers::run_headless() (see solvers/run.hpp):
     // same spawn order, same initial values — batch parity is exact.
     for (std::uint64_t k = 0; k < config_.particles; ++k) {
@@ -166,6 +180,8 @@ class SimController {
   // Declared before runner_: Runner only borrows the solver pointer.
   std::unique_ptr<core::ISolver> solver_;
   core::Runner runner_;
+  // Non-owning observers, re-attached on every rebuild (see add_sink).
+  std::vector<emit::ISink *> observers_;
   bool playing_ = false;
   core::Status last_status_{core::StatusCode::kInvalidArgument};
   std::string error_{"not configured"};
