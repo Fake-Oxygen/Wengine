@@ -60,6 +60,11 @@ struct Frame {
   bool operator==(const Frame &) const noexcept = default;
 };
 
+// Domain adapter: Snapshot (or future domain state) -> generic Frame.
+// One per solver; publishers and the GUI registry take it as a parameter
+// so new domains plug in without touching either consumer.
+using FrameAdapter = Frame (*)(const world::Snapshot &);
+
 // Particle adapter: the only domain adapter today. Preserves dense slot
 // order; channels describe the primary item (slot 0, the CLI p0
 // convention) plus the live count. Future adapters (node voltages, field

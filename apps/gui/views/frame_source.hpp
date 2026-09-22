@@ -42,7 +42,7 @@
 
 namespace wengine::gui {
 
-using FrameAdapter = link::Frame (*)(const world::Snapshot &);
+using FrameAdapter = link::FrameAdapter;
 
 struct FrameSourceDef {
   std::string_view solver;

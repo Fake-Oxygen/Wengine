@@ -70,6 +70,22 @@ target_include_directories(wengine_link INTERFACE
 )
 target_link_libraries(wengine_link INTERFACE wengine_world)
 
+# wengine-link SHM publisher (PHYSI wengine-link epic): POSIX shm_open/mmap
+# endpoint as an emit::ISink. Small STATIC TU by design — the one justified
+# exception to the header-only engine rule (platform syscalls cannot live
+# in headers). Strict warnings like wengine_cli.
+add_library(wengine_link_shm STATIC src/link/shm_publisher.cpp)
+target_include_directories(wengine_link_shm PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(wengine_link_shm PUBLIC wengine_core)
+target_compile_options(wengine_link_shm PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+)
+
 add_library(wengine_core INTERFACE)
 target_link_libraries(wengine_core INTERFACE
     wengine_glm wengine_units wengine_solvers wengine_world wengine_emit wengine_link
@@ -197,6 +213,10 @@ if(BUILD_TESTS)
     add_executable(test_link_protocol tests/test_link_protocol.cpp)
     target_link_libraries(test_link_protocol PRIVATE wengine_core)
     add_test(NAME link_protocol COMMAND test_link_protocol)
+
+    add_executable(test_link_shm tests/test_link_shm.cpp)
+    target_link_libraries(test_link_shm PRIVATE wengine_core wengine_link_shm)
+    add_test(NAME link_shm COMMAND test_link_shm)
 
     add_executable(test_run_config tests/test_run_config.cpp)
     target_link_libraries(test_run_config PRIVATE wengine_core)

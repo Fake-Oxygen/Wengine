@@ -214,7 +214,8 @@ all I/O. No engine headers change for GUI work.
 CMake targets mirror this: `wengine_glm` (third-party import), `wengine_units`,
 `wengine_solvers`, `wengine_world`, `wengine_emit`, `wengine_link` (link wire
 protocol, header-only, OS-free) (all `INTERFACE`) combine
-into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
+into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
+`src/link/shm_publisher.cpp`, the POSIX endpoint TU) links `wengine_core`. `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
 `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
 `src/cli/commands/i2c.cpp`, `src/cli/commands/sim.cpp`) links `wengine_core`;
 `PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
@@ -222,7 +223,8 @@ into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/s
 `test_solver_registry`, `test_runner`, `test_world`, `test_emit`,
 `test_link_protocol` (solver-agnostic items/channels wire frame, particle
 adapter, encode/decode exactness, seqlock states incl. threaded hammer,
-version gate, lag accounting),
+version gate, lag accounting), `test_link_shm` (segment create/publish/
+read-back, headless fan-out exactness, drop-oldest, failure paths),
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
@@ -336,7 +338,7 @@ benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,link,physics,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,link_protocol,determinism,gui_sim_control,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,link_protocol,link_shm,determinism,gui_sim_control,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)
