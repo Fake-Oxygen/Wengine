@@ -141,7 +141,8 @@ struct GraphsPanel {
       attached = true;
     }
     ImGui::SetNextWindowSize(ImVec2(420.0F, 300.0F), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(790.0F, 410.0F), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(880.0F, 410.0F), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
     ImGui::Begin("Graphs");
     const auto &snaps = history.snapshots();
     if (snaps.empty()) {

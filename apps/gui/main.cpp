@@ -18,6 +18,7 @@
 #include "backend/vk_context.hpp"
 #include "panels/closed_form_panels.hpp"
 #include "panels/sim_panel.hpp"
+#include "views/canvas2d_panel.hpp"
 #include "views/graphs_panel.hpp"
 #include "views/viewport3d_panel.hpp"
 #include "wengine/core/status.hpp"
@@ -92,7 +93,7 @@ int main(int argc, char **argv) {
   wengine::gui::backend::setup_vulkan(extensions.data(), sdl_ext_count);
 
   SDL_Window *window = SDL_CreateWindow(
-      "WEngine", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720,
+      "WEngine", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
       SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
   if (window == nullptr) {
     std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -151,6 +152,7 @@ int main(int argc, char **argv) {
   sim_panel.sync_from(sim.config());
   wengine::gui::Viewport3dPanel viewport3d;
   wengine::gui::GraphsPanel graphs;
+  wengine::gui::Canvas2dPanel canvas2d;
 
   wengine::gui::backend::set_clear_color(0.10F, 0.12F, 0.16F, 1.00F);
 
@@ -193,6 +195,9 @@ int main(int argc, char **argv) {
       }
     }
 
+    // Startup layout (1600x900): sim + live views open, calculators and
+    // plots collapsed one click away, room for future panels on the right.
+    ImGui::SetNextWindowPos(ImVec2(20.0F, 20.0F), ImGuiCond_FirstUseEver);
     ImGui::Begin("WEngine");
     ImGui::Text("Backend: Dear ImGui v1.91.9b + SDL2 + Vulkan");
     ImGui::Text("Framerate: %.1f fps", static_cast<double>(io.Framerate));
@@ -200,7 +205,8 @@ int main(int argc, char **argv) {
     ImGui::End();
 
     // No ini file (IniFilename=nullptr): place once per launch, no overlap.
-    ImGui::SetNextWindowPos(ImVec2(440.0F, 60.0F), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(880.0F, 20.0F), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
     ImGui::Begin("Solvers");
     if (ImGui::BeginTabBar("ClosedForm")) {
       for (const auto &panel : wengine::gui::kClosedFormPanels) {
@@ -220,6 +226,9 @@ int main(int argc, char **argv) {
     // Observer-fed series: every emitted snapshot appends points, pausing
     // freezes the plots without touching sim timing.
     graphs.draw(sim);
+
+    // Top-down world view with trails from the shared history.
+    canvas2d.draw(sim.snapshot(), graphs.history);
 
     ImGui::Render();
     ImDrawData *draw_data = ImGui::GetDrawData();

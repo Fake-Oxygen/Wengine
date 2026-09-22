@@ -227,6 +227,14 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui
     )
     add_test(NAME graphs COMMAND test_graphs)
+
+    # 2D world-view math: doubles-only header, no ImGui/SDL/Vulkan needed.
+    add_executable(test_canvas2d tests/test_canvas2d.cpp)
+    target_link_libraries(test_canvas2d PRIVATE wengine_core)
+    target_include_directories(test_canvas2d PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
+    )
+    add_test(NAME canvas2d COMMAND test_canvas2d)
 endif()
 
 if(BUILD_BENCHMARKS)

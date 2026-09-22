@@ -25,7 +25,7 @@ struct Viewport3dPanel {
 
   void draw(const world::Snapshot &snap) {
     ImGui::SetNextWindowSize(ImVec2(420.0F, 340.0F), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(790.0F, 60.0F), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(880.0F, 60.0F), ImGuiCond_FirstUseEver);
     ImGui::Begin("3D Viewport");
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     if (avail.x < 50.0F || avail.y < 50.0F) {
