@@ -212,13 +212,17 @@ Vulkan loader are system packages, not vendored. CMake: `wengine_imgui`
 all I/O. No engine headers change for GUI work.
 
 CMake targets mirror this: `wengine_glm` (third-party import), `wengine_units`,
-`wengine_solvers`, `wengine_world`, `wengine_emit` (all `INTERFACE`) combine
+`wengine_solvers`, `wengine_world`, `wengine_emit`, `wengine_link` (link wire
+protocol, header-only, OS-free) (all `INTERFACE`) combine
 into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
 `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
 `src/cli/commands/i2c.cpp`, `src/cli/commands/sim.cpp`) links `wengine_core`;
 `PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
 (link core), `test_cli_args`, `test_s0`, `test_i2c`, `test_sim` (link cli),
 `test_solver_registry`, `test_runner`, `test_world`, `test_emit`,
+`test_link_protocol` (solver-agnostic items/channels wire frame, particle
+adapter, encode/decode exactness, seqlock states incl. threaded hammer,
+version gate, lag accounting),
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
@@ -330,9 +334,9 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   open, calculators and plots collapsed one click away.
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp
-include/wengine/{cli,core,emit,physics,solvers,units,world}/  (no math dir: glm used directly)
+include/wengine/{cli,core,emit,link,physics,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism,gui_sim_control,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,link_protocol,determinism,gui_sim_control,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

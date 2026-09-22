@@ -60,9 +60,19 @@ target_include_directories(wengine_emit INTERFACE
 )
 target_link_libraries(wengine_emit INTERFACE wengine_world)
 
+# wengine-link wire protocol (PHYSI wengine-link epic): versioned seqlock
+# snapshot bus types + pure encode/decode. Header-only, OS-free; transport
+# endpoints (SHM/TCP publishers) attach as emit::ISink at the app edge.
+add_library(wengine_link INTERFACE)
+target_include_directories(wengine_link INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(wengine_link INTERFACE wengine_world)
+
 add_library(wengine_core INTERFACE)
 target_link_libraries(wengine_core INTERFACE
-    wengine_glm wengine_units wengine_solvers wengine_world wengine_emit
+    wengine_glm wengine_units wengine_solvers wengine_world wengine_emit wengine_link
 )
 add_library(wengine::core ALIAS wengine_core)
 
@@ -183,6 +193,10 @@ if(BUILD_TESTS)
     add_executable(test_emit tests/test_emit.cpp)
     target_link_libraries(test_emit PRIVATE wengine_core)
     add_test(NAME emit COMMAND test_emit)
+
+    add_executable(test_link_protocol tests/test_link_protocol.cpp)
+    target_link_libraries(test_link_protocol PRIVATE wengine_core)
+    add_test(NAME link_protocol COMMAND test_link_protocol)
 
     add_executable(test_run_config tests/test_run_config.cpp)
     target_link_libraries(test_run_config PRIVATE wengine_core)

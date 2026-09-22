@@ -16,13 +16,14 @@ Long-term goals, in order:
 
 Current state:
 
-* CLI-only (`PhysicsSimApp`)
+* CLI (`PhysicsSimApp`) plus Dear ImGui GUI (`WEngineGui`, `BUILD_GUI=OFF`
+  by default)
 * REPL and headless execution
 * Closed-form solvers: `ohm`, `s0`, `i2c`
 * Stepped solver: `projectile`
 * `sim run` command
 * Console and CSV sinks
-* No GUI yet
+* GUI: solver panels, stepped-sim control, graphs, 2D canvas, 3D viewport
 
 ### Project priorities
 
@@ -96,6 +97,14 @@ REPL smoke test:
 printf 'ohm 12V 3A\nexit\n' | ./build/PhysicsSimApp
 ```
 
+GUI build (off by default; needs system `libsdl2-dev` + `libvulkan-dev`):
+
+```sh
+cmake -S . -B build-gui -DBUILD_GUI=ON -DBUILD_TESTS=OFF
+cmake --build build-gui --target WEngineGui
+./build-gui/WEngineGui --help
+```
+
 Requirements:
 
 * Out-of-source builds only; this is enforced by CMake.
@@ -125,6 +134,9 @@ Directory structure:
 include/wengine/<module>/*.hpp   public engine API
 src/cli/*.cpp                    CLI implementation
 apps/cli/main.cpp                application entry point
+apps/gui/main.cpp                GUI entry (thin assembly)
+apps/gui/{backend,controllers,models,panels,views}/
+                                 GUI layers (see GUI rules below)
 tests/test_<domain>.cpp          domain tests
 ```
 
@@ -137,6 +149,10 @@ emit    -> world
 cli     -> solvers, core
 core/solver.hpp -> world
 apps    -> cli + core
+apps/gui -> wengine_core + wengine_imgui only (never the wengine_cli
+            library; header-only cli/args.hpp parsing may be included —
+            it adds no link dependency and reads the same units tables)
+views   -> DataFrame view-model only (never Snapshot internals)
 ```
 
 Do not reverse these dependencies without an explicit architectural decision.
@@ -156,6 +172,27 @@ Engine and solver code must not depend on `iostream` for application I/O.
 * Sinks own output.
 * Engine code exposes data/status rather than performing application I/O.
 * `<ostream>` declarations may be used where required for unit/value formatting.
+
+### GUI rules
+
+`main.cpp` stays thin (arguments, backend lifetime, frame loop, window
+layout). Feature code lives in its layer; new directories appear only with
+the files that need them (no empty placeholder dirs).
+
+* `backend/` owns SDL/Vulkan lifetime and frame render/present.
+* `controllers/` own `Runner` + solver, rebuild from `RunConfig`, and
+  re-attach non-owning sinks on every rebuild.
+* `models/` holds engine-only logic (no ImGui): unit-tested linking
+  `wengine_core` alone.
+* `panels/` renders ImGui UI; verified by windowed runs/screenshots.
+* `views/` consume the `DataFrame` view-model only — never `Snapshot`
+  internals. New solvers add one adapter entry to the frame-source
+  registry; views stay untouched. Engine `Snapshot` must not grow for
+  GUI needs.
+* Third-party GUI headers are included as `SYSTEM` (warning-clean without
+  touching upstream). `BUILD_GUI` defaults `OFF`; unit tests must build
+  and run without GUI libraries (ImGui headers may be included for math
+  checks, never linked).
 
 ### Error handling
 
@@ -239,6 +276,9 @@ _s
 Do not introduce ad-hoc unit conversion tables in the CLI or individual
 solvers.
 
+GUI parses unit strings through the header-only `cli/args.hpp` forwarders
+(no `wengine_cli` link); the suffix tables stay owned by `units/`.
+
 ### Single source of truth
 
 `units/units.hpp` owns:
@@ -313,6 +353,9 @@ Sinks are best-effort, non-throwing observers.
 
 A sink failure must not silently alter simulation state or simulation timing.
 
+Whoever owns a run loop re-attaches its non-owning observers after every
+rebuild; sinks themselves stay unaware of rebuilds.
+
 ---
 
 ## 9. Adding features
@@ -381,6 +424,19 @@ Whenever adding a command, check all existing registry-size assertions.
 4. Existing table-driven tests should cover parsing.
 5. Add literal spot-checks.
 
+### New GUI view or panel
+
+1. Engine-only logic (math, evaluate, adaptation) goes in `models/` or a
+   `views/` math header with no ImGui includes; add a unit test linking
+   `wengine_core` alone.
+2. Rendering goes in `panels/` or `views/`; verify with a windowed run and
+   screenshots (no input-automation tooling exists — interaction feel and
+   populated-state visuals need manual checks).
+3. New solver data sources add exactly one adapter entry to the
+   frame-source registry; views stay untouched.
+4. Maintain every registry-size `static_assert` (panel registry,
+   frame-source registry, like the CLI ones).
+
 ---
 
 ## 10. Testing discipline
@@ -437,6 +493,12 @@ re-investigated without a reason:
 * Literal collisions such as `operator""_s` must remain inside
   `wengine::units::literals`. Never introduce `using namespace` for literals
   into headers.
+* Frame-to-step folding: exact step counts at accumulator-cap edges are
+  FP-fragile — assert bounded ranges there, or clamp play to the step
+  budget and assert the exact park.
+* The ImGui Vulkan backend owns the `VkSurface` (`DestroyWindow` destroys
+  it); never destroy it separately. `SDL_Vulkan_LoadLibrary` must precede
+  the instance-extension query (no lazy loading on that path).
 
 ---
 
@@ -485,6 +547,9 @@ scaffolding:
 
 wengine-link:
 be6e606c-836e-4eb6-810e-fcb0e67b9dde
+
+gui-integration:
+0e4374ad-ab52-4404-b72a-76c7bc8eb4c3
 ```
 
 New work should have a sub-task containing:
