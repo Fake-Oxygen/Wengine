@@ -1,17 +1,17 @@
 #pragma once
 
 // 2D world canvas: top-down view of the simulation plane with a world-unit
-// grid, axes, particle glyphs, velocity vectors, and trajectory trails
-// from the shared snapshot history.
+// grid, axes, entity glyphs, velocity vectors, and trajectory trails from
+// the shared frame history.
 //
-// Snapshot-driven and read-only (const Snapshot + const PlotHistory):
+// Frame-driven and read-only (const DataFrame + const FrameHistory):
 // pan/zoom never touch sim state or timing. Auto-fit tracks the sim until
 // the first manual zoom/pan; the Fit button resumes tracking.
 
 #include "imgui.h"
-#include "models/plot_history.hpp"
+#include "views/frame_source.hpp"
+#include "views/palette.hpp"
 #include "views/worldview2d.hpp"
-#include "wengine/world/state.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -22,7 +22,7 @@ namespace wengine::gui {
 struct Canvas2dPanel {
   View2d view;
 
-  void draw(const world::Snapshot &snap, const PlotHistory &history) {
+  void draw(const DataFrame &frame, const FrameHistory &history) {
     ImGui::SetNextWindowSize(ImVec2(430.0F, 430.0F), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(430.0F, 20.0F), ImGuiCond_FirstUseEver);
     ImGui::Begin("2D Canvas");
@@ -52,7 +52,15 @@ struct Canvas2dPanel {
     const double vp_h = static_cast<double>(size.y);
 
     if (view.auto_fit) {
-      view.fit(snap.pos_x, snap.pos_y, vp_w, vp_h);
+      std::vector<double> xs;
+      std::vector<double> ys;
+      xs.reserve(frame.items.size());
+      ys.reserve(frame.items.size());
+      for (const auto &it : frame.items) {
+        xs.push_back(it.x);
+        ys.push_back(it.y);
+      }
+      view.fit(xs, ys, vp_w, vp_h);
     }
     if (hovered) {
       if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -101,17 +109,17 @@ struct Canvas2dPanel {
     }
 
     // Trails from the shared history (past positions, faint).
-    std::size_t slots = snap.particle_count();
-    for (const auto &s : history.snapshots()) {
-      if (s.particle_count() > slots) {
-        slots = s.particle_count();
+    std::size_t slots = frame.items.size();
+    for (const auto &f : history.frames()) {
+      if (f.items.size() > slots) {
+        slots = f.items.size();
       }
     }
     for (std::size_t k = 0; k < slots; ++k) {
       std::vector<ImVec2> trail;
-      for (const auto &s : history.snapshots()) {
-        if (k < s.particle_count()) {
-          trail.push_back(ImVec2(px(s.pos_x[k]), py(s.pos_y[k])));
+      for (const auto &f : history.frames()) {
+        if (k < f.items.size()) {
+          trail.push_back(ImVec2(px(f.items[k].x), py(f.items[k].y)));
         }
       }
       if (trail.size() >= 2) {
@@ -120,22 +128,24 @@ struct Canvas2dPanel {
       }
     }
 
-    // Live particles + velocity vectors.
-    for (std::size_t k = 0; k < snap.particle_count(); ++k) {
-      const ImVec2 c(px(snap.pos_x[k]), py(snap.pos_y[k]));
-      dl->AddCircleFilled(c, 5.0F, IM_COL32(240, 170, 60, 255));
-      dl->AddLine(c,
-                  ImVec2(px(snap.pos_x[k] + snap.vel_x[k] * 0.5),
-                         py(snap.pos_y[k] + snap.vel_y[k] * 0.5)),
-                  IM_COL32(120, 220, 130, 255), 1.5F);
+    // Live entities + velocity vectors.
+    for (std::size_t k = 0; k < frame.items.size(); ++k) {
+      const SpatialItem &it = frame.items[k];
+      const ImVec2 c(px(it.x), py(it.y));
+      dl->AddCircleFilled(c, static_cast<float>(2.5 + it.size * 2.5),
+                          item_color(k, it.color));
+      if (it.has_velocity) {
+        dl->AddLine(c, ImVec2(px(it.x + it.vx * 0.5), py(it.y + it.vy * 0.5)),
+                    IM_COL32(120, 220, 130, 255), 1.5F);
+      }
     }
     dl->PopClipRect();
 
-    if (snap.particle_count() == 0) {
-      ImGui::TextDisabled("No live particles — grid only.");
+    if (frame.items.empty()) {
+      ImGui::TextDisabled("No items — grid only.");
     } else {
-      ImGui::TextDisabled("%llu particles | %.1f px/unit%s",
-                          static_cast<unsigned long long>(snap.particle_count()),
+      ImGui::TextDisabled("%llu items | %.1f px/unit%s",
+                          static_cast<unsigned long long>(frame.items.size()),
                           view.scale, view.auto_fit ? " | tracking" : "");
     }
     ImGui::End();

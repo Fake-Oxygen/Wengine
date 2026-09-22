@@ -1,26 +1,20 @@
 #pragma once
 
-// Realtime graphs panel: custom ImDrawList time-series plots fed from the
-// snapshot stream (height-vs-time, trajectory), with axis auto-fit.
+// Realtime graphs panel: custom ImDrawList time-series plots over the
+// shared frame history (selected channel vs time, primary-item
+// trajectory), with axis auto-fit.
 //
-// Design notes (decisions recorded for the task):
-// - Custom renderer, not ImPlot: avoids a third third-party dependency
-//   (project policy) and matches the proven 3D-viewport approach. Revisit
-//   if plot needs ever exceed polylines (log axes, histograms, 100k+
-//   points per frame).
-// - Feed path: a PlotHistory sink attached to the SimController. Sinks
-//   fire only on emitted steps, so the series is decimated to the run's
-//   emit rate by construction, and pause-freeze is automatic (a paused
-//   sim emits nothing, the plot simply stops growing).
-// - The panel never touches the sim: const-snapshot observer only.
+// History ownership lives in main.cpp (shared with the 2D canvas); this
+// panel only reads it. Pause-freeze is automatic: a paused sim emits
+// nothing, so the plots stop growing without touching sim timing.
 
 #include "imgui.h"
-#include "controllers/sim_controller.hpp"
-#include "models/plot_history.hpp"
+#include "views/frame_source.hpp"
 
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace wengine::gui {
@@ -130,54 +124,82 @@ inline void draw_plot(ImDrawList *dl, const char *title, const char *x_label,
 } // namespace graphs_detail
 
 struct GraphsPanel {
-  PlotHistory history;
-  bool attached = false;
+  std::string channel; // selected channel name; empty = auto default
 
-  void draw(SimController &sim) {
-    // One-time observer attach; the controller re-attaches it on every
-    // rebuild, so config edits and resets never detach the graphs.
-    if (!attached) {
-      sim.add_sink(history);
-      attached = true;
-    }
+  void draw(const FrameHistory &history) {
     ImGui::SetNextWindowSize(ImVec2(420.0F, 300.0F), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(880.0F, 410.0F), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
     ImGui::Begin("Graphs");
-    const auto &snaps = history.snapshots();
-    if (snaps.empty()) {
+    const auto &frames = history.frames();
+    if (frames.empty()) {
       ImGui::TextDisabled("Run the simulation to collect points.");
       ImGui::TextDisabled("Series follow the run's emit rate; pausing "
                           "freezes the plots.");
       ImGui::End();
       return;
     }
-    std::size_t slots = 0;
-    for (const auto &s : snaps) {
-      if (s.particle_count() > slots) {
-        slots = s.particle_count();
+    // Channel selector over the latest frame's schema; solver switches
+    // re-resolve by name, falling back to the source default.
+    const DataFrame &latest = frames.back();
+    int selected = -1;
+    for (std::size_t k = 0; k < latest.channels.size(); ++k) {
+      if (latest.channels[k].name == channel) {
+        selected = static_cast<int>(k);
       }
     }
-    std::vector<std::vector<ImVec2>> height;
-    std::vector<std::vector<ImVec2>> traj;
-    height.resize(slots);
-    traj.resize(slots);
-    for (const auto &s : snaps) {
-      for (std::size_t k = 0; k < s.particle_count() && k < slots; ++k) {
-        height[k].push_back(ImVec2(static_cast<float>(s.sim_time),
-                                   static_cast<float>(s.pos_y[k])));
-        traj[k].push_back(ImVec2(static_cast<float>(s.pos_x[k]),
-                                 static_cast<float>(s.pos_y[k])));
+    if (selected < 0) {
+      channel = default_channel(latest);
+      for (std::size_t k = 0; k < latest.channels.size(); ++k) {
+        if (latest.channels[k].name == channel) {
+          selected = static_cast<int>(k);
+        }
+      }
+    }
+    auto name_getter = [](void *data, int idx) -> const char * {
+      const auto *names = static_cast<const std::vector<std::string> *>(data);
+      if (idx < 0 || static_cast<std::size_t>(idx) >= names->size()) {
+        return "";
+      }
+      return (*names)[static_cast<std::size_t>(idx)].c_str();
+    };
+    std::vector<std::string> names;
+    for (const auto &c : latest.channels) {
+      names.push_back(c.name);
+    }
+    int combo_idx = selected < 0 ? 0 : selected;
+    if (!names.empty() &&
+        ImGui::Combo("channel", &combo_idx, name_getter, &names,
+                     static_cast<int>(names.size()))) {
+      channel = names[static_cast<std::size_t>(combo_idx)];
+      selected = combo_idx;
+    }
+    // Selected channel vs time (single trace; frames missing the channel
+    // after a source switch are skipped).
+    std::vector<std::vector<ImVec2>> series(1);
+    std::vector<std::vector<ImVec2>> traj(1);
+    for (const auto &f : frames) {
+      for (const auto &c : f.channels) {
+        if (c.name == channel) {
+          series[0].push_back(ImVec2(static_cast<float>(f.time),
+                                     static_cast<float>(c.value)));
+          break;
+        }
+      }
+      if (!f.items.empty()) {
+        traj[0].push_back(ImVec2(static_cast<float>(f.items.front().x),
+                                 static_cast<float>(f.items.front().y)));
       }
     }
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    graphs_detail::draw_plot(dl, "Height y(t)", "t [s]", height, 118.0F);
+    const std::string title = channel.empty() ? "value(t)" : channel + "(t)";
+    graphs_detail::draw_plot(dl, title.c_str(), "t [s]", series, 118.0F);
     graphs_detail::draw_plot(dl, "Trajectory y(x)", "x [m]", traj, 118.0F);
-    ImGui::TextDisabled("%llu snapshots (cap %llu) | steps %llu..%llu",
-                        static_cast<unsigned long long>(snaps.size()),
-                        static_cast<unsigned long long>(PlotHistory::kCapacity),
-                        static_cast<unsigned long long>(snaps.front().step_index),
-                        static_cast<unsigned long long>(snaps.back().step_index));
+    ImGui::TextDisabled("%llu frames (cap %llu) | steps %llu..%llu",
+                        static_cast<unsigned long long>(frames.size()),
+                        static_cast<unsigned long long>(FrameHistory::kCapacity),
+                        static_cast<unsigned long long>(frames.front().step),
+                        static_cast<unsigned long long>(frames.back().step));
     ImGui::End();
   }
 };

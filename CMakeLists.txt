@@ -217,16 +217,16 @@ if(BUILD_TESTS)
     )
     add_test(NAME viewport3d COMMAND test_viewport3d)
 
-    # Graphs history: engine-only sink, no ImGui/SDL/Vulkan needed.
-    # (The fit_bounds math check includes panel + imgui headers only;
-    # nothing ImGui is linked, like the glm headers via wengine_core.)
-    add_executable(test_graphs tests/test_graphs.cpp)
-    target_link_libraries(test_graphs PRIVATE wengine_core)
-    target_include_directories(test_graphs PRIVATE
+    # Frame source seam: adapter + history, engine-only header.
+    # (The plot bounds-math check includes the graphs panel + imgui
+    # headers only; nothing ImGui is linked, like glm via wengine_core.)
+    add_executable(test_frame_source tests/test_frame_source.cpp)
+    target_link_libraries(test_frame_source PRIVATE wengine_core)
+    target_include_directories(test_frame_source PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
         ${CMAKE_CURRENT_SOURCE_DIR}/external/imgui
     )
-    add_test(NAME graphs COMMAND test_graphs)
+    add_test(NAME frame_source COMMAND test_frame_source)
 
     # 2D world-view math: doubles-only header, no ImGui/SDL/Vulkan needed.
     add_executable(test_canvas2d tests/test_canvas2d.cpp)

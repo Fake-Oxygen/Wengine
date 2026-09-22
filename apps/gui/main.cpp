@@ -19,6 +19,7 @@
 #include "panels/closed_form_panels.hpp"
 #include "panels/sim_panel.hpp"
 #include "views/canvas2d_panel.hpp"
+#include "views/frame_source.hpp"
 #include "views/graphs_panel.hpp"
 #include "views/viewport3d_panel.hpp"
 #include "wengine/core/status.hpp"
@@ -153,6 +154,11 @@ int main(int argc, char **argv) {
   wengine::gui::Viewport3dPanel viewport3d;
   wengine::gui::GraphsPanel graphs;
   wengine::gui::Canvas2dPanel canvas2d;
+  // Shared frame stream: the recorder adapts every emitted snapshot
+  // through the solver registry; views read DataFrames only.
+  wengine::gui::FrameHistory frames;
+  wengine::gui::FrameRecorder recorder(frames);
+  sim.add_sink(recorder);
 
   wengine::gui::backend::set_clear_color(0.10F, 0.12F, 0.16F, 1.00F);
 
@@ -195,6 +201,12 @@ int main(int argc, char **argv) {
       }
     }
 
+    // Adapt once per frame at the engine/GUI boundary: every view below
+    // consumes DataFrames, never Snapshots.
+    recorder.set_solver(sim.config().solver);
+    const wengine::gui::DataFrame frame =
+        wengine::gui::adapt_frame(sim.snapshot(), sim.config().solver);
+
     // Startup layout (1600x900): sim + live views open, calculators and
     // plots collapsed one click away, room for future panels on the right.
     ImGui::SetNextWindowPos(ImVec2(20.0F, 20.0F), ImGuiCond_FirstUseEver);
@@ -202,6 +214,7 @@ int main(int argc, char **argv) {
     ImGui::Text("Backend: Dear ImGui v1.91.9b + SDL2 + Vulkan");
     ImGui::Text("Framerate: %.1f fps", static_cast<double>(io.Framerate));
     sim_panel.draw(sim);
+    sim_panel.draw_status(sim, frame);
     ImGui::End();
 
     // No ini file (IniFilename=nullptr): place once per launch, no overlap.
@@ -220,15 +233,15 @@ int main(int argc, char **argv) {
     }
     ImGui::End();
 
-    // Snapshot-driven and read-only: the camera cannot perturb the sim.
-    viewport3d.draw(sim.snapshot());
+    // Frame-driven and read-only: cameras cannot perturb the sim.
+    viewport3d.draw(frame);
 
     // Observer-fed series: every emitted snapshot appends points, pausing
     // freezes the plots without touching sim timing.
-    graphs.draw(sim);
+    graphs.draw(frames);
 
     // Top-down world view with trails from the shared history.
-    canvas2d.draw(sim.snapshot(), graphs.history);
+    canvas2d.draw(frame, frames);
 
     ImGui::Render();
     ImDrawData *draw_data = ImGui::GetDrawData();

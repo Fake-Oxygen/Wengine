@@ -10,6 +10,7 @@
 
 #include "imgui.h"
 #include "controllers/sim_controller.hpp"
+#include "views/frame_source.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <cstddef>
@@ -131,17 +132,23 @@ struct SimPanel {
       sim.reset();
       sync_from(sim.config());
     }
+  }
 
-    const world::Snapshot snap = sim.snapshot();
+  // Status renders from the adapted frame (solver-agnostic): step, time,
+  // item count, and the primary item's kinematics when present.
+  void draw_status(SimController &sim, const DataFrame &frame) {
     ImGui::Text("step=%llu t=%.4fs solver=%.*s%s",
-                static_cast<unsigned long long>(snap.step_index), snap.sim_time,
+                static_cast<unsigned long long>(frame.step), frame.time,
                 static_cast<int>(sim.config().solver.size()),
                 sim.config().solver.data(), sim.playing() ? " (playing)" : "");
-    if (snap.particle_count() > 0) {
-      ImGui::Text("p0: x=%.5f y=%.5f vx=%.5f vy=%.5f", snap.pos_x[0],
-                  snap.pos_y[0], snap.vel_x[0], snap.vel_y[0]);
+    if (frame.items.empty()) {
+      ImGui::Text("primary: (no items)");
     } else {
-      ImGui::Text("p0: (no live particles)");
+      const SpatialItem &p = frame.items.front();
+      ImGui::Text("primary: x=%.5f y=%.5f z=%.5f", p.x, p.y, p.z);
+      if (p.has_velocity) {
+        ImGui::Text("         v=(%.3f, %.3f, %.3f)", p.vx, p.vy, p.vz);
+      }
     }
     if (!sim.ok()) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0F, 0.4F, 0.4F, 1.0F));

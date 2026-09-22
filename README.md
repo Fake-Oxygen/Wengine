@@ -223,8 +223,9 @@ into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/s
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
-`test_graphs` (ring bounds, reset clear, CSV-exactness, sink re-attach,
-plot bounds math), `test_canvas2d` (2D mapping, fit, zoom/pan, grid steps). Benchmarks:
+`test_frame_source` (adapter exactness, source registry, channels, ring,
+CSV-exactness, sink re-attach, plot bounds), `test_canvas2d` (2D mapping,
+fit, zoom/pan, grid steps). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`.
 
 ## Flow
@@ -317,19 +318,21 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   apps/gui/backend/vk_context.hpp/.cpp (SDL2 + Vulkan bootstrap, frames)
   apps/gui/controllers/sim_controller.hpp (engine-only RunConfig driver)
   apps/gui/models/closed_form_models.hpp (ohm/s0/i2c evaluate logic)
-  apps/gui/models/plot_history.hpp (bounded snapshot ring sink)
   apps/gui/panels/sim_panel.hpp + closed_form_panels.hpp/.cpp (ImGui UI)
-  apps/gui/views/ camera3d.hpp (orbit/project math) +
-  viewport3d_panel.hpp (ImGui 3D rasterization) + graphs_panel.hpp
-  (ImGui time-series plots over a PlotHistory sink) + worldview2d.hpp
-  (2D fit/zoom/pan math) + canvas2d_panel.hpp (ImGui top-down world view
-  with trails). Startup layout is 1600x900: sim + live views open,
-  calculators and plots collapsed one click away.
+  apps/gui/views/ frame_source.hpp (DataFrame view-model, solver-name
+  adapter registry, frame history + recorder sink), camera3d.hpp
+  (orbit/project math) + viewport3d_panel.hpp (ImGui 3D rasterization) +
+  graphs_panel.hpp (channel selector + time-series plots over frames) +
+  worldview2d.hpp (2D fit/zoom/pan math) + canvas2d_panel.hpp (top-down
+  view with trails) + palette.hpp (shared entity colors).
+  Views consume DataFrames only: new solvers add one adapter entry, and
+  panels stay untouched. Startup layout is 1600x900: sim + live views
+  open, calculators and plots collapsed one click away.
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,physics,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism,gui_sim_control,closed_form_panels,viewport3d,graphs,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism,gui_sim_control,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)
