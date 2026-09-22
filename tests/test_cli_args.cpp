@@ -102,15 +102,18 @@ void test_registry_compile_time() {
   static_assert(CliRegistry::find("ohm") != nullptr);
   static_assert(CliRegistry::find("s0") != nullptr);
   static_assert(CliRegistry::find("i2c") != nullptr);
+  static_assert(CliRegistry::find("sim") != nullptr);
   static_assert(CliRegistry::find("nope") == nullptr);
-  static_assert(CliRegistry::all().size() == 3);
+  static_assert(CliRegistry::all().size() == 4);
   static_assert(!CliRegistry::all()[0].usage.empty());
   static_assert(CliRegistry::find("ohm")->complete != nullptr);
   static_assert(CliRegistry::find("s0")->complete != nullptr);
   static_assert(CliRegistry::find("i2c")->complete != nullptr);
+  static_assert(CliRegistry::find("sim")->complete != nullptr);
   assert(CliRegistry::find("ohm")->run != nullptr);
   assert(CliRegistry::find("s0")->run != nullptr);
   assert(CliRegistry::find("i2c")->run != nullptr);
+  assert(CliRegistry::find("sim")->run != nullptr);
 }
 
 void test_ohm_handler() {
@@ -174,6 +177,8 @@ void test_shell_integration() {
   assert(sh.execute("ohm --help", out) == 0);
   assert(sh.execute("s0 convert --const 1000imp/kWh", out) == 0);
   assert(sh.execute("s0 --help", out) == 0);
+  assert(sh.execute("sim run --steps 2 --particles 1", out) == 0);
+  assert(out.str().find("solver=projectile") != std::string::npos);
   assert(sh.execute("exit", out) == -1);
 }
 
@@ -191,11 +196,16 @@ void test_completion() {
   // Command names (registry + builtins).
   {
     const auto c = complete_line("", 0, all);
-    assert(has(c, "ohm") && has(c, "s0") && has(c, "i2c") && has(c, "help") &&
-           has(c, "exit") && has(c, "quit"));
+    assert(has(c, "ohm") && has(c, "s0") && has(c, "i2c") && has(c, "sim") &&
+           has(c, "help") && has(c, "exit") && has(c, "quit"));
   }
   assert(complete_line("o", 1, all) == std::vector<std::string>{"ohm"});
-  assert(complete_line("s", 1, all) == std::vector<std::string>{"s0"});
+  {
+    // "s" now prefixes two commands: definition order (s0, then sim).
+    const auto c = complete_line("s", 1, all);
+    assert(c.size() == 2 && c[0] == "s0" && c[1] == "sim");
+  }
+  assert(complete_line("si", 2, all) == std::vector<std::string>{"sim"});
   assert(complete_line("i", 1, all) == std::vector<std::string>{"i2c"});
   assert(complete_line("h", 1, all) == std::vector<std::string>{"help"});
   assert(complete_line("zzz", 3, all).empty());
@@ -242,6 +252,14 @@ void test_completion() {
     const auto c = complete_line("i2c pullup --speed ", 20, all);
     assert(c.size() == 3 && has(c, "std") && has(c, "fast") && has(c, "fmp"));
   }
+
+  // Sim modes and options.
+  assert(complete_line("sim ", 4, all) == std::vector<std::string>{"run"});
+  {
+    const auto c = complete_line("sim --", 6, all);
+    assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv"));
+  }
+  assert(complete_line("sim run --steps 10", 18, all).empty()); // numeric value
   assert(complete_line("help ", 5, all).size() == complete_line("", 0, all).size());
   assert(complete_line("help o", 6, all) == std::vector<std::string>{"ohm"});
   assert(complete_line("nope ", 5, all).empty());

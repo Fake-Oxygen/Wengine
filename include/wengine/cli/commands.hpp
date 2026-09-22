@@ -66,4 +66,20 @@ struct I2cSpec {
                        std::vector<std::string> &out);
 };
 
+struct SimSpec {
+  static constexpr std::string_view kName = "sim";
+  static constexpr std::string_view kDescription = "Run stepped simulation (engine vertical slice)";
+  static constexpr std::string_view kUsage =
+      "sim run [--steps N] [--dt <s>] [--gravity <m/s^2>] [--particles N]\n"
+      "        [--x0 X] [--y0 Y] [--vx0 VX] [--vy0 VY]\n"
+      "        [--emit-csv <path>] [--emit-every N]\n"
+      "  sim run --steps 100 --particles 1   (projectile demo, all params named)\n"
+      "Defaults: steps=100, dt=0.01s, gravity=9.81, particles=1,\n"
+      "  x0=y0=0, vx0=vy0=10, emit-every=1. Time unit: s/ms/us/ns.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                       std::vector<std::string> &out);
+};
+
 } // namespace wengine::cli::commands

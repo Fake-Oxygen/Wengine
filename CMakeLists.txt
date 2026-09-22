@@ -77,6 +77,7 @@ if(BUILD_CLI)
         src/cli/commands/ohm.cpp
         src/cli/commands/s0.cpp
         src/cli/commands/i2c.cpp
+        src/cli/commands/sim.cpp
     )
     target_include_directories(wengine_cli PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -118,6 +119,10 @@ if(BUILD_TESTS)
     add_executable(test_i2c tests/test_i2c.cpp)
     target_link_libraries(test_i2c PRIVATE wengine_cli)
     add_test(NAME i2c COMMAND test_i2c)
+
+    add_executable(test_sim tests/test_sim.cpp)
+    target_link_libraries(test_sim PRIVATE wengine_cli)
+    add_test(NAME sim COMMAND test_sim)
 
     add_executable(test_runner tests/test_runner.cpp)
     target_link_libraries(test_runner PRIVATE wengine_core)

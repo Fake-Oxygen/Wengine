@@ -115,6 +115,21 @@ Cb max 400/400/550 pF, IOL 3/3/30 mA. `--vol/--iol/--tr` override any preset.
 Hs-mode is rejected (current-source pull-ups, UM10204 §5). Capacitance units:
 `F`/`mF`/`uF`/`nF`/`pF`; resistance `Ohm`/`kOhm`; time `s`/`ms`/`us`/`ns`.
 
+Stepped simulation (engine vertical slice — runner + state + sinks):
+
+```text
+> sim run --steps 100 --particles 1
+sim run: solver=projectile g=9.81
+steps: 100 x 0.01s -> t=1s
+particles: 1
+p0: x=10 y=5.04595 vx=10 vy=0.19
+> sim run --steps 20 --dt 10ms --particles 2 --emit-csv run.csv --emit-every 10
+```
+
+All `sim` parameters are named (`--steps`, `--dt`, `--gravity`, `--particles`,
+`--x0/--y0/--vx0/--vy0`, `--emit-csv`, `--emit-every`); the CSV log carries
+the full snapshot stream for replay.
+
 Argument forms (see `wengine/cli/args.hpp`): positional values with unit
 suffixes (`12V`, `0.5A`, `4Ohm`, bare numbers = SI units), named options
 `--key value` / `--key=value` / `-k value` (`--u/-U/--voltage`,
@@ -137,7 +152,7 @@ tests/  benchmarks/  examples/
 |---|---|---|
 | `math` | `wengine/math/vector_*.hpp` | `Vector2D<T>`/`Vector3D<T>` header-only structs, no virtuals |
 | `units` | `wengine/units/units.hpp`, `converter.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals |
-| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp` | Pure `static constexpr` functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series` — no I/O |
+| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step` — no I/O |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp` | `Status`/`StatusCode` (no exceptions/strings in hot path), `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
 | `world` | `wengine/world/entity.hpp`, `particles.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `State` (clock + entities + pools), deep-copy `Snapshot`, versioned binary save/load |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision) |
@@ -159,9 +174,10 @@ CMake targets mirror this: `wengine_math`, `wengine_units`,
 into `wengine_core` (`wengine::core` alias; `PhysicsEngineCore` is a legacy
 alias). `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
 `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
-`src/cli/commands/i2c.cpp`) links `wengine_core`; `PhysicsSimApp` links
-`wengine_cli`. Tests: `test_ohm_law`, `test_math_units` (link core),
-`test_cli_args`, `test_s0`, `test_i2c` (link cli). Benchmark: `bench_ohm`.
+`src/cli/commands/i2c.cpp`, `src/cli/commands/sim.cpp`) links `wengine_core`;
+`PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
+(link core), `test_cli_args`, `test_s0`, `test_i2c`, `test_sim` (link cli).
+Benchmark: `bench_ohm`.
 
 ## Flow
 
@@ -243,6 +259,6 @@ benchmarks/bench_ohm.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,math,physics,solvers,units,world}/
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,runner,world,emit}.cpp
 cmake/ docs/ external/ (reserved/empty)
 ```
