@@ -140,6 +140,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_emit PRIVATE wengine_core)
     add_test(NAME emit COMMAND test_emit)
 
+    add_executable(test_run_config tests/test_run_config.cpp)
+    target_link_libraries(test_run_config PRIVATE wengine_core)
+    add_test(NAME run_config COMMAND test_run_config)
+
     add_executable(test_determinism tests/test_determinism.cpp)
     target_link_libraries(test_determinism PRIVATE wengine_core)
     add_test(NAME determinism COMMAND test_determinism)

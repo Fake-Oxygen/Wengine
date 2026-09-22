@@ -163,8 +163,8 @@ tests/  benchmarks/  examples/
 | Module | Path | Role |
 |---|---|---|
 | `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
-| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `registry.hpp`, `solver_registry.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
-| `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
+| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
+| `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp`, `run_config.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
 | `world` | `wengine/world/entity.hpp`, `particles.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `State` (clock + entities + pools), deep-copy `Snapshot`, versioned binary save/load |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
@@ -230,6 +230,10 @@ with an accumulator for real-time loops. Each step calls registered
 `ISolver::step(state, dt)` implementations in order, then `take_snapshot()`
 hands an immutable `Snapshot` to attached `emit::ISink` observers
 (decimated via `emit_every`). Engine code never knows its consumers.
+Headless runs go through the `core::RunConfig` seam: frontends (CLI today,
+GUI tomorrow) build the plain-data config and call
+`solvers::run_headless()` with caller-owned sinks — the engine never sees
+frontend types.
 
 ### Emit transport decision (recorded)
 

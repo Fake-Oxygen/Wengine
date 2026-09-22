@@ -16,8 +16,8 @@
 // Lookup `find()` is constexpr linear search: fastest for the small N
 // typical of solver catalogs (no hash, no allocations).
 // Factories build default-configured instances; callers configure the
-// solver (or build it directly, as the CLI does today) before handing it
-// to core::Runner, which owns no solvers itself.
+// solver before handing it to core::Runner, which owns no solvers itself
+// (the headless path centralizes this in solvers::run_headless).
 
 #include "wengine/core/solver.hpp"
 

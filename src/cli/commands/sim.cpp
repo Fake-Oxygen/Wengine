@@ -1,12 +1,12 @@
 #include "wengine/cli/commands.hpp"
 #include "wengine/cli/status.hpp"
-#include "wengine/core/runner.hpp"
+#include "wengine/core/run_config.hpp"
 #include "wengine/emit/csv_sink.hpp"
+#include "wengine/solvers/run.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <array>
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -162,8 +162,6 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     return usage_error(out, "emit stride must be >= 0");
   }
 
-  core::Runner runner{{.dt = dt,
-                       .emit_every = static_cast<std::uint64_t>(emit_every)}};
   const solvers::SolverDef *sdef = solvers::SolverRegistry::find(solver_name);
   if (sdef == nullptr) {
     out << "Error: unknown solver '" << solver_name << "'. Available:";
@@ -173,25 +171,27 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     out << '\n';
     return core::kExitUsage;
   }
-  std::unique_ptr<core::ISolver> solver = sdef->create();
-  // --gravity configures the projectile solver specifically; particle
-  // population (--particles/--x0/...) is generic runner-level setup.
-  const bool is_projectile = solver->name() == solvers::ProjectileSolver::kName;
-  if (is_projectile) {
-    // Registry lookup guarantees the factory built a ProjectileSolver.
-    static_cast<solvers::ProjectileSolver *>(solver.get())->set_gravity(gravity);
-  } else if (has_gravity) {
+  // --gravity applies to the projectile solver specifically. This message
+  // stays CLI-owned; the engine driver re-validates for all frontends.
+  const bool is_projectile = sdef->name == solvers::ProjectileSolver::kName;
+  if (!is_projectile && has_gravity) {
     return usage_error(out, "--gravity only applies to solver 'projectile'");
   }
-  runner.add_solver(*solver);
-  for (long long k = 0; k < n_particles; ++k) {
-    world::Entity e = runner.state().spawn_entity();
-    runner.state().particles.attach(e.index);
-    runner.state().particles.pos_x[e.index] = x0;
-    runner.state().particles.pos_y[e.index] = y0;
-    runner.state().particles.vel_x[e.index] = vx0;
-    runner.state().particles.vel_y[e.index] = vy0;
-  }
+
+  // Headless run goes through the engine seam: the CLI builds a RunConfig
+  // (plain data, no engine wiring here) and the driver owns the rest.
+  core::RunConfig cfg;
+  cfg.loop.dt = dt;
+  cfg.loop.emit_every = static_cast<std::uint64_t>(emit_every);
+  cfg.steps = static_cast<std::uint64_t>(steps);
+  cfg.solver = solver_name;
+  cfg.gravity = gravity;
+  cfg.has_gravity = has_gravity;
+  cfg.particles = static_cast<std::uint64_t>(n_particles);
+  cfg.x0 = x0;
+  cfg.y0 = y0;
+  cfg.vx0 = vx0;
+  cfg.vy0 = vy0;
 
   std::optional<emit::CsvSink> csv;
   if (csv_path) {
@@ -200,18 +200,22 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       out << "Error: cannot open CSV file '" << *csv_path << "'\n";
       return core::kExitRuntime;
     }
-    runner.add_sink(*csv);
   }
 
-  const core::Status st =
-      runner.run(static_cast<std::uint64_t>(steps));
+  world::State s;
+  core::Status st;
+  if (csv) {
+    std::array<emit::ISink *, 1> sinks{&*csv};
+    st = solvers::run_headless(cfg, sinks, s);
+  } else {
+    st = solvers::run_headless(cfg, std::span<emit::ISink *>{}, s);
+  }
   if (!st.ok()) {
     out << "Error: simulation step failed\n";
     return core::kExitRuntime;
   }
 
-  const world::State &s = runner.state();
-  out << "sim run: solver=" << solver->name();
+  out << "sim run: solver=" << solver_name;
   if (is_projectile) {
     out << " g=" << gravity;
   }
