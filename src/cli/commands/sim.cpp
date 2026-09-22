@@ -1,4 +1,5 @@
 #include "wengine/cli/commands.hpp"
+#include "wengine/cli/status.hpp"
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/csv_sink.hpp"
 #include "wengine/solvers/solver_registry.hpp"
@@ -22,15 +23,11 @@ namespace {
 }
 
 int usage_error(std::ostream &out, std::string_view msg) {
-  out << "Error: " << msg << '\n';
-  out << SimSpec::kUsage << '\n';
-  return 2;
+  return cli::usage_error(out, msg, SimSpec::kUsage);
 }
 
 int unexpected_error(std::ostream &out, std::string_view tok) {
-  out << "Error: unexpected argument '" << tok << "'\n";
-  out << SimSpec::kUsage << '\n';
-  return 2;
+  return cli::unexpected_error(out, tok, SimSpec::kUsage);
 }
 
 void push_matches(std::string_view partial, std::span<const std::string_view> options,
@@ -54,7 +51,7 @@ constexpr std::array<std::string_view, 16> kSimOptions{{
 int SimSpec::run(ArgCursor &args, std::ostream &out) {
   if (args.take_flag({"--help", "-h"})) {
     out << kName << " - " << kDescription << "\nUsage:\n" << kUsage << '\n';
-    return 0;
+    return core::kExitOk;
   }
 
   long long steps = 100;
@@ -71,7 +68,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
                       long long &slot) -> bool {
     if (auto o = args.take_option(names)) {
       auto p = parse_i64(*o);
-      if (!p.ok) {
+      if (!p.ok()) {
         out << "Error: invalid " << what << " '" << *o << "'\n";
         out << kUsage << '\n';
         return false;
@@ -81,10 +78,10 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     return true;
   };
   auto take_num = [&](std::initializer_list<std::string_view> names, const char *what,
-                      double &slot, ParseResult<double> (*parse)(std::string_view)) -> bool {
+                      double &slot, core::Result<double> (*parse)(std::string_view)) -> bool {
     if (auto o = args.take_option(names)) {
       auto p = parse(*o);
-      if (!p.ok) {
+      if (!p.ok()) {
         out << "Error: invalid " << what << " '" << *o << "'\n";
         out << kUsage << '\n';
         return false;
@@ -95,38 +92,38 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   };
 
   if (!take_i64({"--steps", "-n"}, "step count", steps)) {
-    return 2;
+    return core::kExitUsage;
   }
   if (!take_num({"--dt"}, "time step", dt, parse_time)) {
-    return 2;
+    return core::kExitUsage;
   }
   if (auto o = args.take_option({"--gravity", "-g"})) {
     auto p = parse_double(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       out << "Error: invalid gravity '" << *o << "'\n";
       out << kUsage << '\n';
-      return 2;
+      return core::kExitUsage;
     }
     gravity = p.value;
     has_gravity = true;
   }
   if (!take_i64({"--particles", "-p"}, "particle count", n_particles)) {
-    return 2;
+    return core::kExitUsage;
   }
   if (!take_num({"--x0"}, "x0", x0, parse_double)) {
-    return 2;
+    return core::kExitUsage;
   }
   if (!take_num({"--y0"}, "y0", y0, parse_double)) {
-    return 2;
+    return core::kExitUsage;
   }
   if (!take_num({"--vx0"}, "vx0", vx0, parse_double)) {
-    return 2;
+    return core::kExitUsage;
   }
   if (!take_num({"--vy0"}, "vy0", vy0, parse_double)) {
-    return 2;
+    return core::kExitUsage;
   }
   if (!take_i64({"--emit-every"}, "emit stride", emit_every)) {
-    return 2;
+    return core::kExitUsage;
   }
   csv_path = args.take_option({"--emit-csv"});
   if (auto o = args.take_option({"--solver"})) {
@@ -143,9 +140,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     pos[n_pos++] = *p;
   }
   if (args.has_remaining()) {
-    out << "Error: unknown option '" << *args.first_remaining() << "'\n";
-    out << kUsage << '\n';
-    return 2;
+    return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
   if (n_pos != 1 || !is_sim_mode(pos[0])) {
     if (n_pos > 1 && is_sim_mode(pos[0])) {
@@ -176,7 +171,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       out << ' ' << d.name;
     }
     out << '\n';
-    return 2;
+    return core::kExitUsage;
   }
   std::unique_ptr<core::ISolver> solver = sdef->create();
   // --gravity configures the projectile solver specifically; particle
@@ -203,7 +198,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     csv.emplace(std::string{*csv_path});
     if (!csv->ok()) {
       out << "Error: cannot open CSV file '" << *csv_path << "'\n";
-      return 1;
+      return core::kExitRuntime;
     }
     runner.add_sink(*csv);
   }
@@ -212,7 +207,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       runner.run(static_cast<std::uint64_t>(steps));
   if (!st.ok()) {
     out << "Error: simulation step failed\n";
-    return 1;
+    return core::kExitRuntime;
   }
 
   const world::State &s = runner.state();
@@ -232,10 +227,13 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
         << " vx=" << s.particles.vel_x[first] << " vy=" << s.particles.vel_y[first] << '\n';
   }
   if (csv) {
-    csv->flush();
+    if (!csv->flush().ok()) {
+      out << "Error: failed writing CSV file '" << csv->path() << "'\n";
+      return core::kExitRuntime;
+    }
     out << "csv: " << csv->path() << " (" << csv->rows_written() << " rows)\n";
   }
-  return 0;
+  return core::kExitOk;
 }
 
 void SimSpec::complete(std::span<const std::string_view> prior_args, std::string_view partial,

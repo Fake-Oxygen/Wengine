@@ -42,35 +42,35 @@ void test_tokenizer() {
 }
 
 void test_scalars() {
-  assert(parse_double("12.4").ok && std::fabs(parse_double("12.4").value - 12.4) < 1e-12);
-  assert(!parse_double("").ok);
-  assert(!parse_double("12V").ok); // suffix belongs to unit parsers
-  assert(!parse_double("abc").ok);
+  assert(parse_double("12.4").ok() && std::fabs(parse_double("12.4").value - 12.4) < 1e-12);
+  assert(!parse_double("").ok());
+  assert(!parse_double("12V").ok()); // suffix belongs to unit parsers
+  assert(!parse_double("abc").ok());
 
-  assert(parse_i64("-42").ok && parse_i64("-42").value == -42);
-  assert(!parse_i64("3.5").ok);
+  assert(parse_i64("-42").ok() && parse_i64("-42").value == -42);
+  assert(!parse_i64("3.5").ok());
 
   assert(parse_bool("true").value && parse_bool("1").value);
   assert(!parse_bool("0").value && !parse_bool("off").value);
-  assert(!parse_bool("maybe").ok);
+  assert(!parse_bool("maybe").ok());
 }
 
 void test_units() {
   auto v = parse_voltage("12.4V");
-  assert(v.ok && std::fabs(v.value - 12.4) < 1e-12);
+  assert(v.ok() && std::fabs(v.value - 12.4) < 1e-12);
   assert(std::fabs(parse_voltage("1kV").value - 1000.0) < 1e-9);
   assert(std::fabs(parse_voltage("500mV").value - 0.5) < 1e-12);
   assert(std::fabs(parse_voltage("3").value - 3.0) < 1e-12); // bare SI
-  assert(!parse_voltage("5A").ok);
-  assert(!parse_voltage("abc").ok);
+  assert(!parse_voltage("5A").ok());
+  assert(!parse_voltage("abc").ok());
 
   assert(std::fabs(parse_current("0.54A").value - 0.54) < 1e-12);
   assert(std::fabs(parse_current("2mA").value - 0.002) < 1e-12);
-  assert(!parse_current("5V").ok);
+  assert(!parse_current("5V").ok());
 
   assert(std::fabs(parse_resistance("4Ohm").value - 4.0) < 1e-12);
   assert(std::fabs(parse_resistance("2kOhm").value - 2000.0) < 1e-9);
-  assert(!parse_resistance("7V").ok);
+  assert(!parse_resistance("7V").ok());
 }
 
 void test_cursor_options() {
@@ -359,12 +359,12 @@ void test_history() {
   // Persistence round-trip.
   const std::string path = "/tmp/wengine_test_history.txt";
   std::remove(path.c_str());
-  assert(h.save(path));
+  assert(h.save(path).ok());
   History loaded;
   assert(loaded.load(path) == 3);
   assert(loaded.at(2) == "b");
   assert(loaded.add("c"));
-  assert(loaded.append_to_file(path, "c"));
+  assert(loaded.append_to_file(path, "c").ok());
   History reloaded;
   assert(reloaded.load(path) == 4);
   std::remove(path.c_str());

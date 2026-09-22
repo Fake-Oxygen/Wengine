@@ -156,7 +156,7 @@ tests/  benchmarks/  examples/
 | `math` | `wengine/math/vector_*.hpp` | `Vector2D<T>`/`Vector3D<T>` header-only structs, no virtuals |
 | `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
 | `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `registry.hpp`, `solver_registry.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
-| `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp` | `Status`/`StatusCode` (no exceptions/strings in hot path), `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
+| `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
 | `world` | `wengine/world/entity.hpp`, `particles.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `State` (clock + entities + pools), deep-copy `Snapshot`, versioned binary save/load |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
@@ -174,8 +174,7 @@ apps    -> cli + core
 
 CMake targets mirror this: `wengine_math`, `wengine_units`,
 `wengine_solvers`, `wengine_world`, `wengine_emit` (all `INTERFACE`) combine
-into `wengine_core` (`wengine::core` alias; `PhysicsEngineCore` is a legacy
-alias). `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
+into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
 `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
 `src/cli/commands/i2c.cpp`, `src/cli/commands/sim.cpp`) links `wengine_core`;
 `PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
@@ -232,13 +231,19 @@ bridge, versioning).
 - Hot path (math/solvers/parser): header-only, `constexpr`/`noexcept`
   where possible, `[[nodiscard]]` on results; no virtuals, no
   `<sstream>`/`<stoi>`/regex/exceptions — `std::from_chars`,
-  `string_view`, `span`, `ParseResult<T>`/`Status` instead. One
-  `try/catch` lives only at the `Shell::execute` boundary for `ostream`
-  errors.
+  `string_view`, `span`, `core::Result<T>`/`Status` instead. One
+  defensive `try/catch` lives only at the `Shell::execute` boundary and
+  maps to `kInternal`.
 - Solvers: pure functions over `units::Value<Dim>` (SI base internally);
   never touch `iostream`, CLI types, or `world` I/O directly.
-- CLI handlers: signature `int run(ArgCursor&, std::ostream&)`; return
-  `0`/`2` (usage) and print `kUsage` on error.
+- Errors (unified): `core::Status` (void ops) + `core::Result<T>`
+  (value ops) everywhere fallible;
+  `std::optional` only for absence, `bool` only for predicates/state
+  queries, solver `inf`/`feasible` are domain values. CLI handlers keep
+  signature `int run(ArgCursor&, std::ostream&)` but produce the `int`
+  only via `core::kExitOk/kExitRuntime/kExitUsage` and the shared
+  `cli/status.hpp` helpers (`usage_error`/`runtime_error`/
+  `unexpected_error`); `-1` is the REPL exit signal.
 - Commands: spec struct (`kName`, `kDescription`, `kUsage`, `run`) +
   registration in `command_registry.hpp` as
   `using CliRegistry = Registry<...>`; duplicates/empty names fail at

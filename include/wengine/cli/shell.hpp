@@ -12,7 +12,8 @@ namespace wengine::cli {
 class Shell {
 public:
   // Execute one line. `line` is copied into an internal buffer so the
-  // returned views stay valid for the call. Returns 0 ok, 1 error, -1 exit.
+  // returned views stay valid for the call. Returns core::kExitOk (0),
+  // core::kExitRuntime (1), core::kExitUsage (2), or -1 for exit/quit.
   int execute(std::string_view line, std::ostream &out);
 
   // Execute pre-split tokens (e.g. process argv in headless mode).

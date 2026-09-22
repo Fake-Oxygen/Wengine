@@ -1,4 +1,5 @@
 #include "wengine/cli/commands.hpp"
+#include "wengine/cli/status.hpp"
 #include "wengine/solvers/s0_pulse.hpp"
 
 #include <array>
@@ -29,16 +30,14 @@ namespace {
          ends_with(s, "Ws");
 }
 
-int usage_error(std::ostream &out, std::string_view msg) {
-  out << "Error: " << msg << '\n';
-  out << S0Spec::kUsage << '\n';
-  return 2;
+// Thin forwarders onto the single shared helper (cli/status.hpp) with this
+// command's usage text — no return-code literals here.
+inline int usage_error(std::ostream &out, std::string_view msg) {
+  return cli::usage_error(out, msg, S0Spec::kUsage);
 }
 
-int unexpected_error(std::ostream &out, std::string_view tok) {
-  out << "Error: unexpected argument '" << tok << "'\n";
-  out << S0Spec::kUsage << '\n';
-  return 2;
+inline int unexpected_error(std::ostream &out, std::string_view tok) {
+  return cli::unexpected_error(out, tok, S0Spec::kUsage);
 }
 
 } // namespace
@@ -46,7 +45,7 @@ int unexpected_error(std::ostream &out, std::string_view tok) {
 int S0Spec::run(ArgCursor &args, std::ostream &out) {
   if (args.take_flag({"--help", "-h"})) {
     out << kName << " - " << kDescription << "\nUsage:\n" << kUsage << '\n';
-    return 0;
+    return core::kExitOk;
   }
 
   using S = solvers::S0PulseSolver;
@@ -64,63 +63,63 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
 
   if (auto o = args.take_option({"--power", "-P"})) {
     auto p = parse_power(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid power value");
     }
     power_w = p.value;
   }
   if (auto o = args.take_option({"--freq", "--frequency", "-f"})) {
     auto p = parse_frequency(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid frequency value");
     }
     freq_hz = p.value;
   }
   if (auto o = args.take_option({"--pulses", "--count", "-n"})) {
     auto p = parse_pulses(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid pulse count");
     }
     pulses_n = p.value;
   }
   if (auto o = args.take_option({"--const", "--meter", "-c"})) {
     auto p = parse_meter_const(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid meter constant (e.g. 1000imp/kWh)");
     }
     const_c = p.value;
   }
   if (auto o = args.take_option({"--time", "-t"})) {
     auto p = parse_time(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid time value");
     }
     time_s = p.value;
   }
   if (auto o = args.take_option({"--energy", "-e"})) {
     auto p = parse_energy(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid energy value");
     }
     energy_j = p.value;
   }
   if (auto o = args.take_option({"--voltage", "--u", "-U"})) {
     auto p = parse_voltage(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid voltage value");
     }
     u_v = p.value;
   }
   if (auto o = args.take_option({"--current", "--i", "-I"})) {
     auto p = parse_current(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid current value");
     }
     i_a = p.value;
   }
   if (auto o = args.take_option({"--pf", "--power-factor"})) {
     auto p = parse_double(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid power factor");
     }
     power_factor = p.value;
@@ -139,9 +138,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     pos[n_pos++] = *p;
   }
   if (args.has_remaining()) {
-    out << "Error: unknown option '" << *args.first_remaining() << "'\n";
-    out << kUsage << '\n';
-    return 2;
+    return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
 
   std::string_view mode{};
@@ -186,7 +183,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     }
     if (!const_c) {
       auto p = parse_meter_const(val(0));
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid meter constant positional");
       }
       const_c = p.value;
@@ -200,7 +197,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     }
     if (!power_w) {
       auto p = parse_power(val(0));
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid power positional");
       }
       power_w = p.value;
@@ -214,7 +211,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     }
     if (!freq_hz) {
       auto p = parse_frequency(val(0));
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid frequency positional");
       }
       freq_hz = p.value;
@@ -228,7 +225,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     }
     if (!pulses_n) {
       auto p = parse_pulses(val(0));
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid pulse count positional");
       }
       pulses_n = p.value;
@@ -239,7 +236,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     }
     if (!energy_j && !power_w && n_val == 1 && looks_like_energy(val(0))) {
       auto p = parse_energy(val(0));
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid energy positional");
       }
       energy_j = p.value;
@@ -248,7 +245,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
       std::size_t k = 0;
       if (!power_w && k < n_val && !looks_like_energy(val(k))) {
         auto p = parse_power(val(k));
-        if (!p.ok) {
+        if (!p.ok()) {
           return usage_error(out, "invalid power positional");
         }
         power_w = p.value;
@@ -256,7 +253,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
       }
       if (!time_s && k < n_val) {
         auto p = parse_time(val(k));
-        if (!p.ok) {
+        if (!p.ok()) {
           return usage_error(out, "invalid time positional");
         }
         time_s = p.value;
@@ -272,7 +269,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     std::size_t k = 0;
     if (!u_v && k < n_val) {
       auto p = parse_voltage(val(k));
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid voltage positional");
       }
       u_v = p.value;
@@ -280,7 +277,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     }
     if (!i_a && k < n_val) {
       auto p = parse_current(val(k));
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid current positional");
       }
       i_a = p.value;
@@ -288,7 +285,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     }
     if (!time_s && k < n_val) {
       auto p = parse_time(val(k));
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid time positional");
       }
       time_s = p.value;
@@ -317,7 +314,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     out << "E/imp = " << S::imp_per_kwh_to_j_per_imp(c) << " J\n";
     out << "E/imp = " << S::imp_per_kwh_to_wh_per_imp(c) << " Wh\n";
     out << "E/imp = " << S::imp_per_kwh_to_kwh_per_imp(c) << " kWh\n";
-    return 0;
+    return core::kExitOk;
   }
   if (mode == "rate") {
     if (!power_w || !const_c) {
@@ -333,7 +330,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     out << "T = " << t << " s/imp\n";
     out << "rate = " << f * 60.0 << " imp/min\n";
     out << "rate = " << f * 3600.0 << " imp/h\n";
-    return 0;
+    return core::kExitOk;
   }
   if (mode == "power") {
     if (!freq_hz || !const_c) {
@@ -346,7 +343,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     out << "f = " << *freq_hz << " Hz\n";
     out << "P = " << p << " W\n";
     out << "P = " << p / 1000.0 << " kW\n";
-    return 0;
+    return core::kExitOk;
   }
   if (mode == "energy") {
     if (!pulses_n || !const_c) {
@@ -361,7 +358,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     out << "E = " << ekwh << " kWh\n";
     out << "E = " << ekwh * 1000.0 << " Wh\n";
     out << "E = " << ej << " J\n";
-    return 0;
+    return core::kExitOk;
   }
   if (mode == "pulses") {
     if (!const_c) {
@@ -375,7 +372,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
       out << "E = " << *energy_j << " J\n";
       out << "E = " << S::joules_to_kwh(*energy_j) << " kWh\n";
       out << "N = " << n << " imp\n";
-      return 0;
+      return core::kExitOk;
     }
     if (!power_w || !time_s) {
       return usage_error(out, "pulses needs --power + --time (or --energy) and --const");
@@ -390,7 +387,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
     out << "N = " << n << " imp\n";
     out << "E = " << S::joules_to_kwh(ej) << " kWh\n";
     out << "E = " << ej << " J\n";
-    return 0;
+    return core::kExitOk;
   }
   // full
   if (!const_c) {
@@ -427,7 +424,7 @@ int S0Spec::run(ArgCursor &args, std::ostream &out) {
   out << "T = " << r.period_s << " s/imp\n";
   out << "N = " << r.pulses << " imp\n";
   out << "E/imp = " << r.j_per_imp << " J\n";
-  return 0;
+  return core::kExitOk;
 }
 
 namespace {

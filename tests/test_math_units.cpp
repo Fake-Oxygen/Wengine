@@ -43,14 +43,14 @@ void test_value_printing() {
 // parse through the CLI forwarders to exactly its table scale. If a table
 // and the parser ever drift apart, this fails.
 template <typename Dim>
-void check_table(wengine::cli::ParseResult<double> (*parse)(std::string_view)) {
+void check_table(wengine::core::Result<double> (*parse)(std::string_view)) {
   for (const auto &e : scales_for<Dim>::value) {
     const std::string tok = "1" + std::string(e.suffix);
     const auto r = parse(tok);
-    assert(r.ok && r.value == e.scale);
+    assert(r.ok() && r.value == e.scale);
   }
   const auto bare = parse("2.5");
-  assert(bare.ok && bare.value == 2.5); // bare number stays SI
+  assert(bare.ok() && bare.value == 2.5); // bare number stays SI
 }
 
 void test_scales_single_source() {

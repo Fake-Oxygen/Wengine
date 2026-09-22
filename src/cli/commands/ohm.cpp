@@ -1,4 +1,5 @@
 #include "wengine/cli/commands.hpp"
+#include "wengine/cli/status.hpp"
 #include "wengine/solvers/ohm_law.hpp"
 
 #include <array>
@@ -42,7 +43,7 @@ enum class Kind : int { kBare, kVoltage, kCurrent, kResistance };
 int OhmSpec::run(ArgCursor &args, std::ostream &out) {
   if (args.take_flag({"--help", "-h"})) {
     out << kName << " - " << kDescription << "\nUsage:\n" << kUsage << '\n';
-    return 0;
+    return core::kExitOk;
   }
 
   std::optional<double> u_si;
@@ -52,28 +53,28 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
   // -- named options (all forms: --u V | --u=V | -U V) ------------------
   if (auto o = args.take_option({"--voltage", "--volt", "--u", "-U"})) {
     auto p = parse_voltage(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       out << "Error: invalid voltage '" << *o << "' (" << p.error << ")\n";
       out << kUsage << '\n';
-      return 2;
+      return core::kExitUsage;
     }
     u_si = p.value;
   }
   if (auto o = args.take_option({"--current", "--i", "-I"})) {
     auto p = parse_current(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       out << "Error: invalid current '" << *o << "' (" << p.error << ")\n";
       out << kUsage << '\n';
-      return 2;
+      return core::kExitUsage;
     }
     i_si = p.value;
   }
   if (auto o = args.take_option({"--resistance", "--r", "-R"})) {
     auto p = parse_resistance(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       out << "Error: invalid resistance '" << *o << "' (" << p.error << ")\n";
       out << kUsage << '\n';
-      return 2;
+      return core::kExitUsage;
     }
     r_si = p.value;
   }
@@ -85,7 +86,7 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
     if (mode != "ui" && mode != "iu" && mode != "ur" && mode != "ru" &&
         mode != "ir" && mode != "ri") {
       out << "Error: --from must be one of ui|ur|ir (got '" << mode << "')\n";
-      return 2;
+      return core::kExitUsage;
     }
   }
 
@@ -96,21 +97,19 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
     if (n_pos >= pos.size()) {
       out << "Error: too many positional arguments (max 3: U I R)\n";
       out << kUsage << '\n';
-      return 2;
+      return core::kExitUsage;
     }
     pos[n_pos++] = *p;
   }
 
   // Any leftover tokens are unknown options (e.g. --typo).
   if (args.has_remaining()) {
-    out << "Error: unknown option '" << *args.first_remaining() << "'\n";
-    out << kUsage << '\n';
-    return 2;
+    return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
 
   auto assign_bare = [&](std::string_view tok) -> bool {
     auto p = parse_double(tok);
-    if (!p.ok) {
+    if (!p.ok()) {
       out << "Error: invalid number '" << tok << "'\n";
       return false;
     }
@@ -160,12 +159,12 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
     case Kind::kVoltage: {
       if (u_si) {
         out << "Error: duplicate voltage '" << tok << "'\n";
-        return 2;
+        return core::kExitUsage;
       }
       auto p = parse_voltage(tok);
-      if (!p.ok) {
+      if (!p.ok()) {
         out << "Error: invalid voltage '" << tok << "'\n";
-        return 2;
+        return core::kExitUsage;
       }
       u_si = p.value;
       break;
@@ -173,12 +172,12 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
     case Kind::kCurrent: {
       if (i_si) {
         out << "Error: duplicate current '" << tok << "'\n";
-        return 2;
+        return core::kExitUsage;
       }
       auto p = parse_current(tok);
-      if (!p.ok) {
+      if (!p.ok()) {
         out << "Error: invalid current '" << tok << "'\n";
-        return 2;
+        return core::kExitUsage;
       }
       i_si = p.value;
       break;
@@ -186,19 +185,19 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
     case Kind::kResistance: {
       if (r_si) {
         out << "Error: duplicate resistance '" << tok << "'\n";
-        return 2;
+        return core::kExitUsage;
       }
       auto p = parse_resistance(tok);
-      if (!p.ok) {
+      if (!p.ok()) {
         out << "Error: invalid resistance '" << tok << "'\n";
-        return 2;
+        return core::kExitUsage;
       }
       r_si = p.value;
       break;
     }
     case Kind::kBare:
       if (!assign_bare(tok)) {
-        return 2;
+        return core::kExitUsage;
       }
       break;
     }
@@ -208,7 +207,7 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
   if (given != 2) {
     out << "Error: provide exactly 2 of U/I/R (got " << given << ")\n";
     out << kUsage << '\n';
-    return 2;
+    return core::kExitUsage;
   }
 
   using V = units::Value<units::ElectricPotential>;
@@ -221,7 +220,7 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
   } else if (u_si && r_si) {
     if (*r_si == 0.0) {
       out << "Error: resistance must be non-zero\n";
-      return 2;
+      return core::kExitUsage;
     }
     st = solvers::OhmLawSolver::solve_from_ur(V{*u_si}, R{*r_si});
   } else {
@@ -232,7 +231,7 @@ int OhmSpec::run(ArgCursor &args, std::ostream &out) {
   out << "I = " << st.current.get() << " A\n";
   out << "R = " << st.resistance.get() << " Ohm\n";
   out << "P = " << st.power.get() << " W\n";
-  return 0;
+  return core::kExitOk;
 }
 
 namespace {

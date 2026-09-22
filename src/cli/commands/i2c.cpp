@@ -1,4 +1,5 @@
 #include "wengine/cli/commands.hpp"
+#include "wengine/cli/status.hpp"
 #include "wengine/solvers/i2c.hpp"
 
 #include <array>
@@ -30,29 +31,29 @@ namespace {
 }
 
 int usage_error(std::ostream &out, std::string_view msg) {
-  out << "Error: " << msg << '\n';
-  out << I2cSpec::kUsage << '\n';
-  return 2;
+  return cli::usage_error(out, msg, I2cSpec::kUsage);
 }
 
 int unexpected_error(std::ostream &out, std::string_view tok) {
-  out << "Error: unexpected argument '" << tok << "'\n";
-  out << I2cSpec::kUsage << '\n';
-  return 2;
+  return cli::unexpected_error(out, tok, I2cSpec::kUsage);
 }
 
-std::optional<solvers::I2cMode> parse_speed(std::string_view s) noexcept {
+inline int runtime_error(std::ostream &out, std::string_view msg) {
+  return cli::runtime_error(out, msg);
+}
+
+core::Result<solvers::I2cMode> parse_speed(std::string_view s) noexcept {
   using solvers::I2cMode;
   if (s == "std" || s == "standard") {
-    return I2cMode::Standard;
+    return core::Result<I2cMode>::success(I2cMode::Standard);
   }
   if (s == "fast") {
-    return I2cMode::Fast;
+    return core::Result<I2cMode>::success(I2cMode::Fast);
   }
   if (s == "fmp" || s == "fastplus" || s == "fast-plus" || s == "fm+") {
-    return I2cMode::FastPlus;
+    return core::Result<I2cMode>::success(I2cMode::FastPlus);
   }
-  return std::nullopt;
+  return core::Result<I2cMode>::failure("unknown speed (std|fast|fmp)");
 }
 
 const char *speed_name(solvers::I2cMode m) noexcept {
@@ -98,7 +99,7 @@ constexpr std::array<std::string_view, 20> kI2cOptions{{
 int I2cSpec::run(ArgCursor &args, std::ostream &out) {
   if (args.take_flag({"--help", "-h"})) {
     out << kName << " - " << kDescription << "\nUsage:\n" << kUsage << '\n';
-    return 0;
+    return core::kExitOk;
   }
 
   using S = solvers::I2cBusSolver;
@@ -116,49 +117,49 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
 
   if (auto o = args.take_option({"--vdd", "--voltage"})) {
     auto p = parse_voltage(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid VDD value");
     }
     vdd_v = p.value;
   }
   if (auto o = args.take_option({"--cb", "--capacitance"})) {
     auto p = parse_capacitance(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid bus capacitance (e.g. 200pF)");
     }
     cb_f = p.value;
   }
   if (auto o = args.take_option({"--vol", "--low"})) {
     auto p = parse_voltage(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid VOL value");
     }
     vol_v = p.value;
   }
   if (auto o = args.take_option({"--iol", "--current"})) {
     auto p = parse_current(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid IOL value");
     }
     iol_a = p.value;
   }
   if (auto o = args.take_option({"--tr", "--rise", "--time"})) {
     auto p = parse_time(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid rise-time value");
     }
     tr_s = p.value;
   }
   if (auto o = args.take_option({"--rp", "--pullup", "--resistance"})) {
     auto p = parse_resistance(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid Rp value");
     }
     rp_ohm = p.value;
   }
   if (auto o = args.take_option({"--rs", "--series"})) {
     auto p = parse_resistance(*o);
-    if (!p.ok) {
+    if (!p.ok()) {
       return usage_error(out, "invalid Rs value");
     }
     rs_ohm = p.value;
@@ -175,9 +176,7 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
     pos[n_pos++] = *p;
   }
   if (args.has_remaining()) {
-    out << "Error: unknown option '" << *args.first_remaining() << "'\n";
-    out << kUsage << '\n';
-    return 2;
+    return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
   if (n_pos == 0 || !is_i2c_mode(pos[0])) {
     return usage_error(out, "missing mode (pullup|series|full)");
@@ -189,7 +188,7 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
     const std::string_view tok = pos[k];
     if (looks_like_res(tok)) {
       auto p = parse_resistance(tok);
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid resistance positional");
       }
       if (!rp_ohm) {
@@ -205,7 +204,7 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
         return unexpected_error(out, tok);
       }
       auto p = parse_capacitance(tok);
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid capacitance positional");
       }
       cb_f = p.value;
@@ -214,14 +213,14 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
         return unexpected_error(out, tok);
       }
       auto p = parse_voltage(tok);
-      if (!p.ok) {
+      if (!p.ok()) {
         return usage_error(out, "invalid voltage positional");
       }
       vdd_v = p.value;
     } else {
       // Bare number: first empty slot in VDD, Cb, Rp, Rs order.
       auto p = parse_double(tok);
-      if (!p.ok) {
+      if (!p.ok()) {
         return unexpected_error(out, tok);
       }
       if (!vdd_v) {
@@ -242,15 +241,15 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
   I2cMode speed = I2cMode::Fast;
   if (speed_raw) {
     auto m = parse_speed(*speed_raw);
-    if (!m) {
+    if (!m.ok()) {
       if (*speed_raw == "hs" || *speed_raw == "highspeed" || *speed_raw == "high-speed") {
         out << "Error: Hs-mode uses switched current-source pull-ups "
                "(UM10204 section 5); resistor sizing does not apply\n";
-        return 2;
+        return core::kExitUsage;
       }
-      return usage_error(out, "unknown speed (std|fast|fmp)");
+      return usage_error(out, m.error);
     }
-    speed = *m;
+    speed = m.value;
   }
 
   if (!vdd_v || !cb_f) {
@@ -315,10 +314,12 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
     if (!pull.feasible && !rp_ohm) {
       out << "Error: empty Rp window (Rp(min) > Rp(max)); reduce Cb or relax tr\n";
       print_pullup();
-      return 1;
+      return core::kExitRuntime;
     }
     print_pullup();
-    return (pull.rp_used_ohm > 0.0 && (!pull.tr_ok || !pull.iol_ok)) ? 1 : 0;
+    return (pull.rp_used_ohm > 0.0 && (!pull.tr_ok || !pull.iol_ok))
+               ? core::kExitRuntime
+               : core::kExitOk;
   }
 
   // series / full need an Rp in place: explicit or the pullup E12 pick.
@@ -331,7 +332,7 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
   } else {
     out << "Error: no feasible Rp; pass --rp explicitly or fix the pullup window\n";
     print_pullup();
-    return 1;
+    return core::kExitRuntime;
   }
 
   const auto ser =
@@ -356,7 +357,7 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
 
   if (mode == "series") {
     print_series();
-    return (ser.low_ok && ser.rise_ok && ser.fall_ok) ? 0 : 1;
+    return (ser.low_ok && ser.rise_ok && ser.fall_ok) ? core::kExitOk : core::kExitRuntime;
   }
 
   print_pullup();
@@ -364,7 +365,7 @@ int I2cSpec::run(ArgCursor &args, std::ostream &out) {
   const bool ok = pull.feasible && pull.tr_ok && pull.iol_ok && ser.low_ok && ser.rise_ok &&
                   ser.fall_ok && *cb_f <= lim.cb_max_f;
   out << "summary: " << (ok ? "PASS" : "FAIL") << '\n';
-  return ok ? 0 : 1;
+  return ok ? core::kExitOk : core::kExitRuntime;
 }
 
 void I2cSpec::complete(std::span<const std::string_view> prior_args, std::string_view partial,

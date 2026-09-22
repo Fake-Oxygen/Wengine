@@ -6,8 +6,14 @@
 // falls back to plain `std::getline` (pipes, tests, non-POSIX platforms).
 // All terminal handling lives in `src/cli/line_reader.cpp`; this header is
 // portable C++20 with no platform includes.
+//
+// Error convention (unified): fallible persistence returns `core::Status`
+// (`kInternal` on I/O failure); `add()` stays `bool` (stored vs ignored —
+// a predicate, not an error); `load()` returns the entry count (missing
+// file is 0, not an error); `read_line()` returns `nullopt` only for EOF
+// (absence, not failure).
 
-#include <cstddef>
+#include "wengine/core/status.hpp"
 #include <iosfwd>
 #include <optional>
 #include <string>
@@ -37,10 +43,10 @@ public:
   // Load persisted lines (up to capacity, oldest-first). Missing file is OK.
   // Returns number of entries loaded.
   std::size_t load(std::string_view path);
-  // Rewrite the whole file from memory. Returns false on I/O error.
-  bool save(std::string_view path) const noexcept;
-  // Append one line to the file. Returns false on I/O error.
-  bool append_to_file(std::string_view path, std::string_view line) const noexcept;
+  // Rewrite the whole file from memory. `kInternal` on I/O error.
+  core::Status save(std::string_view path) const noexcept;
+  // Append one line to the file. `kInternal` on I/O error.
+  core::Status append_to_file(std::string_view path, std::string_view line) const noexcept;
 
 private:
   std::vector<std::string> entries_;

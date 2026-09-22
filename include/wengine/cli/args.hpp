@@ -10,6 +10,7 @@
 // the single source of truth. This header keeps only the generic parsing
 // machinery and thin per-quantity forwarders.
 
+#include "wengine/core/status.hpp"
 #include "wengine/units/scales.hpp"
 
 #include <charconv>
@@ -118,56 +119,48 @@ inline std::vector<std::string_view> tokenize_view(std::string_view line) {
 }
 
 // ------------------------------------------------------------ parse results
-template <typename T>
-struct ParseResult {
-  bool ok{false};
-  T value{};
-  std::string_view error{};
-
-  [[nodiscard]] static constexpr ParseResult success(T v) noexcept { return {true, v, {}}; }
-  [[nodiscard]] static constexpr ParseResult failure(std::string_view e) noexcept {
-    return {false, T{}, e};
-  }
-};
+// Unified error vocabulary: parsing returns `core::Result<T>` (the single
+// value-or-error type — see `core/status.hpp`). There is no second type:
+// former `ParseResult<T>` call sites now spell `core::Result<T>` directly.
 
 namespace detail {
 
-inline ParseResult<double> parse_double_impl(std::string_view s) noexcept {
+inline core::Result<double> parse_double_impl(std::string_view s) noexcept {
   if (s.empty()) {
-    return ParseResult<double>::failure("expected number, got empty");
+    return core::Result<double>::failure("expected number, got empty");
   }
   double v = 0.0;
   const char *beg = s.data();
   const char *end = s.data() + s.size();
   auto res = std::from_chars(beg, end, v);
   if (res.ec != std::errc{} || res.ptr != end) {
-    return ParseResult<double>::failure("invalid number");
+    return core::Result<double>::failure("invalid number");
   }
-  return ParseResult<double>::success(v);
+  return core::Result<double>::success(v);
 }
 
-inline ParseResult<long long> parse_i64_impl(std::string_view s) noexcept {
+inline core::Result<long long> parse_i64_impl(std::string_view s) noexcept {
   if (s.empty()) {
-    return ParseResult<long long>::failure("expected integer, got empty");
+    return core::Result<long long>::failure("expected integer, got empty");
   }
   long long v = 0;
   const char *beg = s.data();
   const char *end = s.data() + s.size();
   auto res = std::from_chars(beg, end, v);
   if (res.ec != std::errc{} || res.ptr != end) {
-    return ParseResult<long long>::failure("invalid integer");
+    return core::Result<long long>::failure("invalid integer");
   }
-  return ParseResult<long long>::success(v);
+  return core::Result<long long>::success(v);
 }
 
-inline ParseResult<bool> parse_bool_impl(std::string_view s) noexcept {
+inline core::Result<bool> parse_bool_impl(std::string_view s) noexcept {
   if (s == "1" || s == "true" || s == "on" || s == "yes") {
-    return ParseResult<bool>::success(true);
+    return core::Result<bool>::success(true);
   }
   if (s == "0" || s == "false" || s == "off" || s == "no") {
-    return ParseResult<bool>::success(false);
+    return core::Result<bool>::success(false);
   }
-  return ParseResult<bool>::failure("invalid bool (true/false/1/0/on/off)");
+  return core::Result<bool>::failure("invalid bool (true/false/1/0/on/off)");
 }
 
 // Split "12.4kV" -> {"12.4", "kV"}. Numeric prefix = [0-9+-.eE], rest = suffix.
@@ -183,14 +176,14 @@ inline std::pair<std::string_view, std::string_view> split_number_suffix(
 
 // Suffix tables live in units/scales.hpp (single source of truth); this
 // stays generic over any such table.
-inline ParseResult<double> parse_scaled_impl(
+inline core::Result<double> parse_scaled_impl(
     std::string_view s, std::span<const units::SuffixScale> table) noexcept {
   auto [num, suf] = split_number_suffix(s);
   if (num.empty()) {
-    return ParseResult<double>::failure("expected number with optional suffix");
+    return core::Result<double>::failure("expected number with optional suffix");
   }
   auto n = parse_double_impl(num);
-  if (!n.ok) {
+  if (!n.ok()) {
     return n;
   }
   if (suf.empty()) {
@@ -198,55 +191,55 @@ inline ParseResult<double> parse_scaled_impl(
   }
   for (const auto &e : table) {
     if (e.suffix == suf) {
-      return ParseResult<double>::success(n.value * e.scale);
+      return core::Result<double>::success(n.value * e.scale);
     }
   }
-  return ParseResult<double>::failure("unknown unit suffix");
+  return core::Result<double>::failure("unknown unit suffix");
 }
 
 } // namespace detail
 
 // Public scalar parsers (thin, noexcept wrappers).
-[[nodiscard]] inline ParseResult<double> parse_double(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_double(std::string_view s) noexcept {
   return detail::parse_double_impl(s);
 }
-[[nodiscard]] inline ParseResult<long long> parse_i64(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<long long> parse_i64(std::string_view s) noexcept {
   return detail::parse_i64_impl(s);
 }
-[[nodiscard]] inline ParseResult<bool> parse_bool(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<bool> parse_bool(std::string_view s) noexcept {
   return detail::parse_bool_impl(s);
 }
 
 // Per-quantity forwarders onto the units-owned suffix tables
 // (units::scales_for — the single source of truth).
-[[nodiscard]] inline ParseResult<double> parse_voltage(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_voltage(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::ElectricPotential>::value);
 }
-[[nodiscard]] inline ParseResult<double> parse_current(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_current(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::ElectricCurrent>::value);
 }
-[[nodiscard]] inline ParseResult<double> parse_resistance(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_resistance(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::ElectricResistance>::value);
 }
-[[nodiscard]] inline ParseResult<double> parse_power(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_power(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Power>::value);
 }
-[[nodiscard]] inline ParseResult<double> parse_energy(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_energy(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Energy>::value);
 }
-[[nodiscard]] inline ParseResult<double> parse_frequency(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_frequency(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Frequency>::value);
 }
-[[nodiscard]] inline ParseResult<double> parse_time(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_time(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Time>::value);
 }
-[[nodiscard]] inline ParseResult<double> parse_meter_const(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_meter_const(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::MeterConstant>::value);
 }
-[[nodiscard]] inline ParseResult<double> parse_pulses(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_pulses(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Count>::value);
 }
-[[nodiscard]] inline ParseResult<double> parse_capacitance(std::string_view s) noexcept {
+[[nodiscard]] inline core::Result<double> parse_capacitance(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Capacitance>::value);
 }
 
@@ -356,19 +349,19 @@ public:
   }
 
   // -- typed helpers ------------------------------------------------------
-  ParseResult<double> next_double() noexcept {
+  core::Result<double> next_double() noexcept {
     auto o = next_positional();
     if (!o) {
-      return ParseResult<double>::failure("missing number argument");
+      return core::Result<double>::failure("missing number argument");
     }
     return parse_double(*o);
   }
 
-  ParseResult<double> take_double_option(
+  core::Result<double> take_double_option(
       std::initializer_list<std::string_view> names) noexcept {
     auto o = take_option(names);
     if (!o) {
-      return ParseResult<double>::failure("option not provided");
+      return core::Result<double>::failure("option not provided");
     }
     return parse_double(*o);
   }

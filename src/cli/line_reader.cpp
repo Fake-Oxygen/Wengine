@@ -63,24 +63,31 @@ std::size_t History::load(std::string_view path) {
   return entries_.size();
 }
 
-bool History::save(std::string_view path) const noexcept {
+core::Status History::save(std::string_view path) const noexcept {
   std::ofstream f{std::string{path}, std::ios::trunc};
   if (!f) {
-    return false;
+    return {core::StatusCode::kInternal};
   }
   for (const auto &e : entries_) {
     f << e << '\n';
   }
-  return static_cast<bool>(f);
+  if (!static_cast<bool>(f)) {
+    return {core::StatusCode::kInternal};
+  }
+  return core::Status::success();
 }
 
-bool History::append_to_file(std::string_view path, std::string_view line) const noexcept {
+core::Status History::append_to_file(std::string_view path,
+                                     std::string_view line) const noexcept {
   std::ofstream f{std::string{path}, std::ios::app};
   if (!f) {
-    return false;
+    return {core::StatusCode::kInternal};
   }
   f << line << '\n';
-  return static_cast<bool>(f);
+  if (!static_cast<bool>(f)) {
+    return {core::StatusCode::kInternal};
+  }
+  return core::Status::success();
 }
 
 // ---------------------------------------------------------------- LineReader

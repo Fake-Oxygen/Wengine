@@ -62,9 +62,6 @@ target_link_libraries(wengine_core INTERFACE
 )
 add_library(wengine::core ALIAS wengine_core)
 
-# Legacy alias so old links keep working during migration.
-add_library(PhysicsEngineCore ALIAS wengine_core)
-
 # ------------------------------------------------------------------
 # CLI: thin adapter only (src/cli/*). No physics here, calls solvers.
 # Future GUI (apps/gui) links wengine_core the same way, never the CLI.

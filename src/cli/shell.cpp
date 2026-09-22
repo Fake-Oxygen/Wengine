@@ -1,6 +1,7 @@
 #include "wengine/cli/shell.hpp"
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/command_registry.hpp"
+#include "wengine/core/status.hpp"
 
 #include <array>
 #include <exception>
@@ -9,6 +10,11 @@
 #include <utility>
 
 namespace wengine::cli {
+
+// Unified convention: commands return `core::kExitOk/Runtime/Usage`; `-1`
+// is the REPL exit signal (not a Status). The `catch` below is a defensive
+// last resort only — engine/CLI code is noexcept and never throws; any
+// exception maps to `kInternal` -> exit 1.
 
 int Shell::execute(std::string_view line, std::ostream &out) {
   // Own the line so string_view tokens stay valid for this call.
@@ -20,18 +26,18 @@ int Shell::execute(std::string_view line, std::ostream &out) {
   const std::size_t n = tokenize_into(owned, buf);
   if (n > buf.size()) {
     out << "Error: too many arguments (max " << buf.size() << ")\n";
-    return 1;
+    return core::kExitRuntime;
   }
   return execute_argv(std::span<const std::string_view>{buf.data(), n}, out);
 }
 
 int Shell::execute_argv(std::span<const std::string_view> tokens, std::ostream &out) {
   if (tokens.empty()) {
-    return 0;
+    return core::kExitOk;
   }
   if (tokens.size() > kMaxArgs) {
     out << "Error: too many arguments (max " << kMaxArgs << ")\n";
-    return 1;
+    return core::kExitRuntime;
   }
 
   std::string_view cmd_name = tokens[0];
@@ -48,20 +54,20 @@ int Shell::execute_argv(std::span<const std::string_view> tokens, std::ostream &
         if (!d->usage.empty()) {
           out << "Usage:\n" << d->usage << '\n';
         }
-        return 0;
+        return core::kExitOk;
       }
       out << "Unknown command: " << args[0] << '\n';
-      return 1;
+      return core::kExitRuntime;
     }
     print_help(out);
-    return 0;
+    return core::kExitOk;
   }
 
   const auto *def = CliRegistry::find(cmd_name);
   if (def == nullptr) {
     out << "Unknown command: " << cmd_name << '\n';
     out << "Type 'help' for available commands.\n";
-    return 1;
+    return core::kExitRuntime;
   }
 
   ArgCursor cursor{args};
@@ -69,7 +75,7 @@ int Shell::execute_argv(std::span<const std::string_view> tokens, std::ostream &
     return def->run(cursor, out);
   } catch (const std::exception &e) {
     out << "Error: " << e.what() << '\n';
-    return 1;
+    return core::to_exit_code(core::Status{core::StatusCode::kInternal});
   }
 }
 
