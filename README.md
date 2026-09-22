@@ -126,9 +126,12 @@ p0: x=10 y=5.04595 vx=10 vy=0.19
 > sim run --steps 20 --dt 10ms --particles 2 --emit-csv run.csv --emit-every 10
 ```
 
-All `sim` parameters are named (`--steps`, `--dt`, `--gravity`, `--particles`,
-`--x0/--y0/--vx0/--vy0`, `--emit-csv`, `--emit-every`); the CSV log carries
-the full snapshot stream for replay.
+All `sim` parameters are named (`--solver`, `--steps`, `--dt`, `--gravity`,
+`--particles`, `--x0/--y0/--vx0/--vy0`, `--emit-csv`, `--emit-every`); the CSV
+log carries the full snapshot stream for replay. `--solver` selects from the
+compile-time solver registry (default `projectile`; unknown names list what's
+available), so new stepped solvers become runnable without touching the CLI —
+`--gravity` applies to `projectile` only, particle population is generic setup.
 
 Argument forms (see `wengine/cli/args.hpp`): positional values with unit
 suffixes (`12V`, `0.5A`, `4Ohm`, bare numbers = SI units), named options
@@ -151,8 +154,8 @@ tests/  benchmarks/  examples/
 | Module | Path | Role |
 |---|---|---|
 | `math` | `wengine/math/vector_*.hpp` | `Vector2D<T>`/`Vector3D<T>` header-only structs, no virtuals |
-| `units` | `wengine/units/units.hpp`, `converter.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals |
-| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step` — no I/O |
+| `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
+| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `registry.hpp`, `solver_registry.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp` | `Status`/`StatusCode` (no exceptions/strings in hot path), `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
 | `world` | `wengine/world/entity.hpp`, `particles.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `State` (clock + entities + pools), deep-copy `Snapshot`, versioned binary save/load |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision) |
@@ -259,6 +262,6 @@ benchmarks/bench_ohm.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,math,physics,solvers,units,world}/
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,runner,world,emit}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit}.cpp
 cmake/ docs/ external/ (reserved/empty)
 ```

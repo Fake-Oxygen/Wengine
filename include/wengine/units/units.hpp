@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ostream>
+
 namespace wengine::units {
 
 // Compile-time SI dimension: Length, Time, Mass, Current, Temp, Amount, Light.
@@ -51,9 +53,30 @@ public:
   constexpr Value<Dim> operator+(const Value<Dim> &rhs) const noexcept {
     return Value<Dim>(value_ + rhs.value_);
   }
-  constexpr Value<Dim> operator-(const Value<Dim> &rhs) const noexcept {
-    return Value<Dim>(value_ - rhs.value_);
-  }
+    constexpr Value<Dim> operator-(const Value<Dim> &rhs) const noexcept {
+      return Value<Dim>(value_ - rhs.value_);
+    }
+
+    // Exact floating-point comparisons (same dimension only); use .get()
+    // with an epsilon for tolerance-based checks.
+    constexpr bool operator==(const Value<Dim> &rhs) const noexcept {
+      return value_ == rhs.value_;
+    }
+    constexpr bool operator!=(const Value<Dim> &rhs) const noexcept {
+      return value_ != rhs.value_;
+    }
+    constexpr bool operator<(const Value<Dim> &rhs) const noexcept {
+      return value_ < rhs.value_;
+    }
+    constexpr bool operator<=(const Value<Dim> &rhs) const noexcept {
+      return value_ <= rhs.value_;
+    }
+    constexpr bool operator>(const Value<Dim> &rhs) const noexcept {
+      return value_ > rhs.value_;
+    }
+    constexpr bool operator>=(const Value<Dim> &rhs) const noexcept {
+      return value_ >= rhs.value_;
+    }
 
   template <typename OtherDim>
   constexpr auto operator*(const Value<OtherDim> &rhs) const noexcept {
@@ -74,6 +97,12 @@ private:
 // Back-compat alias for legacy code (Physics::WValue).
 template <typename Dim>
 using WValue = Value<Dim>;
+
+// Prints the raw SI base value (no unit suffix); callers add context.
+template <typename Dim>
+std::ostream &operator<<(std::ostream &out, const Value<Dim> &v) {
+  return out << v.get();
+}
 
 } // namespace wengine::units
 

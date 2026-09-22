@@ -5,8 +5,13 @@
 // Goals: zero-copy (string_view into caller-owned line buffer), no exceptions,
 // no <sstream>/<stoi>/regex in hot path, constexpr-friendly primitives.
 // Everything here is header-only and noexcept where possible.
+//
+// Unit knowledge (suffix -> SI scale tables) lives in units/scales.hpp —
+// the single source of truth. This header keeps only the generic parsing
+// machinery and thin per-quantity forwarders.
 
-#include <array>
+#include "wengine/units/scales.hpp"
+
 #include <charconv>
 #include <cstdint>
 #include <initializer_list>
@@ -176,13 +181,10 @@ inline std::pair<std::string_view, std::string_view> split_number_suffix(
   return {s.substr(0, i), s.substr(i)};
 }
 
-struct SuffixScale {
-  std::string_view suffix;
-  double scale;
-};
-
+// Suffix tables live in units/scales.hpp (single source of truth); this
+// stays generic over any such table.
 inline ParseResult<double> parse_scaled_impl(
-    std::string_view s, std::span<const SuffixScale> table) noexcept {
+    std::string_view s, std::span<const units::SuffixScale> table) noexcept {
   auto [num, suf] = split_number_suffix(s);
   if (num.empty()) {
     return ParseResult<double>::failure("expected number with optional suffix");
@@ -215,116 +217,37 @@ inline ParseResult<double> parse_scaled_impl(
   return detail::parse_bool_impl(s);
 }
 
-// Default SI suffix tables (base units V / A / Ohm).
-inline constexpr std::array<detail::SuffixScale, 4> kVoltageSuffixes{{
-    {"V", 1.0},
-    {"mV", 1e-3},
-    {"kV", 1e3},
-    {"MV", 1e6},
-}};
-inline constexpr std::array<detail::SuffixScale, 4> kCurrentSuffixes{{
-    {"A", 1.0},
-    {"mA", 1e-3},
-    {"kA", 1e3},
-    {"MA", 1e6},
-}};
-inline constexpr std::array<detail::SuffixScale, 7> kResistanceSuffixes{{
-    {"Ohm", 1.0},
-    {"ohm", 1.0},
-    {"mOhm", 1e-3},
-    {"kOhm", 1e3},
-    {"MOhm", 1e6},
-    {"R", 1.0}, // shorthand
-    {"kR", 1e3},
-}};
-
+// Per-quantity forwarders onto the units-owned suffix tables
+// (units::scales_for — the single source of truth).
 [[nodiscard]] inline ParseResult<double> parse_voltage(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kVoltageSuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::ElectricPotential>::value);
 }
 [[nodiscard]] inline ParseResult<double> parse_current(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kCurrentSuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::ElectricCurrent>::value);
 }
 [[nodiscard]] inline ParseResult<double> parse_resistance(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kResistanceSuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::ElectricResistance>::value);
 }
-
-// Power (base W), energy (base J == Ws), frequency (base Hz),
-// time (base s), meter constant (base imp/kWh), pulse counts (dimensionless).
-inline constexpr std::array<detail::SuffixScale, 4> kPowerSuffixes{{
-    {"W", 1.0},
-    {"mW", 1e-3},
-    {"kW", 1e3},
-    {"MW", 1e6},
-}};
-inline constexpr std::array<detail::SuffixScale, 7> kEnergySuffixes{{
-    {"J", 1.0},
-    {"Ws", 1.0},
-    {"kJ", 1e3},
-    {"Wh", 3600.0},
-    {"kWh", 3600000.0},
-    {"MWh", 3600000000.0},
-    {"MJ", 1e6},
-}};
-inline constexpr std::array<detail::SuffixScale, 3> kFrequencySuffixes{{
-    {"Hz", 1.0},
-    {"mHz", 1e-3},
-    {"kHz", 1e3},
-}};
-inline constexpr std::array<detail::SuffixScale, 8> kTimeSuffixes{{
-    {"s", 1.0},
-    {"sec", 1.0},
-    {"ms", 1e-3},
-    {"us", 1e-6},
-    {"ns", 1e-9},
-    {"min", 60.0},
-    {"h", 3600.0},
-    {"ps", 1e-12},
-}};
-// Canonical result: impulses per kWh.
-inline constexpr std::array<detail::SuffixScale, 6> kMeterConstantSuffixes{{
-    {"imp/kWh", 1.0},
-    {"imp/Wh", 1000.0},
-    {"imp/J", 3600000.0},
-    {"imp/Ws", 3600000.0},
-    {"imp/kJ", 3600.0},
-    {"imp/MWh", 0.001},
-}};
-inline constexpr std::array<detail::SuffixScale, 5> kPulseSuffixes{{
-    {"imp", 1.0},
-    {"imps", 1.0},
-    {"pulse", 1.0},
-    {"pulses", 1.0},
-    {"cnt", 1.0},
-}};
-// Canonical result: farads.
-inline constexpr std::array<detail::SuffixScale, 5> kCapacitanceSuffixes{{
-    {"F", 1.0},
-    {"mF", 1e-3},
-    {"uF", 1e-6},
-    {"nF", 1e-9},
-    {"pF", 1e-12},
-}};
-
 [[nodiscard]] inline ParseResult<double> parse_power(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kPowerSuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::Power>::value);
 }
 [[nodiscard]] inline ParseResult<double> parse_energy(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kEnergySuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::Energy>::value);
 }
 [[nodiscard]] inline ParseResult<double> parse_frequency(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kFrequencySuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::Frequency>::value);
 }
 [[nodiscard]] inline ParseResult<double> parse_time(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kTimeSuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::Time>::value);
 }
 [[nodiscard]] inline ParseResult<double> parse_meter_const(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kMeterConstantSuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::MeterConstant>::value);
 }
 [[nodiscard]] inline ParseResult<double> parse_pulses(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kPulseSuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::Count>::value);
 }
 [[nodiscard]] inline ParseResult<double> parse_capacitance(std::string_view s) noexcept {
-  return detail::parse_scaled_impl(s, kCapacitanceSuffixes);
+  return detail::parse_scaled_impl(s, units::scales_for<units::Capacitance>::value);
 }
 
 // --------------------------------------------------------------- ArgCursor
