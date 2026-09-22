@@ -13,25 +13,25 @@
 //   The wire carries no particle model: a frame is clock (step/time) plus
 //   generic spatial items (position, velocity, glyph hints) plus named
 //   scalar channels. This mirrors the engine -> GUI transport exactly —
-//   gui::DataFrame is items + channels, views never see solver internals,
-//   and each solver plugs in through one adapter entry. The link layer does
-//   the same: link::Frame is the engine-owned twin of DataFrame (same
-//   shape, no GUI dependency), frame_from_snapshot() is the particle
-//   adapter (the only one today), and future solvers (circuits, EM, FEA,
-//   rigid bodies, ...) add one adapter each. A circuit run publishes probe
-//   items (possibly none) plus node-voltage channels; an EM run publishes
+//   views consume link::Frame (link/frame.hpp) and never see solver
+//   internals, and each solver plugs in through one adapter entry, with
+//   frame_from_snapshot() as the particle adapter (the only one today).
+//   Future solvers (circuits, EM, FEA, rigid bodies, ...) add one adapter
+//   each. A circuit run publishes probe items (possibly none) plus
+//   node-voltage channels; an EM run publishes sample-point items plus
 //   sample-point items plus energy/peak channels — zero protocol change,
 //   zero reader change, zero view change. Versions bump only when the
-//   generic structs themselves need new field kinds.
+//   generic structs themselves need new field kinds. The shared model
+//   lives in link/frame.hpp: link::Frame is consumed directly by GUI
+//   views AND the encoder below — one source of truth, not twins.
 //
 // WHERE IT SITS (dependency direction preserved):
 //   link -> world (+ core/status vocabulary). Engine never includes link.
 //   Publishers are emit::ISink implementations built and owned by the
 //   caller (CLI/GUI edge) and attached via Runner::add_sink /
 //   run_headless(sinks) / SimController::add_sink, exactly like CsvSink.
-//   Readers decode to link::Frame and map field-for-field onto DataFrame
-//   (identical shape: step, time, items, named channels) — views never see
-//   the wire, just as they never see Snapshot internals.
+//   Readers decode to link::Frame, which GUI views consume directly —
+//   views never see the wire, just as they never see Snapshot internals.
 //
 // MULTI-SINK / MULTI-TRANSPORT DESIGN (the scalability seam):
 //   * Engine fan-out (one run -> N sinks) already exists: Runner calls each
@@ -136,17 +136,14 @@
 // out of v1 — cross-host framing is the TCP task's problem.
 
 #include "wengine/core/status.hpp"
-#include "wengine/world/state.hpp"
+#include "wengine/link/frame.hpp"
 
 #include <atomic>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <string>
 #include <string_view>
 #include <type_traits>
-#include <vector>
 
 namespace wengine::link {
 
@@ -161,69 +158,9 @@ inline constexpr std::size_t kDomainSize = 32;
 // Ring depth: 8 slots at 60 Hz emit ~= 130 ms of reader jitter cover.
 inline constexpr std::size_t kSlotCount = 8;
 
-// Generic host-side frame: the engine-owned twin of gui::DataFrame (same
-// shape, no GUI dependency). Adapters populate it; encode_frame wires it.
-// New solvers add adapter functions — never wire structs (S6).
-struct FrameItem {
-  double x = 0.0;
-  double y = 0.0;
-  double z = 0.0;
-  double vx = 0.0;
-  double vy = 0.0;
-  double vz = 0.0;
-  bool has_velocity = true;
-  double size = 1.0; // glyph scale hint (rigid bodies render bigger)
-  std::uint32_t color = 0; // 0 = palette by index (future: heat/color data)
-
-  bool operator==(const FrameItem &) const noexcept = default;
-};
-
-struct FrameChannel {
-  std::string name;
-  double value = 0.0;
-
-  bool operator==(const FrameChannel &) const noexcept = default;
-};
-
-struct Frame {
-  std::uint64_t step = 0;
-  double time = 0.0;
-  std::vector<FrameItem> items;
-  std::vector<FrameChannel> channels; // stable order per source
-
-  bool operator==(const Frame &) const noexcept = default;
-};
-
-// Particle adapter: the only domain adapter today. Preserves dense slot
-// order (S3); channels mirror the GUI particle adapter (count + p0 probe),
-// so link readers and GUI views describe the same run identically.
-// Allocates like take_snapshot does (S4); future domains add siblings.
-[[nodiscard]] inline Frame frame_from_snapshot(const world::Snapshot &s) {
-  Frame f;
-  f.step = s.step_index;
-  f.time = s.sim_time;
-  for (std::size_t k = 0; k < s.particle_count(); ++k) {
-    FrameItem it;
-    it.x = s.pos_x[k];
-    it.y = s.pos_y[k];
-    it.vx = s.vel_x[k];
-    it.vy = s.vel_y[k];
-    f.items.push_back(it);
-  }
-  f.channels.push_back({"count", static_cast<double>(s.particle_count())});
-  if (!f.items.empty()) {
-    const FrameItem &p = f.items.front();
-    f.channels.push_back({"p0.x", p.x});
-    f.channels.push_back({"p0.y", p.y});
-    f.channels.push_back({"p0.vx", p.vx});
-    f.channels.push_back({"p0.vy", p.vy});
-    f.channels.push_back({"p0.speed", std::hypot(p.vx, p.vy)});
-  }
-  return f;
-}
-
 // Fixed-capacity wire structs. Trivially copyable by construction: the only
-// types ever memcpy'd across the transport.
+// types ever memcpy'd across the transport. Host-side model (Frame) lives
+// in link/frame.hpp; the particle adapter with it.
 struct LinkItem {
   double x = 0.0;
   double y = 0.0;

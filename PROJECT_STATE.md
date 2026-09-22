@@ -28,22 +28,23 @@ GUI (Dear ImGui + SDL2 + Vulkan, `apps/gui/`) is functional:
 | Graphs | Done | Channel selector + trajectory over frame history |
 | 2D canvas | Done | Grid, axes, glyphs, vectors, trails, Fit tracking |
 | 3D viewport | Done | Orbit camera, grid/axes, depth-sorted glyphs |
-| View-model seam | Done | Views consume `DataFrame` only; 1-entry adapter registry |
+| View-model seam | Done | Views consume shared `link::Frame` only; 1-entry adapter registry |
 
 ## 2. Open work (Plane, `PHYSI` project)
 
 GUI epic (`gui-integration`) still in Backlog:
 
 - Engine linkage: in-process + SHM subscribe + CSV replay in the GUI.
-  Depends on the `wengine-link` epic (protocol spec, SHM writer/reader,
-  replay bridge, versioning — all still Backlog).
+  Depends on the `wengine-link` epic (protocol spec Done; SHM
+  writer/reader, replay bridge, versioning still Backlog).
 - Backend hardening: validation layers (not installed here) + `--gpu`
   selection override.
 - Automated smoke test: `--frames N` hook for CI.
 
 Future solvers (fields, circuits, rigid bodies) each need: engine-side
 state domains + stepped/closed-form implementation first, then exactly
-one frame-source adapter entry — views stay untouched.
+one `link::Frame` adapter function + one frame-source registry entry —
+views stay untouched.
 
 ## 3. Needs manual verification (no input/display-automation tooling)
 

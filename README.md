@@ -227,7 +227,7 @@ version gate, lag accounting),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
-`test_frame_source` (adapter exactness, source registry, channels, ring,
+`test_frame_source` (source registry, channels, ring,
 CSV-exactness, sink re-attach, plot bounds), `test_canvas2d` (2D mapping,
 fit, zoom/pan, grid steps). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`.
@@ -323,14 +323,14 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   apps/gui/controllers/sim_controller.hpp (engine-only RunConfig driver)
   apps/gui/models/closed_form_models.hpp (ohm/s0/i2c evaluate logic)
   apps/gui/panels/sim_panel.hpp + closed_form_panels.hpp/.cpp (ImGui UI)
-  apps/gui/views/ frame_source.hpp (DataFrame view-model, solver-name
-  adapter registry, frame history + recorder sink), camera3d.hpp
+  apps/gui/views/ frame_source.hpp (solver-name adapter registry over the
+  shared link::Frame view-model, frame history + recorder sink), camera3d.hpp
   (orbit/project math) + viewport3d_panel.hpp (ImGui 3D rasterization) +
   graphs_panel.hpp (channel selector + time-series plots over frames) +
   worldview2d.hpp (2D fit/zoom/pan math) + canvas2d_panel.hpp (top-down
   view with trails) + palette.hpp (shared entity colors).
-  Views consume DataFrames only: new solvers add one adapter entry, and
-  panels stay untouched. Startup layout is 1600x900: sim + live views
+  Views consume link::Frames only: new solvers add one adapter function
+  plus one registry entry, and panels stay untouched. Startup layout is 1600x900: sim + live views
   open, calculators and plots collapsed one click away.
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp

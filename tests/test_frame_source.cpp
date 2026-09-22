@@ -1,12 +1,14 @@
-// Frame source seam: particle adapter exactness, solver registry,
-// default channel, history ring behavior, bit-exactness against CsvSink
-// output, and controller sink re-attachment through the recorder.
+// Frame source seam: solver registry, default channel, history ring
+// behavior, bit-exactness against CsvSink output, and controller sink
+// re-attachment through the recorder. Adapter exactness lives with the
+// adapter itself (test_link_protocol covers link::frame_from_snapshot).
 
 #include "controllers/sim_controller.hpp"
 #include "views/frame_source.hpp"
 #include "views/graphs_panel.hpp"
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/csv_sink.hpp"
+#include "wengine/link/frame.hpp"
 #include "wengine/solvers/projectile.hpp"
 
 #include <cassert>
@@ -34,48 +36,28 @@ wengine::world::Snapshot make_snap(std::uint64_t step) {
   return s;
 }
 
-void test_adapter_exactness() {
-  const wengine::gui::DataFrame f =
-      wengine::gui::frame_from_particles(make_snap(7));
-  assert(f.step == 7 && near(f.time, 0.07));
-  assert(f.items.size() == 1);
-  assert(f.items[0].x == 1.0 && f.items[0].y == 2.0 && f.items[0].z == 0.0);
-  assert(f.items[0].vx == 3.0 && f.items[0].vy == 4.0);
-  assert(f.items[0].has_velocity);
-  // Primary-item channels + count, stable order.
-  assert(f.channels.size() == 6);
-  assert(f.channels[0].name == "count" && f.channels[0].value == 1.0);
-  assert(f.channels[1].name == "p0.x" && f.channels[1].value == 1.0);
-  assert(f.channels[2].name == "p0.y" && f.channels[2].value == 2.0);
-  assert(f.channels[5].name == "p0.speed" && near(f.channels[5].value, 5.0));
-  // Empty snapshot: count channel only, no items.
-  const wengine::gui::DataFrame e =
-      wengine::gui::frame_from_particles(wengine::world::Snapshot{});
-  assert(e.items.empty() && e.channels.size() == 1);
-}
-
 void test_registry() {
   // One entry today; update with each new solver adapter.
   static_assert(std::tuple_size_v<decltype(wengine::gui::kFrameSources)> == 1);
   const wengine::world::Snapshot s = make_snap(3);
-  const wengine::gui::DataFrame via_reg =
+  const wengine::link::Frame via_reg =
       wengine::gui::adapt_frame(s, "projectile");
-  const wengine::gui::DataFrame direct = wengine::gui::frame_from_particles(s);
-  assert(via_reg.step == direct.step && via_reg.items.size() == 1);
-  // Unknown names fall back to the particle mapping (snapshot is
-  // particle-shaped); a future domain entry replaces this path.
-  const wengine::gui::DataFrame fallback = wengine::gui::adapt_frame(s, "nope");
+  const wengine::link::Frame direct = wengine::link::frame_from_snapshot(s);
+  assert(via_reg == direct);
+  // Unknown names fall back to the particle mapping (the only domain
+  // today); a future domain entry replaces this path.
+  const wengine::link::Frame fallback = wengine::gui::adapt_frame(s, "nope");
   assert(fallback.items.size() == 1 && fallback.items[0].x == 1.0);
 }
 
 void test_default_channel() {
-  const wengine::gui::DataFrame f =
-      wengine::gui::frame_from_particles(make_snap(1));
+  const wengine::link::Frame f =
+      wengine::link::frame_from_snapshot(make_snap(1));
   assert(wengine::gui::default_channel(f) == "p0.y");
-  wengine::gui::DataFrame g;
+  wengine::link::Frame g;
   g.channels.push_back({"V(out)", 3.3});
   assert(wengine::gui::default_channel(g) == "V(out)");
-  assert(wengine::gui::default_channel(wengine::gui::DataFrame{}).empty());
+  assert(wengine::gui::default_channel(wengine::link::Frame{}).empty());
 }
 
 void test_fit_bounds() {
@@ -94,8 +76,8 @@ void test_fit_bounds() {
   assert(e.x0 == 0.0 && e.x1 == 1.0 && e.y0 == 0.0 && e.y1 == 1.0);
 }
 
-wengine::gui::DataFrame make_frame(std::uint64_t step) {
-  return wengine::gui::frame_from_particles(make_snap(step));
+wengine::link::Frame make_frame(std::uint64_t step) {
+  return wengine::link::frame_from_snapshot(make_snap(step));
 }
 
 void test_history_ring_and_reset() {
@@ -152,7 +134,7 @@ void test_csv_exactness() {
   std::string line;
   while (std::getline(in, line)) {
     assert(row < history.size());
-    const wengine::gui::DataFrame &f = history.frames()[row];
+    const wengine::link::Frame &f = history.frames()[row];
     const char *p = line.c_str();
     char *end = nullptr;
     const auto step = std::strtoull(p, &end, 10);
@@ -212,7 +194,6 @@ void test_controller_sink_reattach() {
 } // namespace
 
 int main() {
-  test_adapter_exactness();
   test_registry();
   test_default_channel();
   test_fit_bounds();

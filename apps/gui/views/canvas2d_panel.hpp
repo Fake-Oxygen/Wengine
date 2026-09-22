@@ -4,7 +4,7 @@
 // grid, axes, entity glyphs, velocity vectors, and trajectory trails from
 // the shared frame history.
 //
-// Frame-driven and read-only (const DataFrame + const FrameHistory):
+// Frame-driven and read-only (const link::Frame + const FrameHistory):
 // pan/zoom never touch sim state or timing. Auto-fit tracks the sim until
 // the first manual zoom/pan; the Fit button resumes tracking.
 
@@ -22,7 +22,7 @@ namespace wengine::gui {
 struct Canvas2dPanel {
   View2d view;
 
-  void draw(const DataFrame &frame, const FrameHistory &history) {
+  void draw(const link::Frame &frame, const FrameHistory &history) {
     ImGui::SetNextWindowSize(ImVec2(430.0F, 430.0F), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(430.0F, 20.0F), ImGuiCond_FirstUseEver);
     ImGui::Begin("2D Canvas");
@@ -130,7 +130,7 @@ struct Canvas2dPanel {
 
     // Live entities + velocity vectors.
     for (std::size_t k = 0; k < frame.items.size(); ++k) {
-      const SpatialItem &it = frame.items[k];
+      const link::FrameItem &it = frame.items[k];
       const ImVec2 c(px(it.x), py(it.y));
       dl->AddCircleFilled(c, static_cast<float>(2.5 + it.size * 2.5),
                           item_color(k, it.color));

@@ -152,7 +152,8 @@ apps    -> cli + core
 apps/gui -> wengine_core + wengine_imgui only (never the wengine_cli
             library; header-only cli/args.hpp parsing may be included —
             it adds no link dependency and reads the same units tables)
-views   -> DataFrame view-model only (never Snapshot internals)
+views   -> link::Frame view-model only (never Snapshot internals;
+            Frame is shared with the link wire encoder, see link/frame.hpp)
 ```
 
 Do not reverse these dependencies without an explicit architectural decision.
@@ -185,10 +186,12 @@ the files that need them (no empty placeholder dirs).
 * `models/` holds engine-only logic (no ImGui): unit-tested linking
   `wengine_core` alone.
 * `panels/` renders ImGui UI; verified by windowed runs/screenshots.
-* `views/` consume the `DataFrame` view-model only — never `Snapshot`
-  internals. New solvers add one adapter entry to the frame-source
-  registry; views stay untouched. Engine `Snapshot` must not grow for
-  GUI needs.
+* `views/` consume the `link::Frame` view-model only — never `Snapshot`
+  internals and never wire structs. `link::Frame` (link/frame.hpp) is the
+  single source of truth shared with the link wire encoder. New solvers
+  add one adapter function (beside `link::Frame`) plus one entry to the
+  frame-source registry; views stay untouched. Engine `Snapshot` must not
+  grow for GUI needs.
 * Third-party GUI headers are included as `SYSTEM` (warning-clean without
   touching upstream). `BUILD_GUI` defaults `OFF`; unit tests must build
   and run without GUI libraries (ImGui headers may be included for math
@@ -432,8 +435,9 @@ Whenever adding a command, check all existing registry-size assertions.
 2. Rendering goes in `panels/` or `views/`; verify with a windowed run and
    screenshots (no input-automation tooling exists — interaction feel and
    populated-state visuals need manual checks).
-3. New solver data sources add exactly one adapter entry to the
-   frame-source registry; views stay untouched.
+3. New solver data sources add exactly one adapter function (beside
+   `link::Frame`) plus one entry to the frame-source registry; views stay
+   untouched.
 4. Maintain every registry-size `static_assert` (panel registry,
    frame-source registry, like the CLI ones).
 

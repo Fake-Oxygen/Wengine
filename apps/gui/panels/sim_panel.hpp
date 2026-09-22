@@ -136,7 +136,7 @@ struct SimPanel {
 
   // Status renders from the adapted frame (solver-agnostic): step, time,
   // item count, and the primary item's kinematics when present.
-  void draw_status(SimController &sim, const DataFrame &frame) {
+  void draw_status(SimController &sim, const link::Frame &frame) {
     ImGui::Text("step=%llu t=%.4fs solver=%.*s%s",
                 static_cast<unsigned long long>(frame.step), frame.time,
                 static_cast<int>(sim.config().solver.size()),
@@ -144,7 +144,7 @@ struct SimPanel {
     if (frame.items.empty()) {
       ImGui::Text("primary: (no items)");
     } else {
-      const SpatialItem &p = frame.items.front();
+      const link::FrameItem &p = frame.items.front();
       ImGui::Text("primary: x=%.5f y=%.5f z=%.5f", p.x, p.y, p.z);
       if (p.has_velocity) {
         ImGui::Text("         v=(%.3f, %.3f, %.3f)", p.vx, p.vy, p.vz);

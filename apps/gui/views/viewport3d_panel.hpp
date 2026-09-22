@@ -4,7 +4,7 @@
 // scene (floor grid, RGB axes, entity glyphs with velocity vectors),
 // drawn into an ImGui window via ImDrawList.
 //
-// Frame-driven and read-only: takes `const DataFrame &` (any solver
+// Frame-driven and read-only: takes `const link::Frame &` (any solver
 // source), never touches live sim state, so camera moves cannot perturb
 // the simulation. Far-to-near painter order; segments with an endpoint
 // behind the camera are skipped.
@@ -25,7 +25,7 @@ namespace wengine::gui {
 struct Viewport3dPanel {
   Camera3d camera;
 
-  void draw(const DataFrame &frame) {
+  void draw(const link::Frame &frame) {
     ImGui::SetNextWindowSize(ImVec2(420.0F, 340.0F), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(880.0F, 60.0F), ImGuiCond_FirstUseEver);
     ImGui::Begin("3D Viewport");
@@ -107,7 +107,7 @@ struct Viewport3dPanel {
     });
     std::size_t drawn = 0;
     for (std::size_t k : order) {
-      const SpatialItem &it = frame.items[k];
+      const link::FrameItem &it = frame.items[k];
       const glm::dvec3 p{it.x, it.y, it.z};
       const Camera3d::Screen s = camera.project(p, vp_w, vp_h);
       if (s.behind) {

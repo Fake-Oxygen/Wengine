@@ -155,7 +155,7 @@ int main(int argc, char **argv) {
   wengine::gui::GraphsPanel graphs;
   wengine::gui::Canvas2dPanel canvas2d;
   // Shared frame stream: the recorder adapts every emitted snapshot
-  // through the solver registry; views read DataFrames only.
+  // through the solver registry; views read link::Frames only.
   wengine::gui::FrameHistory frames;
   wengine::gui::FrameRecorder recorder(frames);
   sim.add_sink(recorder);
@@ -202,9 +202,9 @@ int main(int argc, char **argv) {
     }
 
     // Adapt once per frame at the engine/GUI boundary: every view below
-    // consumes DataFrames, never Snapshots.
+    // consumes link::Frames, never Snapshots.
     recorder.set_solver(sim.config().solver);
-    const wengine::gui::DataFrame frame =
+    const wengine::link::Frame frame =
         wengine::gui::adapt_frame(sim.snapshot(), sim.config().solver);
 
     // Startup layout (1600x900): sim + live views open, calculators and

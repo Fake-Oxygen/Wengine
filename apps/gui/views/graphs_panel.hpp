@@ -141,7 +141,7 @@ struct GraphsPanel {
     }
     // Channel selector over the latest frame's schema; solver switches
     // re-resolve by name, falling back to the source default.
-    const DataFrame &latest = frames.back();
+    const link::Frame &latest = frames.back();
     int selected = -1;
     for (std::size_t k = 0; k < latest.channels.size(); ++k) {
       if (latest.channels[k].name == channel) {
