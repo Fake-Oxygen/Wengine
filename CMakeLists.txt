@@ -16,6 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BUILD_CLI "Build CLI app" ON)
+option(BUILD_GUI "Build GUI app (scaffold, backend TBD per PHYSI-13)" OFF)
 option(BUILD_TESTS "Build lightweight tests (no external deps)" ON)
 option(BUILD_BENCHMARKS "Build micro-benchmarks" ON)
 
@@ -93,6 +94,42 @@ if(BUILD_CLI)
 
     add_executable(PhysicsSimApp apps/cli/main.cpp)
     target_link_libraries(PhysicsSimApp PRIVATE wengine_cli)
+endif()
+
+# ------------------------------------------------------------------
+# GUI (PHYSI-13 decision: Dear ImGui + SDL2 + Vulkan).
+# - Dear ImGui: external/imgui submodule, pinned v1.91.9b (MIT), the
+#   engine's second third-party dep (see README dependency policy).
+# - SDL2 + Vulkan loader: system packages (libsdl2-dev, libvulkan-dev).
+# apps/gui links wengine_core directly — never wengine_cli, never the
+# reverse — and owns all I/O. No engine headers change for GUI work.
+# ------------------------------------------------------------------
+if(BUILD_GUI)
+    find_package(SDL2 CONFIG REQUIRED)
+    find_package(Vulkan REQUIRED)
+
+    # Third-party: deliberately no project warning flags here.
+    add_library(wengine_imgui STATIC
+        external/imgui/imgui.cpp
+        external/imgui/imgui_draw.cpp
+        external/imgui/imgui_tables.cpp
+        external/imgui/imgui_widgets.cpp
+        external/imgui/backends/imgui_impl_sdl2.cpp
+        external/imgui/backends/imgui_impl_vulkan.cpp
+    )
+    target_include_directories(wengine_imgui SYSTEM PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/imgui>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/backends>
+    )
+    target_link_libraries(wengine_imgui PUBLIC SDL2::SDL2 Vulkan::Vulkan)
+
+    add_executable(WEngineGui apps/gui/main.cpp)
+    target_link_libraries(WEngineGui PRIVATE wengine_core wengine_imgui)
+    target_compile_options(WEngineGui PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+        $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+    )
 endif()
 
 # ------------------------------------------------------------------

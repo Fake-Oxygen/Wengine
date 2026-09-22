@@ -12,6 +12,9 @@ CLI adapter on top.
 - GLM via the `external/glm` submodule (pinned 1.0.1) — clone with
   `git clone --recursive` or run `git submodule update --init` after cloning.
   Otherwise dependency-free (tests use plain `assert`, no gtest fetch)
+- GUI only (`-DBUILD_GUI=ON`): Dear ImGui via the `external/imgui`
+  submodule (pinned v1.91.9b) plus system `libsdl2-dev` and
+  `libvulkan-dev` (SDL2 windowing + Vulkan rendering, see policy below).
 
 ## Build
 
@@ -22,10 +25,11 @@ cmake -S . -B build
 cmake --build build
 ```
 
-Options (all default `ON`):
+Options (CLI/tests/benchmarks default `ON`, GUI defaults `OFF`):
 
 ```sh
-cmake -S . -B build -DBUILD_CLI=ON -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON
+cmake -S . -B build -DBUILD_CLI=ON -DBUILD_TESTS=ON -DBUILD_BENCHMARKS=ON -DBUILD_GUI=OFF
+# GUI blank app: cmake -S . -B build-gui -DBUILD_GUI=ON && cmake --build build-gui
 ```
 
 Run tests and benchmarks:
@@ -196,6 +200,17 @@ the pin moves only by explicit decision; golden tests are implicitly
 pinned to the submodule commit (re-derive goldens on bumps, never widen
 tolerances); no second third-party dep without its own decision record.
 
+GUI backend decision (PHYSI-13): Dear ImGui (`external/imgui` submodule,
+pinned v1.91.9b, MIT) + SDL2 windowing + Vulkan rendering — the authorized
+second third-party dep. Chosen over SDL2/OpenGL and GLFW variants for
+explicit GPU control and the highest perf ceiling (validation-layer
+support, no hidden driver sync, compute-shader future for fields/particles)
+at the cost of Vulkan bootstrap code owned by `apps/gui`. SDL2 and the
+Vulkan loader are system packages, not vendored. CMake: `wengine_imgui`
+(`STATIC`, `SYSTEM` includes so third-party headers stay warning-clean);
+`WEngineGui` links `wengine_core` directly, never `wengine_cli`, and owns
+all I/O. No engine headers change for GUI work.
+
 CMake targets mirror this: `wengine_glm` (third-party import), `wengine_units`,
 `wengine_solvers`, `wengine_world`, `wengine_emit` (all `INTERFACE`) combine
 into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
@@ -292,12 +307,13 @@ bridge, versioning).
 ## Layout
 
 ```text
-apps/cli/main.cpp  apps/gui/ (empty)
+apps/cli/main.cpp  apps/gui/main.cpp (Dear ImGui + SDL2 + Vulkan blank app)
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,physics,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
 tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism}.cpp
 cmake/ docs/ (reserved/empty)
-external/glm/ (git submodule, pinned 1.0.1 — the only third-party dep, see policy above)
+external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
+external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)
 ```
