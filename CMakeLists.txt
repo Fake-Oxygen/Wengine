@@ -184,6 +184,14 @@ if(BUILD_TESTS)
     add_executable(test_determinism tests/test_determinism.cpp)
     target_link_libraries(test_determinism PRIVATE wengine_core)
     add_test(NAME determinism COMMAND test_determinism)
+
+    # GUI controller test: engine-only header, no SDL/Vulkan needed.
+    add_executable(test_gui_sim_control tests/test_gui_sim_control.cpp)
+    target_link_libraries(test_gui_sim_control PRIVATE wengine_core)
+    target_include_directories(test_gui_sim_control PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
+    )
+    add_test(NAME gui_sim_control COMMAND test_gui_sim_control)
 endif()
 
 if(BUILD_BENCHMARKS)

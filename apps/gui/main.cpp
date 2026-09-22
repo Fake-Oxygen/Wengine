@@ -17,6 +17,8 @@
 
 #include "wengine/core/run_config.hpp"
 
+#include "sim_panel.hpp"
+
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_vulkan.h"
@@ -394,9 +396,9 @@ int main(int argc, char **argv) {
   ImGui_ImplVulkan_Init(&init_info);
   ImGui_ImplVulkan_CreateFontsTexture();
 
-  const wengine::core::RunConfig defaults{};
-  const char *solver_name =
-      defaults.solver.empty() ? "(none)" : defaults.solver.data();
+  wengine::gui::SimController sim;
+  wengine::gui::SimPanel sim_panel;
+  sim_panel.sync_from(sim.config());
 
   const ImVec4 clear_color =
       ImVec4(0.10F, 0.12F, 0.16F, 1.00F);
@@ -441,18 +443,20 @@ int main(int argc, char **argv) {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
+    // Play mode folds wall-clock time into fixed steps; the controller
+    // auto-pauses at the step budget, so Reset + Play matches headless.
+    if (sim.playing()) {
+      const wengine::core::Status advance_st =
+          sim.advance_frame(static_cast<double>(io.DeltaTime));
+      if (!advance_st.ok()) {
+        sim.set_playing(false);
+      }
+    }
+
     ImGui::Begin("WEngine");
     ImGui::Text("Backend: Dear ImGui v1.91.9b + SDL2 + Vulkan");
     ImGui::Text("Framerate: %.1f fps", static_cast<double>(io.Framerate));
-    ImGui::Separator();
-    ImGui::Text("Engine seam: core::RunConfig defaults");
-    ImGui::Text("dt=%.4fs steps=%llu particles=%llu", defaults.loop.dt,
-                static_cast<unsigned long long>(defaults.steps),
-                static_cast<unsigned long long>(defaults.particles));
-    ImGui::Text("solver=%s", solver_name);
-    ImGui::Separator();
-    ImGui::TextWrapped("Solver and simulation panels arrive with the "
-                       "GUI follow-up tasks.");
+    sim_panel.draw(sim);
     ImGui::End();
 
     ImGui::Render();

@@ -219,7 +219,8 @@ into `wengine_core` (`wengine::core` alias). `wengine_cli` (`STATIC`: `src/cli/s
 `PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
 (link core), `test_cli_args`, `test_s0`, `test_i2c`, `test_sim` (link cli),
 `test_solver_registry`, `test_runner`, `test_world`, `test_emit`,
-`test_determinism` (fixed-dt goldens, exact repeat, CSV replay). Benchmarks:
+`test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
+`test_gui_sim_control` (GUI controller bit-parity with headless + goldens). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`.
 
 ## Flow
@@ -307,12 +308,14 @@ bridge, versioning).
 ## Layout
 
 ```text
-apps/cli/main.cpp  apps/gui/main.cpp (Dear ImGui + SDL2 + Vulkan blank app)
+apps/cli/main.cpp  apps/gui/main.cpp (Dear ImGui + SDL2 + Vulkan blank app
+  + sim panel)  apps/gui/sim_controller.hpp (engine-only RunConfig driver,
+  unit-tested)  apps/gui/sim_panel.hpp (ImGui panel rendering)
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp
 include/wengine/{cli,core,emit,physics,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,determinism,gui_sim_control}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)
