@@ -137,6 +137,29 @@ void test_cli_csv() {
   std::remove(path.c_str());
 }
 
+void test_cli_solver_selection() {
+  // Explicit selection of the registered solver (space and = forms).
+  {
+    const auto [rc, s] = run_sim("run --solver projectile --steps 5 --particles 1");
+    assert(rc == 0 && s.find("solver=projectile") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sim("run --solver=projectile --steps 5");
+    assert(rc == 0);
+  }
+  // Solver-scoped option still applies through the registry path.
+  {
+    const auto [rc, s] = run_sim("run --solver projectile --steps 5 --gravity 1.62");
+    assert(rc == 0 && s.find("g=1.62") != std::string::npos);
+  }
+  // Unknown names fail with the live registry contents listed.
+  {
+    const auto [rc, s] = run_sim("run --solver nope --steps 5");
+    assert(rc == 2 && s.find("unknown solver 'nope'") != std::string::npos &&
+           s.find("projectile") != std::string::npos);
+  }
+}
+
 void test_cli_errors() {
   assert(run_sim("run --steps 100 --particles 1").first == 0);
   assert(run_sim("run").first == 0); // all defaults
@@ -162,6 +185,7 @@ int main() {
   test_bad_dt();
   test_cli_golden();
   test_cli_csv();
+  test_cli_solver_selection();
   test_cli_errors();
   std::cout << "test_sim: OK\n";
   return 0;

@@ -70,10 +70,13 @@ struct SimSpec {
   static constexpr std::string_view kName = "sim";
   static constexpr std::string_view kDescription = "Run stepped simulation (engine vertical slice)";
   static constexpr std::string_view kUsage =
-      "sim run [--steps N] [--dt <s>] [--gravity <m/s^2>] [--particles N]\n"
-      "        [--x0 X] [--y0 Y] [--vx0 VX] [--vy0 VY]\n"
+      "sim run [--solver <name>] [--steps N] [--dt <s>] [--gravity <m/s^2>]\n"
+      "        [--particles N] [--x0 X] [--y0 Y] [--vx0 VX] [--vy0 VY]\n"
       "        [--emit-csv <path>] [--emit-every N]\n"
       "  sim run --steps 100 --particles 1   (projectile demo, all params named)\n"
+      "Solvers come from the compile-time registry (default projectile;\n"
+      "  unknown names list the available ones). --gravity applies to the\n"
+      "  projectile solver only; particle population is generic setup.\n"
       "Defaults: steps=100, dt=0.01s, gravity=9.81, particles=1,\n"
       "  x0=y0=0, vx0=vy0=10, emit-every=1. Time unit: s/ms/us/ns.";
 

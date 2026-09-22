@@ -257,9 +257,14 @@ void test_completion() {
   assert(complete_line("sim ", 4, all) == std::vector<std::string>{"run"});
   {
     const auto c = complete_line("sim --", 6, all);
-    assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv"));
+    assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
+           has(c, "--solver"));
   }
   assert(complete_line("sim run --steps 10", 18, all).empty()); // numeric value
+  assert(complete_line("sim run --solver ", 17, all) ==
+         std::vector<std::string>{"projectile"});
+  assert(complete_line("sim run --solver=p", 18, all) ==
+         std::vector<std::string>{"--solver=projectile"});
   assert(complete_line("help ", 5, all).size() == complete_line("", 0, all).size());
   assert(complete_line("help o", 6, all) == std::vector<std::string>{"ohm"});
   assert(complete_line("nope ", 5, all).empty());

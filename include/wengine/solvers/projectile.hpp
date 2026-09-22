@@ -13,15 +13,24 @@
 #include "wengine/core/solver.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string_view>
 
 namespace wengine::solvers {
 
 class ProjectileSolver : public core::ISolver {
 public:
+  static constexpr std::string_view kName = "projectile";
+  static constexpr std::string_view kDescription =
+      "Point particles under constant gravity (semi-implicit Euler)";
+
+  static std::unique_ptr<core::ISolver> create() {
+    return std::make_unique<ProjectileSolver>();
+  }
+
   explicit ProjectileSolver(double gravity = 9.81) : gravity_(gravity) {}
 
-  [[nodiscard]] std::string_view name() const noexcept override { return "projectile"; }
+  [[nodiscard]] std::string_view name() const noexcept override { return kName; }
   [[nodiscard]] double gravity() const noexcept { return gravity_; }
   void set_gravity(double g) noexcept { gravity_ = g; }
 

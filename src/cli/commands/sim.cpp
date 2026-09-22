@@ -1,10 +1,11 @@
 #include "wengine/cli/commands.hpp"
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/csv_sink.hpp"
-#include "wengine/solvers/projectile.hpp"
+#include "wengine/solvers/solver_registry.hpp"
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -43,9 +44,9 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 
 constexpr std::array<std::string_view, 1> kSimModes{{"run"}};
 
-constexpr std::array<std::string_view, 15> kSimOptions{{
-    "--steps", "-n", "--dt", "--gravity", "-g", "--particles", "-p", "--x0", "--y0",
-    "--vx0", "--vy0", "--emit-csv", "--emit-every", "--help", "-h",
+constexpr std::array<std::string_view, 16> kSimOptions{{
+    "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
+    "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-every", "--help", "-h",
 }};
 
 } // namespace
@@ -59,10 +60,12 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   long long steps = 100;
   double dt = 0.01;
   double gravity = 9.81;
+  bool has_gravity = false;
   long long n_particles = 1;
   double x0 = 0.0, y0 = 0.0, vx0 = 10.0, vy0 = 10.0;
   long long emit_every = 1;
   std::optional<std::string_view> csv_path;
+  std::string_view solver_name = solvers::ProjectileSolver::kName;
 
   auto take_i64 = [&](std::initializer_list<std::string_view> names, const char *what,
                       long long &slot) -> bool {
@@ -97,8 +100,15 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   if (!take_num({"--dt"}, "time step", dt, parse_time)) {
     return 2;
   }
-  if (!take_num({"--gravity", "-g"}, "gravity", gravity, parse_double)) {
-    return 2;
+  if (auto o = args.take_option({"--gravity", "-g"})) {
+    auto p = parse_double(*o);
+    if (!p.ok) {
+      out << "Error: invalid gravity '" << *o << "'\n";
+      out << kUsage << '\n';
+      return 2;
+    }
+    gravity = p.value;
+    has_gravity = true;
   }
   if (!take_i64({"--particles", "-p"}, "particle count", n_particles)) {
     return 2;
@@ -119,6 +129,9 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     return 2;
   }
   csv_path = args.take_option({"--emit-csv"});
+  if (auto o = args.take_option({"--solver"})) {
+    solver_name = *o;
+  }
 
   // Mode subcommand: exactly one `run` positional; all params are named.
   std::array<std::string_view, 2> pos{};
@@ -156,8 +169,26 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
 
   core::Runner runner{{.dt = dt,
                        .emit_every = static_cast<std::uint64_t>(emit_every)}};
-  solvers::ProjectileSolver solver(gravity);
-  runner.add_solver(solver);
+  const solvers::SolverDef *sdef = solvers::SolverRegistry::find(solver_name);
+  if (sdef == nullptr) {
+    out << "Error: unknown solver '" << solver_name << "'. Available:";
+    for (const auto &d : solvers::SolverRegistry::all()) {
+      out << ' ' << d.name;
+    }
+    out << '\n';
+    return 2;
+  }
+  std::unique_ptr<core::ISolver> solver = sdef->create();
+  // --gravity configures the projectile solver specifically; particle
+  // population (--particles/--x0/...) is generic runner-level setup.
+  const bool is_projectile = solver->name() == solvers::ProjectileSolver::kName;
+  if (is_projectile) {
+    // Registry lookup guarantees the factory built a ProjectileSolver.
+    static_cast<solvers::ProjectileSolver *>(solver.get())->set_gravity(gravity);
+  } else if (has_gravity) {
+    return usage_error(out, "--gravity only applies to solver 'projectile'");
+  }
+  runner.add_solver(*solver);
   for (long long k = 0; k < n_particles; ++k) {
     world::Entity e = runner.state().spawn_entity();
     runner.state().particles.attach(e.index);
@@ -185,7 +216,11 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   }
 
   const world::State &s = runner.state();
-  out << "sim run: solver=" << solver.name() << " g=" << solver.gravity() << '\n';
+  out << "sim run: solver=" << solver->name();
+  if (is_projectile) {
+    out << " g=" << gravity;
+  }
+  out << '\n';
   out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
   out << "particles: " << s.particles.live_count << '\n';
   if (s.particles.live_count > 0) {
@@ -205,6 +240,25 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
 
 void SimSpec::complete(std::span<const std::string_view> prior_args, std::string_view partial,
                        std::vector<std::string> &out) {
+  // Values for a preceding "--solver".
+  if (!prior_args.empty() && prior_args.back() == "--solver") {
+    for (const auto &d : solvers::SolverRegistry::all()) {
+      if (d.name.substr(0, partial.size()) == partial) {
+        out.emplace_back(d.name);
+      }
+    }
+    return;
+  }
+  constexpr std::string_view kSolverEq = "--solver=";
+  if (partial.substr(0, kSolverEq.size()) == kSolverEq) {
+    const std::string_view sub = partial.substr(kSolverEq.size());
+    for (const auto &d : solvers::SolverRegistry::all()) {
+      if (d.name.substr(0, sub.size()) == sub) {
+        out.emplace_back(std::string{kSolverEq} + std::string{d.name});
+      }
+    }
+    return;
+  }
   if (!partial.empty() && partial.front() == '-') {
     push_matches(partial, kSimOptions, out);
     return;

@@ -124,6 +124,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_sim PRIVATE wengine_cli)
     add_test(NAME sim COMMAND test_sim)
 
+    add_executable(test_solver_registry tests/test_solver_registry.cpp)
+    target_link_libraries(test_solver_registry PRIVATE wengine_core)
+    add_test(NAME solver_registry COMMAND test_solver_registry)
+
     add_executable(test_runner tests/test_runner.cpp)
     target_link_libraries(test_runner PRIVATE wengine_core)
     add_test(NAME runner COMMAND test_runner)
