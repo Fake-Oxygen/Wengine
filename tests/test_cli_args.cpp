@@ -258,7 +258,7 @@ void test_completion() {
   {
     const auto c = complete_line("sim --", 6, all);
     assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
-           has(c, "--solver"));
+           has(c, "--emit-shm") && has(c, "--solver"));
   }
   assert(complete_line("sim run --steps 10", 18, all).empty()); // numeric value
   assert(complete_line("sim run --solver ", 17, all) ==

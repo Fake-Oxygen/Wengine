@@ -137,11 +137,16 @@ steps: 100 x 0.01s -> t=1s
 particles: 1
 p0: x=10 y=5.04595 vx=10 vy=0.19
 > sim run --steps 20 --dt 10ms --particles 2 --emit-csv run.csv --emit-every 10
+> sim run --steps 100 --emit-shm /wengine-demo &
+> link_sample /wengine-demo --frames 5   (live SHM read in another terminal)
 ```
 
 All `sim` parameters are named (`--solver`, `--steps`, `--dt`, `--gravity`,
-`--particles`, `--x0/--y0/--vx0/--vy0`, `--emit-csv`, `--emit-every`); the CSV
-log carries the full snapshot stream for replay. `--solver` selects from the
+`--particles`, `--x0/--y0/--vx0/--vy0`, `--emit-csv`, `--emit-shm`,
+`--emit-every`); the CSV log carries the full snapshot stream for replay,
+while `--emit-shm <name>` publishes every emitted snapshot to a
+wengine-link SHM segment for realtime local consumers (`examples/
+link_sample` prints them live; the segment lives while `sim` runs). `--solver` selects from the
 compile-time solver registry (default `projectile`; unknown names list what's
 available), so new stepped solvers become runnable without touching the CLI —
 `--gravity` applies to `projectile` only, particle population is generic setup.
@@ -224,7 +229,8 @@ into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
 `test_link_protocol` (solver-agnostic items/channels wire frame, particle
 adapter, encode/decode exactness, seqlock states incl. threaded hammer,
 version gate, lag accounting), `test_link_shm` (segment create/publish/
-read-back, headless fan-out exactness, drop-oldest, failure paths),
+read-back, headless fan-out exactness, drop-oldest, failure paths, reader
+attach/poll), `test_sim` now also covers `--emit-shm` wiring,
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
@@ -335,9 +341,9 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   plus one registry entry, and panels stay untouched. Startup layout is 1600x900: sim + live views
   open, calculators and plots collapsed one click away.
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
-examples/cli_smoke.cpp
+examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
 include/wengine/{cli,core,emit,link,physics,solvers,units,world}/  (no math dir: glm used directly)
-src/{cli,solvers,...}/  (cli filled; others reserved for .cpp as needed)
+src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
 tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,link_protocol,link_shm,determinism,gui_sim_control,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)

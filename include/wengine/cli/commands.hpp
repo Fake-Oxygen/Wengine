@@ -72,7 +72,7 @@ struct SimSpec {
   static constexpr std::string_view kUsage =
       "sim run [--solver <name>] [--steps N] [--dt <s>] [--gravity <m/s^2>]\n"
       "        [--particles N] [--x0 X] [--y0 Y] [--vx0 VX] [--vy0 VY]\n"
-      "        [--emit-csv <path>] [--emit-every N]\n"
+      "        [--emit-csv <path>] [--emit-shm <name>] [--emit-every N]\n"
       "  sim run --steps 100 --particles 1   (projectile demo, all params named)\n"
       "Solvers come from the compile-time registry (default projectile;\n"
       "  unknown names list the available ones). --gravity applies to the\n"

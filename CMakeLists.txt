@@ -70,11 +70,15 @@ target_include_directories(wengine_link INTERFACE
 )
 target_link_libraries(wengine_link INTERFACE wengine_world)
 
-# wengine-link SHM publisher (PHYSI wengine-link epic): POSIX shm_open/mmap
-# endpoint as an emit::ISink. Small STATIC TU by design — the one justified
-# exception to the header-only engine rule (platform syscalls cannot live
-# in headers). Strict warnings like wengine_cli.
-add_library(wengine_link_shm STATIC src/link/shm_publisher.cpp)
+# wengine-link SHM endpoints (PHYSI wengine-link epic): POSIX shm_open/mmap
+# publisher + reader as an emit::ISink / pull reader pair. Small STATIC TUs
+# by design — the one justified exception to the header-only engine rule
+# (platform syscalls cannot live in headers). Strict warnings like
+# wengine_cli.
+add_library(wengine_link_shm STATIC
+    src/link/shm_publisher.cpp
+    src/link/shm_reader.cpp
+)
 target_include_directories(wengine_link_shm PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
@@ -110,7 +114,7 @@ if(BUILD_CLI)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     )
-    target_link_libraries(wengine_cli PUBLIC wengine_core)
+    target_link_libraries(wengine_cli PUBLIC wengine_core wengine_link_shm)
 
     target_compile_options(wengine_cli PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
@@ -120,6 +124,16 @@ if(BUILD_CLI)
 
     add_executable(PhysicsSimApp apps/cli/main.cpp)
     target_link_libraries(PhysicsSimApp PRIVATE wengine_cli)
+
+    # Sample external-app reader for the wengine-link SHM bus; pairs with
+    # `sim run --emit-shm`. Small, self-contained, strict warnings.
+    add_executable(link_sample examples/link_sample.cpp)
+    target_link_libraries(link_sample PRIVATE wengine_core wengine_link_shm)
+    target_compile_options(link_sample PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+        $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+    )
 endif()
 
 # ------------------------------------------------------------------

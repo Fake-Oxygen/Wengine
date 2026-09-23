@@ -4,6 +4,7 @@
 
 #include "wengine/core/run_config.hpp"
 #include "wengine/link/shm_publisher.hpp"
+#include "wengine/link/shm_reader.hpp"
 #include "wengine/solvers/run.hpp"
 
 #include <array>
@@ -218,8 +219,7 @@ void test_over_bound_frame_dropped_loudly() {
   assert(pub.stats().published == 1);
 }
 
-void test_move_transfers_ownership() {
-  const std::string name = seg_name("move");
+void test_move_transfers_ownership() {  const std::string name = seg_name("move");
   link::ShmPublisher moved(name, "projectile");
   assert(moved.ok());
   world::Snapshot s;
@@ -237,6 +237,83 @@ void test_move_transfers_ownership() {
   moved.on_snapshot(s);
 }
 
+void test_reader_attach_and_latest() {
+  const std::string name = seg_name("reader");
+  link::ShmPublisher pub(name, "projectile");
+  assert(pub.ok());
+  world::State final_state;
+  std::array<emit::ISink *, 1> sinks{&pub};
+  assert(solvers::run_headless(batch_cfg(3, 1), sinks, final_state).ok());
+
+  link::ShmReader reader(name);
+  assert(reader.ok());
+  assert(reader.header() != nullptr);
+  assert(link::check_header(*reader.header()).ok());
+  assert(std::string(reader.header()->domain) == "projectile");
+  assert(reader.published() == 3);
+
+  // Latest bus frame decodes bit-exact to the engine's final state.
+  link::Frame got;
+  assert(reader.read_latest_frame(got));
+  assert(got == link::frame_from_snapshot(world::take_snapshot(final_state)));
+
+  // Cursor semantics: first poll yields the latest, second yields nothing.
+  std::uint64_t cursor = 0;
+  link::LinkFrame wire{};
+  assert(reader.poll_newer(cursor, wire));
+  assert(cursor == 3 && wire.step_index == 3);
+  assert(!reader.poll_newer(cursor, wire));
+
+  // Reader never unlinks: a second attach works while it is alive, and the
+  // publisher is unaffected by reader lifetimes.
+  {
+    link::ShmReader second(name);
+    assert(second.ok() && second.published() == 3);
+  }
+  assert(pub.ok() && pub.stats().published == 3);
+}
+
+void test_reader_rejects_foreign() {
+  // Missing segment: loud internal failure, never a crash.
+  link::ShmReader missing("/wengine-test-shm-no-such-segment");
+  assert(!missing.ok());
+  assert(missing.header() == nullptr && missing.published() == 0);
+
+  // Wrong-sized segment (publisher mid-construction looks like this):
+  // loud invalid-argument, retryable after the publisher is ready.
+  const std::string name = seg_name("foreign");
+  ::shm_unlink(name.c_str());
+  const int fd = ::shm_open(name.c_str(), O_CREAT | O_RDWR, 0600);
+  assert(fd >= 0);
+  assert(::ftruncate(fd, 16) == 0);
+  ::close(fd);
+  link::ShmReader foreign(name);
+  assert(!foreign.ok());
+  assert(foreign.status().code == core::StatusCode::kInvalidArgument);
+  ::shm_unlink(name.c_str());
+
+  link::ShmReader bad_name("no-leading-slash");
+  assert(!bad_name.ok());
+}
+
+void test_reader_move() {
+  const std::string name = seg_name("rmove");
+  link::ShmPublisher pub(name, "projectile");
+  assert(pub.ok());
+  world::State unused;
+  std::array<emit::ISink *, 1> sinks{&pub};
+  assert(solvers::run_headless(batch_cfg(2, 1), sinks, unused).ok());
+
+  link::ShmReader moved(name);
+  assert(moved.ok());
+  link::ShmReader target = std::move(moved);
+  assert(target.ok() && target.published() == 2);
+  link::Frame got;
+  assert(target.read_latest_frame(got));
+  assert(got.step == 2);
+  assert(!moved.ok()); // moved-from: inert, destroys safely
+}
+
 } // namespace
 
 int main() {
@@ -245,6 +322,9 @@ int main() {
   test_bad_open_is_loud();
   test_over_bound_frame_dropped_loudly();
   test_move_transfers_ownership();
+  test_reader_attach_and_latest();
+  test_reader_rejects_foreign();
+  test_reader_move();
   std::cout << "test_link_shm: OK\n";
   return 0;
 }

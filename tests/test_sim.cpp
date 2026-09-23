@@ -12,6 +12,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 
 using namespace wengine::solvers;
 using wengine::cli::ArgCursor;
@@ -177,6 +178,30 @@ void test_cli_errors() {
   }
 }
 
+void test_cli_shm() {
+  // Flag wiring end-to-end: the publisher count in the output line proves
+  // every emitted snapshot reached the bus (bus-content exactness itself
+  // is covered in test_link_shm through the same run_headless path; the
+  // segment is unlinked when the command's publisher dies, so there is
+  // nothing to read back here by design).
+  const std::string seg =
+      "/wengine-test-sim-" + std::to_string(::getpid());
+  const auto [rc, s] =
+      run_sim("run --steps 10 --particles 1 --emit-shm " + seg);
+  assert(rc == 0);
+  assert(s.find("shm: " + seg + " (10 frames)") != std::string::npos);
+  // CSV + SHM fan out together through one run.
+  const auto [rc2, s2] = run_sim("run --steps 4 --emit-every 2 --emit-shm " + seg +
+                                 " --emit-csv /tmp/wengine_test_sim_shm.csv");
+  assert(rc2 == 0);
+  assert(s2.find("shm: " + seg + " (2 frames)") != std::string::npos);
+  assert(s2.find("csv: /tmp/wengine_test_sim_shm.csv (2 rows)") != std::string::npos);
+  std::remove("/tmp/wengine_test_sim_shm.csv");
+  // Bad segment name is a usage error, never a crash.
+  const auto [rc3, s3] = run_sim("run --steps 5 --emit-shm no-leading-slash");
+  assert(rc3 == 2 && s3.find("invalid SHM segment name") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
@@ -185,6 +210,7 @@ int main() {
   test_bad_dt();
   test_cli_golden();
   test_cli_csv();
+  test_cli_shm();
   test_cli_solver_selection();
   test_cli_errors();
   std::cout << "test_sim: OK\n";

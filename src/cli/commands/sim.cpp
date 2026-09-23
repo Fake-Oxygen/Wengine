@@ -2,6 +2,7 @@
 #include "wengine/cli/status.hpp"
 #include "wengine/core/run_config.hpp"
 #include "wengine/emit/csv_sink.hpp"
+#include "wengine/link/shm_publisher.hpp"
 #include "wengine/solvers/run.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 
@@ -41,9 +42,9 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 
 constexpr std::array<std::string_view, 1> kSimModes{{"run"}};
 
-constexpr std::array<std::string_view, 16> kSimOptions{{
+constexpr std::array<std::string_view, 17> kSimOptions{{
     "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
-    "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-every", "--help", "-h",
+    "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-every", "--help", "-h",
 }};
 
 } // namespace
@@ -62,6 +63,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   double x0 = 0.0, y0 = 0.0, vx0 = 10.0, vy0 = 10.0;
   long long emit_every = 1;
   std::optional<std::string_view> csv_path;
+  std::optional<std::string_view> shm_name;
   std::string_view solver_name = solvers::ProjectileSolver::kName;
 
   auto take_i64 = [&](std::initializer_list<std::string_view> names, const char *what,
@@ -126,6 +128,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     return core::kExitUsage;
   }
   csv_path = args.take_option({"--emit-csv"});
+  shm_name = args.take_option({"--emit-shm"});
   if (auto o = args.take_option({"--solver"})) {
     solver_name = *o;
   }
@@ -202,14 +205,33 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
 
-  world::State s;
-  core::Status st;
-  if (csv) {
-    std::array<emit::ISink *, 1> sinks{&*csv};
-    st = solvers::run_headless(cfg, sinks, s);
-  } else {
-    st = solvers::run_headless(cfg, std::span<emit::ISink *>{}, s);
+  // SHM publish rides the same emit path as CSV (both are best-effort
+  // ISinks owned here, never in RunConfig). Domain tag = solver name so
+  // readers pick the matching adapter. Adapter selection is the default
+  // particle mapping until a second stepped solver needs a registry.
+  std::optional<link::ShmPublisher> shm;
+  if (shm_name) {
+    shm.emplace(*shm_name, solver_name);
+    if (!shm->ok()) {
+      if (shm->status().code == core::StatusCode::kInvalidArgument) {
+        return usage_error(out, "invalid SHM segment name (want /name)");
+      }
+      out << "Error: cannot open SHM segment '" << *shm_name << "'\n";
+      return core::kExitRuntime;
+    }
   }
+
+  world::State s;
+  std::array<emit::ISink *, 2> sink_arr{};
+  std::size_t n_sinks = 0;
+  if (csv) {
+    sink_arr[n_sinks++] = &*csv;
+  }
+  if (shm) {
+    sink_arr[n_sinks++] = &*shm;
+  }
+  const core::Status st =
+      solvers::run_headless(cfg, std::span(sink_arr.data(), n_sinks), s);
   if (!st.ok()) {
     out << "Error: simulation step failed\n";
     return core::kExitRuntime;
@@ -236,6 +258,13 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       return core::kExitRuntime;
     }
     out << "csv: " << csv->path() << " (" << csv->rows_written() << " rows)\n";
+  }
+  if (shm) {
+    if (!shm->ok()) {
+      out << "Error: SHM publish failed on '" << shm->name() << "'\n";
+      return core::kExitRuntime;
+    }
+    out << "shm: " << shm->name() << " (" << shm->stats().published << " frames)\n";
   }
   return core::kExitOk;
 }
