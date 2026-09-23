@@ -10,11 +10,13 @@
 // decode. The GUI subscriber mode (gui-integration epic) will build on
 // poll_newer + adapt_frame; the sample app builds on read_latest_frame.
 //
-// ATTACH GATES (loud, in order): name shape (POSIX "/name") ->
-// shm_open read-only -> fstat size == publisher layout (catches attach
-// during publisher construction, when the segment exists but is
-// half-sized) -> check_header version/capacity/domain. Any failure leaves
-// an inert !ok() reader with Status + errno.
+// ATTACH GATES = the v1 negotiation (in order): name shape (POSIX
+// "/name") -> shm_open read-only -> fstat size == publisher layout ->
+// version commit word set -> inspect_header exact match. Tools retry the
+// transient states (kMissing/kUnready) until their timeout and fail fast
+// otherwise: refusal carries the segment's version via report(), syscall
+// failures via last_errno(). A refusal is never retried — same input
+// decides the same way every time (deterministic negotiation).
 //
 // LIFECYCLE: the reader NEVER unlinks (the publisher owns the name).
 // Attach after the publisher starts; if the publisher exits and recreates
@@ -35,6 +37,16 @@
 
 namespace wengine::link {
 
+// Attach outcome: the negotiation verdict. Only kAttached means ok().
+enum class AttachState : std::uint8_t {
+  kAttached, // success
+  kBadName, // name shape invalid — usage-error class, validate upfront
+  kMissing, // shm_open ENOENT — publisher not started yet, retry
+  kUnready, // opened but version commit word unset — mid-construction, retry
+  kRefused, // complete header, incompatible — fail fast, see report()
+  kError, // syscall failure — fail fast, see last_errno()
+};
+
 class ShmReader {
  public:
   explicit ShmReader(std::string_view name);
@@ -47,6 +59,9 @@ class ShmReader {
 
   [[nodiscard]] bool ok() const noexcept { return status_.ok(); }
   [[nodiscard]] core::Status status() const noexcept { return status_; }
+  [[nodiscard]] AttachState state() const noexcept { return state_; }
+  // Mismatch verdict (meaningful for kRefused; ok-report when attached).
+  [[nodiscard]] const HeaderReport &report() const noexcept { return report_; }
   // errno captured at the failing attach syscall (0 when ok).
   [[nodiscard]] int last_errno() const noexcept { return last_errno_; }
   [[nodiscard]] const std::string &name() const noexcept { return name_; }
@@ -75,6 +90,8 @@ class ShmReader {
   const SegmentHeader *header_ = nullptr;
   const Slot *slots_ = nullptr;
   core::Status status_{};
+  AttachState state_ = AttachState::kError;
+  HeaderReport report_{};
   int last_errno_ = 0;
 };
 

@@ -31,6 +31,8 @@ struct Camera3d {
   double pitch = 0.45; // elevation, radians, clamped to (-1.55, 1.55)
   double distance = 30.0; // clamped to [1, 500]
   double fov_y_deg = 45.0;
+  bool track = true; // follow the primary item each frame; manual pan
+                     // releases (orbit/zoom stay compatible with tracking)
 
   [[nodiscard]] glm::dvec3 target() const noexcept {
     return {target_x, target_y, target_z};
@@ -53,6 +55,16 @@ struct Camera3d {
 
   [[nodiscard]] glm::dvec3 up() const noexcept {
     return glm::cross(right(), forward());
+  }
+
+  // Follow mode: point the orbit target at (x, y, z) — the panel calls
+  // this with the primary item while track holds, so entities stay framed
+  // no matter how far the run travels (the fixed default target only suits
+  // the origin neighborhood). Pure target move; orbit/zoom keep working.
+  void follow(double x, double y, double z) noexcept {
+    target_x = x;
+    target_y = y;
+    target_z = z;
   }
 
   [[nodiscard]] glm::dmat4 view_matrix() const {
@@ -112,6 +124,7 @@ struct Camera3d {
   }
 
   void pan(double dx_pixels, double dy_pixels) noexcept {
+    track = false; // manual pan takes over from follow mode
     const double s = distance * 0.0016;
     const glm::dvec3 r = right();
     const glm::dvec3 u = up();

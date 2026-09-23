@@ -29,6 +29,9 @@ struct Viewport3dPanel {
     ImGui::SetNextWindowSize(ImVec2(420.0F, 340.0F), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(880.0F, 60.0F), ImGuiCond_FirstUseEver);
     ImGui::Begin("3D Viewport");
+    ImGui::Checkbox("Track##viewport", &camera.track);
+    ImGui::SameLine();
+    ImGui::TextDisabled("follow primary item");
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     if (avail.x < 50.0F || avail.y < 50.0F) {
       ImGui::TextDisabled("Viewport too small.");
@@ -41,6 +44,12 @@ struct Viewport3dPanel {
                                ImGuiButtonFlags_MouseButtonRight);
     const bool hovered = ImGui::IsItemHovered();
     const ImGuiIO &io = ImGui::GetIO();
+    // Follow runs before manual nav: a pan this tick applies on top of the
+    // followed target and releases tracking (it stays released after).
+    if (camera.track && !frame.items.empty()) {
+      const link::FrameItem &p = frame.items.front();
+      camera.follow(p.x, p.y, p.z);
+    }
     if (hovered) {
       if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         camera.orbit(static_cast<double>(io.MouseDelta.x),

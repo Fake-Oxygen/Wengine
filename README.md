@@ -139,6 +139,8 @@ p0: x=10 y=5.04595 vx=10 vy=0.19
 > sim run --steps 20 --dt 10ms --particles 2 --emit-csv run.csv --emit-every 10
 > sim run --steps 100 --emit-shm /wengine-demo &
 > link_sample /wengine-demo --frames 5   (live SHM read in another terminal)
+> link_bridge record /wengine-demo rec.csv --frames 5 &
+> link_bridge play run.csv /wengine-demo --rate 10   (replay a CSV log onto the bus)
 ```
 
 All `sim` parameters are named (`--solver`, `--steps`, `--dt`, `--gravity`,
@@ -230,13 +232,16 @@ into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
 adapter, encode/decode exactness, seqlock states incl. threaded hammer,
 version gate, lag accounting), `test_link_shm` (segment create/publish/
 read-back, headless fan-out exactness, drop-oldest, failure paths, reader
-attach/poll), `test_sim` now also covers `--emit-shm` wiring,
+ attach/poll), `test_link_bridge` (CSV parse fidelity + rejection, inverse
+ adapter, CSV->bus->CSV byte-identity), `test_sim` now also covers `--emit-shm` wiring,
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
 `test_frame_source` (source registry, channels, ring,
-CSV-exactness, sink re-attach, plot bounds), `test_canvas2d` (2D mapping,
+CSV-exactness, sink re-attach, plot bounds), `test_gui_stream_source`
+(SHM subscribe parity + lag isolation, CSV replay transport/pacing,
+CLI/frame/CSV exactness), `test_canvas2d` (2D mapping,
 fit, zoom/pan, grid steps). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_link`
 (publish ns/frame + frames/s through a live SHM segment, slow-reader
@@ -282,7 +287,10 @@ zero-copy publish with drop-oldest semantics fitting visualization, while
 the file log covers determinism, replay, and debugging for free. Sockets /
 message queues are deferred until a networked consumer actually exists.
 Tracked as a separate Plane epic (link protocol, writer, reader, replay
-bridge, versioning).
+bridge, versioning). Wire versions exact-match at attach: a reader refuses
+a foreign segment immediately with the found version reported
+(`segment 'X' has version 2, this reader supports version 1`); version 0
+is reserved as the mid-construction marker and never assigned.
 
 ## Conventions
 
@@ -331,8 +339,10 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   lifetime, frame loop, window layout)
   apps/gui/backend/vk_context.hpp/.cpp (SDL2 + Vulkan bootstrap, frames)
   apps/gui/controllers/sim_controller.hpp (engine-only RunConfig driver)
+  + external_source.hpp (SHM subscriber + CSV replay, engine-only)
   apps/gui/models/closed_form_models.hpp (ohm/s0/i2c evaluate logic)
-  apps/gui/panels/sim_panel.hpp + closed_form_panels.hpp/.cpp (ImGui UI)
+  apps/gui/panels/sim_panel.hpp + source_panel.hpp (frame-source selector)
+  + closed_form_panels.hpp/.cpp (ImGui UI)
   apps/gui/views/ frame_source.hpp (solver-name adapter registry over the
   shared link::Frame view-model, frame history + recorder sink), camera3d.hpp
   (orbit/project math) + viewport3d_panel.hpp (ImGui 3D rasterization) +
@@ -340,13 +350,19 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   worldview2d.hpp (2D fit/zoom/pan math) + canvas2d_panel.hpp (top-down
   view with trails) + palette.hpp (shared entity colors).
   Views consume link::Frames only: new solvers add one adapter function
-  plus one registry entry, and panels stay untouched. Startup layout is 1600x900: sim + live views
+  plus one registry entry, and panels stay untouched. Frames come from the
+  in-process sim, an SHM-subscribed headless run, or a CSV replay (source
+  panel); switching sources clears the shared history (one clock per view).
+  Startup layout is 1600x900: sim + live views
   open, calculators and plots collapsed one click away.
 benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
 examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
+  + link_bridge.cpp (CSV<->bus replay bridge: play/record, built with CLI)
+  + link_fastread.cpp (minimum-loss subscriber: no per-frame print, reused
+  buffers, lag/loss summary; built with CLI)
 include/wengine/{cli,core,emit,link,physics,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,link_protocol,link_shm,determinism,gui_sim_control,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

@@ -149,9 +149,10 @@ emit    -> world
 cli     -> solvers, core
 core/solver.hpp -> world
 apps    -> cli + core
-apps/gui -> wengine_core + wengine_imgui only (never the wengine_cli
-            library; header-only cli/args.hpp parsing may be included —
-            it adds no link dependency and reads the same units tables)
+apps/gui -> wengine_core + wengine_imgui + wengine_link_shm (SHM endpoints
+            only) (never the wengine_cli library; header-only cli/args.hpp
+            parsing may be included — it adds no link dependency and reads
+            the same units tables)
 views   -> link::Frame view-model only (never Snapshot internals;
             Frame is shared with the link wire encoder, see link/frame.hpp)
 ```
@@ -186,6 +187,9 @@ the files that need them (no empty placeholder dirs).
 * `models/` holds engine-only logic (no ImGui): unit-tested linking
   `wengine_core` alone.
 * `panels/` renders ImGui UI; verified by windowed runs/screenshots.
+  Panels sharing a window share one ImGui ID scope (IDs default to widget
+  labels): suffix every button/label with `##<panel>` so duplicate labels
+  across panels cannot collide and misbehave.
 * `views/` consume the `link::Frame` view-model only — never `Snapshot`
   internals and never wire structs. `link::Frame` (link/frame.hpp) is the
   single source of truth shared with the link wire encoder. New solvers

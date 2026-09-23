@@ -19,27 +19,21 @@
 
 namespace wengine::link {
 
-namespace {
-
-[[nodiscard]] bool valid_segment_name(std::string_view name) noexcept {
-  if (name.size() < 2 || name.front() != '/') {
-    return false;
-  }
-  return name.find('/', 1) == std::string_view::npos;
-}
-
-} // namespace
-
 ShmReader::ShmReader(std::string_view name) {
+  state_ = AttachState::kBadName;
   if (!valid_segment_name(name)) {
     status_ = {core::StatusCode::kInvalidArgument};
     return;
   }
   name_ = std::string(name);
+  state_ = AttachState::kMissing;
   fd_ = ::shm_open(name_.c_str(), O_RDONLY, 0600);
   if (fd_ < 0) {
     last_errno_ = errno;
     status_ = {core::StatusCode::kInternal};
+    if (last_errno_ != ENOENT) {
+      state_ = AttachState::kError; // present but unopenable: fail fast
+    }
     return;
   }
   mapping_size_ = sizeof(SegmentHeader) + kSlotCount * sizeof(Slot);
@@ -47,11 +41,13 @@ ShmReader::ShmReader(std::string_view name) {
   if (::fstat(fd_, &st) != 0) {
     last_errno_ = errno;
     status_ = {core::StatusCode::kInternal};
+    state_ = AttachState::kError;
     cleanup();
     return;
   }
-  // Half-constructed publisher segment (exists, not yet sized/inited):
-  // loud reject, the caller retries after the publisher is ready.
+  // Opened but half-sized: publisher between shm_open and ftruncate.
+  // Transient by construction — the caller retries.
+  state_ = AttachState::kUnready;
   if (st.st_size != static_cast<off_t>(mapping_size_)) {
     status_ = {core::StatusCode::kInvalidArgument};
     cleanup();
@@ -62,6 +58,7 @@ ShmReader::ShmReader(std::string_view name) {
   if (base == MAP_FAILED) {
     last_errno_ = errno;
     status_ = {core::StatusCode::kInternal};
+    state_ = AttachState::kError;
     cleanup();
     return;
   }
@@ -69,10 +66,20 @@ ShmReader::ShmReader(std::string_view name) {
   header_ = static_cast<const SegmentHeader *>(base_);
   slots_ = reinterpret_cast<const Slot *>(static_cast<const char *>(base_) +
                                           sizeof(SegmentHeader));
-  if (!check_header(*header_).ok()) {
+  // Commit word unset: publisher mapped but not yet initialized header.
+  if (header_->version.load(std::memory_order_acquire) == 0) {
     status_ = {core::StatusCode::kInvalidArgument};
     cleanup();
+    return;
   }
+  report_ = inspect_header(*header_);
+  if (!report_.status.ok()) {
+    status_ = report_.status;
+    state_ = AttachState::kRefused; // complete but incompatible: fail fast
+    cleanup();
+    return;
+  }
+  state_ = AttachState::kAttached;
 }
 
 ShmReader::~ShmReader() { cleanup(); }
@@ -85,6 +92,8 @@ ShmReader::ShmReader(ShmReader &&other) noexcept
       header_(other.header_),
       slots_(other.slots_),
       status_(other.status_),
+      state_(other.state_),
+      report_(other.report_),
       last_errno_(other.last_errno_) {
   other.fd_ = -1;
   other.base_ = nullptr;
@@ -92,6 +101,9 @@ ShmReader::ShmReader(ShmReader &&other) noexcept
   other.header_ = nullptr;
   other.slots_ = nullptr;
   other.status_ = {core::StatusCode::kInternal}; // moved-from: inert
+  other.state_ = AttachState::kError;
+  other.report_ = HeaderReport{};
+  other.report_.status = {core::StatusCode::kInternal};
   other.last_errno_ = 0;
 }
 
@@ -105,6 +117,8 @@ ShmReader &ShmReader::operator=(ShmReader &&other) noexcept {
     header_ = other.header_;
     slots_ = other.slots_;
     status_ = other.status_;
+    state_ = other.state_;
+    report_ = other.report_;
     last_errno_ = other.last_errno_;
     other.fd_ = -1;
     other.base_ = nullptr;
@@ -112,6 +126,9 @@ ShmReader &ShmReader::operator=(ShmReader &&other) noexcept {
     other.header_ = nullptr;
     other.slots_ = nullptr;
     other.status_ = {core::StatusCode::kInternal};
+    other.state_ = AttachState::kError;
+    other.report_ = HeaderReport{};
+    other.report_.status = {core::StatusCode::kInternal};
     other.last_errno_ = 0;
   }
   return *this;
@@ -128,20 +145,45 @@ bool ShmReader::read_latest(LinkFrame &out) const {
   if (slots_ == nullptr) {
     return false;
   }
-  bool found = false;
-  std::uint64_t best = 0;
-  for (std::size_t i = 0; i < kSlotCount; ++i) {
-    LinkFrame got{};
-    if (slot_try_read(slots_[i], got) != SlotRead::kOk) {
-      continue;
+  // Two-pass scan: peek frame_seq words first (cheap acquire loads, no
+  // copies), then a single guarded copy of the newest slot. Copying every
+  // clean slot would move up to kSlotCount full frames per poll (~0.5 MB);
+  // this moves one. NOTE: the seqlock seq words are per-slot write parity,
+  // not ordering — only frame_seq orders frames across slots. The peek is
+  // verified (seq unchanged across it) and the copy is fully guarded by
+  // slot_try_read; a writer recycling mid-read just costs a bounded rescan
+  // — never corrupt data, never a misreported frame.
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    std::uint64_t best = 0;
+    std::size_t index = 0;
+    bool found = false;
+    for (std::size_t i = 0; i < kSlotCount; ++i) {
+      const std::uint64_t before = slots_[i].seq.load(std::memory_order_acquire);
+      if (before == std::uint64_t{0} ||
+          (before & std::uint64_t{1}) != std::uint64_t{0}) {
+        continue; // never written, or writer active
+      }
+      const std::uint64_t candidate = slots_[i].frame.frame_seq;
+      const std::uint64_t after = slots_[i].seq.load(std::memory_order_acquire);
+      if (before != after || candidate == std::uint64_t{0}) {
+        continue; // recycled mid-peek: skip this pass
+      }
+      if (!found || candidate > best) {
+        best = candidate;
+        index = i;
+        found = true;
+      }
     }
-    if (!found || got.frame_seq > best) {
-      best = got.frame_seq;
+    if (!found) {
+      return false;
+    }
+    LinkFrame got{};
+    if (slot_try_read(slots_[index], got) == SlotRead::kOk) {
       out = got;
-      found = true;
+      return true;
     }
   }
-  return found;
+  return false;
 }
 
 bool ShmReader::read_latest_frame(Frame &out) const {

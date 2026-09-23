@@ -92,6 +92,37 @@ void test_orbit_zoom_pan() {
   assert(cam.target_x != tx);
 }
 
+void test_track_follows_primary() {
+  // Regression: a far-travelled particle (long/shm runs) leaves the fixed
+  // default frustum, so the viewport follows the primary item while track
+  // holds. Far point: inside the view volume check fails without follow.
+  wengine::gui::Camera3d cam; // default target (0, 2, 0), distance 30
+  assert(cam.track);
+  const glm::dvec3 far{30000.0, -44115000.0, 0.0};
+  const wengine::gui::Camera3d::Screen lost =
+      cam.project(far, 420.0, 340.0);
+  assert(!lost.behind); // in front, but far outside the pixels
+  assert(lost.x < 0.0 || lost.x > 420.0 || lost.y < 0.0 || lost.y > 340.0);
+
+  cam.follow(far.x, far.y, far.z);
+  const wengine::gui::Camera3d::Screen found =
+      cam.project(far, 420.0, 340.0);
+  assert(!found.behind);
+  assert(found.x >= 0.0 && found.x <= 420.0);
+  assert(found.y >= 0.0 && found.y <= 340.0);
+  // Centered up to large-coordinate rounding (sub-pixel in practice).
+  assert(std::fabs(found.x - 210.0) < 1.0);
+  assert(std::fabs(found.y - 170.0) < 1.0);
+
+  // Orbit/zoom stay compatible with tracking; only manual pan releases it.
+  cam.orbit(50.0, 10.0);
+  assert(cam.track);
+  cam.zoom(2.0);
+  assert(cam.track);
+  cam.pan(5.0, 5.0);
+  assert(!cam.track);
+}
+
 void test_grid_segments() {
   const auto segs = wengine::gui::grid_segments(10.0, 5.0);
   // (2*2 + 1) lines per direction.
@@ -115,6 +146,7 @@ int main() {
   test_depth_orders_along_view();
   test_viewport_guards();
   test_orbit_zoom_pan();
+  test_track_follows_primary();
   test_grid_segments();
   std::printf("test_viewport3d: OK\n");
   return 0;

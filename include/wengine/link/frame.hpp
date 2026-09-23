@@ -94,4 +94,28 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
   return f;
 }
 
+// Inverse particle adapter for the record path (bus -> CSV): Frame items
+// become dense Snapshot slots in order, step/time carried over. Lossy by
+// format necessity, documented: item z/vz have no CSV column and are
+// dropped, channels are ignored (CSV is particle-shaped). Within those
+// bounds it is exact — snapshot_from_frame(frame_from_snapshot(s)) == s —
+// so a bus recording of a CSV playback is byte-identical to the source
+// log. May allocate (vectors); never call inside the sim loop.
+[[nodiscard]] inline world::Snapshot snapshot_from_frame(const Frame &f) {
+  world::Snapshot s;
+  s.step_index = f.step;
+  s.sim_time = f.time;
+  s.pos_x.reserve(f.items.size());
+  s.pos_y.reserve(f.items.size());
+  s.vel_x.reserve(f.items.size());
+  s.vel_y.reserve(f.items.size());
+  for (const FrameItem &it : f.items) {
+    s.pos_x.push_back(it.x);
+    s.pos_y.push_back(it.y);
+    s.vel_x.push_back(it.vx);
+    s.vel_y.push_back(it.vy);
+  }
+  return s;
+}
+
 } // namespace wengine::link

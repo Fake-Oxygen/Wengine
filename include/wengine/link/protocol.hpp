@@ -102,10 +102,36 @@
 //   Header init completes before any reader attaches, so version/domain/
 //   capacities are observed without tearing by construction.
 //
-// VERSIONING (v1 rule): exact match. check_header() rejects any version,
-// domain, or capacity mismatch with kInvalidArgument — loudly at open, not
-// silently mid-stream. Forward/backward compat matrix is the versioning
-// task's job; this header only guarantees detection.
+// VERSIONING + NEGOTIATION (v1 contract):
+//   There is no back-and-forth to negotiate on a SHM bus: the writer stamps
+//   the header, the reader accepts (exact match) or refuses loudly at
+//   attach. That attach gate IS the negotiation protocol, in order: name
+//   shape -> segment exists -> size == publisher layout -> version commit
+//   word set -> version/capacities/domain exact match (inspect_header).
+//   check_header() rejects anything else with kInvalidArgument — loudly at
+//   open, never silently mid-stream. ShmReader classifies the outcome
+//   (attached / missing / unready / refused / error) so tools retry the
+//   transient states and fail fast with a versioned message on refusal.
+//   Commit word: init_header writes version LAST with release semantics;
+//   readers treat version == 0 as mid-construction (unready), never as a
+//   version verdict — a partially initialized header can never be mistaken
+//   for an incompatible writer.
+//
+// COMPAT MATRIX (v1: first and only version):
+//   same version + capacities + valid domain -> attach, full interop.
+//   anything else -> loud refusal with found-version report. Old-reader /
+//   new-writer and new-reader / old-writer pairs cannot occur yet; when v2
+//   lands, its matrix row is added beside these tests, not instead of them.
+//
+// MIGRATION POLICY (for v2 authors):
+//   Bump kVersion; never reuse a version number. Version 0 is reserved as
+//   the unready marker and will never be assigned to a real writer. Keep
+//   every v1 rejection test passing (detection only gets stricter). New
+//   fields go in new structs — v1 readers must keep refusing v2 segments
+//   loudly, which the crafted-segment tests guard. Multi-version readers
+//   (accept ranges) are deferred until a second version actually exists;
+//   until then readers support exactly one version and say so in refusal
+//   messages.
 //
 // DROP-OLDEST + LAG ACCOUNTING (policy decision, recorded):
 //   Writer drops oldest on full (ring overwrite); readers take latest only
@@ -144,6 +170,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -213,16 +240,20 @@ struct Slot {
   LinkFrame frame{};
 };
 
-// Cross-process atomics need lock-free u64; fail loudly where untrue.
+// Cross-process atomics need lock-free u64/u32; fail loudly where untrue.
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(sizeof(std::atomic<std::uint64_t>) == sizeof(std::uint64_t));
+static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
+static_assert(sizeof(std::atomic<std::uint32_t>) == sizeof(std::uint32_t));
 
 // Segment header, written once at creation before readers attach.
 // publish_count is the only field mutated post-init (writer only).
-// Not copyable (atomic counter): init in place via init_header, never
+// Not copyable (atomic members): init in place via init_header, never
 // memcpy'd as a whole — only LinkFrames cross the wire by value.
+// version is the commit word: plain readers must observe it via acquire
+// (see inspect_header); version == 0 means mid-construction.
 struct SegmentHeader {
-  std::uint32_t version = 0; // kVersion once initialized
+  std::atomic<std::uint32_t> version{0}; // kVersion once committed
   char domain[kDomainSize] = {}; // solver/domain tag, NUL-terminated (S2)
   std::uint64_t max_items = 0; // == kMaxItems once initialized
   std::uint64_t max_channels = 0; // == kMaxChannels once initialized
@@ -257,30 +288,103 @@ enum class SlotRead : std::uint8_t { kOk, kEmpty, kBusy, kTorn };
   h.max_channels = static_cast<std::uint64_t>(kMaxChannels);
   h.slot_count = static_cast<std::uint64_t>(kSlotCount);
   h.publish_count.store(0, std::memory_order_relaxed);
+  // Commit word LAST with release semantics: a reader observing version ==
+  // kVersion (acquire) sees the fully initialized header above. Readers
+  // treat version == 0 as mid-construction, never as a verdict.
+  h.version.store(kVersion, std::memory_order_release);
   return core::Status::success();
 }
 
-// Exact-match version/capacity/domain gate for attaching readers.
-// Corrupt or foreign segments (bad version, missing NUL, capacity drift)
-// fail loudly here instead of mid-stream.
-[[nodiscard]] inline core::Status check_header(const SegmentHeader &h) noexcept {
-  if (h.version != kVersion) {
-    return {core::StatusCode::kInvalidArgument};
+// Structured attach-gate verdict: what failed, and which version the
+// segment actually carries — the "clear error" behind every refusal.
+// First failure wins, checked in negotiation order (version, capacities,
+// domain), so the reported cause is always the actionable one.
+enum class HeaderIssue : std::uint8_t {
+  kNone,
+  kVersionMismatch,
+  kCapacityMismatch,
+  kDomainMismatch
+};
+
+struct HeaderReport {
+  core::Status status{};
+  HeaderIssue issue = HeaderIssue::kNone;
+  std::uint32_t found_version = 0;
+};
+
+[[nodiscard]] inline HeaderReport inspect_header(const SegmentHeader &h) noexcept {
+  HeaderReport r{};
+  r.found_version = h.version.load(std::memory_order_acquire);
+  if (r.found_version != kVersion) {
+    r.status = {core::StatusCode::kInvalidArgument};
+    r.issue = HeaderIssue::kVersionMismatch;
+    return r;
   }
   if (h.max_items != static_cast<std::uint64_t>(kMaxItems) ||
       h.max_channels != static_cast<std::uint64_t>(kMaxChannels) ||
       h.slot_count != static_cast<std::uint64_t>(kSlotCount)) {
-    return {core::StatusCode::kInvalidArgument};
+    r.status = {core::StatusCode::kInvalidArgument};
+    r.issue = HeaderIssue::kCapacityMismatch;
+    return r;
   }
   if (h.domain[0] == '\0') {
-    return {core::StatusCode::kInvalidArgument};
+    r.status = {core::StatusCode::kInvalidArgument};
+    r.issue = HeaderIssue::kDomainMismatch;
+    return r;
   }
   for (std::size_t i = 0; i < kDomainSize; ++i) {
     if (h.domain[i] == '\0') {
-      return core::Status::success();
+      r.status = core::Status::success();
+      return r;
     }
   }
-  return {core::StatusCode::kInvalidArgument}; // unterminated: corrupt
+  r.status = {core::StatusCode::kInvalidArgument}; // unterminated: corrupt
+  r.issue = HeaderIssue::kDomainMismatch;
+  return r;
+}
+
+// Exact-match version/capacity/domain gate for attaching readers.
+// Corrupt or foreign segments (bad version, missing NUL, capacity drift)
+// fail loudly here instead of mid-stream. For the reason behind a
+// refusal, see inspect_header.
+[[nodiscard]] inline core::Status check_header(const SegmentHeader &h) noexcept {
+  return inspect_header(h).status;
+}
+
+// Shared POSIX segment-name rule (single leading slash, nothing else):
+// used by both endpoints so tools can validate upfront (exit 2) instead
+// of failing at open time.
+[[nodiscard]] inline bool valid_segment_name(std::string_view name) noexcept {
+  if (name.size() < 2 || name.front() != '/') {
+    return false;
+  }
+  return name.find('/', 1) == std::string_view::npos;
+}
+
+// Human refusal line for a HeaderReport (tools print this verbatim after
+// "Error: "). Shared so every consumer — sample, bridge, future GUI
+// subscriber — reports the same clear error for the same verdict. Edge
+// code may allocate; never called on hot paths.
+[[nodiscard]] inline std::string describe_refusal(std::string_view segment,
+                                                  const HeaderReport &rep) {
+  std::string msg = "segment '";
+  msg += segment;
+  switch (rep.issue) {
+  case HeaderIssue::kVersionMismatch:
+    msg += "' has version " + std::to_string(rep.found_version) +
+           ", this reader supports version " + std::to_string(kVersion);
+    break;
+  case HeaderIssue::kCapacityMismatch:
+    msg += "' has incompatible capacities";
+    break;
+  case HeaderIssue::kDomainMismatch:
+    msg += "' has an invalid domain tag";
+    break;
+  default:
+    msg += "' is incompatible";
+    break;
+  }
+  return msg;
 }
 
 // Frame -> wire (S1/S3/S4). Hot publisher path: noexcept,

@@ -86,6 +86,9 @@ int main(int argc, char **argv) {
     return usage_error("missing <segment>");
   }
   const std::string segment = argv[1];
+  if (!wengine::link::valid_segment_name(segment)) {
+    return usage_error("invalid segment name (want /name)");
+  }
   std::uint64_t want_frames = 0; // 0 = subscribe forever
   std::uint64_t timeout_ms = kDefaultTimeoutMs;
   for (int i = 2; i < argc; ++i) {
@@ -110,6 +113,8 @@ int main(int argc, char **argv) {
   }
 
   // Wait for the publisher: start order between sim and sample is free.
+  // Missing/unready segments retry until the timeout; refusals and
+  // syscall errors fail fast with a clear message (never a timeout).
   const Clock::time_point start = Clock::now();
   std::optional<wengine::link::ShmReader> reader;
   for (;;) {
@@ -117,7 +122,24 @@ int main(int argc, char **argv) {
     if (reader->ok()) {
       break;
     }
+    const wengine::link::AttachState st = reader->state();
+    const wengine::link::HeaderReport rep = reader->report();
+    const int err = reader->last_errno();
     reader.reset();
+    using wengine::link::AttachState;
+    if (st == AttachState::kRefused) {
+      std::cerr << "Error: " << wengine::link::describe_refusal(segment, rep) << "\n";
+      return 1;
+    }
+    if (st != AttachState::kMissing && st != AttachState::kUnready) {
+      if (err != 0) {
+        std::cerr << "Error: cannot attach to segment '" << segment
+                  << "': " << std::strerror(err) << "\n";
+      } else {
+        std::cerr << "Error: cannot attach to segment '" << segment << "'\n";
+      }
+      return 1;
+    }
     if (timeout_ms != 0 && elapsed_ms(start) >= timeout_ms) {
       std::cerr << "link_sample: timed out waiting for segment '" << segment
                 << "'\n";

@@ -42,7 +42,7 @@ link::Frame make_frame(std::uint64_t step, double time) {
 void test_header_init_and_check() {
   link::SegmentHeader h;
   assert(link::init_header(h, "projectile").ok());
-  assert(h.version == link::kVersion);
+  assert(h.version.load() == link::kVersion);
   assert(std::string(h.domain) == "projectile");
   assert(h.max_items == static_cast<std::uint64_t>(link::kMaxItems));
   assert(h.max_channels == static_cast<std::uint64_t>(link::kMaxChannels));
@@ -60,12 +60,12 @@ void test_header_init_and_check() {
   assert(link::check_header(bad).ok());
 
   // Corrupt/foreign headers fail loudly at open, not mid-stream. Headers
-  // hold an atomic counter, so they are not copyable: rebuild via init and
-  // mutate one field at a time.
+  // hold atomics, so they are not copyable: rebuild via init and mutate
+  // one field at a time.
   {
     link::SegmentHeader corrupt;
     assert(link::init_header(corrupt, "projectile").ok());
-    corrupt.version = link::kVersion + 1;
+    corrupt.version.store(link::kVersion + 1);
     assert(!link::check_header(corrupt).ok());
   }
   {
@@ -100,6 +100,61 @@ void test_header_init_and_check() {
     }
     assert(!link::check_header(corrupt).ok());
   }
+}
+
+void test_compat_matrix() {
+  // v1 matrix: same version + capacities + valid domain interops; every
+  // other combination refuses loudly with the actionable cause reported.
+  // When v2 lands, its row is added here — these rows keep passing.
+  link::SegmentHeader good;
+  assert(link::init_header(good, "projectile").ok());
+  const link::HeaderReport ok_rep = link::inspect_header(good);
+  assert(ok_rep.status.ok() && ok_rep.issue == link::HeaderIssue::kNone);
+  assert(ok_rep.found_version == link::kVersion);
+  assert(link::check_header(good).ok()); // consistent with the report
+
+  // Foreign versions: older, newer, zero (mid-construction), max.
+  for (std::uint32_t v : {std::uint32_t{0}, link::kVersion + 1,
+                          std::uint32_t{0xFFFFFFFFu}}) {
+    if (v == link::kVersion) {
+      continue;
+    }
+    link::SegmentHeader foreign;
+    assert(link::init_header(foreign, "projectile").ok());
+    foreign.version.store(v);
+    const link::HeaderReport rep = link::inspect_header(foreign);
+    assert(!rep.status.ok());
+    assert(rep.status.code == core::StatusCode::kInvalidArgument);
+    assert(rep.issue == link::HeaderIssue::kVersionMismatch);
+    assert(rep.found_version == v); // the clear error carries the version
+    assert(!link::check_header(foreign).ok());
+  }
+
+  // Capacity drift under a matching version: capacity cause, not version.
+  {
+    link::SegmentHeader drift;
+    assert(link::init_header(drift, "projectile").ok());
+    drift.slot_count = 16;
+    const link::HeaderReport rep = link::inspect_header(drift);
+    assert(!rep.status.ok() && rep.issue == link::HeaderIssue::kCapacityMismatch);
+    assert(rep.found_version == link::kVersion);
+  }
+  // Domain faults under a matching version: domain cause.
+  {
+    link::SegmentHeader nodomain;
+    assert(link::init_header(nodomain, "projectile").ok());
+    nodomain.domain[0] = '\0';
+    const link::HeaderReport rep = link::inspect_header(nodomain);
+    assert(!rep.status.ok() && rep.issue == link::HeaderIssue::kDomainMismatch);
+  }
+
+  // Shared name rule, both endpoints (tools validate upfront, exit 2).
+  assert(link::valid_segment_name("/wengine-demo"));
+  assert(link::valid_segment_name("/a"));
+  assert(!link::valid_segment_name(""));
+  assert(!link::valid_segment_name("/"));
+  assert(!link::valid_segment_name("no-leading-slash"));
+  assert(!link::valid_segment_name("/has/nested/slash"));
 }
 
 void test_encode_decode_roundtrip() {
@@ -348,6 +403,7 @@ void test_seqlock_concurrent() {
 
 int main() {
   test_header_init_and_check();
+  test_compat_matrix();
   test_encode_decode_roundtrip();
   test_particle_adapter();
   test_encode_over_bound();

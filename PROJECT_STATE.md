@@ -34,9 +34,11 @@ GUI (Dear ImGui + SDL2 + Vulkan, `apps/gui/`) is functional:
 
 GUI epic (`gui-integration`) still in Backlog:
 
-- Engine linkage: in-process + SHM subscribe + CSV replay in the GUI.
-  Depends on the `wengine-link` epic (protocol spec Done; SHM
-  writer/reader, replay bridge, versioning still Backlog).
+- Engine linkage: in-process (done) + SHM subscribe + CSV replay in the
+  GUI (landed: source panel + engine-only ShmSource/CsvReplay, lag-isolated
+  by design, parity-tested). Needs a manual click-through (mode switching,
+  replay transport feel, populated views per source) — no automation
+  tooling exists.
 - Backend hardening: validation layers (not installed here) + `--gpu`
   selection override.
 - Automated smoke test: `--frames N` hook for CI.

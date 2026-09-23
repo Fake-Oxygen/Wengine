@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <iostream>
+#include <new>
 #include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -247,6 +248,7 @@ void test_reader_attach_and_latest() {
 
   link::ShmReader reader(name);
   assert(reader.ok());
+  assert(reader.state() == link::AttachState::kAttached);
   assert(reader.header() != nullptr);
   assert(link::check_header(*reader.header()).ok());
   assert(std::string(reader.header()->domain) == "projectile");
@@ -274,13 +276,14 @@ void test_reader_attach_and_latest() {
 }
 
 void test_reader_rejects_foreign() {
-  // Missing segment: loud internal failure, never a crash.
+  // Missing segment: loud failure, never a crash; retryable state.
   link::ShmReader missing("/wengine-test-shm-no-such-segment");
   assert(!missing.ok());
+  assert(missing.state() == link::AttachState::kMissing);
   assert(missing.header() == nullptr && missing.published() == 0);
 
   // Wrong-sized segment (publisher mid-construction looks like this):
-  // loud invalid-argument, retryable after the publisher is ready.
+  // unready, retryable after the publisher is ready.
   const std::string name = seg_name("foreign");
   ::shm_unlink(name.c_str());
   const int fd = ::shm_open(name.c_str(), O_CREAT | O_RDWR, 0600);
@@ -289,11 +292,93 @@ void test_reader_rejects_foreign() {
   ::close(fd);
   link::ShmReader foreign(name);
   assert(!foreign.ok());
+  assert(foreign.state() == link::AttachState::kUnready);
   assert(foreign.status().code == core::StatusCode::kInvalidArgument);
   ::shm_unlink(name.c_str());
 
   link::ShmReader bad_name("no-leading-slash");
   assert(!bad_name.ok());
+  assert(bad_name.state() == link::AttachState::kBadName);
+}
+
+// Raw segment crafter: whatever bytes a foreign or mid-construction writer
+// would leave behind. RAII: unmaps, closes, unlinks.
+struct CraftedSegment {
+  std::string name;
+  int fd = -1;
+  void *base = nullptr;
+  std::size_t size = sizeof(link::SegmentHeader) +
+                     link::kSlotCount * sizeof(link::Slot);
+  link::SegmentHeader *header = nullptr;
+
+  explicit CraftedSegment(const std::string &n) : name(n) {
+    ::shm_unlink(name.c_str());
+    fd = ::shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+    assert(fd >= 0);
+    assert(::ftruncate(fd, static_cast<off_t>(size)) == 0);
+    base = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    assert(base != MAP_FAILED);
+    header = new (base) link::SegmentHeader(); // all zeros: unready look
+  }
+
+  ~CraftedSegment() {
+    ::munmap(base, size);
+    ::close(fd);
+    ::shm_unlink(name.c_str());
+  }
+
+  CraftedSegment(const CraftedSegment &) = delete;
+  CraftedSegment &operator=(const CraftedSegment &) = delete;
+};
+
+void test_version_negotiation() {
+  // Old-reader / new-writer row: a v2 header (capacities intact) refuses
+  // fast with the found version reported — the clear error. Same verdict
+  // on every attempt (deterministic negotiation, nothing to retry).
+  {
+    CraftedSegment seg(seg_name("v2"));
+    const char *domain = "projectile";
+    for (std::size_t i = 0; domain[i] != '\0'; ++i) {
+      seg.header->domain[i] = domain[i];
+    }
+    seg.header->max_items = static_cast<std::uint64_t>(link::kMaxItems);
+    seg.header->max_channels = static_cast<std::uint64_t>(link::kMaxChannels);
+    seg.header->slot_count = static_cast<std::uint64_t>(link::kSlotCount);
+    seg.header->version.store(2, std::memory_order_release);
+    link::ShmReader reader(seg.name);
+    assert(!reader.ok());
+    assert(reader.state() == link::AttachState::kRefused);
+    assert(reader.report().issue == link::HeaderIssue::kVersionMismatch);
+    assert(reader.report().found_version == 2);
+    assert(reader.header() == nullptr);
+    // Repeatable: negotiation has no transient component.
+    link::ShmReader retry(seg.name);
+    assert(retry.state() == link::AttachState::kRefused);
+  }
+  // Mid-construction look (right size, all zeros): unready, retryable —
+  // never mistaken for a verdict. (Version 0 is reserved as the unready
+  // marker and will never be assigned to a real writer.)
+  {
+    CraftedSegment seg(seg_name("mid"));
+    link::ShmReader reader(seg.name);
+    assert(!reader.ok());
+    assert(reader.state() == link::AttachState::kUnready);
+  }
+  // Capacity drift under a matching version refuses as capacity, and a
+  // good attach reports kAttached with a clean report.
+  {
+    CraftedSegment seg(seg_name("cap"));
+    seg.header->domain[0] = 'p';
+    seg.header->domain[1] = '\0';
+    seg.header->max_items = 7;
+    seg.header->max_channels = static_cast<std::uint64_t>(link::kMaxChannels);
+    seg.header->slot_count = static_cast<std::uint64_t>(link::kSlotCount);
+    seg.header->version.store(link::kVersion, std::memory_order_release);
+    link::ShmReader reader(seg.name);
+    assert(reader.state() == link::AttachState::kRefused);
+    assert(reader.report().issue == link::HeaderIssue::kCapacityMismatch);
+    assert(reader.report().found_version == link::kVersion);
+  }
 }
 
 void test_reader_move() {
@@ -324,6 +409,7 @@ int main() {
   test_move_transfers_ownership();
   test_reader_attach_and_latest();
   test_reader_rejects_foreign();
+  test_version_negotiation();
   test_reader_move();
   std::cout << "test_link_shm: OK\n";
   return 0;

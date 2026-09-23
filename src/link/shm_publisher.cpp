@@ -22,18 +22,6 @@
 
 namespace wengine::link {
 
-namespace {
-
-[[nodiscard]] bool valid_segment_name(std::string_view name) noexcept {
-  // POSIX: must start with '/', contain no other '/', be non-empty past it.
-  if (name.size() < 2 || name.front() != '/') {
-    return false;
-  }
-  return name.find('/', 1) == std::string_view::npos;
-}
-
-} // namespace
-
 ShmPublisher::ShmPublisher(std::string_view name, std::string_view domain,
                            FrameAdapter adapter)
     : adapter_(adapter) {

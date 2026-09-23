@@ -134,6 +134,24 @@ if(BUILD_CLI)
         $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
             -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
     )
+
+    # Replay bridge between CsvSink logs and the bus (play/record modes).
+    add_executable(link_bridge examples/link_bridge.cpp)
+    target_link_libraries(link_bridge PRIVATE wengine_core wengine_link_shm)
+    target_compile_options(link_bridge PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+        $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+    )
+
+    # Minimum-loss subscriber: no per-frame printing, reused decode buffers.
+    add_executable(link_fastread examples/link_fastread.cpp)
+    target_link_libraries(link_fastread PRIVATE wengine_core wengine_link_shm)
+    target_compile_options(link_fastread PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+        $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+    )
 endif()
 
 # ------------------------------------------------------------------
@@ -141,8 +159,9 @@ endif()
 # - Dear ImGui: external/imgui submodule, pinned v1.91.9b (MIT), the
 #   engine's second third-party dep (see README dependency policy).
 # - SDL2 + Vulkan loader: system packages (libsdl2-dev, libvulkan-dev).
-# apps/gui links wengine_core directly — never wengine_cli, never the
-# reverse — and owns all I/O. No engine headers change for GUI work.
+# apps/gui links wengine_core + wengine_link_shm (SHM subscribe endpoints)
+# directly — never wengine_cli, never the reverse — and owns all I/O.
+# No engine headers change for GUI work.
 # ------------------------------------------------------------------
 if(BUILD_GUI)
     find_package(SDL2 CONFIG REQUIRED)
@@ -171,7 +190,7 @@ if(BUILD_GUI)
     target_include_directories(WEngineGui PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
     )
-    target_link_libraries(WEngineGui PRIVATE wengine_core wengine_imgui)
+    target_link_libraries(WEngineGui PRIVATE wengine_core wengine_imgui wengine_link_shm)
     target_compile_options(WEngineGui PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
         $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
@@ -231,6 +250,18 @@ if(BUILD_TESTS)
     add_executable(test_link_shm tests/test_link_shm.cpp)
     target_link_libraries(test_link_shm PRIVATE wengine_core wengine_link_shm)
     add_test(NAME link_shm COMMAND test_link_shm)
+
+    add_executable(test_link_bridge tests/test_link_bridge.cpp)
+    target_link_libraries(test_link_bridge PRIVATE wengine_core wengine_link_shm)
+    add_test(NAME link_bridge COMMAND test_link_bridge)
+
+    # GUI external sources: engine-only controller header, no SDL/Vulkan needed.
+    add_executable(test_gui_stream_source tests/test_gui_stream_source.cpp)
+    target_link_libraries(test_gui_stream_source PRIVATE wengine_core wengine_link_shm)
+    target_include_directories(test_gui_stream_source PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
+    )
+    add_test(NAME gui_stream_source COMMAND test_gui_stream_source)
 
     add_executable(test_run_config tests/test_run_config.cpp)
     target_link_libraries(test_run_config PRIVATE wengine_core)

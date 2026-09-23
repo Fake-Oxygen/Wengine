@@ -5,9 +5,10 @@
 // Feature code lives in its own directories:
 //
 //   backend/      SDL2 + Vulkan bootstrap (VulkanHandles, frame render)
-//   controllers/  engine drivers with GUI-owned state (SimController)
+//   controllers/  engine drivers with GUI-owned state (SimController,
+//                 SHM/CSV external sources)
 //   models/       engine-only evaluate logic (closed-form solver models)
-//   panels/       ImGui rendering (sim panel, closed-form panel registry)
+//   panels/       ImGui rendering (sim/source panels, closed-form registry)
 //   views/        reserved: graphs, 2D canvas, 3D viewport land here
 //
 // Dependency direction: apps/gui -> wengine_core + wengine_imgui only.
@@ -16,8 +17,10 @@
 // 2 usage error.
 
 #include "backend/vk_context.hpp"
+#include "controllers/external_source.hpp"
 #include "panels/closed_form_panels.hpp"
 #include "panels/sim_panel.hpp"
+#include "panels/source_panel.hpp"
 #include "views/canvas2d_panel.hpp"
 #include "views/frame_source.hpp"
 #include "views/graphs_panel.hpp"
@@ -31,6 +34,7 @@
 #include <SDL.h>
 #include <SDL_vulkan.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <string_view>
 #include <vector>
@@ -160,6 +164,16 @@ int main(int argc, char **argv) {
   wengine::gui::FrameRecorder recorder(frames);
   sim.add_sink(recorder);
 
+  // External sources (engine linkage): SHM subscriber + CSV replay. The
+  // in-process sim above advances only while selected; switching sources
+  // clears the shared history (one clock per view).
+  wengine::gui::ShmSource shm_source;
+  wengine::gui::CsvReplay replay;
+  wengine::gui::SourcePanel source_panel;
+  wengine::gui::SourceMode last_mode = wengine::gui::SourceMode::kInProcess;
+  std::size_t last_csv_cursor = 0;
+  const wengine::link::Frame empty_frame{};
+
   wengine::gui::backend::set_clear_color(0.10F, 0.12F, 0.16F, 1.00F);
 
   bool done = false;
@@ -193,7 +207,14 @@ int main(int argc, char **argv) {
 
     // Play mode folds wall-clock time into fixed steps; the controller
     // auto-pauses at the step budget, so Reset + Play matches headless.
-    if (sim.playing()) {
+    // The in-process sim advances only while selected as the frame source.
+    const wengine::gui::SourceMode mode = source_panel.mode();
+    if (mode != last_mode) {
+      frames.clear();
+      last_mode = mode;
+      last_csv_cursor = replay.count();
+    }
+    if (mode == wengine::gui::SourceMode::kInProcess && sim.playing()) {
       const wengine::core::Status advance_st =
           sim.advance_frame(static_cast<double>(io.DeltaTime));
       if (!advance_st.ok()) {
@@ -204,8 +225,37 @@ int main(int argc, char **argv) {
     // Adapt once per frame at the engine/GUI boundary: every view below
     // consumes link::Frames, never Snapshots.
     recorder.set_solver(sim.config().solver);
-    const wengine::link::Frame frame =
+    const wengine::link::Frame inprocess_frame =
         wengine::gui::adapt_frame(sim.snapshot(), sim.config().solver);
+
+    // External sources feed the same views through the same history; with
+    // no data yet the views show their empty states.
+    const wengine::link::Frame *view_frame = &inprocess_frame;
+    if (mode == wengine::gui::SourceMode::kShm) {
+      shm_source.set_segment(source_panel.segment);
+      if (shm_source.poll()) {
+        frames.push(shm_source.frame());
+      }
+      view_frame = shm_source.has_frame() ? &shm_source.frame() : &empty_frame;
+    } else if (mode == wengine::gui::SourceMode::kCsv) {
+      if (source_panel.load_requested) {
+        source_panel.load_requested = false;
+        (void)replay.load_file(source_panel.csv_path);
+        frames.clear();
+        last_csv_cursor = replay.count();
+      }
+      replay.set_rate(source_panel.replay_rate);
+      replay.advance_frame(static_cast<double>(io.DeltaTime));
+      if (replay.has_frame()) {
+        if (replay.cursor() != last_csv_cursor) {
+          frames.push(replay.frame());
+          last_csv_cursor = replay.cursor();
+        }
+        view_frame = &replay.frame();
+      } else {
+        view_frame = &empty_frame;
+      }
+    }
 
     // Startup layout (1600x900): sim + live views open, calculators and
     // plots collapsed one click away, room for future panels on the right.
@@ -214,7 +264,8 @@ int main(int argc, char **argv) {
     ImGui::Text("Backend: Dear ImGui v1.91.9b + SDL2 + Vulkan");
     ImGui::Text("Framerate: %.1f fps", static_cast<double>(io.Framerate));
     sim_panel.draw(sim);
-    sim_panel.draw_status(sim, frame);
+    sim_panel.draw_status(sim, inprocess_frame);
+    source_panel.draw(shm_source, replay);
     ImGui::End();
 
     // No ini file (IniFilename=nullptr): place once per launch, no overlap.
@@ -234,14 +285,14 @@ int main(int argc, char **argv) {
     ImGui::End();
 
     // Frame-driven and read-only: cameras cannot perturb the sim.
-    viewport3d.draw(frame);
+    viewport3d.draw(*view_frame);
 
     // Observer-fed series: every emitted snapshot appends points, pausing
     // freezes the plots without touching sim timing.
     graphs.draw(frames);
 
     // Top-down world view with trails from the shared history.
-    canvas2d.draw(frame, frames);
+    canvas2d.draw(*view_frame, frames);
 
     ImGui::Render();
     ImDrawData *draw_data = ImGui::GetDrawData();
