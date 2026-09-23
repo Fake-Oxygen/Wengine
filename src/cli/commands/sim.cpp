@@ -298,8 +298,8 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       const std::string_view kind_name =
           kind_idx < signal::kKindNames.size() ? signal::kKindNames[kind_idx] : "?";
       const auto qty = static_cast<signal::QuantityId>(s.signals.quantity[i]);
-      out << "s" << i << ": " << kind_name << " value=" << s.signals.value[i] << ' '
-          << signal::quantity_suffix(qty) << '\n';
+      out << "s" << s.signals.serial[i] << ": " << kind_name << " value=" << s.signals.value[i]
+          << ' ' << signal::quantity_suffix(qty) << '\n';
     }
   }
   if (csv) {

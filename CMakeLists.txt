@@ -243,6 +243,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_signal PRIVATE wengine_core)
     add_test(NAME signal COMMAND test_signal)
 
+    add_executable(test_routing tests/test_routing.cpp)
+    target_link_libraries(test_routing PRIVATE wengine_core)
+    add_test(NAME routing COMMAND test_routing)
+
     add_executable(test_runner tests/test_runner.cpp)
     target_link_libraries(test_runner PRIVATE wengine_core)
     add_test(NAME runner COMMAND test_runner)

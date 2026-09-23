@@ -49,12 +49,14 @@ enum class SignalKind : std::uint8_t {
   kDc = 4,
   kPulse = 5,
   kNoise = 6,
+  kSum = 7, // combinator: sums operand sources (SIG-5); solver-only kind
 };
 
 // Canonical kind names for CLI/GUI/control-plane vocabularies (single
-// source of truth; `parse_kind` accepts exactly these).
-inline constexpr std::array<std::string_view, 7> kKindNames{
-    {"sine", "square", "triangle", "saw", "dc", "pulse", "noise"}};
+// source of truth; `parse_kind` accepts exactly these). APPEND-ONLY:
+// serialized kind bytes must stay stable, so new kinds go last.
+inline constexpr std::array<std::string_view, 8> kKindNames{
+    {"sine", "square", "triangle", "saw", "dc", "pulse", "noise", "sum"}};
 
 // Physical-quantity tag. Stored as `uint8` in pools/snapshots/wire, never
 // as strings. U/I first; the mechanism is generic (see kQuantities).
@@ -127,12 +129,17 @@ using StampedValue =
 struct SignalParams {
   SignalKind kind = SignalKind::kSine;
   QuantityId quantity = QuantityId::kVoltage;
-  double freq_hz = 1.0; // periodic kinds only; ignored by dc/noise
+  double freq_hz = 1.0; // periodic kinds only; ignored by dc/noise/sum
   double amp = 1.0; // SI peak: V or A per `quantity`
   double offset = 0.0; // SI base
   double phase_rad = 0.0;
   double duty = 0.5; // square/pulse high fraction in [0,1]
   std::uint64_t seed = 1; // noise only
+  // Sum operands: operand source serials (kSum only, 1..kMaxOps). Stored as
+  // serials (stable across despawn/respawn), resolved to slots per step.
+  static constexpr std::size_t kMaxOps = 8;
+  std::array<std::uint64_t, kMaxOps> ops{};
+  std::uint8_t op_count = 0;
 
   bool operator==(const SignalParams &) const noexcept = default;
 };
@@ -174,6 +181,10 @@ struct SignalParams {
       return p.offset + p.amp * (-1.0 + 2.0 * ph);
     }
   }
+  case SignalKind::kSum:
+    // Solver-only kind: sums operand sources inside SignalSolver (pool
+    // context required). Direct evaluation is the identity by definition.
+    return p.offset;
   }
   return p.offset; // unreachable: every enumerator handled above
 }
@@ -247,7 +258,9 @@ struct SignalRunConfig {
 };
 
 // Config validation: periodic kinds need f > 0; duty is checked only for
-// the kinds that read it (other kinds ignore it, lenient by design).
+// the kinds that read it (other kinds ignore it, lenient by design); sums
+// need 1..kMaxOps operand serials (existence/kind checked at configure
+// time against the live pool, not here).
 [[nodiscard]] inline core::Status validate_params(const SignalParams &p) noexcept {
   switch (p.kind) {
   case SignalKind::kSine:
@@ -261,6 +274,11 @@ struct SignalRunConfig {
     break;
   case SignalKind::kDc:
   case SignalKind::kNoise:
+    break;
+  case SignalKind::kSum:
+    if (p.op_count < 1 || p.op_count > SignalParams::kMaxOps) {
+      return {core::StatusCode::kInvalidArgument};
+    }
     break;
   }
   if ((p.kind == SignalKind::kSquare || p.kind == SignalKind::kPulse) &&

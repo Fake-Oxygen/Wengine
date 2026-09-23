@@ -2,14 +2,17 @@
 
 // Versioned binary persistence for world::State (deterministic, no deps).
 //
-// Format v2, all integers little-endian, doubles as IEEE-754 bits:
-//   'W' 'E' 'N' 'G', u32 version (= 2)
+// Format v3, all integers little-endian, doubles as IEEE-754 bits:
+//   'W' 'E' 'N' 'G', u32 version (= 3)
 //   f64 sim_time, u64 step_index
 //   u32 entity_capacity, generations[u32]..., u32 freelist_size, freelist[u32]...
 //   u32 particle_capacity, per slot: u8 present + f64 x4 (fixed stride)
 //   u32 signal_capacity, per slot: u8 present, u8 kind, u8 quantity,
-//     u8 running, f64 freq/amp/offset/phase/duty/t0/value, u64 seed, u64 rng
-// v1 files (no signal section) still load: signals come back empty.
+//     u8 running, u8 op_count, f64 freq/amp/offset/phase/duty/t0/value,
+//     u64 seed, u64 rng, u64 serial, u64 ops[kMaxOps]
+// v2 files (no serial/operands) still load: serials synthesize as slot
+// indices, operand lists come back empty. v1 files (no signal section)
+// still load: signals come back empty.
 // Freelist order is stored, so a round-trip preserves exact spawn-reuse
 // behavior. load_state() replaces the target; corrupt input (bad magic,
 // version, truncation, out-of-range indices) yields kInvalidArgument and
@@ -29,7 +32,7 @@
 
 namespace wengine::world {
 
-inline constexpr std::uint32_t kStateFormatVersion = 2;
+inline constexpr std::uint32_t kStateFormatVersion = 3;
 // Sanity cap per count field: rejects corrupt files before huge allocs.
 inline constexpr std::uint32_t kMaxStateEntries = 1u << 24;
 
@@ -137,6 +140,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
     detail::put_u8(out, s.signals.kind[i]);
     detail::put_u8(out, s.signals.quantity[i]);
     detail::put_u8(out, s.signals.running[i]);
+    detail::put_u8(out, s.signals.op_count[i]);
     detail::put_f64_le(out, s.signals.freq[i]);
     detail::put_f64_le(out, s.signals.amp[i]);
     detail::put_f64_le(out, s.signals.offset[i]);
@@ -146,6 +150,10 @@ inline bool get_f64_le(std::istream &in, double &v) {
     detail::put_f64_le(out, s.signals.value[i]);
     detail::put_u64_le(out, s.signals.seed[i]);
     detail::put_u64_le(out, s.signals.rng[i]);
+    detail::put_u64_le(out, s.signals.serial[i]);
+    for (std::size_t k = 0; k < signal::SignalParams::kMaxOps; ++k) {
+      detail::put_u64_le(out, s.signals.ops[i * signal::SignalParams::kMaxOps + k]);
+    }
   }
   if (!out) {
     return {core::StatusCode::kInternal};
@@ -164,7 +172,8 @@ inline bool get_f64_le(std::istream &in, double &v) {
     return invalid();
   }
   std::uint32_t version = 0;
-  if (!detail::get_u32_le(in, version) || (version != 1 && version != kStateFormatVersion)) {
+  if (!detail::get_u32_le(in, version) ||
+      (version != 1 && version != 2 && version != kStateFormatVersion)) {
     return invalid();
   }
   State tmp;
@@ -238,25 +247,37 @@ inline bool get_f64_le(std::istream &in, double &v) {
   tmp.signals.t0.resize(sig_cap);
   tmp.signals.value.resize(sig_cap);
   tmp.signals.running.resize(sig_cap);
+  tmp.signals.op_count.resize(sig_cap);
+  tmp.signals.serial.resize(sig_cap);
+  tmp.signals.ops.resize(static_cast<std::size_t>(sig_cap) *
+                         signal::SignalParams::kMaxOps);
   tmp.signals.present.resize(sig_cap);
   tmp.signals.live_count = 0;
+  tmp.signals.next_serial = 0;
   for (std::uint32_t i = 0; i < sig_cap; ++i) {
     std::uint8_t p = 0;
     std::uint8_t kind = 0;
     std::uint8_t qty = 0;
     std::uint8_t run = 0;
+    std::uint8_t ops = 0;
     if (!detail::get_u8(in, p) || p > 1 || !detail::get_u8(in, kind) ||
-        kind > static_cast<std::uint8_t>(signal::SignalKind::kNoise) ||
+        kind > static_cast<std::uint8_t>(signal::SignalKind::kSum) ||
         !detail::get_u8(in, qty) ||
         qty > static_cast<std::uint8_t>(signal::QuantityId::kCurrent) ||
         !detail::get_u8(in, run) || run > 1) {
       return invalid();
+    }
+    if (version == kStateFormatVersion) {
+      if (!detail::get_u8(in, ops) || ops > signal::SignalParams::kMaxOps) {
+        return invalid();
+      }
     }
     tmp.signals.present[i] = p;
     tmp.signals.live_count += p;
     tmp.signals.kind[i] = kind;
     tmp.signals.quantity[i] = qty;
     tmp.signals.running[i] = run;
+    tmp.signals.op_count[i] = (version == kStateFormatVersion) ? ops : 0;
     if (!detail::get_f64_le(in, tmp.signals.freq[i]) ||
         !detail::get_f64_le(in, tmp.signals.amp[i]) ||
         !detail::get_f64_le(in, tmp.signals.offset[i]) ||
@@ -267,6 +288,29 @@ inline bool get_f64_le(std::istream &in, double &v) {
         !detail::get_u64_le(in, tmp.signals.seed[i]) ||
         !detail::get_u64_le(in, tmp.signals.rng[i])) {
       return invalid();
+    }
+    if (version == kStateFormatVersion) {
+      std::uint64_t serial = 0;
+      if (!detail::get_u64_le(in, serial) || serial + 1 == 0) {
+        return invalid(); // exhausted serial space: corrupt, never produced
+      }
+      tmp.signals.serial[i] = serial;
+      if (serial >= tmp.signals.next_serial) {
+        tmp.signals.next_serial = serial + 1;
+      }
+      for (std::size_t k = 0; k < signal::SignalParams::kMaxOps; ++k) {
+        if (!detail::get_u64_le(
+                in, tmp.signals.ops[i * signal::SignalParams::kMaxOps + k])) {
+          return invalid();
+        }
+      }
+    } else {
+      // v2 has no serials/operands: synthesize serials as slot indices,
+      // operand lists stay empty (sums did not exist in v2).
+      tmp.signals.serial[i] = i;
+      if (static_cast<std::uint64_t>(i) + 1 > tmp.signals.next_serial) {
+        tmp.signals.next_serial = static_cast<std::uint64_t>(i) + 1;
+      }
     }
   }
   s = std::move(tmp);

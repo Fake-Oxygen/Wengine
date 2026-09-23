@@ -51,7 +51,7 @@ public:
     }
     for (std::size_t k = 0; k < s.signal_count(); ++k) {
       const auto qty = static_cast<signal::QuantityId>(s.sig_quantity[k]);
-      out_ << s.step_index << ',' << s.sim_time << ',' << s.sig_slot[k] << ','
+      out_ << s.step_index << ',' << s.sim_time << ',' << s.sig_serial[k] << ','
            << s.sig_value[k] << ',' << signal::quantity_suffix(qty) << '\n';
       if (!out_) {
         status_ = {core::StatusCode::kInternal};
@@ -110,7 +110,7 @@ parse_signals_log(std::istream &in, std::vector<world::Snapshot> &out,
   std::uint64_t line_no = 1;
   bool have_step = false;
   std::uint64_t cur_step = 0;
-  std::uint32_t prev_id = 0;
+  std::uint64_t prev_id = 0;
   world::Snapshot cur;
   while (std::getline(in, line)) {
     ++line_no;
@@ -140,15 +140,13 @@ parse_signals_log(std::istream &in, std::vector<world::Snapshot> &out,
     if (!csv_detail::parse_u64_field(fields[0], step) ||
         !csv_detail::parse_f64_field(fields[1], time) ||
         !csv_detail::parse_u64_field(fields[2], id) ||
-        !csv_detail::parse_f64_field(fields[3], value) ||
-        id > 0xFFFFFFFFULL) {
+        !csv_detail::parse_f64_field(fields[3], value)) {
       return invalid("malformed row on line " + std::to_string(line_no));
     }
     const auto qty = signal::parse_quantity(fields[4]);
     if (!qty.ok()) {
       return invalid("malformed row on line " + std::to_string(line_no));
     }
-    const std::uint32_t slot = static_cast<std::uint32_t>(id);
     if (!have_step || step != cur_step) {
       if (have_step) {
         if (step <= cur_step) {
@@ -165,12 +163,12 @@ parse_signals_log(std::istream &in, std::vector<world::Snapshot> &out,
       if (time != cur.sim_time) {
         return invalid("time differs within step on line " + std::to_string(line_no));
       }
-      if (!cur.sig_slot.empty() && slot <= prev_id) {
+      if (!cur.sig_serial.empty() && id <= prev_id) {
         return invalid("sig id not ascending on line " + std::to_string(line_no));
       }
     }
-    prev_id = slot;
-    cur.sig_slot.push_back(slot);
+    prev_id = id;
+    cur.sig_serial.push_back(id);
     cur.sig_value.push_back(value);
     cur.sig_quantity.push_back(static_cast<std::uint8_t>(qty.value));
   }

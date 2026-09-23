@@ -10,8 +10,8 @@
 // views) and must be non-null; the driver never opens files or touches
 // frontend I/O. Config problems (bad dt/steps, unknown solver, gravity
 // with a non-projectile solver, set signal section with a non-signal
-// solver, invalid signal params) return kInvalidArgument; step failures
-// propagate the solver's Status unchanged.
+// solver, invalid signal params, kSum in a batch section) return
+// kInvalidArgument; step failures propagate the solver's Status unchanged.
 
 #include "wengine/core/run_config.hpp"
 #include "wengine/core/runner.hpp"
@@ -48,9 +48,12 @@ namespace wengine::solvers {
   }
   // Signal-scoped section mirrors the gravity pattern above, but with
   // parsed values: frontends fill cfg.signal, the driver only validates.
+  // Batch spawns identical sources, so kSum is rejected here — sums need
+  // distinct per-source operands (SIG-6 family configures those directly).
   const bool is_signal = solver->name() == SignalSolver::kName;
   if (is_signal) {
-    if (!signal::validate_params(cfg.signal.params).ok()) {
+    if (!signal::validate_params(cfg.signal.params).ok() ||
+        cfg.signal.params.kind == signal::SignalKind::kSum) {
       return {core::StatusCode::kInvalidArgument};
     }
   } else if (cfg.signal.set) {
@@ -69,12 +72,17 @@ namespace wengine::solvers {
   }
   if (is_signal) {
     // Batch sources share params; per-source seeds derive deterministically
-    // (seed + index) so N noise sources never alias each other.
+    // (seed + index) so N noise sources never alias each other. Sums are
+    // rejected above, so configure cannot fail here (defense in depth).
     for (std::uint64_t k = 0; k < cfg.signal.count; ++k) {
       world::Entity e = runner.state().spawn_entity();
       signal::SignalParams p = cfg.signal.params;
       p.seed = cfg.signal.params.seed + k;
-      world::configure_source(e, runner.state().signals, p, 0.0);
+      const core::Status cst =
+          world::configure_source(e, runner.state().signals, p, 0.0);
+      if (!cst.ok()) {
+        return cst;
+      }
     }
   }
   for (emit::ISink *sink : sinks) {

@@ -130,7 +130,7 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
   f.channels.push_back({"sig.count", static_cast<double>(s.signal_count())});
   for (std::size_t k = 0; k < s.signal_count(); ++k) {
     const auto qty = static_cast<signal::QuantityId>(s.sig_quantity[k]);
-    std::string name = "sig." + std::to_string(s.sig_slot[k]) + "." +
+    std::string name = "sig." + std::to_string(s.sig_serial[k]) + "." +
                        std::string(signal::quantity_suffix(qty));
     f.channels.push_back({name, s.sig_value[k]});
   }

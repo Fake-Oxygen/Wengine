@@ -212,7 +212,12 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     return usage_error(out, "emit stride must be >= 0");
   }
   // Engine re-validates (freq/duty); the CLI reports them as usage errors.
+  // Batch runs reject sums: identical batch sources cannot hold distinct
+  // per-source operands (the SIG-6 family configures sums directly).
   params.seed = static_cast<std::uint64_t>(sig_seed < 0 ? 0 : sig_seed);
+  if (params.kind == signal::SignalKind::kSum) {
+    return usage_error(out, "sum needs per-source operands (not supported in batch runs)");
+  }
   if (sig_seed < 0 || sig_count < 0 || !signal::validate_params(params).ok()) {
     return usage_error(out, "invalid signal params (freq > 0, duty in 0..1, seed/count >= 0)");
   }
@@ -276,8 +281,8 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     const std::string_view kind_name =
         kind_idx < signal::kKindNames.size() ? signal::kKindNames[kind_idx] : "?";
     const auto qty = static_cast<signal::QuantityId>(s.signals.quantity[i]);
-    out << "s" << i << ": " << kind_name << " value=" << s.signals.value[i] << ' '
-        << signal::quantity_suffix(qty) << '\n';
+    out << "s" << s.signals.serial[i] << ": " << kind_name << " value=" << s.signals.value[i]
+        << ' ' << signal::quantity_suffix(qty) << '\n';
   }
   if (sig_csv) {
     if (!sig_csv->flush().ok()) {

@@ -51,7 +51,7 @@ void test_registry() {
   wengine::world::Snapshot sig;
   sig.step_index = 7;
   sig.sim_time = 0.07;
-  sig.sig_slot.push_back(0);
+  sig.sig_serial.push_back(0);
   sig.sig_value.push_back(3.3);
   sig.sig_quantity.push_back(0);
   const wengine::link::Frame via_sig = wengine::gui::adapt_frame(sig, "signal");

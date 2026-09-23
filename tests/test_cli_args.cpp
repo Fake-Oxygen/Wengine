@@ -287,12 +287,12 @@ void test_completion() {
   }
   {
     const std::vector<std::string> want{"sine", "square", "triangle", "saw", "dc",
-                                        "pulse", "noise"};
+                                        "pulse", "noise", "sum"};
     assert(complete_line("sig run --sig-kind ", 19, all) == want);
   }
   {
     const std::vector<std::string> want{"--sig-kind=sine", "--sig-kind=square",
-                                        "--sig-kind=saw"};
+                                        "--sig-kind=saw", "--sig-kind=sum"};
     assert(complete_line("sig run --sig-kind=s", 20, all) == want);
   }
   {

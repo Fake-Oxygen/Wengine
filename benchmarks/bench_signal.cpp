@@ -61,7 +61,10 @@ int main(int argc, char **argv) {
     p.amp = 0.5 + (xorshift(rng) % 5000) / 1000.0;
     p.phase_rad = (xorshift(rng) % 6283) / 1000.0;
     wengine::world::Entity e = runner.state().spawn_entity();
-    wengine::world::configure_source(e, runner.state().signals, p, 0.0);
+    if (!wengine::world::configure_source(e, runner.state().signals, p, 0.0).ok()) {
+      std::cout << "bench_signal: setup failed\n";
+      return 1;
+    }
   }
 
   auto t0 = std::chrono::high_resolution_clock::now();

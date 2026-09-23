@@ -138,7 +138,7 @@ void test_parse_and_validate() {
 
 world::Entity spawn(core::Runner &runner, const signal::SignalParams &p) {
   world::Entity e = runner.state().spawn_entity();
-  world::configure_source(e, runner.state().signals, p, runner.state().sim_time);
+  assert(world::configure_source(e, runner.state().signals, p, runner.state().sim_time).ok());
   return e;
 }
 
@@ -158,7 +158,7 @@ void test_solver_golden_and_snapshot() {
 
   const world::Snapshot snap = world::take_snapshot(st);
   assert(snap.signal_count() == 1);
-  assert(snap.sig_slot[0] == 0);
+  assert(snap.sig_serial[0] == 0);
   assert(snap.sig_quantity[0] == static_cast<std::uint8_t>(signal::QuantityId::kVoltage));
   assert(snap.sig_value[0] == st.signals.value[0]);
   assert(snap.particle_count() == 0);
@@ -300,7 +300,7 @@ void test_signals_csv_round_trip() {
   assert(emit::parse_signals_log(in, snaps, error).ok());
   assert(snaps.size() == 3);
   assert(snaps[0].step_index == 2 && snaps[0].signal_count() == 1);
-  assert(snaps[0].sig_slot[0] == 0 && snaps[0].sig_quantity[0] == 0);
+  assert(snaps[0].sig_serial[0] == 0 && snaps[0].sig_quantity[0] == 0);
   // Exact round-trip: max_digits10 doubles re-parse bit-identically.
   assert(snaps[2].sig_value[0] == runner.state().signals.value[0]);
   std::remove(path.c_str());

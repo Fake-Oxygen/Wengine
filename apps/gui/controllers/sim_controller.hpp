@@ -73,11 +73,14 @@ class SimController {
     if (!is_signal && cfg.signal.set) {
       return reject("signal options only apply to solver 'signal'");
     }
-    if (is_signal && !signal::validate_params(cfg.signal.params).ok()) {
-      return reject("invalid signal params (freq > 0, duty in 0..1)");
+    if (is_signal && (!signal::validate_params(cfg.signal.params).ok() ||
+                      cfg.signal.params.kind == signal::SignalKind::kSum)) {
+      return reject("invalid signal params (freq > 0, duty in 0..1; no batch sums)");
     }
     config_ = cfg;
-    rebuild();
+    if (!rebuild()) {
+      return last_status_; // error_ set inside (unreachable post-validation)
+    }
     error_.clear();
     last_status_ = core::Status::success();
     return last_status_;
@@ -86,7 +89,9 @@ class SimController {
   // Rebuild from the current (already validated) config. Step index and
   // clock return to 0; transport keeps its play/pause state.
   void reset() {
-    rebuild();
+    if (!rebuild()) {
+      return; // last_status_/error_ set inside (unreachable post-validation)
+    }
     error_.clear();
     last_status_ = core::Status::success();
   }
@@ -159,7 +164,8 @@ class SimController {
     return last_status_;
   }
 
-  void rebuild() {
+  // False on signal-setup failure (unreachable: set_config validated).
+  bool rebuild() {
     runner_ = core::Runner(config_.loop);
     // set_config() validated the name, so this resolve cannot fail.
     const solvers::SolverDef *sdef =
@@ -184,13 +190,20 @@ class SimController {
       runner_.state().particles.vel_y[e.index] = config_.vy0;
     }
     if (solver_->name() == solvers::SignalSolver::kName) {
+      // set_config() rejected sums and validated params, so configure
+      // cannot fail here; the check is defense in depth (same as run_headless).
       for (std::uint64_t k = 0; k < config_.signal.count; ++k) {
         world::Entity e = runner_.state().spawn_entity();
         signal::SignalParams p = config_.signal.params;
         p.seed = config_.signal.params.seed + k;
-        world::configure_source(e, runner_.state().signals, p, 0.0);
+        if (!world::configure_source(e, runner_.state().signals, p, 0.0).ok()) {
+          last_status_ = core::Status::failure(core::StatusCode::kInvalidArgument);
+          error_ = "signal setup failed";
+          return false;
+        }
       }
     }
+    return true;
   }
 
   core::RunConfig config_{};

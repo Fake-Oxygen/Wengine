@@ -199,10 +199,10 @@ tests/  benchmarks/  examples/
 |---|---|---|
 | `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
 | `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `signal.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step`, `SignalSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
-| `signal` | `wengine/signal/types.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation — no I/O; pool lives in `world` |
+| `signal` | `wengine/signal/types.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial) — no I/O; pool lives in `world` |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp`, `run_config.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
-| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (signal sources, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot`, versioned binary save/load (v2; v1 loads with empty signals) |
-| `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser) |
+| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ serial-carrying signal arrays, `select_signals` subset filter), versioned binary save/load (v3; v2 loads with synthesized serials, v1 with empty signals) |
+| `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions, `StrideSink` step-aligned decimation, drop counters) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion |
 
@@ -255,7 +255,10 @@ into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
 `test_solver_registry`, `test_runner`, `test_signal` (waveform goldens,
 seeded-noise sequence, solver end-of-step convention, headless signal
 config + rejections, signal Frame adapter + wire round-trip, signals CSV
-round-trip, v2/v1 serialization), `test_world`, `test_emit`,
+round-trip, v2/v1 serialization), `test_routing` (serial stability,
+1:N/N:1 subscriptions, mid-run reconfig, stride alignment, sum golden +
+operand rejections, dangling-operand failure, sink-failure isolation, v3
+round-trip + v2 fallback), `test_world`, `test_emit`,
 `test_link_protocol` (solver-agnostic items/channels wire frame, particle
 adapter, encode/decode exactness, seqlock states incl. threaded hammer,
 version gate, lag accounting), `test_link_shm` (segment create/publish/
@@ -391,7 +394,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   buffers, lag/loss summary; built with CLI)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,routing,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

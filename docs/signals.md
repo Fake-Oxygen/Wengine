@@ -49,16 +49,42 @@ stop and re-bases on start (pause/resume exact). Noise: seeded
 xorshift/splitmix advanced once per step in slot order (deterministic,
 `dt`-independent sequence; value scaled by params, not by `dt`).
 
-## 4. Routing
+## 4. Routing (SIG-5, implemented 2026-09-23)
+
+Identity: every source owns a stable `serial` (u64, monotonic per State,
+never reused across despawn/respawn). Slots recycle, serials don't, so
+subscriptions, CSV `sig_id`s, Frame channels (`sig.<serial>.U`), and the
+control plane address sources unambiguously (`find_serial` resolves to the
+live slot; unknown/despawned serials are "source gone", never slot 0).
 
 `Snapshot` carries ALL live source values (dense slot order). Per-sink
 selection lives in adapters/filters at the edge, never in `Runner`:
 
-- `Runner` fan-out already gives 1 source -> N sinks (attach N sinks).
-- N sources -> 1 sink via explicit combinator sources (sum/mux as a source
-  kind reading sibling slots) or via sink-side allowlist filter.
-- Rate decimation via `emit_every` (global) + approved `StrideSink` wrapper
-  (per-sink stride, no `Runner` change).
+- 1 source -> N sinks: attach N sinks (existing `Runner` fan-out), each
+  behind its own `emit::SignalSubsetSink` allowlist.
+- N sources -> 1 sink: one `SignalSubsetSink` holding N serials; or the
+  `kSum` combinator source (sums operand serials, replayable in Snapshot).
+- Rate decimation: `emit_every` (global) + `emit::StrideSink` wrapper
+  (per-sink, step-aligned `step % stride == 0`, no `Runner` change).
+- Mix/mux arithmetic beyond sum needs runtime selection: deferred to the
+  SIG-10 control plane (select verb). Source display names (`sig.motor`):
+  deferred to the SIG-6 CLI family (serials are the mechanism; names are UX).
+
+Sum rules: operands validated at configure time (each resolves to a live
+non-sum source — sums stay flattened, no dangling refs, no self-reference
+since the new serial doesn't exist yet). The solver evaluates generators
+first, sums second, so sums always read fresh values regardless of slot
+order. A later-despawned operand fails the step loudly (`kInvalidArgument`,
+time/index frozen) instead of reading a stale slot; a stopped operand
+contributes its frozen sample. Batch runs (`run_headless`, GUI controller)
+reject `kSum`: identical batch sources cannot hold distinct operands —
+the per-source family configures sums directly.
+
+Subset sinks preserve ticks: a non-muted subscription forwards EVERY
+snapshot (possibly with zero rows), so downstream SHM readers observe
+every tick and their LagStats stay exact — only rows filter, never ticks.
+Mute = empty subscription (everything dropped, counted). Drops are loud
+via `matched()`/`dropped()`/`forwarded_rows()` counters.
 
 ## 5. Transports (stream-out)
 
@@ -146,8 +172,9 @@ CLI/GUI/control edges never grow unit tables: parsing goes through
 | D4a | Stream vs control: separate sockets vs multiplexed | Separate sockets (stream stays non-blocking/simple) | LOCKED A (2026-09-23) |
 | D4b | UART control embedding | COBS-escaped control frames interleaved with stream | LOCKED A (2026-09-23) |
 | D5 | Lua state shape | Single shared `lua_State`, per-source refs, budgeted | LOCKED A (2026-09-23) |
-| D6 | Combinators as source kinds vs sink-side mix | Source-kind sum/mux (replayable, visible in Snapshot) + sink allowlist filter | LOCKED |
+| D6 | Combinators as source kinds vs sink-side mix | Source-kind sum (replayable, in Snapshot) + sink allowlist filter; mux needs runtime select -> SIG-10 | LOCKED, sum done SIG-5 |
 | D7 | Concurrent control endpoints (Zephyr UART + PC TCP) | Fixed drain order, last-writer-wins per step, replay-logged (sec. 6) | LOCKED (2026-09-23) |
+| D8 | Sum in batch runs (`run_headless`, GUI) | Rejected: identical batches can't hold distinct operands; per-source family configures sums | LOCKED (SIG-5) |
 
 Build order: SIG-1 -> SIG-2+SIG-3 -> SIG-5 -> SIG-4a+SIG-6 -> SIG-7 || SIG-8
 -> SIG-10 (needs SIG-7 framing) -> SIG-9 -> SIG-4b (dep-gated).

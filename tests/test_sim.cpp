@@ -275,6 +275,7 @@ void test_cli_signal() {
   assert(run_sig("run --sig-freq 0Hz").first == 2);
   assert(run_sig("run --sig-duty 2 --sig-kind square").first == 2);
   assert(run_sig("run --sig-seed -1").first == 2);
+  assert(run_sig("run --sig-kind sum --steps 2").first == 2); // batch rejects sums
   assert(run_sig("run --steps 0").first == 2);
   {
     const auto [rc, s] = run_sig("--help");
