@@ -10,17 +10,34 @@
 // across `dt` scales; no unbounded phase accumulator exists to drift.
 // Noise is seeded splitmix64 advanced once per step in slot order.
 //
-// Hot path: `noexcept`, no allocation, no strings. Parsing/validation are
-// config-edge only. `std::sin` keeps `eval_signal` out of `constexpr`
-// (correct, not restrictive); the integer RNG is `constexpr` with a
-// `static_assert` on the published splitmix64 vector.
+// Hot path stores SI `double` + `QuantityId` tag (zero-cost stamping —
+// see below). Parsing/validation are config-edge only. `std::sin` keeps
+// `eval_signal` out of `constexpr` (correct, not restrictive); the integer
+// RNG is `constexpr` with a `static_assert` on the published splitmix64
+// vector.
+//
+// STAMPING MODEL (SIG-3): every sample carries its physical quantity from
+// evaluation to display. The pool is homogeneous (plain SI doubles —
+// templating it per dimension is impossible), so dimensional safety lives
+// at the boundaries: `kQuantities` is the single table mapping each tag to
+// its channel suffix, human name, accepted spellings, and units-owned
+// suffix scales; `DimensionFor` maps each tag to its `units::Dimension`
+// for typed `units::Value<Dim>` work; `stamp()` builds a dimensionally
+// typed value for control/display edges. Adding a quantity = one table row
+// + one `DimensionFor` line (see "Adding a physical quantity" in
+// docs/signals.md); the hot path never changes.
 
 #include "wengine/core/status.hpp"
+#include "wengine/units/scales.hpp"
+#include "wengine/units/units.hpp"
 
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <span>
 #include <string_view>
+#include <type_traits>
+#include <variant>
 
 namespace wengine::signal {
 
@@ -39,10 +56,73 @@ enum class SignalKind : std::uint8_t {
 inline constexpr std::array<std::string_view, 7> kKindNames{
     {"sine", "square", "triangle", "saw", "dc", "pulse", "noise"}};
 
-// Minimal physical-quantity tag (SIG-2). Display/suffix only on the hot
-// path; full `units::Value<Dim>` binding + the one-entry scaling path are
-// SIG-3. Stored as `uint8` in pools/snapshots, never as strings.
+// Physical-quantity tag. Stored as `uint8` in pools/snapshots/wire, never
+// as strings. U/I first; the mechanism is generic (see kQuantities).
 enum class QuantityId : std::uint8_t { kVoltage = 0, kCurrent = 1 };
+
+// Single quantity table: every per-quantity fact lives in exactly one row
+// (channel/CSV suffix, human name, accepted `--sig-quantity` spellings,
+// units-owned suffix scales for parsing). Extension = append one row;
+// the `static_assert`s below keep rows, codes, and `DimensionFor` in sync.
+struct QuantityDesc {
+  QuantityId id;
+  std::string_view suffix; // "U" — channel (`sig.0.U`), CSV, console tag
+  std::string_view name; // "voltage" — messages, future GUI/control display
+  std::span<const units::SuffixScale> scales; // units-owned parse table
+  std::array<std::string_view, 2> spellings; // accepted --sig-quantity text
+};
+
+inline constexpr std::array<QuantityDesc, 2> kQuantities{{
+    {QuantityId::kVoltage, "U", "voltage", units::scales_for<units::ElectricPotential>::value,
+     {"U", "V"}},
+    {QuantityId::kCurrent, "I", "current", units::scales_for<units::ElectricCurrent>::value,
+     {"I", "A"}},
+}};
+
+inline constexpr std::size_t kQuantityCount = kQuantities.size();
+
+namespace detail {
+[[nodiscard]] inline constexpr const QuantityDesc *find_quantity(QuantityId q) noexcept {
+  const std::size_t i = static_cast<std::size_t>(q);
+  return i < kQuantities.size() ? &kQuantities[i] : nullptr;
+}
+} // namespace detail
+
+static_assert(kQuantities[static_cast<std::size_t>(QuantityId::kVoltage)].id ==
+              QuantityId::kVoltage);
+static_assert(kQuantities[static_cast<std::size_t>(QuantityId::kCurrent)].id ==
+              QuantityId::kCurrent);
+
+// Compile-time tag -> Dimension binding for typed `units::Value<Dim>`
+// work at control/display edges. One line per quantity, beside the table.
+template <QuantityId Q>
+struct DimensionFor;
+template <>
+struct DimensionFor<QuantityId::kVoltage> {
+  using type = units::ElectricPotential;
+};
+template <>
+struct DimensionFor<QuantityId::kCurrent> {
+  using type = units::ElectricCurrent;
+};
+template <QuantityId Q>
+using DimensionForT = typename DimensionFor<Q>::type;
+
+static_assert(std::is_same_v<DimensionForT<QuantityId::kVoltage>, units::ElectricPotential>);
+static_assert(std::is_same_v<DimensionForT<QuantityId::kCurrent>, units::ElectricCurrent>);
+
+// Dimensionally typed sample for boundary code (control plane, display):
+// carries the dimension tag AND a matching `Value<Dim>`, so misreading
+// volts as amps is a compile-time error wherever this type is used.
+using StampedValue =
+    std::variant<units::Value<units::ElectricPotential>, units::Value<units::ElectricCurrent>>;
+
+[[nodiscard]] inline StampedValue stamp(QuantityId q, double si_value) {
+  if (q == QuantityId::kCurrent) {
+    return StampedValue{units::Value<units::ElectricCurrent>{si_value}};
+  }
+  return StampedValue{units::Value<units::ElectricPotential>{si_value}};
+}
 
 struct SignalParams {
   SignalKind kind = SignalKind::kSine;
@@ -119,9 +199,17 @@ static_assert((rng_next(0) & 0xFFFFFFFFu) == 0x7B1DCDAFu);
   return static_cast<double>(z >> 11) * (1.0 / 9007199254740992.0);
 }
 
-// Channel-name suffix for a stamped quantity (`sig.<slot>.U`).
+// Channel-name suffix for a stamped quantity (`sig.<slot>.U`). Unknown
+// codes (corrupt input that slipped validation) render as "?".
 [[nodiscard]] inline constexpr std::string_view quantity_suffix(QuantityId q) noexcept {
-  return q == QuantityId::kCurrent ? "I" : "U";
+  const QuantityDesc *d = detail::find_quantity(q);
+  return d != nullptr ? d->suffix : "?";
+}
+
+// Human name for messages and future GUI/control display.
+[[nodiscard]] inline constexpr std::string_view quantity_name(QuantityId q) noexcept {
+  const QuantityDesc *d = detail::find_quantity(q);
+  return d != nullptr ? d->name : "?";
 }
 
 // Config-edge parsing (may allocate on failure strings; never on hot path).
@@ -136,11 +224,12 @@ static_assert((rng_next(0) & 0xFFFFFFFFu) == 0x7B1DCDAFu);
 
 [[nodiscard]] inline core::Result<QuantityId>
 parse_quantity(std::string_view s) noexcept {
-  if (s == "U" || s == "V") {
-    return core::Result<QuantityId>::success(QuantityId::kVoltage);
-  }
-  if (s == "I" || s == "A") {
-    return core::Result<QuantityId>::success(QuantityId::kCurrent);
+  for (const QuantityDesc &d : kQuantities) {
+    for (std::string_view spelling : d.spellings) {
+      if (s == spelling) {
+        return core::Result<QuantityId>::success(d.id);
+      }
+    }
   }
   return core::Result<QuantityId>::failure("unknown quantity (want U|I)");
 }

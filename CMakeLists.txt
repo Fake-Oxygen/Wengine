@@ -52,6 +52,7 @@ target_include_directories(wengine_signal INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
+target_link_libraries(wengine_signal INTERFACE wengine_units)
 
 add_library(wengine_world INTERFACE)
 target_include_directories(wengine_world INTERFACE

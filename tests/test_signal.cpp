@@ -7,6 +7,7 @@
 #include "wengine/solvers/signal.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 #include "wengine/world/serialize.hpp"
+#include "wengine/cli/args.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -18,9 +19,26 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 using namespace wengine;
+
+// Scaling-path proof support (file scope: explicit specializations must be
+// declared at namespace scope enclosing wengine::units).
+namespace scaling_proof {
+using TestTemp = units::Dimension<0, 0, 0, 0, 1, 0, 0>;
+constexpr units::Value<TestTemp> operator""_tC(long double v) {
+  return units::Value<TestTemp>(static_cast<double>(v));
+}
+} // namespace scaling_proof
+
+template <>
+struct units::scales_for<scaling_proof::TestTemp> {
+  static constexpr std::array<units::SuffixScale, 2> value{{{"tC", 1.0}, {"mtC", 1e-3}}};
+};
 
 namespace {
 
@@ -343,6 +361,102 @@ void test_registry() {
   assert(solver && solver->name() == "signal");
 }
 
+void test_quantity_table() {
+  // Single-table round-trips: every spelling parses, every id has a
+  // suffix/name/scales row, codes are dense (sync with DimensionFor).
+  static_assert(signal::kQuantityCount == 2);
+  for (const signal::QuantityDesc &d : signal::kQuantities) {
+    assert(!d.suffix.empty() && !d.name.empty() && !d.scales.empty());
+    for (std::string_view spelling : d.spellings) {
+      assert(signal::parse_quantity(spelling).value == d.id);
+    }
+    assert(signal::quantity_suffix(d.id) == d.suffix);
+    assert(signal::quantity_name(d.id) == d.name);
+  }
+  assert(signal::quantity_suffix(static_cast<signal::QuantityId>(9)) == "?");
+  assert(!signal::parse_quantity("W").ok());
+  assert(!signal::parse_quantity("").ok());
+
+  // Quantity-aware value parsing through the units-owned tables (the only
+  // parser commands need): voltage suffixes work for U, current suffixes
+  // for I, and cross-dimension text is rejected — the dimensional firewall.
+  using wengine::cli::parse_quantity_value;
+  using signal::QuantityId;
+  auto u = parse_quantity_value(QuantityId::kVoltage, "3.3kV");
+  assert(u.ok() && u.value == 3300.0);
+  assert(parse_quantity_value(QuantityId::kVoltage, "12V").value == 12.0);
+  assert(parse_quantity_value(QuantityId::kVoltage, "5mV").value == 0.005);
+  auto i = parse_quantity_value(QuantityId::kCurrent, "2mA");
+  assert(i.ok() && i.value == 0.002);
+  assert(!parse_quantity_value(QuantityId::kVoltage, "2mA").ok());
+  assert(!parse_quantity_value(QuantityId::kCurrent, "3.3kV").ok());
+  assert(!parse_quantity_value(QuantityId::kVoltage, "abc").ok());
+  assert(!parse_quantity_value(static_cast<QuantityId>(9), "1V").ok());
+}
+
+void test_stamped_values() {
+  // Typed boundary: stamp() carries the dimension tag AND a matching
+  // Value<Dim>; misreading volts as amps fails to compile wherever the
+  // variant is consumed (checked here at runtime over live snapshot data).
+  using signal::QuantityId;
+  using units::ElectricCurrent;
+  using units::ElectricPotential;
+  const signal::StampedValue v = signal::stamp(QuantityId::kVoltage, 3.3);
+  assert(std::holds_alternative<units::Value<ElectricPotential>>(v));
+  assert(std::get<units::Value<ElectricPotential>>(v).get() == 3.3);
+  const signal::StampedValue c = signal::stamp(QuantityId::kCurrent, 0.05);
+  assert(std::holds_alternative<units::Value<ElectricCurrent>>(c));
+
+  // Stamp every live sample of a real run and verify dimension + value.
+  core::Runner runner{{.dt = 0.01}};
+  solvers::SignalSolver solver;
+  runner.add_solver(solver);
+  signal::SignalParams p;
+  p.quantity = QuantityId::kCurrent;
+  p.kind = signal::SignalKind::kDc;
+  p.offset = 0.5;
+  spawn(runner, p);
+  assert(runner.run(2).ok());
+  const world::Snapshot snap = world::take_snapshot(runner.state());
+  assert(snap.signal_count() == 1);
+  const signal::StampedValue s =
+      signal::stamp(static_cast<QuantityId>(snap.sig_quantity[0]), snap.sig_value[0]);
+  assert(std::holds_alternative<units::Value<ElectricCurrent>>(s));
+  assert(std::get<units::Value<ElectricCurrent>>(s).get() == 0.5);
+  // std::visit dispatches on the stamped dimension (the control-plane
+  // pattern: one handler per physical quantity, chosen by the tag).
+  double visited = -1.0;
+  const char *seen = "";
+  std::visit(
+      [&](const auto &val) {
+        visited = val.get();
+        using V = std::decay_t<decltype(val)>;
+        if constexpr (std::is_same_v<V, units::Value<ElectricCurrent>>) {
+          seen = "current";
+        } else {
+          seen = "voltage";
+        }
+      },
+      s);
+  assert(visited == 0.5 && std::string_view(seen) == "current");
+}
+
+// Scaling-path proof: a test-only dimension (no production change) plugs
+// into the generic units machinery — Dimension + literal + one scales row
+// is the whole recipe. This is the "one-entry change" SIG-3 requires.
+void test_dimension_scaling() {
+  using scaling_proof::TestTemp;
+  using wengine::cli::detail::parse_scaled_impl;
+  // Generic suffix-scale parsing accepts the new dimension untouched.
+  const auto a = parse_scaled_impl("12mtC", units::scales_for<TestTemp>::value);
+  assert(a.ok() && a.value == 0.012);
+  assert(!parse_scaled_impl("12K", units::scales_for<TestTemp>::value).ok());
+  // Value arithmetic + exact comparison work like every other dimension.
+  constexpr units::Value<TestTemp> t = scaling_proof::operator""_tC(2.0);
+  static_assert(t.get() == 2.0);
+  assert(t + t == scaling_proof::operator""_tC(4.0));
+}
+
 } // namespace
 
 int main() {
@@ -356,6 +470,9 @@ int main() {
   test_signals_csv_round_trip();
   test_serialize_signals();
   test_registry();
+  test_quantity_table();
+  test_stamped_values();
+  test_dimension_scaling();
   std::cout << "test_signal: OK\n";
   return 0;
 }

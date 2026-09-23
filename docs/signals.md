@@ -108,6 +108,33 @@ Fixed-`dt` eval order (slot order), seeded RNG, closed-form time base,
 scales + exact noise-sequence test. Control events are part of the replay
 log. No FP/op-order changes without re-derived goldens.
 
+## 9. Adding a physical quantity (one-entry scaling path, SIG-3)
+
+Stamping is generic; U/I are just the first two rows. To add a quantity
+(e.g. temperature):
+
+1. `units/units.hpp`: `using Temperature = Dimension<0,0,0,0,1,0,0>;` plus
+   its literal(s) — the established units recipe, unchanged.
+2. `units/scales.hpp`: one `scales_for<Temperature>` row — the established
+   recipe; generic suffix parsing accepts it with no other change (proven
+   by `test_dimension_scaling`, which registers a test-only dimension and
+   parses it through the untouched generic machinery).
+3. `signal/types.hpp`: append one `kQuantities` row
+   `{id, suffix, name, scales_for<...>::value, spellings}` (the new enum
+   value goes first) plus one `DimensionFor` specialization line. The
+   `static_assert`s fail until all three agree — the compiler enforces the
+   recipe.
+4. Nothing else changes: hot path (SI double + tag), pool, snapshot,
+   serialize validation bound, Frame/CSV/CLI display, and
+   `parse_quantity_value` all derive from the table. `StampedValue` gains
+   one variant alternative for the new `Value<Dim>`; `stamp()` gains one
+   branch.
+
+CLI/GUI/control edges never grow unit tables: parsing goes through
+`cli::parse_quantity_value(tag, text)`, display through
+`quantity_suffix`/`quantity_name`, typed work through `stamp()` +
+`DimensionFor`.
+
 ## Decision log
 
 | ID | Question | Recommendation | Status |

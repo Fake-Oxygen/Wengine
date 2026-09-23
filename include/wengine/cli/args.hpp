@@ -11,6 +11,7 @@
 // machinery and thin per-quantity forwarders.
 
 #include "wengine/core/status.hpp"
+#include "wengine/signal/types.hpp"
 #include "wengine/units/scales.hpp"
 
 #include <charconv>
@@ -230,7 +231,24 @@ inline core::Result<double> parse_scaled_impl(
 [[nodiscard]] inline core::Result<double> parse_frequency(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Frequency>::value);
 }
-[[nodiscard]] inline core::Result<double> parse_time(std::string_view s) noexcept {
+// Signal-stamped value parser: dispatches to the units-owned suffix table
+// of the stamped quantity (the single table in signal::kQuantities).
+// This is the only quantity-aware parser commands need — no ad-hoc
+// voltage/current switches at call sites.
+[[nodiscard]] inline core::Result<double>
+parse_quantity_value(signal::QuantityId q, std::string_view s) noexcept {
+  const signal::QuantityDesc *d = nullptr;
+  for (const signal::QuantityDesc &row : signal::kQuantities) {
+    if (row.id == q) {
+      d = &row;
+      break;
+    }
+  }
+  if (d == nullptr) {
+    return core::Result<double>::failure("unknown quantity");
+  }
+  return detail::parse_scaled_impl(s, d->scales);
+}[[nodiscard]] inline core::Result<double> parse_time(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Time>::value);
 }
 [[nodiscard]] inline core::Result<double> parse_meter_const(std::string_view s) noexcept {

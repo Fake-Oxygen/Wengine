@@ -122,9 +122,9 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   auto take_qty = [&](std::optional<std::string_view> o, const char *what,
                       double &slot) -> bool {
     if (o) {
-      const auto p = (params.quantity == signal::QuantityId::kCurrent)
-                         ? parse_current(*o)
-                         : parse_voltage(*o);
+      // Quantity-aware parse through the units-owned tables (no ad-hoc
+      // voltage/current switch here — see signal::kQuantities).
+      const auto p = parse_quantity_value(params.quantity, *o);
       if (!p.ok()) {
         out << "Error: invalid " << what << " '" << *o << "'\n";
         out << kUsage << '\n';
