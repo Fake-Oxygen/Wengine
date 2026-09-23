@@ -238,7 +238,9 @@ attach/poll), `test_sim` now also covers `--emit-shm` wiring,
 `test_frame_source` (source registry, channels, ring,
 CSV-exactness, sink re-attach, plot bounds), `test_canvas2d` (2D mapping,
 fit, zoom/pan, grid steps). Benchmarks:
-`bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`.
+`bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_link`
+(publish ns/frame + frames/s through a live SHM segment, slow-reader
+published/received/missed/max_gap).
 
 ## Flow
 

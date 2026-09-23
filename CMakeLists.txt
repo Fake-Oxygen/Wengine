@@ -297,4 +297,7 @@ if(BUILD_BENCHMARKS)
 
     add_executable(bench_projectile benchmarks/bench_projectile.cpp)
     target_link_libraries(bench_projectile PRIVATE wengine_core)
+
+    add_executable(bench_link benchmarks/bench_link.cpp)
+    target_link_libraries(bench_link PRIVATE wengine_core wengine_link_shm)
 endif()

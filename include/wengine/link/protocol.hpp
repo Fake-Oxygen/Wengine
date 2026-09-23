@@ -107,13 +107,15 @@
 // silently mid-stream. Forward/backward compat matrix is the versioning
 // task's job; this header only guarantees detection.
 //
-// DROP-OLDEST + LAG ACCOUNTING:
-//   The writer ring-overwrites (slot = write_index % slot_count); a slow
-//   reader's slot may be recycled — that IS the policy, matching
-//   FrameHistory's bounded drop-oldest ring. No backlog, no blocking.
-//   publish_count (header, monotonic) and frame_seq (per frame, monotonic)
-//   let readers compute exact loss: missed = cur_seq - prev_seq - 1
-//   (reader_missed()). Receiver-lag never alters sim state or timing.
+// DROP-OLDEST + LAG ACCOUNTING (policy decision, recorded):
+//   Writer drops oldest on full (ring overwrite); readers take latest only
+//   and never drain a backlog — there is no queue to catch up with, only a
+//   window onto the newest frame. A slow reader's slot may be recycled —
+//   that IS the policy, matching FrameHistory's bounded drop-oldest ring.
+//   No backlog, no blocking. publish_count (header, monotonic) and
+//   frame_seq (per frame, monotonic) let readers compute exact loss:
+//   missed = cur_seq - prev_seq - 1 (reader_missed(), LagStats below).
+//   Receiver-lag never alters sim state or timing.
 //
 // PUBLISHER CONTRACT (S7 — the blocking-sink hazard):
 //   Runner fans out synchronously: a blocking on_snapshot stalls the sim
@@ -412,6 +414,33 @@ inline void slot_end_write(Slot &slot) noexcept {
 [[nodiscard]] inline constexpr std::uint64_t reader_missed(std::uint64_t prev_seq,
                                                            std::uint64_t cur_seq) noexcept {
   return (cur_seq > prev_seq + 1) ? (cur_seq - prev_seq - 1) : 0;
+}
+
+// Reader-side lag/overflow counters: one cursor per reader (share-nothing
+// across threads; the mapping itself is multi-reader safe). Feed every
+// clean frame_seq observed (e.g. beside poll_newer); the counters then
+// report exactly what this reader saw vs. what the bus carried.
+// First observation counts pre-attach frames as missed — they existed on
+// the bus and this reader never saw them (same display as the sample app).
+struct LagStats {
+  std::uint64_t last_seq = 0; // last consumed frame_seq (0 = none yet)
+  std::uint64_t received = 0; // clean frames consumed
+  std::uint64_t missed = 0; // frames overwritten before observation
+  std::uint64_t max_gap = 0; // largest single-span loss
+};
+
+// Record one clean frame_seq; returns this span's loss. noexcept,
+// allocation-free: safe beside any read loop, including the GUI subscriber.
+[[nodiscard]] inline std::uint64_t lag_observe(LagStats &cur,
+                                               std::uint64_t seq) noexcept {
+  const std::uint64_t gap = reader_missed(cur.last_seq, seq);
+  cur.missed += gap;
+  if (gap > cur.max_gap) {
+    cur.max_gap = gap;
+  }
+  cur.last_seq = seq;
+  ++cur.received;
+  return gap;
 }
 
 // Writer-side publish accounting (header side, visible to readers).

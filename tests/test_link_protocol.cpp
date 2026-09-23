@@ -255,6 +255,24 @@ void test_ring_and_lag() {
   assert(link::reader_missed(5, 8) == 2); // two frames overwritten unseen
 }
 
+void test_lag_stats() {
+  link::LagStats cur;
+  assert(link::lag_observe(cur, 1) == 0);
+  assert(cur.received == 1 && cur.missed == 0 && cur.max_gap == 0);
+  assert(link::lag_observe(cur, 2) == 0);
+  assert(cur.received == 2 && cur.missed == 0);
+  assert(link::lag_observe(cur, 5) == 2); // frames 3,4 overwritten unseen
+  assert(cur.received == 3 && cur.missed == 2 && cur.max_gap == 2);
+  assert(cur.last_seq == 5);
+  assert(link::lag_observe(cur, 6) == 0);
+  assert(cur.received == 4 && cur.missed == 2 && cur.max_gap == 2);
+
+  // First observation counts pre-attach frames as missed (sample display).
+  link::LagStats late;
+  assert(link::lag_observe(late, 1416) == 1415);
+  assert(late.received == 1 && late.missed == 1415 && late.max_gap == 1415);
+}
+
 void test_header_counters() {
   link::SegmentHeader h;
   assert(link::init_header(h, "projectile").ok());
@@ -335,6 +353,7 @@ int main() {
   test_encode_over_bound();
   test_seqlock_states();
   test_ring_and_lag();
+  test_lag_stats();
   test_header_counters();
   test_seqlock_concurrent();
   std::cout << "test_link_protocol: OK\n";
