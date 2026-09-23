@@ -63,7 +63,8 @@ re-tokenizing (an argument containing spaces stays one argument), exit code
 is the command result (`0` ok, `1` runtime/check failure, `2` usage error;
 `exit`/`quit` map to `0`). With no arguments the interactive REPL starts.
 
-REPL commands: `help [cmd]`, `exit`/`quit`, plus registered solvers.
+REPL commands: `help [cmd]`, `exit`/`quit`, plus registered commands
+(`ohm`, `s0`, `i2c`, `sim`, `sig`).
 `--help`/`-h` also print help. Return codes: `0` ok, `1`
 runtime/unknown-command error, `2` argument/usage error, `-1` internal exit
 signal (REPL loop only).
@@ -154,24 +155,27 @@ compile-time solver registry (default `projectile`; unknown names list what's
 available), so new stepped solvers become runnable without touching the CLI —
 `--gravity` applies to `projectile` only, particle population is generic setup.
 
-Signal generation (`--solver signal`): unlimited sources, stamped U/I:
+Signal generation (`sig run` — its own command, so solver vocabularies never
+bloat `sim run`): unlimited sources, stamped U/I:
 
 ```text
-> sim run --solver signal --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --steps 1000 --dt 0.1ms
-> sim run --solver signal --sig-kind square --sig-freq 50Hz --sig-amp 5V --sig-duty 0.25
-> sim run --solver signal --sig-kind noise --sig-amp 1V --sig-seed 7 --sig-count 2
-> sim run --solver signal --sig-kind dc --sig-offset 2.5V --emit-csv sig.csv --emit-shm /wengine-sig
+> sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --steps 1000 --dt 0.1ms
+> sig run --sig-kind square --sig-freq 50Hz --sig-amp 5V --sig-duty 0.25
+> sig run --sig-kind noise --sig-amp 1V --sig-seed 7 --sig-count 2
+> sig run --sig-kind dc --sig-offset 2.5V --emit-csv sig.csv --emit-shm /wengine-sig
 ```
 
 Kinds: `sine square triangle saw dc pulse noise` (`--sig-kind`, Tab-completed).
 `--sig-freq` (`Hz`/`kHz`), `--sig-amp`/`--sig-offset` (`V`/`mV`/`kV` or
 `A`/`mA` per `--sig-quantity U|I`), `--sig-phase` (rad), `--sig-duty`
 (square/pulse high fraction), `--sig-seed` (noise; source `k` uses
-`seed+k`), `--sig-count` (identical sources, default 1). With solver
-`signal`, `--particles` defaults to 0 and `--emit-csv` writes the signals
-log (`step,time,sig_id,value,quantity`, exact round-trip); `--emit-shm`
-publishes signal channels (`sig.<slot>.U`). See `docs/signals.md` for the
-full design (routing, control plane, Lua, Zephyr transports).
+`seed+k`), `--sig-count` (identical sources, default 1).
+`--emit-csv` writes the signals log (`step,time,sig_id,value,quantity`,
+exact round-trip); `--emit-shm` publishes signal channels
+(`sig.<slot>.U`). `sim run --solver signal` runs one default 1 Hz sine
+(zero particles); mixed particle+signal runs pass `--particles N` there.
+See `docs/signals.md` for the full design (routing, control plane, Lua,
+Zephyr transports).
 
 Argument forms (see `wengine/cli/args.hpp`): positional values with unit
 suffixes (`12V`, `0.5A`, `4Ohm`, bare numbers = SI units), named options

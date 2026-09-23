@@ -103,17 +103,20 @@ void test_registry_compile_time() {
   static_assert(CliRegistry::find("s0") != nullptr);
   static_assert(CliRegistry::find("i2c") != nullptr);
   static_assert(CliRegistry::find("sim") != nullptr);
+  static_assert(CliRegistry::find("sig") != nullptr);
   static_assert(CliRegistry::find("nope") == nullptr);
-  static_assert(CliRegistry::all().size() == 4);
+  static_assert(CliRegistry::all().size() == 5);
   static_assert(!CliRegistry::all()[0].usage.empty());
   static_assert(CliRegistry::find("ohm")->complete != nullptr);
   static_assert(CliRegistry::find("s0")->complete != nullptr);
   static_assert(CliRegistry::find("i2c")->complete != nullptr);
   static_assert(CliRegistry::find("sim")->complete != nullptr);
+  static_assert(CliRegistry::find("sig")->complete != nullptr);
   assert(CliRegistry::find("ohm")->run != nullptr);
   assert(CliRegistry::find("s0")->run != nullptr);
   assert(CliRegistry::find("i2c")->run != nullptr);
   assert(CliRegistry::find("sim")->run != nullptr);
+  assert(CliRegistry::find("sig")->run != nullptr);
 }
 
 void test_ohm_handler() {
@@ -179,6 +182,8 @@ void test_shell_integration() {
   assert(sh.execute("s0 --help", out) == 0);
   assert(sh.execute("sim run --steps 2 --particles 1", out) == 0);
   assert(out.str().find("solver=projectile") != std::string::npos);
+  assert(sh.execute("sig run --sig-kind dc --steps 2", out) == 0);
+  assert(out.str().find("sig run: kind=dc") != std::string::npos);
   assert(sh.execute("exit", out) == -1);
 }
 
@@ -197,15 +202,18 @@ void test_completion() {
   {
     const auto c = complete_line("", 0, all);
     assert(has(c, "ohm") && has(c, "s0") && has(c, "i2c") && has(c, "sim") &&
-           has(c, "help") && has(c, "exit") && has(c, "quit"));
+           has(c, "sig") && has(c, "help") && has(c, "exit") && has(c, "quit"));
   }
   assert(complete_line("o", 1, all) == std::vector<std::string>{"ohm"});
   {
-    // "s" now prefixes two commands: definition order (s0, then sim).
+    // "s" now prefixes three commands: definition order (s0, sim, sig).
     const auto c = complete_line("s", 1, all);
-    assert(c.size() == 2 && c[0] == "s0" && c[1] == "sim");
+    assert(c.size() == 3 && c[0] == "s0" && c[1] == "sim" && c[2] == "sig");
   }
-  assert(complete_line("si", 2, all) == std::vector<std::string>{"sim"});
+  {
+    const auto c = complete_line("si", 2, all);
+    assert(c.size() == 2 && c[0] == "sim" && c[1] == "sig");
+  }
   assert(complete_line("i", 1, all) == std::vector<std::string>{"i2c"});
   assert(complete_line("h", 1, all) == std::vector<std::string>{"help"});
   assert(complete_line("zzz", 3, all).empty());
@@ -258,8 +266,7 @@ void test_completion() {
   {
     const auto c = complete_line("sim --", 6, all);
     assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
-           has(c, "--emit-shm") && has(c, "--solver") && has(c, "--sig-kind") &&
-           has(c, "--sig-freq") && has(c, "--sig-quantity"));
+           has(c, "--emit-shm") && has(c, "--solver"));
   }
   assert(complete_line("sim run --steps 10", 18, all).empty()); // numeric value
   {
@@ -270,19 +277,27 @@ void test_completion() {
          std::vector<std::string>{"--solver=projectile"});
   assert(complete_line("sim run --solver=s", 18, all) ==
          std::vector<std::string>{"--solver=signal"});
+  // Sig modes, options, and kind/quantity vocabularies.
+  assert(complete_line("sig ", 4, all) == std::vector<std::string>{"run"});
+  {
+    const auto c = complete_line("sig --", 6, all);
+    assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
+           has(c, "--emit-shm") && has(c, "--sig-kind") && has(c, "--sig-freq") &&
+           has(c, "--sig-quantity") && has(c, "--sig-count"));
+  }
   {
     const std::vector<std::string> want{"sine", "square", "triangle", "saw", "dc",
                                         "pulse", "noise"};
-    assert(complete_line("sim run --sig-kind ", 19, all) == want);
+    assert(complete_line("sig run --sig-kind ", 19, all) == want);
   }
   {
     const std::vector<std::string> want{"--sig-kind=sine", "--sig-kind=square",
                                         "--sig-kind=saw"};
-    assert(complete_line("sim run --sig-kind=s", 20, all) == want);
+    assert(complete_line("sig run --sig-kind=s", 20, all) == want);
   }
   {
     const std::vector<std::string> want{"U", "I"};
-    assert(complete_line("sim run --sig-quantity ", 23, all) == want);
+    assert(complete_line("sig run --sig-quantity ", 23, all) == want);
   }
   assert(complete_line("help ", 5, all).size() == complete_line("", 0, all).size());
   assert(complete_line("help o", 6, all) == std::vector<std::string>{"ohm"});

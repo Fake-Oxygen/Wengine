@@ -145,6 +145,18 @@ parse_quantity(std::string_view s) noexcept {
   return core::Result<QuantityId>::failure("unknown quantity (want U|I)");
 }
 
+// Run-scoped section owned by the signal module and aggregated by
+// core::RunConfig (one member per solver — see run_config.hpp). Parsed
+// values only (no strings): frontends parse kind/quantity/amplitude text
+// and store the result here; the driver validates + spawns. `set` marks
+// explicitly provided options so the driver can reject them with a
+// non-signal solver (same pattern as RunConfig::has_gravity).
+struct SignalRunConfig {
+  SignalParams params;
+  std::uint64_t count = 1;
+  bool set = false;
+};
+
 // Config validation: periodic kinds need f > 0; duty is checked only for
 // the kinds that read it (other kinds ignore it, lenient by design).
 [[nodiscard]] inline core::Status validate_params(const SignalParams &p) noexcept {

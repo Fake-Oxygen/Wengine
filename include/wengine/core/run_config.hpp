@@ -11,11 +11,17 @@
 // (empty matches nothing and is rejected — the choice stays explicit).
 // `gravity` is projectile-scoped: honored for solver "projectile",
 // rejected with any other solver. Particle population is generic setup.
+// Solver-scoped sections (currently `signal` only) follow one rule: each
+// solver owns its section struct beside itself, RunConfig aggregates one
+// member per solver, and the driver honors a section iff its solver is
+// selected — rejecting it when `set` with any other solver. New solvers
+// add a section, never flat fields (gravity is grandfathered flat).
 // Sinks are NOT part of the config: callers create and own them (file,
 // console, future SHM writer) and pass them to the driver, so all I/O
 // wiring stays at the edge.
 
 #include "wengine/core/runner.hpp"
+#include "wengine/signal/types.hpp"
 
 #include <cstdint>
 #include <string_view>
@@ -33,19 +39,7 @@ struct RunConfig {
   double y0 = 0.0;
   double vx0 = 10.0;
   double vy0 = 10.0;
-  // Signal-scoped (SIG-2): honored for solver "signal", rejected with any
-  // other solver (same pattern as gravity). `signals` sources spawn with
-  // identical params; per-source tuning is SIG-6/SIG-10 control-plane work.
-  std::string_view sig_kind = "sine";
-  double sig_freq = 1.0; // Hz
-  double sig_amp = 1.0; // SI peak (V or A per sig_quantity)
-  double sig_offset = 0.0; // SI base
-  double sig_phase = 0.0; // rad
-  double sig_duty = 0.5; // square/pulse high fraction
-  std::uint64_t sig_seed = 1; // noise only
-  std::string_view sig_quantity = "U"; // U|V (voltage) or I|A (current)
-  std::uint64_t signals = 1;
-  bool has_signal_opts = false; // set when any --sig-* was explicitly provided
+  signal::SignalRunConfig signal; // signal-scoped (count/params/set)
 };
 
 } // namespace wengine::core

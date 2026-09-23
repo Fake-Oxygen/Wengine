@@ -10,8 +10,9 @@
 // solvers::run_headless() bit-for-bit for the same config (same Runner
 // sequencing, same spawn order and initial values). Validation mirrors
 // run_headless(): dt > 0, steps >= 1, known solver name,
-// projectile-scoped gravity. A dedicated test guards this parity, so the
-// small spawn block duplicated from solvers/run.hpp cannot drift silently.
+// projectile-scoped gravity, signal-scoped section. A dedicated test
+// guards this parity, so the small spawn block duplicated from
+// solvers/run.hpp cannot drift silently.
 //
 // Engine-only includes: no ImGui, SDL, or Vulkan here, so unit tests link
 // wengine_core alone. GUI owns all I/O; failures surface as Status plus an
@@ -21,6 +22,7 @@
 #include "wengine/core/run_config.hpp"
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/sink.hpp"
+#include "wengine/signal/types.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 #include "wengine/world/state.hpp"
 
@@ -66,6 +68,13 @@ class SimController {
     const bool is_projectile = sdef->name == solvers::ProjectileSolver::kName;
     if (!is_projectile && cfg.has_gravity) {
       return reject("--gravity only applies to solver 'projectile'");
+    }
+    const bool is_signal = sdef->name == solvers::SignalSolver::kName;
+    if (!is_signal && cfg.signal.set) {
+      return reject("signal options only apply to solver 'signal'");
+    }
+    if (is_signal && !signal::validate_params(cfg.signal.params).ok()) {
+      return reject("invalid signal params (freq > 0, duty in 0..1)");
     }
     config_ = cfg;
     rebuild();
@@ -173,6 +182,14 @@ class SimController {
       runner_.state().particles.pos_y[e.index] = config_.y0;
       runner_.state().particles.vel_x[e.index] = config_.vx0;
       runner_.state().particles.vel_y[e.index] = config_.vy0;
+    }
+    if (solver_->name() == solvers::SignalSolver::kName) {
+      for (std::uint64_t k = 0; k < config_.signal.count; ++k) {
+        world::Entity e = runner_.state().spawn_entity();
+        signal::SignalParams p = config_.signal.params;
+        p.seed = config_.signal.params.seed + k;
+        world::configure_source(e, runner_.state().signals, p, 0.0);
+      }
     }
   }
 

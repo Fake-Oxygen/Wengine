@@ -202,37 +202,50 @@ void test_cli_shm() {
   assert(rc3 == 2 && s3.find("invalid SHM segment name") != std::string::npos);
 }
 
+std::pair<int, std::string> run_sig(std::string line) {
+  std::array<std::string_view, kMaxArgs> buf{};
+  const std::size_t n = tokenize_into(line, buf);
+  std::span<const std::string_view> args{buf.data(), n};
+  ArgCursor cur{args};
+  std::ostringstream out;
+  const int rc = wengine::cli::commands::SigSpec::run(cur, out);
+  return {rc, out.str()};
+}
+
 void test_cli_signal() {
   // DC golden: exact value in CLI text (three-level: solver -> CLI -> CSV).
   {
-    const auto [rc, s] = run_sim("run --solver signal --sig-kind dc --sig-offset 3.3V");
+    const auto [rc, s] = run_sig("run --sig-kind dc --sig-offset 3.3V");
     assert(rc == 0);
-    assert(s.find("solver=signal") != std::string::npos);
-    assert(s.find("kind=dc") != std::string::npos);
-    assert(s.find("particles: 0") != std::string::npos);
+    assert(s.find("sig run: kind=dc") != std::string::npos);
     assert(s.find("signals: 1") != std::string::npos);
     assert(s.find("s0: dc value=3.3 U") != std::string::npos);
   }
   // Sine smoke: 1 Hz at default dt, plus current stamping.
   {
-    const auto [rc, s] = run_sim(
-        "run --solver signal --sig-kind sine --sig-freq 1Hz --sig-amp 2V "
-        "--steps 10 --dt 10ms");
+    const auto [rc, s] =
+        run_sig("run --sig-kind sine --sig-freq 1Hz --sig-amp 2V --steps 10 --dt 10ms");
     assert(rc == 0 && s.find("s0: sine value=") != std::string::npos &&
            s.find(" U") != std::string::npos);
   }
   {
-    const auto [rc, s] = run_sim("run --solver signal --sig-kind dc --sig-offset 50mA "
-                                 "--sig-quantity I --steps 2");
+    const auto [rc, s] = run_sig("run --sig-kind dc --sig-offset 50mA --sig-quantity I "
+                                 "--steps 2");
     assert(rc == 0 && s.find("s0: dc value=0.05 I") != std::string::npos);
+  }
+  // Square duty + multi-source batch.
+  {
+    const auto [rc, s] = run_sig("run --sig-kind square --sig-freq 50Hz --sig-amp 5V "
+                                 "--sig-duty 0.25 --sig-count 2 --steps 3 --dt 1ms");
+    assert(rc == 0 && s.find("signals: 2") != std::string::npos &&
+           s.find("s1: square value=5 U") != std::string::npos);
   }
   // Signals CSV log carries the full stream for replay (D2b-A).
   {
     const std::string path = "/tmp/wengine_test_sim_sig.csv";
     std::remove(path.c_str());
-    const auto [rc, s] = run_sim("run --solver signal --sig-kind dc --sig-offset 1V "
-                                 "--steps 4 --emit-csv " +
-                                 path);
+    const auto [rc, s] =
+        run_sig("run --sig-kind dc --sig-offset 1V --steps 4 --emit-csv " + path);
     assert(rc == 0);
     assert(s.find("csv: " + path + " (4 rows)") != std::string::npos);
     std::ifstream in(path);
@@ -244,19 +257,33 @@ void test_cli_signal() {
     assert(row == "1,0.01,0,1,U");
     std::remove(path.c_str());
   }
-  // Scoping: --sig-* with projectile and --gravity with signal are usage errors.
+  // sim run stays vocabulary-free: signal opts there are usage errors, and
+  // the bare signal solver runs one default sine.
   assert(run_sim("run --solver projectile --sig-kind sine").first == 2);
   assert(run_sim("run --solver signal --gravity 9.81").first == 2);
-  assert(run_sim("run --solver signal --sig-kind sawtooth").first == 2);
-  assert(run_sim("run --solver signal --sig-quantity W").first == 2);
-  assert(run_sim("run --solver signal --sig-freq 0Hz").first == 2);
-  assert(run_sim("run --solver signal --sig-duty 2 --sig-kind square").first == 2);
-  assert(run_sim("run --solver signal --sig-seed -1").first == 2);
+  {
+    const auto [rc, s] = run_sim("run --solver signal --steps 2");
+    assert(rc == 0 && s.find("solver=signal") != std::string::npos &&
+           s.find("signals: 1") != std::string::npos &&
+           s.find("s0: sine value=") != std::string::npos);
+  }
+  // sig usage errors: missing mode, bad vocab, bad ranges, stray positionals.
+  assert(run_sig("--sig-kind dc").first == 2);
+  assert(run_sig("run extra").first == 2);
+  assert(run_sig("run --sig-kind sawtooth").first == 2);
+  assert(run_sig("run --sig-quantity W").first == 2);
+  assert(run_sig("run --sig-freq 0Hz").first == 2);
+  assert(run_sig("run --sig-duty 2 --sig-kind square").first == 2);
+  assert(run_sig("run --sig-seed -1").first == 2);
+  assert(run_sig("run --steps 0").first == 2);
+  {
+    const auto [rc, s] = run_sig("--help");
+    assert(rc == 0 && s.find("sig run") != std::string::npos);
+  }
   // SHM publishes signal channels through the signal adapter.
   {
     const std::string seg = "/wengine-test-sim-sig-" + std::to_string(::getpid());
-    const auto [rc, s] = run_sim("run --solver signal --sig-kind dc --sig-offset 1V "
-                                 "--steps 5 --emit-shm " +
+    const auto [rc, s] = run_sig("run --sig-kind dc --sig-offset 1V --steps 5 --emit-shm " +
                                  seg);
     assert(rc == 0);
     assert(s.find("shm: " + seg + " (5 frames)") != std::string::npos);

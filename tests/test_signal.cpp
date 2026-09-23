@@ -205,28 +205,30 @@ void test_run_headless_signal() {
 
   // Batch seeds derive (seed + index): two noise sources never alias.
   core::RunConfig cfg2 = cfg;
-  cfg2.sig_kind = "noise";
-  cfg2.sig_amp = 1.0;
-  cfg2.signals = 2;
+  cfg2.signal.params.kind = signal::SignalKind::kNoise;
+  cfg2.signal.params.amp = 1.0;
+  cfg2.signal.count = 2;
   world::State out2;
   assert(solvers::run_headless(cfg2, std::span<emit::ISink *>{}, out2).ok());
   assert(out2.signals.live_count == 2);
   assert(out2.signals.value[0] != out2.signals.value[1]);
   assert(out2.signals.seed[0] == 1 && out2.signals.seed[1] == 2);
 
-  // Rejections: signal opts with projectile, gravity with signal, bad params.
+  // Rejections: set signal section with projectile, gravity with signal,
+  // invalid params (sine at 0 Hz, square duty out of range).
   core::RunConfig bad = cfg;
   bad.solver = "projectile";
-  bad.has_signal_opts = true;
+  bad.signal.set = true;
   assert(!solvers::run_headless(bad, std::span<emit::ISink *>{}, out).ok());
   bad = cfg;
   bad.has_gravity = true;
   assert(!solvers::run_headless(bad, std::span<emit::ISink *>{}, out).ok());
   bad = cfg;
-  bad.sig_kind = "sawtooth";
+  bad.signal.params.freq_hz = 0.0;
   assert(!solvers::run_headless(bad, std::span<emit::ISink *>{}, out).ok());
   bad = cfg;
-  bad.sig_freq = 0.0;
+  bad.signal.params.kind = signal::SignalKind::kSquare;
+  bad.signal.params.duty = 2.0;
   assert(!solvers::run_headless(bad, std::span<emit::ISink *>{}, out).ok());
 }
 

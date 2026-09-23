@@ -115,6 +115,7 @@ if(BUILD_CLI)
         src/cli/commands/s0.cpp
         src/cli/commands/i2c.cpp
         src/cli/commands/sim.cpp
+        src/cli/commands/sig.cpp
     )
     target_include_directories(wengine_cli PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

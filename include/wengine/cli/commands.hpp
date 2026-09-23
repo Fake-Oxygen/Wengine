@@ -73,23 +73,41 @@ struct SimSpec {
       "sim run [--solver <name>] [--steps N] [--dt <s>] [--gravity <m/s^2>]\n"
       "        [--particles N] [--x0 X] [--y0 Y] [--vx0 VX] [--vy0 VY]\n"
       "        [--emit-csv <path>] [--emit-shm <name>] [--emit-every N]\n"
-      "        [--sig-kind <kind>] [--sig-freq <Hz>] [--sig-amp <V|A>]\n"
-      "        [--sig-offset <V|A>] [--sig-phase <rad>] [--sig-duty 0..1]\n"
-      "        [--sig-seed N] [--sig-quantity U|I] [--sig-count N]\n"
       "  sim run --steps 100 --particles 1   (projectile demo, all params named)\n"
-      "  sim run --solver signal --sig-kind sine --sig-freq 1Hz --sig-amp 3.3V\n"
-      "        --steps 100 --dt 10ms\n"
       "Solvers come from the compile-time registry (default projectile;\n"
       "  unknown names list the available ones). --gravity applies to the\n"
-      "  projectile solver only; --sig-* apply to the signal solver only\n"
-      "  (kinds: sine square triangle saw dc pulse noise; --sig-count spawns\n"
-      "  that many identical sources, noise seeds derive as seed+k).\n"
-      "  With solver signal, --particles defaults to 0 and --emit-csv writes\n"
-      "  the signals log (step,time,sig_id,value,quantity); --emit-shm\n"
-      "  publishes signal channels (sig.<slot>.U).\n"
-      "  Particle population is generic setup.\n"
+      "  projectile solver only; particle population is generic setup.\n"
+      "  No solver-scoped options beyond --gravity live here: signal sources\n"
+      "  are tuned in the sig command (sim run --solver signal runs one\n"
+      "  default 1 Hz sine with zero particles). With solver signal,\n"
+      "  --emit-csv writes the signals log and --emit-shm publishes signal\n"
+      "  channels (sig.<slot>.U).\n"
       "Defaults: steps=100, dt=0.01s, gravity=9.81, particles=1,\n"
       "  x0=y0=0, vx0=vy0=10, emit-every=1. Time unit: s/ms/us/ns.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                       std::vector<std::string> &out);
+};
+
+struct SigSpec {
+  static constexpr std::string_view kName = "sig";
+  static constexpr std::string_view kDescription = "Generate signals (sine/square/triangle/saw/dc/pulse/noise)";
+  static constexpr std::string_view kUsage =
+      "sig run [--sig-kind <kind>] [--sig-freq <Hz>] [--sig-amp <V|A>]\n"
+      "        [--sig-offset <V|A>] [--sig-phase <rad>] [--sig-duty 0..1]\n"
+      "        [--sig-seed N] [--sig-quantity U|I] [--sig-count N]\n"
+      "        [--steps N] [--dt <s>] [--emit-csv <path>] [--emit-shm <name>]\n"
+      "        [--emit-every N]\n"
+      "  sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --steps 1000 --dt 0.1ms\n"
+      "Kinds: sine square triangle saw dc pulse noise (--sig-count spawns\n"
+      "  that many identical sources; noise seeds derive as seed+k).\n"
+      "  --sig-freq takes Hz/kHz; --sig-amp/--sig-offset take V/mV/kV or\n"
+      "  A/mA per --sig-quantity U|I. --emit-csv writes the signals log\n"
+      "  (step,time,sig_id,value,quantity); --emit-shm publishes signal\n"
+      "  channels (sig.<slot>.U). Per-source tuning is future work (SIG-6).\n"
+      "Defaults: kind=sine, freq=1Hz, amp=1, offset=0, phase=0, duty=0.5,\n"
+      "  seed=1, quantity=U, count=1, steps=100, dt=0.01s, emit-every=1.";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial,

@@ -45,11 +45,9 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 
 constexpr std::array<std::string_view, 1> kSimModes{{"run"}};
 
-constexpr std::array<std::string_view, 26> kSimOptions{{
+constexpr std::array<std::string_view, 17> kSimOptions{{
     "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
     "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-every", "--help", "-h",
-    "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset", "--sig-phase", "--sig-duty",
-    "--sig-seed", "--sig-quantity", "--sig-count",
 }};
 
 } // namespace
@@ -146,35 +144,6 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     solver_name = *o;
   }
 
-  // Signal-scoped options (raw first: amp/offset parse against --sig-quantity).
-  const auto o_sig_kind = args.take_option({"--sig-kind"});
-  const auto o_sig_freq = args.take_option({"--sig-freq"});
-  const auto o_sig_amp = args.take_option({"--sig-amp"});
-  const auto o_sig_offset = args.take_option({"--sig-offset"});
-  const auto o_sig_phase = args.take_option({"--sig-phase"});
-  const auto o_sig_duty = args.take_option({"--sig-duty"});
-  const auto o_sig_seed = args.take_option({"--sig-seed"});
-  const auto o_sig_quantity = args.take_option({"--sig-quantity"});
-  const auto o_sig_count = args.take_option({"--sig-count"});
-  const bool has_signal_opts = o_sig_kind || o_sig_freq || o_sig_amp || o_sig_offset ||
-                               o_sig_phase || o_sig_duty || o_sig_seed || o_sig_quantity ||
-                               o_sig_count;
-  std::string_view sig_kind = "sine";
-  std::string_view sig_quantity = "U";
-  double sig_freq = 1.0;
-  double sig_amp = 1.0;
-  double sig_offset = 0.0;
-  double sig_phase = 0.0;
-  double sig_duty = 0.5;
-  long long sig_seed = 1;
-  long long sig_count = 1;
-  if (o_sig_kind) {
-    sig_kind = *o_sig_kind;
-  }
-  if (o_sig_quantity) {
-    sig_quantity = *o_sig_quantity;
-  }
-
   // Mode subcommand: exactly one `run` positional; all params are named.
   std::array<std::string_view, 2> pos{};
   std::size_t n_pos = 0;
@@ -218,106 +187,16 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   }
   // --gravity applies to the projectile solver specifically. This message
   // stays CLI-owned; the engine driver re-validates for all frontends.
+  // NOTE: no solver-scoped options beyond --gravity live here by policy:
+  // signal sources are tuned in the sig command. With solver signal, sim
+  // runs one default 1 Hz sine (RunConfig defaults) with zero particles.
   const bool is_projectile = sdef->name == solvers::ProjectileSolver::kName;
   if (!is_projectile && has_gravity) {
     return usage_error(out, "--gravity only applies to solver 'projectile'");
   }
-  // --sig-* apply to the signal solver specifically (same pattern).
+  // Domain dispatch for outputs only (no solver vocabulary): signal runs
+  // log the signals table and publish signal channels.
   const bool is_signal = sdef->name == solvers::SignalSolver::kName;
-  if (!is_signal && has_signal_opts) {
-    return usage_error(out, "--sig-* only applies to solver 'signal'");
-  }
-  signal::SignalKind sig_kind_parsed = signal::SignalKind::kSine;
-  signal::QuantityId sig_qty_parsed = signal::QuantityId::kVoltage;
-  if (is_signal) {
-    const auto kind = signal::parse_kind(sig_kind);
-    if (!kind.ok()) {
-      return usage_error(out, "unknown signal kind (want sine|square|triangle|saw|dc|pulse|noise)");
-    }
-    sig_kind_parsed = kind.value;
-    const auto qty = signal::parse_quantity(sig_quantity);
-    if (!qty.ok()) {
-      return usage_error(out, "unknown signal quantity (want U|I)");
-    }
-    sig_qty_parsed = qty.value;
-    // Amp/offset parse against the stamped quantity (V or A suffixes).
-    auto take_qty = [&](std::optional<std::string_view> o, const char *what,
-                        double &slot) -> bool {
-      if (o) {
-        const auto p = (sig_qty_parsed == signal::QuantityId::kCurrent)
-                           ? parse_current(*o)
-                           : parse_voltage(*o);
-        if (!p.ok()) {
-          out << "Error: invalid " << what << " '" << *o << "'\n";
-          out << kUsage << '\n';
-          return false;
-        }
-        slot = p.value;
-      }
-      return true;
-    };
-    if (o_sig_freq) {
-      const auto p = parse_frequency(*o_sig_freq);
-      if (!p.ok()) {
-        out << "Error: invalid signal frequency '" << *o_sig_freq << "'\n";
-        out << kUsage << '\n';
-        return core::kExitUsage;
-      }
-      sig_freq = p.value;
-    }
-    if (!take_qty(o_sig_amp, "signal amplitude", sig_amp) ||
-        !take_qty(o_sig_offset, "signal offset", sig_offset)) {
-      return core::kExitUsage;
-    }
-    if (o_sig_phase) {
-      const auto p = parse_double(*o_sig_phase);
-      if (!p.ok()) {
-        out << "Error: invalid signal phase '" << *o_sig_phase << "'\n";
-        out << kUsage << '\n';
-        return core::kExitUsage;
-      }
-      sig_phase = p.value;
-    }
-    if (o_sig_duty) {
-      const auto p = parse_double(*o_sig_duty);
-      if (!p.ok()) {
-        out << "Error: invalid signal duty '" << *o_sig_duty << "'\n";
-        out << kUsage << '\n';
-        return core::kExitUsage;
-      }
-      sig_duty = p.value;
-    }
-    if (o_sig_seed) {
-      const auto p = parse_i64(*o_sig_seed);
-      if (!p.ok()) {
-        out << "Error: invalid signal seed '" << *o_sig_seed << "'\n";
-        out << kUsage << '\n';
-        return core::kExitUsage;
-      }
-      sig_seed = p.value;
-    }
-    if (o_sig_count) {
-      const auto p = parse_i64(*o_sig_count);
-      if (!p.ok()) {
-        out << "Error: invalid signal count '" << *o_sig_count << "'\n";
-        out << kUsage << '\n';
-        return core::kExitUsage;
-      }
-      sig_count = p.value;
-    }
-    // Engine re-validates (freq/duty); the CLI reports them as usage errors.
-    signal::SignalParams check{sig_kind_parsed,
-                               sig_qty_parsed,
-                               sig_freq,
-                               sig_amp,
-                               sig_offset,
-                               sig_phase,
-                               sig_duty,
-                               static_cast<std::uint64_t>(sig_seed < 0 ? 0 : sig_seed)};
-    if (sig_seed < 0 || sig_count < 0 || !signal::validate_params(check).ok()) {
-      return usage_error(out, "invalid signal params (freq > 0, duty in 0..1, seed/count >= 0)");
-    }
-  }
 
   // Headless run goes through the engine seam: the CLI builds a RunConfig
   // (plain data, no engine wiring here) and the driver owns the rest.
@@ -337,16 +216,6 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   cfg.y0 = y0;
   cfg.vx0 = vx0;
   cfg.vy0 = vy0;
-  cfg.sig_kind = sig_kind;
-  cfg.sig_freq = sig_freq;
-  cfg.sig_amp = sig_amp;
-  cfg.sig_offset = sig_offset;
-  cfg.sig_phase = sig_phase;
-  cfg.sig_duty = sig_duty;
-  cfg.sig_seed = static_cast<std::uint64_t>(sig_seed);
-  cfg.sig_quantity = sig_quantity;
-  cfg.signals = static_cast<std::uint64_t>(sig_count);
-  cfg.has_signal_opts = has_signal_opts;
 
   // Signal runs log the signals table (D2b-A); particle runs keep CsvSink.
   std::optional<emit::CsvSink> csv;
@@ -407,9 +276,6 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   out << "sim run: solver=" << solver_name;
   if (is_projectile) {
     out << " g=" << gravity;
-  }
-  if (is_signal) {
-    out << " kind=" << sig_kind;
   }
   out << '\n';
   out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
@@ -477,34 +343,6 @@ void SimSpec::complete(std::span<const std::string_view> prior_args, std::string
     for (const auto &d : solvers::SolverRegistry::all()) {
       if (d.name.substr(0, sub.size()) == sub) {
         out.emplace_back(std::string{kSolverEq} + std::string{d.name});
-      }
-    }
-    return;
-  }
-  // Values for a preceding "--sig-kind".
-  if (!prior_args.empty() && prior_args.back() == "--sig-kind") {
-    for (std::string_view k : signal::kKindNames) {
-      if (k.substr(0, partial.size()) == partial) {
-        out.emplace_back(k);
-      }
-    }
-    return;
-  }
-  constexpr std::string_view kKindEq = "--sig-kind=";
-  if (partial.substr(0, kKindEq.size()) == kKindEq) {
-    const std::string_view sub = partial.substr(kKindEq.size());
-    for (std::string_view k : signal::kKindNames) {
-      if (k.substr(0, sub.size()) == sub) {
-        out.emplace_back(std::string{kKindEq} + std::string{k});
-      }
-    }
-    return;
-  }
-  // Values for a preceding "--sig-quantity".
-  if (!prior_args.empty() && prior_args.back() == "--sig-quantity") {
-    for (std::string_view q : {"U", "I"}) {
-      if (q.substr(0, partial.size()) == partial) {
-        out.emplace_back(q);
       }
     }
     return;
