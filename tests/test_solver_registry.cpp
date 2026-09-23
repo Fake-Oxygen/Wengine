@@ -15,8 +15,9 @@ constexpr bool near(double a, double b, double eps = 1e-9) {
 
 void test_registry_compile_time() {
   static_assert(solvers::SolverRegistry::find("projectile") != nullptr);
+  static_assert(solvers::SolverRegistry::find("signal") != nullptr);
   static_assert(solvers::SolverRegistry::find("nope") == nullptr);
-  static_assert(solvers::SolverRegistry::all().size() == 1);
+  static_assert(solvers::SolverRegistry::all().size() == 2);
   static_assert(!solvers::SolverRegistry::all()[0].description.empty());
   static_assert(solvers::SolverRegistry::find("projectile")->create != nullptr);
 }

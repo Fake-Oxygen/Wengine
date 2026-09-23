@@ -5,9 +5,10 @@
 
 #include "wengine/solvers/projectile.hpp"
 #include "wengine/solvers/registry.hpp"
+#include "wengine/solvers/signal.hpp"
 
 namespace wengine::solvers {
 
-using SolverRegistry = Registry<ProjectileSolver>;
+using SolverRegistry = Registry<ProjectileSolver, SignalSolver>;
 
 } // namespace wengine::solvers

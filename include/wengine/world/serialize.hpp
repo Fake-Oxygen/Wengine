@@ -2,17 +2,21 @@
 
 // Versioned binary persistence for world::State (deterministic, no deps).
 //
-// Format v1, all integers little-endian, doubles as IEEE-754 bits:
-//   'W' 'E' 'N' 'G', u32 version (= 1)
+// Format v2, all integers little-endian, doubles as IEEE-754 bits:
+//   'W' 'E' 'N' 'G', u32 version (= 2)
 //   f64 sim_time, u64 step_index
 //   u32 entity_capacity, generations[u32]..., u32 freelist_size, freelist[u32]...
 //   u32 particle_capacity, per slot: u8 present + f64 x4 (fixed stride)
+//   u32 signal_capacity, per slot: u8 present, u8 kind, u8 quantity,
+//     u8 running, f64 freq/amp/offset/phase/duty/t0/value, u64 seed, u64 rng
+// v1 files (no signal section) still load: signals come back empty.
 // Freelist order is stored, so a round-trip preserves exact spawn-reuse
 // behavior. load_state() replaces the target; corrupt input (bad magic,
 // version, truncation, out-of-range indices) yields kInvalidArgument and
 // leaves the target cleared. Write failures yield kInternal.
 
 #include "wengine/core/status.hpp"
+#include "wengine/signal/types.hpp"
 #include "wengine/world/state.hpp"
 
 #include <bit>
@@ -25,7 +29,7 @@
 
 namespace wengine::world {
 
-inline constexpr std::uint32_t kStateFormatVersion = 1;
+inline constexpr std::uint32_t kStateFormatVersion = 2;
 // Sanity cap per count field: rejects corrupt files before huge allocs.
 inline constexpr std::uint32_t kMaxStateEntries = 1u << 24;
 
@@ -126,6 +130,23 @@ inline bool get_f64_le(std::istream &in, double &v) {
     detail::put_f64_le(out, s.particles.vel_x[i]);
     detail::put_f64_le(out, s.particles.vel_y[i]);
   }
+  const std::size_t sig_cap = s.signals.capacity();
+  detail::put_u32_le(out, static_cast<std::uint32_t>(sig_cap));
+  for (std::size_t i = 0; i < sig_cap; ++i) {
+    detail::put_u8(out, s.signals.present[i]);
+    detail::put_u8(out, s.signals.kind[i]);
+    detail::put_u8(out, s.signals.quantity[i]);
+    detail::put_u8(out, s.signals.running[i]);
+    detail::put_f64_le(out, s.signals.freq[i]);
+    detail::put_f64_le(out, s.signals.amp[i]);
+    detail::put_f64_le(out, s.signals.offset[i]);
+    detail::put_f64_le(out, s.signals.phase[i]);
+    detail::put_f64_le(out, s.signals.duty[i]);
+    detail::put_f64_le(out, s.signals.t0[i]);
+    detail::put_f64_le(out, s.signals.value[i]);
+    detail::put_u64_le(out, s.signals.seed[i]);
+    detail::put_u64_le(out, s.signals.rng[i]);
+  }
   if (!out) {
     return {core::StatusCode::kInternal};
   }
@@ -143,7 +164,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
     return invalid();
   }
   std::uint32_t version = 0;
-  if (!detail::get_u32_le(in, version) || version != kStateFormatVersion) {
+  if (!detail::get_u32_le(in, version) || (version != 1 && version != kStateFormatVersion)) {
     return invalid();
   }
   State tmp;
@@ -197,6 +218,57 @@ inline bool get_f64_le(std::istream &in, double &v) {
     }
   }
   tmp.entities.restore(std::move(gens), std::move(free));
+  if (version == 1) {
+    s = std::move(tmp); // v1 has no signal section: signals stay empty
+    return core::Status::success();
+  }
+  std::uint32_t sig_cap = 0;
+  if (!detail::get_u32_le(in, sig_cap) || sig_cap > kMaxStateEntries) {
+    return invalid();
+  }
+  tmp.signals.kind.resize(sig_cap);
+  tmp.signals.quantity.resize(sig_cap);
+  tmp.signals.freq.resize(sig_cap);
+  tmp.signals.amp.resize(sig_cap);
+  tmp.signals.offset.resize(sig_cap);
+  tmp.signals.phase.resize(sig_cap);
+  tmp.signals.duty.resize(sig_cap);
+  tmp.signals.seed.resize(sig_cap);
+  tmp.signals.rng.resize(sig_cap);
+  tmp.signals.t0.resize(sig_cap);
+  tmp.signals.value.resize(sig_cap);
+  tmp.signals.running.resize(sig_cap);
+  tmp.signals.present.resize(sig_cap);
+  tmp.signals.live_count = 0;
+  for (std::uint32_t i = 0; i < sig_cap; ++i) {
+    std::uint8_t p = 0;
+    std::uint8_t kind = 0;
+    std::uint8_t qty = 0;
+    std::uint8_t run = 0;
+    if (!detail::get_u8(in, p) || p > 1 || !detail::get_u8(in, kind) ||
+        kind > static_cast<std::uint8_t>(signal::SignalKind::kNoise) ||
+        !detail::get_u8(in, qty) ||
+        qty > static_cast<std::uint8_t>(signal::QuantityId::kCurrent) ||
+        !detail::get_u8(in, run) || run > 1) {
+      return invalid();
+    }
+    tmp.signals.present[i] = p;
+    tmp.signals.live_count += p;
+    tmp.signals.kind[i] = kind;
+    tmp.signals.quantity[i] = qty;
+    tmp.signals.running[i] = run;
+    if (!detail::get_f64_le(in, tmp.signals.freq[i]) ||
+        !detail::get_f64_le(in, tmp.signals.amp[i]) ||
+        !detail::get_f64_le(in, tmp.signals.offset[i]) ||
+        !detail::get_f64_le(in, tmp.signals.phase[i]) ||
+        !detail::get_f64_le(in, tmp.signals.duty[i]) ||
+        !detail::get_f64_le(in, tmp.signals.t0[i]) ||
+        !detail::get_f64_le(in, tmp.signals.value[i]) ||
+        !detail::get_u64_le(in, tmp.signals.seed[i]) ||
+        !detail::get_u64_le(in, tmp.signals.rng[i])) {
+      return invalid();
+    }
+  }
   s = std::move(tmp);
   return core::Status::success();
 }

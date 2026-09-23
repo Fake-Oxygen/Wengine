@@ -40,6 +40,7 @@ ctest --test-dir build --output-on-failure
 ./build/bench_s0
 ./build/bench_i2c
 ./build/bench_projectile
+./build/bench_signal
 ```
 
 Benchmarks use runtime-generated (opaque) inputs so the `constexpr`
@@ -153,6 +154,25 @@ compile-time solver registry (default `projectile`; unknown names list what's
 available), so new stepped solvers become runnable without touching the CLI —
 `--gravity` applies to `projectile` only, particle population is generic setup.
 
+Signal generation (`--solver signal`): unlimited sources, stamped U/I:
+
+```text
+> sim run --solver signal --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --steps 1000 --dt 0.1ms
+> sim run --solver signal --sig-kind square --sig-freq 50Hz --sig-amp 5V --sig-duty 0.25
+> sim run --solver signal --sig-kind noise --sig-amp 1V --sig-seed 7 --sig-count 2
+> sim run --solver signal --sig-kind dc --sig-offset 2.5V --emit-csv sig.csv --emit-shm /wengine-sig
+```
+
+Kinds: `sine square triangle saw dc pulse noise` (`--sig-kind`, Tab-completed).
+`--sig-freq` (`Hz`/`kHz`), `--sig-amp`/`--sig-offset` (`V`/`mV`/`kV` or
+`A`/`mA` per `--sig-quantity U|I`), `--sig-phase` (rad), `--sig-duty`
+(square/pulse high fraction), `--sig-seed` (noise; source `k` uses
+`seed+k`), `--sig-count` (identical sources, default 1). With solver
+`signal`, `--particles` defaults to 0 and `--emit-csv` writes the signals
+log (`step,time,sig_id,value,quantity`, exact round-trip); `--emit-shm`
+publishes signal channels (`sig.<slot>.U`). See `docs/signals.md` for the
+full design (routing, control plane, Lua, Zephyr transports).
+
 Argument forms (see `wengine/cli/args.hpp`): positional values with unit
 suffixes (`12V`, `0.5A`, `4Ohm`, bare numbers = SI units), named options
 `--key value` / `--key=value` / `-k value` (`--u/-U/--voltage`,
@@ -174,10 +194,11 @@ tests/  benchmarks/  examples/
 | Module | Path | Role |
 |---|---|---|
 | `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
-| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
+| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `signal.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step`, `SignalSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
+| `signal` | `wengine/signal/types.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation — no I/O; pool lives in `world` |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp`, `run_config.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
-| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `State` (clock + entities + pools), deep-copy `Snapshot`, versioned binary save/load |
-| `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision) |
+| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (signal sources, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot`, versioned binary save/load (v2; v1 loads with empty signals) |
+| `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion |
 
@@ -227,7 +248,10 @@ into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
 `src/cli/commands/i2c.cpp`, `src/cli/commands/sim.cpp`) links `wengine_core`;
 `PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
 (link core), `test_cli_args`, `test_s0`, `test_i2c`, `test_sim` (link cli),
-`test_solver_registry`, `test_runner`, `test_world`, `test_emit`,
+`test_solver_registry`, `test_runner`, `test_signal` (waveform goldens,
+seeded-noise sequence, solver end-of-step convention, headless signal
+config + rejections, signal Frame adapter + wire round-trip, signals CSV
+round-trip, v2/v1 serialization), `test_world`, `test_emit`,
 `test_link_protocol` (solver-agnostic items/channels wire frame, particle
 adapter, encode/decode exactness, seqlock states incl. threaded hammer,
 version gate, lag accounting), `test_link_shm` (segment create/publish/
@@ -243,7 +267,8 @@ CSV-exactness, sink re-attach, plot bounds), `test_gui_stream_source`
 (SHM subscribe parity + lag isolation, CSV replay transport/pacing,
 CLI/frame/CSV exactness), `test_canvas2d` (2D mapping,
 fit, zoom/pan, grid steps). Benchmarks:
-`bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_link`
+`bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_signal`
+(ns/source-step over a live Runner + SignalSolver, opaque params), `bench_link`
 (publish ns/frame + frames/s through a live SHM segment, slow-reader
 published/received/missed/max_gap).
 
@@ -355,14 +380,14 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   panel); switching sources clears the shared history (one clock per view).
   Startup layout is 1600x900: sim + live views
   open, calculators and plots collapsed one click away.
-benchmarks/bench_{ohm,s0,i2c,projectile}.cpp
+benchmarks/bench_{ohm,s0,i2c,projectile,signal}.cpp
 examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   + link_bridge.cpp (CSV<->bus replay bridge: play/record, built with CLI)
   + link_fastread.cpp (minimum-loss subscriber: no per-frame print, reused
   buffers, lag/loss summary; built with CLI)
-include/wengine/{cli,core,emit,link,physics,solvers,units,world}/  (no math dir: glm used directly)
+include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

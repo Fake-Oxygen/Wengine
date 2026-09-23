@@ -202,6 +202,67 @@ void test_cli_shm() {
   assert(rc3 == 2 && s3.find("invalid SHM segment name") != std::string::npos);
 }
 
+void test_cli_signal() {
+  // DC golden: exact value in CLI text (three-level: solver -> CLI -> CSV).
+  {
+    const auto [rc, s] = run_sim("run --solver signal --sig-kind dc --sig-offset 3.3V");
+    assert(rc == 0);
+    assert(s.find("solver=signal") != std::string::npos);
+    assert(s.find("kind=dc") != std::string::npos);
+    assert(s.find("particles: 0") != std::string::npos);
+    assert(s.find("signals: 1") != std::string::npos);
+    assert(s.find("s0: dc value=3.3 U") != std::string::npos);
+  }
+  // Sine smoke: 1 Hz at default dt, plus current stamping.
+  {
+    const auto [rc, s] = run_sim(
+        "run --solver signal --sig-kind sine --sig-freq 1Hz --sig-amp 2V "
+        "--steps 10 --dt 10ms");
+    assert(rc == 0 && s.find("s0: sine value=") != std::string::npos &&
+           s.find(" U") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sim("run --solver signal --sig-kind dc --sig-offset 50mA "
+                                 "--sig-quantity I --steps 2");
+    assert(rc == 0 && s.find("s0: dc value=0.05 I") != std::string::npos);
+  }
+  // Signals CSV log carries the full stream for replay (D2b-A).
+  {
+    const std::string path = "/tmp/wengine_test_sim_sig.csv";
+    std::remove(path.c_str());
+    const auto [rc, s] = run_sim("run --solver signal --sig-kind dc --sig-offset 1V "
+                                 "--steps 4 --emit-csv " +
+                                 path);
+    assert(rc == 0);
+    assert(s.find("csv: " + path + " (4 rows)") != std::string::npos);
+    std::ifstream in(path);
+    std::string header;
+    assert(static_cast<bool>(std::getline(in, header)));
+    assert(header == "step,time,sig_id,value,quantity");
+    std::string row;
+    assert(static_cast<bool>(std::getline(in, row)));
+    assert(row == "1,0.01,0,1,U");
+    std::remove(path.c_str());
+  }
+  // Scoping: --sig-* with projectile and --gravity with signal are usage errors.
+  assert(run_sim("run --solver projectile --sig-kind sine").first == 2);
+  assert(run_sim("run --solver signal --gravity 9.81").first == 2);
+  assert(run_sim("run --solver signal --sig-kind sawtooth").first == 2);
+  assert(run_sim("run --solver signal --sig-quantity W").first == 2);
+  assert(run_sim("run --solver signal --sig-freq 0Hz").first == 2);
+  assert(run_sim("run --solver signal --sig-duty 2 --sig-kind square").first == 2);
+  assert(run_sim("run --solver signal --sig-seed -1").first == 2);
+  // SHM publishes signal channels through the signal adapter.
+  {
+    const std::string seg = "/wengine-test-sim-sig-" + std::to_string(::getpid());
+    const auto [rc, s] = run_sim("run --solver signal --sig-kind dc --sig-offset 1V "
+                                 "--steps 5 --emit-shm " +
+                                 seg);
+    assert(rc == 0);
+    assert(s.find("shm: " + seg + " (5 frames)") != std::string::npos);
+  }
+}
+
 } // namespace
 
 int main() {
@@ -213,6 +274,7 @@ int main() {
   test_cli_shm();
   test_cli_solver_selection();
   test_cli_errors();
+  test_cli_signal();
   std::cout << "test_sim: OK\n";
   return 0;
 }

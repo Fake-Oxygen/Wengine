@@ -37,17 +37,27 @@ wengine::world::Snapshot make_snap(std::uint64_t step) {
 }
 
 void test_registry() {
-  // One entry today; update with each new solver adapter.
-  static_assert(std::tuple_size_v<decltype(wengine::gui::kFrameSources)> == 1);
+  // One entry per solver adapter; update with each new domain.
+  static_assert(std::tuple_size_v<decltype(wengine::gui::kFrameSources)> == 2);
   const wengine::world::Snapshot s = make_snap(3);
   const wengine::link::Frame via_reg =
       wengine::gui::adapt_frame(s, "projectile");
   const wengine::link::Frame direct = wengine::link::frame_from_snapshot(s);
   assert(via_reg == direct);
-  // Unknown names fall back to the particle mapping (the only domain
-  // today); a future domain entry replaces this path.
+  // Unknown names fall back to the particle mapping; the signal domain
+  // has its own entry (channels only, no items).
   const wengine::link::Frame fallback = wengine::gui::adapt_frame(s, "nope");
   assert(fallback.items.size() == 1 && fallback.items[0].x == 1.0);
+  wengine::world::Snapshot sig;
+  sig.step_index = 7;
+  sig.sim_time = 0.07;
+  sig.sig_slot.push_back(0);
+  sig.sig_value.push_back(3.3);
+  sig.sig_quantity.push_back(0);
+  const wengine::link::Frame via_sig = wengine::gui::adapt_frame(sig, "signal");
+  assert(via_sig.items.empty() && via_sig.channels.size() == 2);
+  assert(via_sig.channels[0].name == "sig.count");
+  assert(via_sig.channels[1].name == "sig.0.U" && via_sig.channels[1].value == 3.3);
 }
 
 void test_default_channel() {

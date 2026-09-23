@@ -33,6 +33,19 @@ struct RunConfig {
   double y0 = 0.0;
   double vx0 = 10.0;
   double vy0 = 10.0;
+  // Signal-scoped (SIG-2): honored for solver "signal", rejected with any
+  // other solver (same pattern as gravity). `signals` sources spawn with
+  // identical params; per-source tuning is SIG-6/SIG-10 control-plane work.
+  std::string_view sig_kind = "sine";
+  double sig_freq = 1.0; // Hz
+  double sig_amp = 1.0; // SI peak (V or A per sig_quantity)
+  double sig_offset = 0.0; // SI base
+  double sig_phase = 0.0; // rad
+  double sig_duty = 0.5; // square/pulse high fraction
+  std::uint64_t sig_seed = 1; // noise only
+  std::string_view sig_quantity = "U"; // U|V (voltage) or I|A (current)
+  std::uint64_t signals = 1;
+  bool has_signal_opts = false; // set when any --sig-* was explicitly provided
 };
 
 } // namespace wengine::core

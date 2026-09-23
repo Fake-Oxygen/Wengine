@@ -21,9 +21,12 @@ Current state:
 * REPL and headless execution
 * Closed-form solvers: `ohm`, `s0`, `i2c`
 * Stepped solver: `projectile`
-* `sim run` command
+* `sim run` command (`--emit-csv`, `--emit-shm`)
 * Console and CSV sinks
 * GUI: solver panels, stepped-sim control, graphs, 2D canvas, 3D viewport
+* GUI engine linkage: in-process + SHM subscribe + CSV replay (source panel)
+* `wengine-link` SHM bus: versioned seqlock snapshot bus with C++ publisher/
+  reader endpoints, CSV↔bus replay bridge, sample + fast subscriber tools
 
 ### Project priorities
 
@@ -132,11 +135,15 @@ Directory structure:
 
 ```text
 include/wengine/<module>/*.hpp   public engine API
+include/wengine/link/*.hpp       wire protocol + shared Frame (solver-agnostic)
 src/cli/*.cpp                    CLI implementation
+src/link/*.cpp                   POSIX SHM endpoints (platform TUs, see below)
 apps/cli/main.cpp                application entry point
 apps/gui/main.cpp                GUI entry (thin assembly)
 apps/gui/{backend,controllers,models,panels,views}/
                                  GUI layers (see GUI rules below)
+examples/link_{sample,bridge,fastread}.cpp
+                                 link tools (built with CLI)
 tests/test_<domain>.cpp          domain tests
 ```
 
@@ -146,6 +153,8 @@ Dependency direction:
 solvers -> units, math
 world   -> standalone state
 emit    -> world
+link    -> world (+ core/status vocabulary; endpoints attach as emit::ISink
+           at the app edge, never inside the engine)
 cli     -> solvers, core
 core/solver.hpp -> world
 apps    -> cli + core
@@ -166,6 +175,10 @@ there is a concrete reason to introduce translation units.
 
 `src/` is currently for CLI and future platform-specific implementation code.
 
+The established exception is platform syscalls: link SHM endpoints live in
+`src/link/*.cpp` under the `wengine_link_shm` STATIC target while their
+headers stay platform-free (a Windows port replaces the TU, never the header).
+
 ### I/O boundaries
 
 Engine and solver code must not depend on `iostream` for application I/O.
@@ -183,7 +196,9 @@ the files that need them (no empty placeholder dirs).
 
 * `backend/` owns SDL/Vulkan lifetime and frame render/present.
 * `controllers/` own `Runner` + solver, rebuild from `RunConfig`, and
-  re-attach non-owning sinks on every rebuild.
+  re-attach non-owning sinks on every rebuild. External sources
+  (`ShmSource`, `CsvReplay`) own no sim state: lag and failure stay on
+  the display side by construction.
 * `models/` holds engine-only logic (no ImGui): unit-tested linking
   `wengine_core` alone.
 * `panels/` renders ImGui UI; verified by windowed runs/screenshots.
@@ -362,6 +377,19 @@ A sink failure must not silently alter simulation state or simulation timing.
 
 Whoever owns a run loop re-attaches its non-owning observers after every
 rebuild; sinks themselves stay unaware of rebuilds.
+
+Link transports (`wengine-link` SHM bus):
+
+* publishers are `ISink`s owned at the app edge, never in `RunConfig`;
+* the publish path performs no syscalls or I/O: adapt, encode, seqlock copy;
+* failures are sticky `Status`, never throws; over-bound frames are dropped
+  loudly and counted, never silently truncated;
+* wire versions exact-match at attach with a loud found-version refusal;
+  version 0 is reserved as the mid-construction marker, never assigned;
+* the writer drops oldest on full; readers take latest only and never drain
+  a backlog; receiver lag never alters sim state or timing;
+* readers never unlink (the publisher owns the segment lifetime); a
+  same-name publisher restart needs explicit re-attach (stale mapping).
 
 ---
 

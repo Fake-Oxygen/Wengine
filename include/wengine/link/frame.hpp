@@ -20,6 +20,7 @@
 //     (frame_from_snapshot() is the particle one, the only one today).
 //     Snapshot must NOT grow for GUI/link needs (project rule).
 
+#include "wengine/signal/types.hpp"
 #include "wengine/world/state.hpp"
 
 #include <cmath>
@@ -27,7 +28,6 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-
 namespace wengine::link {
 
 struct FrameItem {
@@ -101,8 +101,7 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
 // bounds it is exact — snapshot_from_frame(frame_from_snapshot(s)) == s —
 // so a bus recording of a CSV playback is byte-identical to the source
 // log. May allocate (vectors); never call inside the sim loop.
-[[nodiscard]] inline world::Snapshot snapshot_from_frame(const Frame &f) {
-  world::Snapshot s;
+[[nodiscard]] inline world::Snapshot snapshot_from_frame(const Frame &f) {  world::Snapshot s;
   s.step_index = f.step;
   s.sim_time = f.time;
   s.pos_x.reserve(f.items.size());
@@ -116,6 +115,26 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
     s.vel_y.push_back(it.vy);
   }
   return s;
+}
+
+// Signal adapter (SIG-2): Snapshot signal arrays -> generic Frame. One
+// channel per live source (`sig.<slot>.U`, suffix per stamped quantity)
+// plus the live count; no items (signals are scalar probes, not glyphs).
+// Deterministic: dense slot order in, channel order out, so round-trips
+// are exactly equal. Allocates like the particle adapter above.
+[[nodiscard]] inline Frame frame_from_signal_snapshot(const world::Snapshot &s) {
+  Frame f;
+  f.step = s.step_index;
+  f.time = s.sim_time;
+  f.channels.reserve(s.signal_count() + 1);
+  f.channels.push_back({"sig.count", static_cast<double>(s.signal_count())});
+  for (std::size_t k = 0; k < s.signal_count(); ++k) {
+    const auto qty = static_cast<signal::QuantityId>(s.sig_quantity[k]);
+    std::string name = "sig." + std::to_string(s.sig_slot[k]) + "." +
+                       std::string(signal::quantity_suffix(qty));
+    f.channels.push_back({name, s.sig_value[k]});
+  }
+  return f;
 }
 
 } // namespace wengine::link

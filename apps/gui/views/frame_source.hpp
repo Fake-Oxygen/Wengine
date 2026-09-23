@@ -49,8 +49,9 @@ struct FrameSourceDef {
   FrameAdapter adapt;
 };
 
-inline constexpr std::array<FrameSourceDef, 1> kFrameSources = {{
+inline constexpr std::array<FrameSourceDef, 2> kFrameSources = {{
     {"projectile", &link::frame_from_snapshot},
+    {"signal", &link::frame_from_signal_snapshot},
 }};
 
 [[nodiscard]] inline link::Frame adapt_frame(const world::Snapshot &s,

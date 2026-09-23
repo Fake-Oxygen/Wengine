@@ -13,6 +13,7 @@
 
 #include "wengine/world/entity.hpp"
 #include "wengine/world/particles.hpp"
+#include "wengine/world/signals.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +26,7 @@ struct State {
   std::uint64_t step_index{0};
   EntityRegistry entities;
   Particles particles;
+  Signals signals;
 
   // Registry-only spawn; attach components (particles.attach(...)) opt-in.
   Entity spawn_entity() { return entities.spawn(); }
@@ -35,6 +37,7 @@ struct State {
       return false;
     }
     particles.detach(e.index);
+    signals.detach(e.index);
     return entities.despawn(e);
   }
 
@@ -43,6 +46,7 @@ struct State {
     step_index = 0;
     entities.clear();
     particles.clear();
+    signals.clear();
   }
 
   bool operator==(const State &) const noexcept = default;
@@ -56,8 +60,14 @@ struct Snapshot {
   std::vector<double> pos_y;
   std::vector<double> vel_x;
   std::vector<double> vel_y;
+  // Dense copy of live signal sources in slot order (deterministic):
+  // slot index, SI value, and QuantityId tag per source.
+  std::vector<std::uint32_t> sig_slot;
+  std::vector<double> sig_value;
+  std::vector<std::uint8_t> sig_quantity;
 
   [[nodiscard]] std::size_t particle_count() const noexcept { return pos_x.size(); }
+  [[nodiscard]] std::size_t signal_count() const noexcept { return sig_value.size(); }
 
   bool operator==(const Snapshot &) const noexcept = default;
 };
@@ -76,6 +86,16 @@ struct Snapshot {
       snap.pos_y.push_back(s.particles.pos_y[i]);
       snap.vel_x.push_back(s.particles.vel_x[i]);
       snap.vel_y.push_back(s.particles.vel_y[i]);
+    }
+  }
+  snap.sig_slot.reserve(s.signals.live_count);
+  snap.sig_value.reserve(s.signals.live_count);
+  snap.sig_quantity.reserve(s.signals.live_count);
+  for (std::uint32_t i = 0; i < s.signals.capacity(); ++i) {
+    if (s.signals.has(i)) {
+      snap.sig_slot.push_back(i);
+      snap.sig_value.push_back(s.signals.value[i]);
+      snap.sig_quantity.push_back(s.signals.quantity[i]);
     }
   }
   return snap;

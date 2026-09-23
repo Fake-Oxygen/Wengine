@@ -258,13 +258,32 @@ void test_completion() {
   {
     const auto c = complete_line("sim --", 6, all);
     assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
-           has(c, "--emit-shm") && has(c, "--solver"));
+           has(c, "--emit-shm") && has(c, "--solver") && has(c, "--sig-kind") &&
+           has(c, "--sig-freq") && has(c, "--sig-quantity"));
   }
   assert(complete_line("sim run --steps 10", 18, all).empty()); // numeric value
-  assert(complete_line("sim run --solver ", 17, all) ==
-         std::vector<std::string>{"projectile"});
+  {
+    const std::vector<std::string> want{"projectile", "signal"};
+    assert(complete_line("sim run --solver ", 17, all) == want);
+  }
   assert(complete_line("sim run --solver=p", 18, all) ==
          std::vector<std::string>{"--solver=projectile"});
+  assert(complete_line("sim run --solver=s", 18, all) ==
+         std::vector<std::string>{"--solver=signal"});
+  {
+    const std::vector<std::string> want{"sine", "square", "triangle", "saw", "dc",
+                                        "pulse", "noise"};
+    assert(complete_line("sim run --sig-kind ", 19, all) == want);
+  }
+  {
+    const std::vector<std::string> want{"--sig-kind=sine", "--sig-kind=square",
+                                        "--sig-kind=saw"};
+    assert(complete_line("sim run --sig-kind=s", 20, all) == want);
+  }
+  {
+    const std::vector<std::string> want{"U", "I"};
+    assert(complete_line("sim run --sig-quantity ", 23, all) == want);
+  }
   assert(complete_line("help ", 5, all).size() == complete_line("", 0, all).size());
   assert(complete_line("help o", 6, all) == std::vector<std::string>{"ohm"});
   assert(complete_line("nope ", 5, all).empty());

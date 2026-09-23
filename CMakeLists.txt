@@ -45,7 +45,13 @@ target_include_directories(wengine_solvers INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(wengine_solvers INTERFACE wengine_units)
+target_link_libraries(wengine_solvers INTERFACE wengine_units wengine_signal)
+
+add_library(wengine_signal INTERFACE)
+target_include_directories(wengine_signal INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
 
 add_library(wengine_world INTERFACE)
 target_include_directories(wengine_world INTERFACE
@@ -92,7 +98,7 @@ target_compile_options(wengine_link_shm PRIVATE
 
 add_library(wengine_core INTERFACE)
 target_link_libraries(wengine_core INTERFACE
-    wengine_glm wengine_units wengine_solvers wengine_world wengine_emit wengine_link
+    wengine_glm wengine_units wengine_signal wengine_solvers wengine_world wengine_emit wengine_link
 )
 add_library(wengine::core ALIAS wengine_core)
 
@@ -231,6 +237,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_solver_registry PRIVATE wengine_core)
     add_test(NAME solver_registry COMMAND test_solver_registry)
 
+    add_executable(test_signal tests/test_signal.cpp)
+    target_link_libraries(test_signal PRIVATE wengine_core)
+    add_test(NAME signal COMMAND test_signal)
+
     add_executable(test_runner tests/test_runner.cpp)
     target_link_libraries(test_runner PRIVATE wengine_core)
     add_test(NAME runner COMMAND test_runner)
@@ -328,6 +338,9 @@ if(BUILD_BENCHMARKS)
 
     add_executable(bench_projectile benchmarks/bench_projectile.cpp)
     target_link_libraries(bench_projectile PRIVATE wengine_core)
+
+    add_executable(bench_signal benchmarks/bench_signal.cpp)
+    target_link_libraries(bench_signal PRIVATE wengine_core)
 
     add_executable(bench_link benchmarks/bench_link.cpp)
     target_link_libraries(bench_link PRIVATE wengine_core wengine_link_shm)
