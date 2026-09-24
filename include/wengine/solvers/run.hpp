@@ -10,8 +10,9 @@
 // views) and must be non-null; the driver never opens files or touches
 // frontend I/O. Config problems (bad dt/steps, unknown solver, gravity
 // with a non-projectile solver, set signal section with a non-signal
-// solver, invalid signal params, kSum in a batch section) return
-// kInvalidArgument; step failures propagate the solver's Status unchanged.
+// solver, invalid signal params, kSum in a batch section, kTable without
+// points, cross-kind leftovers) return kInvalidArgument; step failures
+// propagate the solver's Status unchanged.
 
 #include "wengine/core/run_config.hpp"
 #include "wengine/core/runner.hpp"
@@ -50,10 +51,31 @@ namespace wengine::solvers {
   // parsed values: frontends fill cfg.signal, the driver only validates.
   // Batch spawns identical sources, so kSum is rejected here — sums need
   // distinct per-source operands (SIG-6 family configures those directly).
+  // Custom sources (SIG-4a): kExpression needs its program in params, kTable
+  // needs its points in cfg.signal.table (appended once, shared by all N
+  // batch sources); cross-kind leftovers (expr program with a sine kind,
+  // table points with a non-table kind) are rejected, never ignored.
   const bool is_signal = solver->name() == SignalSolver::kName;
   if (is_signal) {
     if (!signal::validate_params(cfg.signal.params).ok() ||
         cfg.signal.params.kind == signal::SignalKind::kSum) {
+      return {core::StatusCode::kInvalidArgument};
+    }
+    const bool is_expr = cfg.signal.params.kind == signal::SignalKind::kExpression;
+    const bool is_table = cfg.signal.params.kind == signal::SignalKind::kTable;
+    if (is_expr && !cfg.signal.table.empty()) {
+      return {core::StatusCode::kInvalidArgument};
+    }
+    if (!is_expr && cfg.signal.params.expr.size != 0) {
+      return {core::StatusCode::kInvalidArgument};
+    }
+    if (is_table) {
+      if (!signal::validate_table_points(std::span(cfg.signal.table.data(),
+                                                   cfg.signal.table.size()))
+               .ok()) {
+        return {core::StatusCode::kInvalidArgument};
+      }
+    } else if (!cfg.signal.table.empty()) {
       return {core::StatusCode::kInvalidArgument};
     }
   } else if (cfg.signal.set) {
@@ -74,8 +96,30 @@ namespace wengine::solvers {
     // Batch sources share params; per-source seeds derive deterministically
     // (seed + index) so N noise sources never alias each other. Sums are
     // rejected above, so configure cannot fail here (defense in depth).
+    // Table batches share one appended range (see append_table_points).
+    const bool is_table = cfg.signal.params.kind == signal::SignalKind::kTable;
+    std::uint64_t table_off = 0;
+    std::uint64_t table_len = 0;
+    if (is_table) {
+      if (!world::append_table_points(
+               runner.state().signals,
+               std::span(cfg.signal.table.data(), cfg.signal.table.size()), table_off)
+               .ok()) {
+        return {core::StatusCode::kInvalidArgument};
+      }
+      table_len = static_cast<std::uint64_t>(cfg.signal.table.size());
+    }
     for (std::uint64_t k = 0; k < cfg.signal.count; ++k) {
       world::Entity e = runner.state().spawn_entity();
+      if (is_table) {
+        const core::Status cst =
+            world::attach_table_source(e, runner.state().signals, table_off, table_len,
+                                       cfg.signal.params.quantity, 0.0);
+        if (!cst.ok()) {
+          return cst;
+        }
+        continue;
+      }
       signal::SignalParams p = cfg.signal.params;
       p.seed = cfg.signal.params.seed + k;
       const core::Status cst =

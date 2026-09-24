@@ -28,8 +28,19 @@
 // A later-despawned operand fails the step loudly (kInvalidArgument,
 // deterministic) instead of reading a stale slot; a stopped operand
 // contributes its frozen sample.
+//
+// EXPRESSIONS/TABLES (SIG-4a): custom generators evaluated in solver pass
+// 1 like every other generator (same source-time base t = t_end - t0).
+// Expression programs store inline per slot (fixed RPN, SoA columns
+// expr_op/expr_arg/expr_len). Table points store in one append-only global
+// store (table_times/table_values) with per-slot (table_off, table_len)
+// ranges: slots recycle, store ranges never move, so references stay valid
+// across despawn/respawn and serialization is one flat tail. Detach does
+// not reclaim store rows (stability over compaction — same tradeoff as
+// never-reused serials).
 
 #include "wengine/core/status.hpp"
+#include "wengine/signal/table.hpp"
 #include "wengine/signal/types.hpp"
 #include "wengine/world/entity.hpp"
 
@@ -37,6 +48,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace wengine::world {
@@ -57,6 +69,13 @@ struct Signals {
   std::vector<std::uint8_t> running; // 1 = stepping, 0 = frozen
   std::vector<std::uint64_t> ops; // sum operand serials, kMaxOps per slot
   std::vector<std::uint8_t> op_count;
+  std::vector<std::uint8_t> expr_op; // expression RPN opcodes, kMaxExprNodes/slot
+  std::vector<double> expr_arg; // expression kConst payloads, kMaxExprNodes/slot
+  std::vector<std::uint8_t> expr_len; // expression program length per slot
+  std::vector<std::uint64_t> table_off; // table range start in the store
+  std::vector<std::uint64_t> table_len; // table range length per slot
+  std::vector<double> table_times; // append-only global table store (times)
+  std::vector<double> table_values; // append-only global table store (values)
   std::vector<std::uint8_t> present; // 1 = live source in slot
   std::size_t live_count{0};
   std::uint64_t next_serial{0};
@@ -75,6 +94,7 @@ struct Signals {
     }
     const std::size_t n_ops =
         need * signal::SignalParams::kMaxOps - ops.size();
+    const std::size_t n_expr = need * signal::kMaxExprNodes - expr_op.size();
     serial.resize(need, 0);
     kind.resize(need, 0);
     quantity.resize(need, 0);
@@ -90,6 +110,11 @@ struct Signals {
     running.resize(need, 0);
     ops.resize(ops.size() + n_ops, 0);
     op_count.resize(need, 0);
+    expr_op.resize(expr_op.size() + n_expr, 0);
+    expr_arg.resize(expr_arg.size() + n_expr, 0.0);
+    expr_len.resize(need, 0);
+    table_off.resize(need, 0);
+    table_len.resize(need, 0);
     present.resize(need, 0);
   }
 
@@ -126,6 +151,13 @@ struct Signals {
     running.clear();
     ops.clear();
     op_count.clear();
+    expr_op.clear();
+    expr_arg.clear();
+    expr_len.clear();
+    table_off.clear();
+    table_len.clear();
+    table_times.clear();
+    table_values.clear();
     present.clear();
     live_count = 0;
     next_serial = 0;
@@ -151,13 +183,18 @@ struct Signals {
 // the live pool; on failure nothing is attached and the pool is untouched.
 // Initial sample is eval(0): periodic kinds start at phase, noise starts
 // at the seed peek (RNG advances on the first step, never here), sums
-// start at the operands' current sum — so spawn is a pure function of
-// (params, pool, t_now).
+// start at the operands' current sum, expressions evaluate at t = 0 — so
+// spawn is a pure function of (params, pool, t_now). kTable is rejected
+// here by design (points live outside SignalParams — see
+// configure_table_source); every other kind zeroes the table range.
 [[nodiscard]] inline core::Status configure_source(Entity e, Signals &pool,
                                                    const signal::SignalParams &p,
                                                    double t_now) {
   if (!signal::validate_params(p).ok()) {
     return {core::StatusCode::kInvalidArgument};
+  }
+  if (p.kind == signal::SignalKind::kTable) {
+    return {core::StatusCode::kInvalidArgument}; // needs points: use below
   }
   if (p.kind == signal::SignalKind::kSum) {
     for (std::uint8_t k = 0; k < p.op_count; ++k) {
@@ -169,6 +206,14 @@ struct Signals {
         return {core::StatusCode::kInvalidArgument}; // sums stay flattened
       }
     }
+  }
+  double initial = 0.0;
+  if (p.kind == signal::SignalKind::kExpression) {
+    const auto r = signal::eval_expression(p.expr, 0.0);
+    if (!r.ok()) {
+      return {core::StatusCode::kInvalidArgument}; // fails already at t = 0
+    }
+    initial = r.value;
   }
   pool.attach(e.index);
   const std::uint32_t i = e.index;
@@ -192,6 +237,17 @@ struct Signals {
             ? p.ops[k]
             : 0;
   }
+  pool.expr_len[i] = (p.kind == signal::SignalKind::kExpression) ? p.expr.size : 0;
+  for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+    const bool live =
+        p.kind == signal::SignalKind::kExpression && k < p.expr.size;
+    pool.expr_op[i * signal::kMaxExprNodes + k] =
+        live ? static_cast<std::uint8_t>(p.expr.nodes[k].op) : 0;
+    pool.expr_arg[i * signal::kMaxExprNodes + k] =
+        live ? p.expr.nodes[k].value : 0.0;
+  }
+  pool.table_off[i] = 0;
+  pool.table_len[i] = 0;
   if (p.kind == signal::SignalKind::kSum) {
     double acc = p.offset;
     for (std::uint8_t k = 0; k < p.op_count; ++k) {
@@ -199,11 +255,88 @@ struct Signals {
       acc += pool.value[*find_serial(pool, p.ops[static_cast<std::size_t>(k)])];
     }
     pool.value[i] = acc;
+  } else if (p.kind == signal::SignalKind::kExpression) {
+    pool.value[i] = initial;
   } else {
     pool.value[i] =
         signal::eval_signal(p, 0.0, signal::u01_from_bits(signal::rng_next(p.seed)));
   }
   return core::Status::success();
+}
+
+// Append validated table points to the pool store (no attach). Shared by
+// single-source configure and batch spawns so N identical sources reference
+// one range instead of N duplicate copies. `off` receives the range start.
+[[nodiscard]] inline core::Status append_table_points(Signals &pool,
+                                                     std::span<const signal::TablePoint> pts,
+                                                     std::uint64_t &off) {
+  if (!signal::validate_table_points(pts).ok()) {
+    return {core::StatusCode::kInvalidArgument};
+  }
+  off = static_cast<std::uint64_t>(pool.table_times.size());
+  for (const signal::TablePoint &pt : pts) {
+    pool.table_times.push_back(pt.t);
+    pool.table_values.push_back(pt.v);
+  }
+  return core::Status::success();
+}
+
+// Attach entity `e` as a table source over the already-stored range
+// [off, off + len) (from append_table_points). Initial sample is the
+// table value at t = 0 (clamped when the table starts later).
+[[nodiscard]] inline core::Status attach_table_source(Entity e, Signals &pool,
+                                                     std::uint64_t off, std::uint64_t len,
+                                                     signal::QuantityId quantity,
+                                                     double t_now) {
+  if (len == 0 || len > signal::kMaxTablePoints || off > pool.table_times.size() ||
+      len > pool.table_times.size() - off ||
+      pool.table_values.size() < pool.table_times.size()) {
+    return {core::StatusCode::kInvalidArgument};
+  }
+  pool.attach(e.index);
+  const std::uint32_t i = e.index;
+  pool.serial[i] = pool.next_serial++;
+  pool.kind[i] = static_cast<std::uint8_t>(signal::SignalKind::kTable);
+  pool.quantity[i] = static_cast<std::uint8_t>(quantity);
+  pool.freq[i] = 0.0;
+  pool.amp[i] = 0.0;
+  pool.offset[i] = 0.0;
+  pool.phase[i] = 0.0;
+  pool.duty[i] = 0.0;
+  pool.seed[i] = 0;
+  pool.rng[i] = 0;
+  pool.t0[i] = t_now;
+  pool.running[i] = 1;
+  pool.op_count[i] = 0;
+  for (std::size_t k = 0; k < signal::SignalParams::kMaxOps; ++k) {
+    pool.ops[i * signal::SignalParams::kMaxOps + k] = 0;
+  }
+  pool.expr_len[i] = 0;
+  for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+    pool.expr_op[i * signal::kMaxExprNodes + k] = 0;
+    pool.expr_arg[i * signal::kMaxExprNodes + k] = 0.0;
+  }
+  pool.table_off[i] = off;
+  pool.table_len[i] = len;
+  const std::span<const double> times(pool.table_times.data() + off,
+                                      static_cast<std::size_t>(len));
+  const std::span<const double> values(pool.table_values.data() + off,
+                                       static_cast<std::size_t>(len));
+  pool.value[i] = signal::eval_table(times, values, 0.0);
+  return core::Status::success();
+}
+
+// Configure entity `e` as a table-replay source: validates points,
+// appends them once, and attaches over the new range.
+[[nodiscard]] inline core::Status
+configure_table_source(Entity e, Signals &pool, std::span<const signal::TablePoint> pts,
+                       signal::QuantityId quantity, double t_now) {
+  std::uint64_t off = 0;
+  if (!append_table_points(pool, pts, off).ok()) {
+    return {core::StatusCode::kInvalidArgument};
+  }
+  return attach_table_source(e, pool, off, static_cast<std::uint64_t>(pts.size()),
+                             quantity, t_now);
 }
 
 } // namespace wengine::world

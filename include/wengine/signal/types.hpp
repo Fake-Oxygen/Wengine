@@ -28,6 +28,8 @@
 // docs/signals.md); the hot path never changes.
 
 #include "wengine/core/status.hpp"
+#include "wengine/signal/expr.hpp"
+#include "wengine/signal/table.hpp"
 #include "wengine/units/scales.hpp"
 #include "wengine/units/units.hpp"
 
@@ -38,6 +40,7 @@
 #include <string_view>
 #include <type_traits>
 #include <variant>
+#include <vector>
 
 namespace wengine::signal {
 
@@ -50,13 +53,16 @@ enum class SignalKind : std::uint8_t {
   kPulse = 5,
   kNoise = 6,
   kSum = 7, // combinator: sums operand sources (SIG-5); solver-only kind
+  kExpression = 8, // closed-form custom math (SIG-4a); solver-only evaluation
+  kTable = 9, // CSV waveform replay (SIG-4a); solver-only evaluation
 };
 
 // Canonical kind names for CLI/GUI/control-plane vocabularies (single
 // source of truth; `parse_kind` accepts exactly these). APPEND-ONLY:
 // serialized kind bytes must stay stable, so new kinds go last.
-inline constexpr std::array<std::string_view, 8> kKindNames{
-    {"sine", "square", "triangle", "saw", "dc", "pulse", "noise", "sum"}};
+inline constexpr std::array<std::string_view, 10> kKindNames{
+    {"sine", "square", "triangle", "saw", "dc", "pulse", "noise", "sum",
+     "expression", "table"}};
 
 // Physical-quantity tag. Stored as `uint8` in pools/snapshots/wire, never
 // as strings. U/I first; the mechanism is generic (see kQuantities).
@@ -140,6 +146,12 @@ struct SignalParams {
   static constexpr std::size_t kMaxOps = 8;
   std::array<std::uint64_t, kMaxOps> ops{};
   std::uint8_t op_count = 0;
+  // Closed expression program (kExpression only; empty otherwise). Fixed
+  // RPN nodes — no allocation, no strings — so per-step copies stay memcpy.
+  // Table points (kTable) do NOT live here: variable-length data would
+  // allocate on every per-step copy. Tables live in the pool's append-only
+  // store (see world::Signals) and in SignalRunConfig::table for batches.
+  ExprProgram expr;
 
   bool operator==(const SignalParams &) const noexcept = default;
 };
@@ -184,6 +196,12 @@ struct SignalParams {
   case SignalKind::kSum:
     // Solver-only kind: sums operand sources inside SignalSolver (pool
     // context required). Direct evaluation is the identity by definition.
+    return p.offset;
+  case SignalKind::kExpression:
+  case SignalKind::kTable:
+    // Solver-only kinds like kSum: expression needs fallible RPN eval and
+    // table needs pool-store context, so direct evaluation is the identity
+    // and the solver branches explicitly.
     return p.offset;
   }
   return p.offset; // unreachable: every enumerator handled above
@@ -250,17 +268,25 @@ parse_quantity(std::string_view s) noexcept {
 // values only (no strings): frontends parse kind/quantity/amplitude text
 // and store the result here; the driver validates + spawns. `set` marks
 // explicitly provided options so the driver can reject them with a
-// non-signal solver (same pattern as RunConfig::has_gravity).
+// non-signal solver (same pattern as RunConfig::has_gravity). `table`
+// carries CSV points for kTable batches (config-edge allocation, copied
+// into the pool store once per run — never on the hot path); it must be
+// empty for every other kind, like `expr` must be empty unless the kind
+// is kExpression.
 struct SignalRunConfig {
   SignalParams params;
   std::uint64_t count = 1;
   bool set = false;
+  std::vector<TablePoint> table;
 };
 
 // Config validation: periodic kinds need f > 0; duty is checked only for
 // the kinds that read it (other kinds ignore it, lenient by design); sums
 // need 1..kMaxOps operand serials (existence/kind checked at configure
-// time against the live pool, not here).
+// time against the live pool, not here); expressions need a structurally
+// valid program; tables pass here structurally (points are validated where
+// they are supplied: configure_table_source, the batch driver, the GUI
+// controller — SignalParams carries no table points by design).
 [[nodiscard]] inline core::Status validate_params(const SignalParams &p) noexcept {
   switch (p.kind) {
   case SignalKind::kSine:
@@ -274,9 +300,15 @@ struct SignalRunConfig {
     break;
   case SignalKind::kDc:
   case SignalKind::kNoise:
+  case SignalKind::kTable:
     break;
   case SignalKind::kSum:
     if (p.op_count < 1 || p.op_count > SignalParams::kMaxOps) {
+      return {core::StatusCode::kInvalidArgument};
+    }
+    break;
+  case SignalKind::kExpression:
+    if (!validate_program(p.expr)) {
       return {core::StatusCode::kInvalidArgument};
     }
     break;

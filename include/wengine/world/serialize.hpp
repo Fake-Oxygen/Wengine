@@ -2,17 +2,21 @@
 
 // Versioned binary persistence for world::State (deterministic, no deps).
 //
-// Format v3, all integers little-endian, doubles as IEEE-754 bits:
-//   'W' 'E' 'N' 'G', u32 version (= 3)
+// Format v4, all integers little-endian, doubles as IEEE-754 bits:
+//   'W' 'E' 'N' 'G', u32 version (= 4)
 //   f64 sim_time, u64 step_index
 //   u32 entity_capacity, generations[u32]..., u32 freelist_size, freelist[u32]...
 //   u32 particle_capacity, per slot: u8 present + f64 x4 (fixed stride)
 //   u32 signal_capacity, per slot: u8 present, u8 kind, u8 quantity,
 //     u8 running, u8 op_count, f64 freq/amp/offset/phase/duty/t0/value,
-//     u64 seed, u64 rng, u64 serial, u64 ops[kMaxOps]
-// v2 files (no serial/operands) still load: serials synthesize as slot
-// indices, operand lists come back empty. v1 files (no signal section)
-// still load: signals come back empty.
+//     u64 seed, u64 rng, u64 serial, u64 ops[kMaxOps],
+//     u8 expr_len, u8 expr_op[kMaxExprNodes], f64 expr_arg[kMaxExprNodes],
+//     u64 table_off, u64 table_len
+//   u32 table_store_size, f64 table_times[]..., f64 table_values[]...
+// v3 files (no expression/table columns or store) still load: new columns
+// zero out, the store stays empty. v2 files (no serial/operands) still
+// load: serials synthesize as slot indices, operand lists come back empty.
+// v1 files (no signal section) still load: signals come back empty.
 // Freelist order is stored, so a round-trip preserves exact spawn-reuse
 // behavior. load_state() replaces the target; corrupt input (bad magic,
 // version, truncation, out-of-range indices) yields kInvalidArgument and
@@ -23,6 +27,7 @@
 #include "wengine/world/state.hpp"
 
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <istream>
@@ -32,7 +37,7 @@
 
 namespace wengine::world {
 
-inline constexpr std::uint32_t kStateFormatVersion = 3;
+inline constexpr std::uint32_t kStateFormatVersion = 4;
 // Sanity cap per count field: rejects corrupt files before huge allocs.
 inline constexpr std::uint32_t kMaxStateEntries = 1u << 24;
 
@@ -154,6 +159,22 @@ inline bool get_f64_le(std::istream &in, double &v) {
     for (std::size_t k = 0; k < signal::SignalParams::kMaxOps; ++k) {
       detail::put_u64_le(out, s.signals.ops[i * signal::SignalParams::kMaxOps + k]);
     }
+    detail::put_u8(out, s.signals.expr_len[i]);
+    for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+      detail::put_u8(out, s.signals.expr_op[i * signal::kMaxExprNodes + k]);
+    }
+    for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+      detail::put_f64_le(out, s.signals.expr_arg[i * signal::kMaxExprNodes + k]);
+    }
+    detail::put_u64_le(out, s.signals.table_off[i]);
+    detail::put_u64_le(out, s.signals.table_len[i]);
+  }
+  detail::put_u32_le(out, static_cast<std::uint32_t>(s.signals.table_times.size()));
+  for (double t : s.signals.table_times) {
+    detail::put_f64_le(out, t);
+  }
+  for (double v : s.signals.table_values) {
+    detail::put_f64_le(out, v);
   }
   if (!out) {
     return {core::StatusCode::kInternal};
@@ -173,7 +194,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
   }
   std::uint32_t version = 0;
   if (!detail::get_u32_le(in, version) ||
-      (version != 1 && version != 2 && version != kStateFormatVersion)) {
+      (version != 1 && version != 2 && version != 3 && version != kStateFormatVersion)) {
     return invalid();
   }
   State tmp;
@@ -251,6 +272,11 @@ inline bool get_f64_le(std::istream &in, double &v) {
   tmp.signals.serial.resize(sig_cap);
   tmp.signals.ops.resize(static_cast<std::size_t>(sig_cap) *
                          signal::SignalParams::kMaxOps);
+  tmp.signals.expr_op.resize(static_cast<std::size_t>(sig_cap) * signal::kMaxExprNodes);
+  tmp.signals.expr_arg.resize(static_cast<std::size_t>(sig_cap) * signal::kMaxExprNodes);
+  tmp.signals.expr_len.resize(sig_cap);
+  tmp.signals.table_off.resize(sig_cap);
+  tmp.signals.table_len.resize(sig_cap);
   tmp.signals.present.resize(sig_cap);
   tmp.signals.live_count = 0;
   tmp.signals.next_serial = 0;
@@ -261,13 +287,13 @@ inline bool get_f64_le(std::istream &in, double &v) {
     std::uint8_t run = 0;
     std::uint8_t ops = 0;
     if (!detail::get_u8(in, p) || p > 1 || !detail::get_u8(in, kind) ||
-        kind > static_cast<std::uint8_t>(signal::SignalKind::kSum) ||
+        kind > static_cast<std::uint8_t>(signal::SignalKind::kTable) ||
         !detail::get_u8(in, qty) ||
         qty > static_cast<std::uint8_t>(signal::QuantityId::kCurrent) ||
         !detail::get_u8(in, run) || run > 1) {
       return invalid();
     }
-    if (version == kStateFormatVersion) {
+    if (version >= 3) {
       if (!detail::get_u8(in, ops) || ops > signal::SignalParams::kMaxOps) {
         return invalid();
       }
@@ -277,7 +303,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
     tmp.signals.kind[i] = kind;
     tmp.signals.quantity[i] = qty;
     tmp.signals.running[i] = run;
-    tmp.signals.op_count[i] = (version == kStateFormatVersion) ? ops : 0;
+    tmp.signals.op_count[i] = (version >= 3) ? ops : 0;
     if (!detail::get_f64_le(in, tmp.signals.freq[i]) ||
         !detail::get_f64_le(in, tmp.signals.amp[i]) ||
         !detail::get_f64_le(in, tmp.signals.offset[i]) ||
@@ -289,7 +315,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
         !detail::get_u64_le(in, tmp.signals.rng[i])) {
       return invalid();
     }
-    if (version == kStateFormatVersion) {
+    if (version >= 3) {
       std::uint64_t serial = 0;
       if (!detail::get_u64_le(in, serial) || serial + 1 == 0) {
         return invalid(); // exhausted serial space: corrupt, never produced
@@ -310,6 +336,110 @@ inline bool get_f64_le(std::istream &in, double &v) {
       tmp.signals.serial[i] = i;
       if (static_cast<std::uint64_t>(i) + 1 > tmp.signals.next_serial) {
         tmp.signals.next_serial = static_cast<std::uint64_t>(i) + 1;
+      }
+    }
+    if (version >= 4) {
+      std::uint8_t expr_len = 0;
+      if (!detail::get_u8(in, expr_len) || expr_len > signal::kMaxExprNodes) {
+        return invalid();
+      }
+      tmp.signals.expr_len[i] = expr_len;
+      for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+        std::uint8_t op = 0;
+        if (!detail::get_u8(in, op) ||
+            op >= static_cast<std::uint8_t>(signal::ExprOp::kCount)) {
+          return invalid();
+        }
+        tmp.signals.expr_op[i * signal::kMaxExprNodes + k] = op;
+      }
+      for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+        if (!detail::get_f64_le(in, tmp.signals.expr_arg[i * signal::kMaxExprNodes + k])) {
+          return invalid();
+        }
+      }
+      if (!detail::get_u64_le(in, tmp.signals.table_off[i]) ||
+          !detail::get_u64_le(in, tmp.signals.table_len[i]) ||
+          tmp.signals.table_len[i] > signal::kMaxTablePoints) {
+        return invalid();
+      }
+      if (p != 0) {
+        // Live slots re-validate the configure-time invariants: programs
+        // must be stack-balanced (expressions) or empty, and table slots
+        // must carry a non-empty range (checked against the store below).
+        signal::ExprProgram prog;
+        prog.size = expr_len;
+        for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+          prog.nodes[k].op = static_cast<signal::ExprOp>(
+              tmp.signals.expr_op[i * signal::kMaxExprNodes + k]);
+          prog.nodes[k].value = tmp.signals.expr_arg[i * signal::kMaxExprNodes + k];
+        }
+        const bool is_expr = kind == static_cast<std::uint8_t>(signal::SignalKind::kExpression);
+        const bool is_table = kind == static_cast<std::uint8_t>(signal::SignalKind::kTable);
+        if (is_expr && !signal::validate_program(prog)) {
+          return invalid();
+        }
+        if (!is_expr && expr_len != 0) {
+          return invalid();
+        }
+        if (is_table && tmp.signals.table_len[i] == 0) {
+          return invalid();
+        }
+        if (!is_table &&
+            (tmp.signals.table_len[i] != 0 || tmp.signals.table_off[i] != 0)) {
+          return invalid();
+        }
+      } else if (expr_len != 0 || tmp.signals.table_len[i] != 0 ||
+                 tmp.signals.table_off[i] != 0) {
+        return invalid(); // dead slots carry no program or range
+      }
+    } else {
+      // v3 and earlier predate custom sources: programs empty, no ranges.
+      tmp.signals.expr_len[i] = 0;
+      for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+        tmp.signals.expr_op[i * signal::kMaxExprNodes + k] = 0;
+        tmp.signals.expr_arg[i * signal::kMaxExprNodes + k] = 0.0;
+      }
+      tmp.signals.table_off[i] = 0;
+      tmp.signals.table_len[i] = 0;
+    }
+  }
+  if (version >= 4) {
+    std::uint32_t store_len = 0;
+    if (!detail::get_u32_le(in, store_len) || store_len > kMaxStateEntries) {
+      return invalid();
+    }
+    tmp.signals.table_times.resize(store_len);
+    tmp.signals.table_values.resize(store_len);
+    for (std::uint32_t k = 0; k < store_len; ++k) {
+      if (!detail::get_f64_le(in, tmp.signals.table_times[k])) {
+        return invalid();
+      }
+    }
+    for (std::uint32_t k = 0; k < store_len; ++k) {
+      if (!detail::get_f64_le(in, tmp.signals.table_values[k])) {
+        return invalid();
+      }
+    }
+    // Ranges must land inside the store; live table ranges must hold
+    // finite, strictly increasing points (the configure-time invariant).
+    for (std::uint32_t i = 0; i < sig_cap; ++i) {
+      const std::uint64_t off = tmp.signals.table_off[i];
+      const std::uint64_t len = tmp.signals.table_len[i];
+      if (off > store_len || len > store_len - off) {
+        return invalid();
+      }
+      if (tmp.signals.present[i] != 0 &&
+          tmp.signals.kind[i] == static_cast<std::uint8_t>(signal::SignalKind::kTable)) {
+        for (std::uint64_t k = 0; k < len; ++k) {
+          const double t = tmp.signals.table_times[off + k];
+          const double v = tmp.signals.table_values[off + k];
+          if (!std::isfinite(t) || !std::isfinite(v)) {
+            return invalid();
+          }
+          if (k > 0 && !(t > tmp.signals.table_times[off + k - 1])) {
+            return invalid();
+          }
+        }
       }
     }
   }

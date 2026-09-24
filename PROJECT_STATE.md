@@ -44,15 +44,17 @@ GUI (Dear ImGui + SDL2 + Vulkan, `apps/gui/`) is functional:
 | View-model seam | Done | Views consume shared `link::Frame` only; 1-entry adapter registry (projectile, signal) |
 
 Signal generation (new this session, `docs/signals.md` design + decision
-log D1–D8): unlimited stamped sources (`sine/square/triangle/saw/dc/
-pulse/noise/sum`) as a stepped `SignalSolver`; stable per-`State`
+log D1–D11): unlimited stamped sources (`sine/square/triangle/saw/dc/
+pulse/noise/sum/expression/table`) as a stepped `SignalSolver`; stable per-`State`
 serials; physical stamping via the `kQuantities` single table +
 `DimensionFor`/`StampedValue` typed binding (U/I first, one-entry
 extension); N:M edge-side routing (`SignalSubsetSink` allowlists,
 `StrideSink` decimation, tick-preserving, loud counters); signals CSV
 log (`step,time,sig_id,value,quantity`) beside the particle log; CLI via
-`sig run` (`sim run` stays vocabulary-free); serialization `v3` with
-`v2`/`v1` fallback loaders; `bench_signal` (~150 ns/source-step).
+`sig run` (`sim run` stays vocabulary-free; `--sig-expr` closed math over
+`t`, `--sig-table` CSV replay with linear interp + clamped ends);
+serialization `v4` with `v3`/`v2`/`v1` fallback loaders;
+`bench_signal` (~150 ns/source-step).
 
 ## 2. Open work (Plane, `PHYSI` project)
 
@@ -72,9 +74,11 @@ delivery) are Done; `sig run` shipped early under SIG-6, leaving the
 per-source family (list/add/set/drop, display names) for later. Still
 open, in build order:
 
-- SIG-4: custom sources — 4a closed expression + table/CSV replay (no new
-  dep), 4b Lua scripting source (dep decision record required: third
-  third-party dep after glm/imgui).
+- SIG-4: custom sources — 4a closed expression + table/CSV replay SHIPPED
+  2026-09-24 (RPN expr, div-by-zero→Status; table store + v4 serialization;
+  CLI `--sig-expr`/`--sig-table`; GUI batch takes expressions, rejects
+  tables pending a SIG-9 picker), 4b Lua scripting source still open (dep
+  decision record required: third third-party dep after glm/imgui).
 - SIG-7 / SIG-8 (independent parallel tracks): TCP/UDP socket publisher
   sinks + UART publisher + Zephyr sample consumer; owner picks order.
 - SIG-10 (v1 scope, high): generic control plane — param set/start/stop

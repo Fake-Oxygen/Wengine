@@ -110,6 +110,8 @@ void test_eval_goldens() {
 void test_parse_and_validate() {
   assert(signal::parse_kind("sine").value == signal::SignalKind::kSine);
   assert(signal::parse_kind("noise").value == signal::SignalKind::kNoise);
+  assert(signal::parse_kind("expression").value == signal::SignalKind::kExpression);
+  assert(signal::parse_kind("table").value == signal::SignalKind::kTable);
   assert(!signal::parse_kind("sawtooth").ok());
   assert(!signal::parse_kind("").ok());
   assert(signal::parse_quantity("U").value == signal::QuantityId::kVoltage);
@@ -134,6 +136,15 @@ void test_parse_and_validate() {
   assert(signal::validate_params(p).ok());
   p.kind = signal::SignalKind::kSine;
   assert(signal::validate_params(p).ok()); // sine ignores duty
+  p.kind = signal::SignalKind::kExpression;
+  assert(!signal::validate_params(p).ok()); // empty program rejected
+  auto expr_ok = signal::parse_expression("2*t+1");
+  assert(expr_ok.ok());
+  p.expr = expr_ok.value;
+  assert(signal::validate_params(p).ok());
+  p.kind = signal::SignalKind::kTable;
+  p.expr = signal::ExprProgram{};
+  assert(signal::validate_params(p).ok()); // points checked at configure
 }
 
 world::Entity spawn(core::Runner &runner, const signal::SignalParams &p) {
@@ -441,11 +452,374 @@ void test_stamped_values() {
   assert(visited == 0.5 && std::string_view(seen) == "current");
 }
 
+void test_expression_parse_and_eval() {
+  // Independent references: hand-derived arithmetic (exact cases use ==,
+  // libm cases use near — same discipline as the parametric goldens).
+  auto eval_ok = [](std::string_view text, double t) {
+    const auto pr = signal::parse_expression(text);
+    assert(pr.ok());
+    assert(signal::validate_program(pr.value));
+    const auto r = signal::eval_expression(pr.value, t);
+    assert(r.ok());
+    return r.value;
+  };
+  assert(eval_ok("2*t+1", 0.5) == 2.0);
+  assert(eval_ok("2+3*4", 0.0) == 14.0);
+  assert(eval_ok("(2+3)*4", 0.0) == 20.0);
+  assert(eval_ok("10-2-3", 0.0) == 5.0); // left-assoc
+  assert(eval_ok("2^3", 0.0) == 8.0);
+  assert(eval_ok("2^3^2", 0.0) == 512.0); // right-assoc
+  assert(eval_ok("-2^2", 0.0) == -4.0); // -(2^2)
+  assert(eval_ok("2^-3", 0.0) == 0.125);
+  assert(eval_ok("-t", 3.0) == -3.0);
+  assert(eval_ok("min(2,3)", 0.0) == 2.0);
+  assert(eval_ok("max(2,3)", 0.0) == 3.0);
+  assert(eval_ok("abs(-5)", 0.0) == 5.0);
+  assert(eval_ok("sqrt(4)", 0.0) == 2.0);
+  assert(eval_ok("pi", 0.0) == 3.141592653589793);
+  assert(eval_ok("e", 0.0) == 2.718281828459045);
+  assert(near(eval_ok("sin(2*pi*t)", 0.25), 1.0, 1e-12));
+  assert(near(eval_ok("cos(0)", 0.0), 1.0, 1e-15));
+  assert(near(eval_ok("exp(1)", 0.0), 2.718281828459045, 1e-12));
+  assert(near(eval_ok("log(e)", 0.0), 1.0, 1e-12));
+  assert(near(eval_ok("sqrt(2)", 0.0), 1.4142135623730951, 1e-12));
+  assert(near(eval_ok("  sin ( t ) ", 0.0), 0.0, 1e-15)); // whitespace
+
+  // Malformed text is rejected loudly (never a partial program).
+  const char *bad[] = {"",
+                       "   ",
+                       "2+",
+                       "2*",
+                       "(1",
+                       "1)",
+                       "sin(",
+                       "sin(1",
+                       "min(1)",
+                       "min(1,2,3)",
+                       "foo",
+                       "2t",
+                       "2foo",
+                       "+t",
+                       "()",
+                       "2 2",
+                       "log",
+                       "2^",
+                       "^2",
+                       "min(,)",
+                       "3 + ",
+                       "2..3"};
+  for (const char *text : bad) {
+    assert(!signal::parse_expression(text).ok());
+  }
+
+  // Well-formed but failing evaluation: div-by-zero, out-of-domain,
+  // overflow — Status, never NaN/inf samples.
+  auto eval_fail = [](std::string_view text, double t) {
+    const auto pr = signal::parse_expression(text);
+    assert(pr.ok());
+    assert(!signal::eval_expression(pr.value, t).ok());
+  };
+  eval_fail("1/t", 0.0);
+  eval_fail("1/(t-1)", 1.0);
+  eval_fail("0/0", 0.0);
+  eval_fail("log(t)", 0.0);
+  eval_fail("log(0-1)", 0.0);
+  eval_fail("sqrt(0-1)", 0.0);
+  eval_fail("sqrt(t)", -1.0);
+  eval_fail("exp(10000)", 0.0);
+  eval_fail("10^10000", 0.0);
+
+  // Structural validation rejects empty and stack-broken programs.
+  signal::ExprProgram empty;
+  assert(!signal::validate_program(empty));
+  signal::ExprProgram broken;
+  broken.size = 1;
+  broken.nodes[0] = signal::ExprNode{signal::ExprOp::kAdd, 0.0};
+  assert(!signal::validate_program(broken));
+}
+
+world::Entity spawn_expr(core::Runner &runner, std::string_view text) {
+  signal::SignalParams p;
+  p.kind = signal::SignalKind::kExpression;
+  const auto pr = signal::parse_expression(text);
+  assert(pr.ok());
+  p.expr = pr.value;
+  world::Entity e = runner.state().spawn_entity();
+  assert(world::configure_source(e, runner.state().signals, p, runner.state().sim_time)
+             .ok());
+  return e;
+}
+
+void test_expression_solver() {
+  core::Runner runner{{.dt = 0.1}};
+  solvers::SignalSolver solver;
+  runner.add_solver(solver);
+  const world::Entity e = spawn_expr(runner, "2*t+1");
+  assert(runner.state().signals.value[e.index] == 1.0); // eval(0)
+  assert(runner.run(2).ok());
+  // t = 0.2 (exact: two 0.1 steps): 2*0.2+1.
+  assert(near(runner.state().signals.value[e.index], 1.4, 1e-9));
+
+  // Determinism: an identical run is bit-identical (pool columns included).
+  core::Runner runner2{{.dt = 0.1}};
+  solvers::SignalSolver solver2;
+  runner2.add_solver(solver2);
+  spawn_expr(runner2, "2*t+1");
+  assert(runner2.run(2).ok());
+  assert(runner2.state() == runner.state());
+
+  // Expression sine golden matches the parametric sine at shared times.
+  core::Runner re{{.dt = 0.001}};
+  solvers::SignalSolver se;
+  re.add_solver(se);
+  spawn_expr(re, "2*sin(2*pi*t)");
+  assert(re.run(250).ok());
+  assert(near(re.state().signals.value[0], 2.0, 1e-9)); // quarter period
+}
+
+void test_expression_divzero_freezes_step() {
+  // Overflow-based failure over an interval (robust to FP accumulation):
+  // exp(t) overflows past t ~= 709.78; dt = 1 s keeps times exact.
+  core::Runner runner{{.dt = 1.0}};
+  solvers::SignalSolver solver;
+  runner.add_solver(solver);
+  spawn_expr(runner, "exp(t)");
+  assert(runner.state().signals.value[0] == 1.0);
+  const core::Status st = runner.run(1000);
+  assert(!st.ok() && st.code == core::StatusCode::kInvalidArgument);
+  // The failed step advanced neither time nor index and emitted nothing:
+  // steps 1..709 applied (t = 1..709 exact), step 710 (t = 710) failed.
+  assert(runner.state().step_index == 709);
+  assert(runner.state().sim_time == 709.0);
+  assert(std::isfinite(runner.state().signals.value[0]));
+
+  // A source already failing at t = 0 is rejected at configure time.
+  signal::SignalParams p;
+  p.kind = signal::SignalKind::kExpression;
+  p.expr = signal::parse_expression("1/t").value;
+  world::Entity e = runner.state().spawn_entity();
+  assert(!world::configure_source(e, runner.state().signals, p, 0.0).ok());
+  // kTable needs points: the params-only path rejects it.
+  signal::SignalParams tp;
+  tp.kind = signal::SignalKind::kTable;
+  world::Entity e2 = runner.state().spawn_entity();
+  assert(!world::configure_source(e2, runner.state().signals, tp, 0.0).ok());
+}
+
+void test_table_csv_and_interp() {
+  std::vector<signal::TablePoint> pts;
+  std::string error;
+  std::istringstream good("time,value\n0,0.0\n1,10.0\n2,20.0\n");
+  assert(signal::parse_table_csv(good, pts, error).ok());
+  assert(pts.size() == 3);
+  assert(pts[1].t == 1.0 && pts[1].v == 10.0);
+
+  const char *bad[] = {"",
+                       "time,value\n",
+                       "step,time\n0,1\n",
+                       "time,value\n0,0\n0,1\n",
+                       "time,value\n1,0\n0,1\n",
+                       "time,value\n0,0,0\n",
+                       "time,value\n0\n",
+                       "time,value\n0,abc\n",
+                       "time,value\n0,nan\n",
+                       "time,value\n,1\n",
+                       "time,value\n\n"};
+  for (const char *text : bad) {
+    std::istringstream bin(text);
+    assert(!signal::parse_table_csv(bin, pts, error).ok());
+    assert(!error.empty() && pts.empty());
+  }
+  assert(!signal::validate_table_points(std::span<const signal::TablePoint>{}).ok());
+
+  // Hand-derived linear goldens: exact hits (==), mids, clamps.
+  const std::vector<double> ts{0.0, 1.0, 2.0};
+  const std::vector<double> vs{0.0, 10.0, 20.0};
+  auto ev = [&](double t) {
+    return signal::eval_table(std::span(ts.data(), ts.size()),
+                              std::span(vs.data(), vs.size()), t);
+  };
+  assert(ev(-5.0) == 0.0);
+  assert(ev(0.0) == 0.0);
+  assert(ev(0.5) == 5.0);
+  assert(ev(1.0) == 10.0);
+  assert(ev(1.25) == 12.5);
+  assert(ev(2.0) == 20.0);
+  assert(ev(99.0) == 20.0);
+}
+
+void test_table_solver_and_replay() {
+  // Byte-exact replay: exact-hit times return stored values bit-identically.
+  const std::vector<signal::TablePoint> pts{
+      {0.0, 0.0}, {0.1, 0.5877852522924731}, {0.2, 0.9510565162951535}};
+  core::Runner runner{{.dt = 0.1}};
+  solvers::SignalSolver solver;
+  runner.add_solver(solver);
+  world::Entity e = runner.state().spawn_entity();
+  assert(world::configure_table_source(e, runner.state().signals,
+                                       std::span(pts.data(), pts.size()),
+                                       signal::QuantityId::kVoltage, 0.0)
+             .ok());
+  assert(runner.state().signals.value[e.index] == 0.0); // table(0), clamped
+  assert(runner.run(1).ok());
+  assert(runner.state().signals.value[e.index] == 0.5877852522924731);
+  assert(runner.run(1).ok());
+  assert(runner.state().signals.value[e.index] == 0.9510565162951535);
+  assert(runner.run(1).ok()); // past the end: holds last
+  assert(runner.state().signals.value[e.index] == 0.9510565162951535);
+
+  // Determinism across an identical run (shared-nothing rebuild).
+  core::Runner runner2{{.dt = 0.1}};
+  solvers::SignalSolver solver2;
+  runner2.add_solver(solver2);
+  world::Entity e2 = runner2.state().spawn_entity();
+  assert(world::configure_table_source(e2, runner2.state().signals,
+                                       std::span(pts.data(), pts.size()),
+                                       signal::QuantityId::kVoltage, 0.0)
+             .ok());
+  assert(runner2.run(3).ok());
+  assert(runner2.state() == runner.state());
+
+  // Validation: empty and non-increasing spans rejected, pool untouched.
+  const std::size_t live_before = runner.state().signals.live_count;
+  world::Entity e3 = runner.state().spawn_entity();
+  assert(!world::configure_table_source(e3, runner.state().signals,
+                                        std::span<const signal::TablePoint>{},
+                                        signal::QuantityId::kVoltage, 0.0)
+              .ok());
+  const std::vector<signal::TablePoint> rev{{1.0, 0.0}, {0.0, 1.0}};
+  assert(!world::configure_table_source(e3, runner.state().signals,
+                                        std::span(rev.data(), rev.size()),
+                                        signal::QuantityId::kVoltage, 0.0)
+              .ok());
+  assert(runner.state().signals.live_count == live_before);
+}
+
+void test_run_headless_custom() {
+  // Expression batch: 2*t+1 at dt = 0.1, 2 steps -> t = 0.2.
+  core::RunConfig cfg;
+  cfg.loop.dt = 0.1;
+  cfg.steps = 2;
+  cfg.solver = "signal";
+  cfg.particles = 0;
+  cfg.signal.params.kind = signal::SignalKind::kExpression;
+  cfg.signal.params.expr = signal::parse_expression("2*t+1").value;
+  world::State out;
+  assert(solvers::run_headless(cfg, std::span<emit::ISink *>{}, out).ok());
+  assert(out.signals.live_count == 1);
+  assert(near(out.signals.value[0], 1.4, 1e-9));
+
+  // Table batch: shared range, linear mid.
+  core::RunConfig cfg2;
+  cfg2.loop.dt = 0.1;
+  cfg2.steps = 5;
+  cfg2.solver = "signal";
+  cfg2.particles = 0;
+  cfg2.signal.params.kind = signal::SignalKind::kTable;
+  const std::vector<signal::TablePoint> pts{{0.0, 1.0}, {1.0, 3.0}};
+  cfg2.signal.table = pts;
+  world::State out2;
+  assert(solvers::run_headless(cfg2, std::span<emit::ISink *>{}, out2).ok());
+  assert(out2.signals.live_count == 1);
+  assert(near(out2.signals.value[0], 2.0, 1e-9));
+
+  // Rejections: table kind without points, points with a non-table kind,
+  // program with a non-expression kind, empty program, program+points mix.
+  world::State sink_state;
+  core::RunConfig bad = cfg2;
+  bad.signal.table.clear();
+  assert(!solvers::run_headless(bad, std::span<emit::ISink *>{}, sink_state).ok());
+  bad = cfg2;
+  bad.signal.params.kind = signal::SignalKind::kSine;
+  assert(!solvers::run_headless(bad, std::span<emit::ISink *>{}, sink_state).ok());
+  bad = cfg;
+  bad.signal.table = pts;
+  assert(!solvers::run_headless(bad, std::span<emit::ISink *>{}, sink_state).ok());
+  bad = cfg;
+  bad.signal.params.expr = signal::ExprProgram{};
+  assert(!solvers::run_headless(bad, std::span<emit::ISink *>{}, sink_state).ok());
+  bad = cfg2;
+  bad.signal.params.kind = signal::SignalKind::kSine;
+  bad.signal.params.expr = signal::parse_expression("t").value;
+  assert(!solvers::run_headless(bad, std::span<emit::ISink *>{}, sink_state).ok());
+}
+
+void test_serialize_v4_custom() {
+  core::Runner runner{{.dt = 0.1}};
+  solvers::SignalSolver solver;
+  runner.add_solver(solver);
+  spawn_expr(runner, "2*t+1");
+  const std::vector<signal::TablePoint> pts{{0.0, 1.0}, {1.0, 3.0}};
+  world::Entity e = runner.state().spawn_entity();
+  assert(world::configure_table_source(e, runner.state().signals,
+                                       std::span(pts.data(), pts.size()),
+                                       signal::QuantityId::kCurrent, 0.0)
+             .ok());
+  assert(runner.run(3).ok());
+
+  std::ostringstream bytes;
+  assert(world::save_state(runner.state(), bytes).ok());
+  world::State dst;
+  std::istringstream in(bytes.str());
+  assert(world::load_state(dst, in).ok());
+  assert(dst == runner.state());
+  assert(world::take_snapshot(dst) == world::take_snapshot(runner.state()));
+
+  // Truncation is still a loud failure with the target cleared.
+  world::State cut_state;
+  const std::string cut = bytes.str().substr(0, bytes.str().size() / 2);
+  std::istringstream cut_in(cut);
+  assert(!world::load_state(cut_state, cut_in).ok());
+
+  // v3 blob fallback: one sine slot, no custom columns — loads with empty
+  // programs, empty ranges, synthesized nothing (serials stored since v3).
+  std::ostringstream v3;
+  v3.put('W');
+  v3.put('E');
+  v3.put('N');
+  v3.put('G');
+  world::detail::put_u32_le(v3, 3);
+  world::detail::put_f64_le(v3, 0.5);
+  world::detail::put_u64_le(v3, 7);
+  world::detail::put_u32_le(v3, 0); // entities
+  world::detail::put_u32_le(v3, 0); // freelist
+  world::detail::put_u32_le(v3, 0); // particles
+  world::detail::put_u32_le(v3, 1); // one signal slot
+  world::detail::put_u8(v3, 1); // present
+  world::detail::put_u8(v3, 0); // kind sine
+  world::detail::put_u8(v3, 0); // quantity U
+  world::detail::put_u8(v3, 1); // running
+  world::detail::put_u8(v3, 0); // op_count
+  world::detail::put_f64_le(v3, 1.0); // freq
+  world::detail::put_f64_le(v3, 2.0); // amp
+  world::detail::put_f64_le(v3, 0.0); // offset
+  world::detail::put_f64_le(v3, 0.0); // phase
+  world::detail::put_f64_le(v3, 0.5); // duty
+  world::detail::put_f64_le(v3, 0.0); // t0
+  world::detail::put_f64_le(v3, 0.25); // value
+  world::detail::put_u64_le(v3, 1); // seed
+  world::detail::put_u64_le(v3, 9); // rng
+  world::detail::put_u64_le(v3, 5); // serial
+  for (int k = 0; k < 8; ++k) {
+    world::detail::put_u64_le(v3, 0); // ops
+  }
+  world::State legacy;
+  std::istringstream vin(v3.str());
+  assert(world::load_state(legacy, vin).ok());
+  assert(legacy.signals.live_count == 1);
+  assert(legacy.signals.kind[0] == static_cast<std::uint8_t>(signal::SignalKind::kSine));
+  assert(legacy.signals.serial[0] == 5);
+  assert(legacy.signals.value[0] == 0.25);
+  assert(legacy.signals.next_serial == 6);
+  assert(legacy.signals.expr_len[0] == 0);
+  assert(legacy.signals.table_len[0] == 0);
+  assert(legacy.signals.table_times.empty());
+}
+
 // Scaling-path proof: a test-only dimension (no production change) plugs
 // into the generic units machinery — Dimension + literal + one scales row
 // is the whole recipe. This is the "one-entry change" SIG-3 requires.
-void test_dimension_scaling() {
-  using scaling_proof::TestTemp;
+void test_dimension_scaling() {  using scaling_proof::TestTemp;
   using wengine::cli::detail::parse_scaled_impl;
   // Generic suffix-scale parsing accepts the new dimension untouched.
   const auto a = parse_scaled_impl("12mtC", units::scales_for<TestTemp>::value);
@@ -473,6 +847,13 @@ int main() {
   test_quantity_table();
   test_stamped_values();
   test_dimension_scaling();
+  test_expression_parse_and_eval();
+  test_expression_solver();
+  test_expression_divzero_freezes_step();
+  test_table_csv_and_interp();
+  test_table_solver_and_replay();
+  test_run_headless_custom();
+  test_serialize_v4_custom();
   std::cout << "test_signal: OK\n";
   return 0;
 }

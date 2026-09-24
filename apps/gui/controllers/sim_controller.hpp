@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -73,9 +74,29 @@ class SimController {
     if (!is_signal && cfg.signal.set) {
       return reject("signal options only apply to solver 'signal'");
     }
+    // Bit parity with solvers::run_headless(): same validation, same spawn
+    // order (see solvers/run.hpp). Custom sources: expression programs ride
+    // in params, table points in cfg.signal.table (shared range below).
     if (is_signal && (!signal::validate_params(cfg.signal.params).ok() ||
                       cfg.signal.params.kind == signal::SignalKind::kSum)) {
       return reject("invalid signal params (freq > 0, duty in 0..1; no batch sums)");
+    }
+    if (is_signal) {
+      const bool is_expr = cfg.signal.params.kind == signal::SignalKind::kExpression;
+      const bool is_table = cfg.signal.params.kind == signal::SignalKind::kTable;
+      if ((!is_expr && cfg.signal.params.expr.size != 0) ||
+          (is_expr && !cfg.signal.table.empty())) {
+        return reject("invalid signal params (expression program misplaced)");
+      }
+      if (is_table) {
+        if (!signal::validate_table_points(std::span(cfg.signal.table.data(),
+                                                     cfg.signal.table.size()))
+                 .ok()) {
+          return reject("invalid signal params (table needs CSV points)");
+        }
+      } else if (!cfg.signal.table.empty()) {
+        return reject("invalid signal params (table points need kind=table)");
+      }
     }
     config_ = cfg;
     if (!rebuild()) {
@@ -192,8 +213,34 @@ class SimController {
     if (solver_->name() == solvers::SignalSolver::kName) {
       // set_config() rejected sums and validated params, so configure
       // cannot fail here; the check is defense in depth (same as run_headless).
+      // Table batches share one appended range (same as run_headless).
+      const bool is_table = config_.signal.params.kind == signal::SignalKind::kTable;
+      std::uint64_t table_off = 0;
+      std::uint64_t table_len = 0;
+      if (is_table) {
+        if (!world::append_table_points(
+                 runner_.state().signals,
+                 std::span(config_.signal.table.data(), config_.signal.table.size()),
+                 table_off)
+                 .ok()) {
+          last_status_ = core::Status::failure(core::StatusCode::kInvalidArgument);
+          error_ = "signal setup failed";
+          return false;
+        }
+        table_len = static_cast<std::uint64_t>(config_.signal.table.size());
+      }
       for (std::uint64_t k = 0; k < config_.signal.count; ++k) {
         world::Entity e = runner_.state().spawn_entity();
+        if (is_table) {
+          if (!world::attach_table_source(e, runner_.state().signals, table_off, table_len,
+                                          config_.signal.params.quantity, 0.0)
+                   .ok()) {
+            last_status_ = core::Status::failure(core::StatusCode::kInvalidArgument);
+            error_ = "signal setup failed";
+            return false;
+          }
+          continue;
+        }
         signal::SignalParams p = config_.signal.params;
         p.seed = config_.signal.params.seed + k;
         if (!world::configure_source(e, runner_.state().signals, p, 0.0).ok()) {

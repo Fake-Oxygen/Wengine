@@ -16,12 +16,15 @@
 // after the sum was configured) fails the step with kInvalidArgument —
 // loud and deterministic — instead of reading a stale slot. The failed
 // step advances neither time nor index (Runner contract) and emits nothing.
+// Custom generators (SIG-4a: kExpression, kTable) evaluate in pass 1 on the
+// same source-time base; a failing expression fails the step the same way.
 
 #include "wengine/core/solver.hpp"
 #include "wengine/signal/types.hpp"
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string_view>
 
 namespace wengine::solvers {
@@ -30,7 +33,8 @@ class SignalSolver : public core::ISolver {
 public:
   static constexpr std::string_view kName = "signal";
   static constexpr std::string_view kDescription =
-      "Signal sources: sine/square/triangle/saw/dc/pulse/noise/sum (stamped U/I)";
+      "Signal sources: sine/square/triangle/saw/dc/pulse/noise/sum/expression/table "
+      "(stamped U/I)";
 
   static std::unique_ptr<core::ISolver> create() {
     return std::make_unique<SignalSolver>();
@@ -43,12 +47,41 @@ public:
       return {core::StatusCode::kInvalidArgument};
     }
     const double t_end = s.sim_time + dt;
-    // Pass 1: generators (sums read these fresh in pass 2).
+    // Pass 1: generators (sums read these fresh in pass 2). Expression and
+    // table sources are generators: same source-time base, same slot order.
+    // A failing expression (div-by-zero, out-of-domain, overflow) fails the
+    // step loudly like a dangling sum operand — never a NaN sample.
     for (std::uint32_t i = 0; i < s.signals.capacity(); ++i) {
       if (!s.signals.has(i) || s.signals.running[i] == 0) {
         continue;
       }
       if (s.signals.kind[i] == static_cast<std::uint8_t>(signal::SignalKind::kSum)) {
+        continue;
+      }
+      const double t_local = t_end - s.signals.t0[i];
+      if (s.signals.kind[i] ==
+          static_cast<std::uint8_t>(signal::SignalKind::kExpression)) {
+        signal::SignalParams p = params_at(s, i);
+        const auto r = signal::eval_expression(p.expr, t_local);
+        if (!r.ok()) {
+          return {core::StatusCode::kInvalidArgument};
+        }
+        s.signals.value[i] = r.value;
+        continue;
+      }
+      if (s.signals.kind[i] == static_cast<std::uint8_t>(signal::SignalKind::kTable)) {
+        const std::uint64_t len = s.signals.table_len[i];
+        const std::uint64_t off = s.signals.table_off[i];
+        if (len == 0 || len > signal::kMaxTablePoints || off > s.signals.table_times.size() ||
+            len > s.signals.table_times.size() - off ||
+            s.signals.table_values.size() < s.signals.table_times.size()) {
+          return {core::StatusCode::kInvalidArgument}; // corrupt range: loud
+        }
+        const std::span<const double> times(s.signals.table_times.data() + off,
+                                            static_cast<std::size_t>(len));
+        const std::span<const double> values(s.signals.table_values.data() + off,
+                                             static_cast<std::size_t>(len));
+        s.signals.value[i] = signal::eval_table(times, values, t_local);
         continue;
       }
       signal::SignalParams p = params_at(s, i);
@@ -57,7 +90,7 @@ public:
         s.signals.rng[i] = signal::rng_next(s.signals.rng[i]);
         u01 = signal::u01_from_bits(s.signals.rng[i]);
       }
-      s.signals.value[i] = signal::eval_signal(p, t_end - s.signals.t0[i], u01);
+      s.signals.value[i] = signal::eval_signal(p, t_local, u01);
     }
     // Pass 2: sums over pass-1-fresh operand values.
     for (std::uint32_t i = 0; i < s.signals.capacity(); ++i) {
@@ -93,6 +126,14 @@ private:
     p.phase_rad = s.signals.phase[i];
     p.duty = s.signals.duty[i];
     p.seed = s.signals.seed[i];
+    if (p.kind == signal::SignalKind::kExpression) {
+      p.expr.size = s.signals.expr_len[i];
+      for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+        p.expr.nodes[k].op =
+            static_cast<signal::ExprOp>(s.signals.expr_op[i * signal::kMaxExprNodes + k]);
+        p.expr.nodes[k].value = s.signals.expr_arg[i * signal::kMaxExprNodes + k];
+      }
+    }
     return p;
   }
 };

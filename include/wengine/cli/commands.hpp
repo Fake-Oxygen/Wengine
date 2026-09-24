@@ -92,18 +92,28 @@ struct SimSpec {
 
 struct SigSpec {
   static constexpr std::string_view kName = "sig";
-  static constexpr std::string_view kDescription = "Generate signals (sine/square/triangle/saw/dc/pulse/noise)";
+  static constexpr std::string_view kDescription =
+      "Generate signals (sine/square/triangle/saw/dc/pulse/noise/sum/expression/table)";
   static constexpr std::string_view kUsage =
       "sig run [--sig-kind <kind>] [--sig-freq <Hz>] [--sig-amp <V|A>]\n"
       "        [--sig-offset <V|A>] [--sig-phase <rad>] [--sig-duty 0..1]\n"
       "        [--sig-seed N] [--sig-quantity U|I] [--sig-count N]\n"
-      "        [--steps N] [--dt <s>] [--emit-csv <path>] [--emit-shm <name>]\n"
-      "        [--emit-every N]\n"
+      "        [--sig-expr '<math>'] [--sig-table <csv>] [--steps N] [--dt <s>]\n"
+      "        [--emit-csv <path>] [--emit-shm <name>] [--emit-every N]\n"
       "  sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --steps 1000 --dt 0.1ms\n"
-      "Kinds: sine square triangle saw dc pulse noise sum (--sig-count spawns\n"
-      "  that many identical sources; noise seeds derive as seed+k).\n"
+      "  sig run --sig-kind expression --sig-expr 'sin(2*pi*440*t)*0.5'\n"
+      "  sig run --sig-kind table --sig-table wave.csv --steps 1000\n"
+      "Kinds: sine square triangle saw dc pulse noise sum expression table\n"
+      "  (--sig-kind, Tab-completed; --sig-count spawns that many identical\n"
+      "  sources; noise seeds derive as seed+k; table batches share one file).\n"
       "  sum adds operand sources' values (engine API only for now: batch\n"
       "  runs reject it, the per-source family configures it — SIG-6).\n"
+      "  expression compiles a closed math language over t (source seconds):\n"
+      "  literals, t, pi, e, + - * / ^, unary -, sin cos exp log sqrt abs,\n"
+      "  min(a,b) max(a,b), parentheses (from_chars parsing, fixed eval order;\n"
+      "  div-by-zero and out-of-domain fail the step loudly, never NaN).\n"
+      "  table replays a CSV waveform (header 'time,value', SI seconds + SI\n"
+      "  value, linear interp, clamped ends, bit-exact on exact time hits).\n"
       "  --sig-freq takes Hz/kHz; --sig-amp/--sig-offset take V/mV/kV or\n"
       "  A/mA per --sig-quantity U|I. --emit-csv writes the signals log\n"
       "  (step,time,sig_id,value,quantity); --emit-shm publishes signal\n"

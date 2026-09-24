@@ -4,12 +4,14 @@
 #include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/link/shm_publisher.hpp"
+#include "wengine/signal/table.hpp"
 #include "wengine/signal/types.hpp"
 #include "wengine/solvers/run.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <array>
 #include <cstdint>
+#include <fstream>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -40,10 +42,11 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 
 constexpr std::array<std::string_view, 1> kSigModes{{"run"}};
 
-constexpr std::array<std::string_view, 17> kSigOptions{{
+constexpr std::array<std::string_view, 19> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
-    "--emit-csv", "--emit-shm", "--emit-every", "--help", "-h",
+    "--sig-expr", "--sig-table", "--emit-csv", "--emit-shm", "--emit-every", "--help",
+    "-h",
 }};
 
 } // namespace
@@ -103,12 +106,15 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   const auto o_sig_seed = args.take_option({"--sig-seed"});
   const auto o_sig_quantity = args.take_option({"--sig-quantity"});
   const auto o_sig_count = args.take_option({"--sig-count"});
+  const auto o_sig_expr = args.take_option({"--sig-expr"});
+  const auto o_sig_table = args.take_option({"--sig-table"});
 
   signal::SignalParams params;
   if (o_sig_kind) {
     const auto kind = signal::parse_kind(*o_sig_kind);
     if (!kind.ok()) {
-      return usage_error(out, "unknown signal kind (want sine|square|triangle|saw|dc|pulse|noise)");
+      return usage_error(out, "unknown signal kind (want sine|square|triangle|saw|dc|"
+                              "pulse|noise|sum|expression|table)");
     }
     params.kind = kind.value;
   }
@@ -186,6 +192,42 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     sig_count = p.value;
   }
 
+  // Custom sources (SIG-4a): expression text compiles now (config edge),
+  // table CSV loads now (app-edge file I/O — the engine never opens files).
+  // Cross-kind leftovers are usage errors, never silently ignored.
+  std::vector<signal::TablePoint> table_points;
+  const bool is_expr = params.kind == signal::SignalKind::kExpression;
+  const bool is_table = params.kind == signal::SignalKind::kTable;
+  if (is_expr) {
+    if (!o_sig_expr) {
+      return usage_error(out, "expression kind needs --sig-expr '<math>'");
+    }
+    if (o_sig_table) {
+      return usage_error(out, "--sig-table is table-only (no expression source to replay)");
+    }
+    const auto prog = signal::parse_expression(*o_sig_expr);
+    if (!prog.ok()) {
+      out << "Error: invalid expression '" << *o_sig_expr << "' (" << prog.error << ")\n";
+      out << kUsage << '\n';
+      return core::kExitUsage;
+    }
+    params.expr = prog.value;
+  } else if (is_table) {
+    if (!o_sig_table) {
+      return usage_error(out, "table kind needs --sig-table <csv>");
+    }
+    if (o_sig_expr) {
+      return usage_error(out, "--sig-expr is expression-only (no program in a table source)");
+    }
+  } else {
+    if (o_sig_expr) {
+      return usage_error(out, "--sig-expr needs --sig-kind expression");
+    }
+    if (o_sig_table) {
+      return usage_error(out, "--sig-table needs --sig-kind table");
+    }
+  }
+
   // Mode subcommand: exactly one `run` positional; all params are named.
   std::array<std::string_view, 2> pos{};
   std::size_t n_pos = 0;
@@ -211,12 +253,24 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   if (emit_every < 0) {
     return usage_error(out, "emit stride must be >= 0");
   }
-  // Engine re-validates (freq/duty); the CLI reports them as usage errors.
+  // Engine re-validates (freq/duty/expression); the CLI reports them as usage errors.
   // Batch runs reject sums: identical batch sources cannot hold distinct
   // per-source operands (the SIG-6 family configures sums directly).
   params.seed = static_cast<std::uint64_t>(sig_seed < 0 ? 0 : sig_seed);
   if (params.kind == signal::SignalKind::kSum) {
     return usage_error(out, "sum needs per-source operands (not supported in batch runs)");
+  }
+  if (is_table) {
+    std::ifstream table_in(std::string{*o_sig_table});
+    if (!table_in) {
+      out << "Error: cannot open table file '" << *o_sig_table << "'\n";
+      return core::kExitRuntime;
+    }
+    std::string table_error;
+    if (!signal::parse_table_csv(table_in, table_points, table_error).ok()) {
+      out << "Error: invalid table file '" << *o_sig_table << "': " << table_error << '\n';
+      return core::kExitRuntime;
+    }
   }
   if (sig_seed < 0 || sig_count < 0 || !signal::validate_params(params).ok()) {
     return usage_error(out, "invalid signal params (freq > 0, duty in 0..1, seed/count >= 0)");
@@ -231,6 +285,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   cfg.signal.params = params;
   cfg.signal.count = static_cast<std::uint64_t>(sig_count);
   cfg.signal.set = true;
+  cfg.signal.table = std::move(table_points);
 
   std::optional<emit::SignalsCsvSink> sig_csv;
   if (csv_path) {
@@ -271,6 +326,13 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
 
   out << "sig run: kind=" << signal::kKindNames[static_cast<std::size_t>(params.kind)]
       << '\n';
+  if (is_expr) {
+    out << "expr: '" << *o_sig_expr << "' (" << static_cast<unsigned>(params.expr.size)
+        << " nodes)\n";
+  }
+  if (is_table) {
+    out << "table: " << *o_sig_table << " (" << cfg.signal.table.size() << " points)\n";
+  }
   out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
   out << "signals: " << s.signals.live_count << '\n';
   for (std::uint32_t i = 0; i < s.signals.capacity(); ++i) {

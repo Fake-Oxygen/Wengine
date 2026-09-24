@@ -85,6 +85,23 @@ void test_model_rejections() {
   m.kind = "sum";
   m.amp = "1";
   assert(!m.build().ok);
+  // Tables need a CSV file the batch form has no picker for (SIG-9 panel).
+  m.kind = "table";
+  assert(!m.build().ok);
+  // Expressions work in batch (parsed data, no I/O); stray text is rejected.
+  m.kind = "expression";
+  m.expr.clear();
+  assert(!m.build().ok);
+  m.expr = "2*t+";
+  assert(!m.build().ok);
+  m.expr = "2*t+1";
+  const gui::SignalBuild eb = m.build();
+  assert(eb.ok);
+  assert(eb.cfg.signal.params.kind == signal::SignalKind::kExpression);
+  m.kind = "sine";
+  assert(!m.build().ok); // expression text needs kind=expression
+  m.expr.clear();
+  assert(m.build().ok);
 }
 
 void test_controller_parity() {
@@ -122,6 +139,39 @@ void test_controller_rejects_bad_signal() {
   assert(!sim.error().empty());
   // Rejected edits leave the live run untouched.
   assert(sim.state().step_index == 0);
+  // Table points without a table kind (and vice versa) are rejected, never
+  // silently dropped — same rule as the headless driver.
+  bad = sim.config();
+  bad.solver = "signal";
+  bad.signal.set = true;
+  bad.signal.params.kind = signal::SignalKind::kTable;
+  assert(!sim.set_config(bad).ok());
+  bad.signal.table = {{0.0, 1.0}, {1.0, 3.0}};
+  bad.loop.dt = 0.1;
+  assert(sim.set_config(bad).ok());
+  assert(sim.run_exact(5).ok());
+  assert(near(sim.snapshot().sig_value[0], 2.0, 1e-9));
+  bad.signal.params.kind = signal::SignalKind::kSine;
+  assert(!sim.set_config(bad).ok());
+}
+
+void test_controller_expression_parity() {
+  // Expression configs drive the controller bit-identically to headless.
+  core::RunConfig cfg;
+  cfg.loop.dt = 0.1;
+  cfg.steps = 2;
+  cfg.solver = "signal";
+  cfg.particles = 0;
+  cfg.signal.params.kind = signal::SignalKind::kExpression;
+  cfg.signal.params.expr = signal::parse_expression("2*t+1").value;
+  cfg.signal.set = true;
+  gui::SimController sim;
+  assert(sim.set_config(cfg).ok());
+  assert(sim.run_exact(cfg.steps).ok());
+  world::State ref;
+  assert(solvers::run_headless(cfg, std::span<emit::ISink *>{}, ref).ok());
+  assert(sim.state() == ref);
+  assert(near(sim.snapshot().sig_value[0], 1.4, 1e-9));
 }
 
 } // namespace
@@ -132,6 +182,7 @@ int main() {
   test_model_rejections();
   test_controller_parity();
   test_controller_rejects_bad_signal();
+  test_controller_expression_parity();
   std::printf("test_signal_panel: OK\n");
   return 0;
 }

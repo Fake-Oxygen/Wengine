@@ -1,14 +1,18 @@
 # Signals design (SIG-1)
 
 Goal: unlimited signal sources (sine/square/triangle/saw/DC/pulse/PWM/noise/
-expression/table/Lua) stamped with physical quantities (U/I first), routed
-N:M to sinks, controllable via CLI/GUI/generic control plane, streamed over
-SHM (existing) + TCP/UDP + UART for Zephyr HIL. Variable rate: 1 kHz nominal,
-sub-Hz..100 kHz-class `dt` without hard limits (decimation + budgets).
+sum/expression/table/Lua) stamped with physical quantities (U/I first),
+routed N:M to sinks, controllable via CLI/GUI/generic control plane,
+streamed over SHM (existing) + TCP/UDP + UART for Zephyr HIL. Variable
+rate: 1 kHz nominal, sub-Hz..100 kHz-class `dt` without hard limits
+(decimation + budgets).
 
 Locked 2026-09-23 (user): signals ARE stepped solvers; bidirectional control
 plane is v1 scope; custom = closed expression + table now, Lua as gated 4b;
 U/I first with one-entry scaling; TCP/UDP || UART parallel tracks.
+
+Shipped 2026-09-24 (SIG-4a): expression + table sources (this doc, sec. 4a).
+Lua stays dep-gated 4b (sec. 7).
 
 ## 1. Engine shape
 
@@ -79,6 +83,51 @@ time/index frozen) instead of reading a stale slot; a stopped operand
 contributes its frozen sample. Batch runs (`run_headless`, GUI controller)
 reject `kSum`: identical batch sources cannot hold distinct operands —
 the per-source family configures sums directly.
+
+## 4a. Custom sources: expression + table (shipped 2026-09-24)
+
+Both are `SignalKind`s (`kExpression = 8`, `kTable = 9`, append-only
+after `kSum`), evaluated in solver pass 1 on the same source-time base
+(`t = t_end - t0`, rebased on start). Snapshot/Frame/CSV shapes are
+unchanged (still SI value + quantity per source); only the pool grows.
+
+Expression (`signal/expr.hpp`, CLI `--sig-expr`, GUI batch model text
+field): closed language — decimal/scientific literals (from_chars, no
+implicit multiplication), variable `t`, constants `pi`/`e`, binary
+`+ - * / ^` (power, right-associative), unary `-`, functions `sin cos exp
+log sqrt abs` (1 arg) + `min max` (2 args), parentheses, ASCII whitespace
+ignored. Parsing compiles to a fixed RPN program (<= 64 nodes, no
+allocation, no strings) with a fixed eval order, so identical text gives
+identical results. Programs store inline per slot (`expr_op/expr_arg/
+expr_len` SoA). Errors are loud `Status`, never NaN/inf: division by an
+exactly-zero denominator, `log(x <= 0)`, `sqrt(x < 0)`, and any non-finite
+intermediate (overflow, out-of-domain pow) fail evaluation; the solver
+maps that to a failed step (time/index frozen, nothing emitted), exactly
+like a dangling sum operand. A source already failing at `t = 0` is
+rejected at configure time.
+
+Table (`signal/table.hpp`, CLI `--sig-table`, batch `SignalRunConfig::
+table`): CSV waveform with the exact header `time,value`, one `t,v` row
+per line (SI seconds + SI value, no suffixes; full precision for
+bit-exact replay; one trailing `\r` tolerated). Points validate as
+finite with strictly increasing times (1..65536 per source). Evaluation
+is linear interpolation with clamped ends and bit-exact returns on exact
+time hits, found by binary search (unique bracket — method-independent,
+deterministic). Points store in one append-only global pool store with
+per-slot `(table_off, table_len)` ranges (slots recycle, ranges never
+move); batch spawns share one appended range. Table points never live in
+`SignalParams` (variable length would allocate on per-step copies) —
+`configure_source` rejects `kTable`; tables configure via
+`configure_table_source` / `append_table_points` + `attach_table_source`.
+The GUI batch model rejects tables (no CSV picker in the batch form —
+SIG-9 panel follow-up); the per-source family (SIG-6) configures them
+directly.
+
+Serialization is v4 (expr columns + table ranges per slot, store tail;
+v3 loads with zeroed custom columns, v2/v1 as before). Cross-kind
+leftovers (expression program with a sine kind, table points with a
+non-table kind) are rejected at every edge (CLI usage error, driver/
+controller `kInvalidArgument`), never silently ignored.
 
 Subset sinks preserve ticks: a non-muted subscription forwards EVERY
 snapshot (possibly with zero rows), so downstream SHM readers observe
@@ -175,6 +224,9 @@ CLI/GUI/control edges never grow unit tables: parsing goes through
 | D6 | Combinators as source kinds vs sink-side mix | Source-kind sum (replayable, in Snapshot) + sink allowlist filter; mux needs runtime select -> SIG-10 | LOCKED, sum done SIG-5 |
 | D7 | Concurrent control endpoints (Zephyr UART + PC TCP) | Fixed drain order, last-writer-wins per step, replay-logged (sec. 6) | LOCKED (2026-09-23) |
 | D8 | Sum in batch runs (`run_headless`, GUI) | Rejected: identical batches can't hold distinct operands; per-source family configures sums | LOCKED (SIG-5) |
+| D9 | Expression failures (div-by-zero, domain, overflow) | Loud `kInvalidArgument` step failure (time/index frozen), never NaN/inf; t=0 failure rejected at configure | LOCKED (SIG-4a, 2026-09-24) |
+| D10 | Table replay edges (out-of-span, exact hits) | Clamp (hold ends), bit-exact on exact hits, linear interp between; points outside `SignalParams` (pool store + batch section) | LOCKED (SIG-4a, 2026-09-24) |
+| D11 | Custom sources in batch GUI model | Expression text supported (parsed data, no I/O); tables rejected (no CSV picker — SIG-9 panel follow-up) | LOCKED (SIG-4a, 2026-09-24) |
 
-Build order: SIG-1 -> SIG-2+SIG-3 -> SIG-5 -> SIG-4a+SIG-6 -> SIG-7 || SIG-8
--> SIG-10 (needs SIG-7 framing) -> SIG-9 -> SIG-4b (dep-gated).
+Build order: SIG-1 -> SIG-2+SIG-3 -> SIG-5 -> SIG-4a+SIG-6 (both shipped) ->
+SIG-7 || SIG-8 -> SIG-10 (needs SIG-7 framing) -> SIG-9 -> SIG-4b (dep-gated).

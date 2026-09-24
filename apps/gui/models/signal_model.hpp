@@ -12,9 +12,12 @@
 // exactly like a missing CLI option.
 //
 // Engine-only includes (no ImGui/SDL/Vulkan): unit tests link wengine_core
-// alone. Per-source tuning (list/add/drop, start/stop, Lua, expressions)
+// alone. Per-source tuning (list/add/drop, start/stop, Lua, CSV tables)
 // needs the SIG-6 family / SIG-10 control plane and is out of scope here;
-// this model drives one batch source.
+// this model drives one batch source. Expression sources work (the program
+// is plain parsed data, no I/O); table sources need a CSV file the batch
+// form has no picker for yet (SIG-9 panel follow-up) and are rejected with
+// a message, mirroring the kSum batch rule.
 
 #include "wengine/cli/args.hpp"
 #include "wengine/core/run_config.hpp"
@@ -58,6 +61,7 @@ struct SignalModel {
   std::string seed = "1";
   std::string quantity = "U";
   std::string count = "1";
+  std::string expr; // expression source text (kind=expression only)
   std::string dt = "0.01";
   std::string steps = "100";
   std::string emit_every = "1";
@@ -73,7 +77,8 @@ struct SignalModel {
     const auto kind_r =
         signal::parse_kind(kind_t.empty() ? "sine" : kind_t);
     if (!kind_r.ok()) {
-      return fail("unknown signal kind (want sine|square|triangle|saw|dc|pulse|noise|sum)");
+      return fail("unknown signal kind (want sine|square|triangle|saw|dc|pulse|noise|sum|"
+                  "expression|table)");
     }
     const auto qty_r =
         signal::parse_quantity(qty_t.empty() ? "U" : qty_t);
@@ -153,6 +158,23 @@ struct SignalModel {
     }
     if (p.kind == signal::SignalKind::kSum) {
       return fail("sum needs per-source operands (not supported in batch runs)");
+    }
+    if (p.kind == signal::SignalKind::kTable) {
+      return fail("table sources need a CSV file (not supported in batch runs)");
+    }
+    if (p.kind == signal::SignalKind::kExpression) {
+      const std::string_view t = signal_detail::trim(expr);
+      if (t.empty()) {
+        return fail("expression kind needs expression text");
+      }
+      const auto r = signal::parse_expression(t);
+      if (!r.ok()) {
+        return fail("invalid expression '" + std::string(t) + "' (" + std::string(r.error) +
+                    ")");
+      }
+      p.expr = r.value;
+    } else if (!signal_detail::trim(expr).empty()) {
+      return fail("expression text needs kind=expression");
     }
     p.seed = static_cast<std::uint64_t>(seed_v < 0 ? 0 : seed_v);
     if (seed_v < 0 || count_v < 0 || steps_v < 1 || !(dt_v > 0.0) || emit_v < 0 ||

@@ -283,11 +283,12 @@ void test_completion() {
     const auto c = complete_line("sig --", 6, all);
     assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
            has(c, "--emit-shm") && has(c, "--sig-kind") && has(c, "--sig-freq") &&
-           has(c, "--sig-quantity") && has(c, "--sig-count"));
+           has(c, "--sig-quantity") && has(c, "--sig-count") && has(c, "--sig-expr") &&
+           has(c, "--sig-table"));
   }
   {
     const std::vector<std::string> want{"sine", "square", "triangle", "saw", "dc",
-                                        "pulse", "noise", "sum"};
+                                        "pulse", "noise", "sum", "expression", "table"};
     assert(complete_line("sig run --sig-kind ", 19, all) == want);
   }
   {

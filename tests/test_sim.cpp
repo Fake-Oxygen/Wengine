@@ -276,7 +276,40 @@ void test_cli_signal() {
   assert(run_sig("run --sig-duty 2 --sig-kind square").first == 2);
   assert(run_sig("run --sig-seed -1").first == 2);
   assert(run_sig("run --sig-kind sum --steps 2").first == 2); // batch rejects sums
+  assert(run_sig("run --sig-kind expression --steps 2").first == 2); // needs --sig-expr
+  assert(run_sig("run --sig-kind table --steps 2").first == 2); // needs --sig-table
+  assert(run_sig("run --sig-kind sine --sig-expr 't'").first == 2); // cross-kind
+  assert(run_sig("run --sig-kind sine --sig-table x.csv").first == 2); // cross-kind
+  assert(run_sig("run --sig-kind expression --sig-expr '2+'").first == 2); // bad math
+  assert(run_sig("run --sig-kind expression --sig-expr 't' --sig-table x.csv").first ==
+         2);
   assert(run_sig("run --steps 0").first == 2);
+  // Expression golden through the CLI: 2*t+1, dt 100ms, 2 steps -> t = 0.2.
+  {
+    const auto [rc, s] = run_sig("run --sig-kind expression --sig-expr '2*t+1' "
+                                 "--steps 2 --dt 100ms");
+    assert(rc == 0);
+    assert(s.find("sig run: kind=expression") != std::string::npos);
+    assert(s.find("s0: expression value=1.4 U") != std::string::npos);
+  }
+  // Table golden through the CLI: mid-point linear interp is exact here.
+  {
+    const std::string path = "/tmp/wengine_test_sim_sigtable.csv";
+    {
+      std::ofstream out(path);
+      out << "time,value\n0,1.0\n1,3.0\n";
+    }
+    const auto [rc, s] =
+        run_sig("run --sig-kind table --sig-table " + path + " --steps 5 --dt 100ms");
+    assert(rc == 0);
+    assert(s.find("sig run: kind=table") != std::string::npos);
+    assert(s.find("table: " + path + " (2 points)") != std::string::npos);
+    assert(s.find("s0: table value=2 U") != std::string::npos);
+    std::remove(path.c_str());
+  }
+  // Missing table file is a runtime failure, never a crash.
+  assert(run_sig("run --sig-kind table --sig-table /tmp/wengine-no-such-table.csv").first ==
+         1);
   {
     const auto [rc, s] = run_sig("--help");
     assert(rc == 0 && s.find("sig run") != std::string::npos);

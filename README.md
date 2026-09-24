@@ -163,13 +163,22 @@ bloat `sim run`): unlimited sources, stamped U/I:
 > sig run --sig-kind square --sig-freq 50Hz --sig-amp 5V --sig-duty 0.25
 > sig run --sig-kind noise --sig-amp 1V --sig-seed 7 --sig-count 2
 > sig run --sig-kind dc --sig-offset 2.5V --emit-csv sig.csv --emit-shm /wengine-sig
+> sig run --sig-kind expression --sig-expr 'sin(2*pi*440*t)*0.5'
+> sig run --sig-kind table --sig-table wave.csv --steps 1000
 ```
 
-Kinds: `sine square triangle saw dc pulse noise` (`--sig-kind`, Tab-completed).
+Kinds: `sine square triangle saw dc pulse noise sum expression table`
+(`--sig-kind`, Tab-completed).
 `--sig-freq` (`Hz`/`kHz`), `--sig-amp`/`--sig-offset` (`V`/`mV`/`kV` or
 `A`/`mA` per `--sig-quantity U|I`), `--sig-phase` (rad), `--sig-duty`
 (square/pulse high fraction), `--sig-seed` (noise; source `k` uses
 `seed+k`), `--sig-count` (identical sources, default 1).
+`--sig-expr '<math>'` compiles a closed expression over `t` (source
+seconds): literals, `t`, `pi`, `e`, `+ - * / ^`, unary `-`, `sin cos exp
+log sqrt abs`, `min(a,b)` `max(a,b)`, parentheses — div-by-zero and
+out-of-domain fail the step loudly, never NaN. `--sig-table <csv>`
+replays a waveform file (header `time,value`, SI seconds + SI value,
+linear interp, clamped ends, bit-exact on exact time hits).
 `--emit-csv` writes the signals log (`step,time,sig_id,value,quantity`,
 exact round-trip); `--emit-shm` publishes signal channels
 (`sig.<slot>.U`). `sim run --solver signal` runs one default 1 Hz sine
@@ -199,9 +208,9 @@ tests/  benchmarks/  examples/
 |---|---|---|
 | `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
 | `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `signal.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step`, `SignalSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
-| `signal` | `wengine/signal/types.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial) — no I/O; pool lives in `world` |
+| `signal` | `wengine/signal/types.hpp`, `expr.hpp`, `table.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial), closed expression programs (RPN, from_chars parsing, div-by-zero/out-of-domain to Status), table CSV replay (linear interp, clamped, bit-exact hits) — no I/O; pool lives in `world` |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp`, `run_config.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
-| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ serial-carrying signal arrays, `select_signals` subset filter), versioned binary save/load (v3; v2 loads with synthesized serials, v1 with empty signals) |
+| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, expression programs, append-only table store, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ serial-carrying signal arrays, `select_signals` subset filter), versioned binary save/load (v4; v3 loads with zeroed custom columns, v2 with synthesized serials, v1 with empty signals) |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions, `StrideSink` step-aligned decimation, drop counters) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion |
@@ -255,7 +264,9 @@ into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
 `test_solver_registry`, `test_runner`, `test_signal` (waveform goldens,
 seeded-noise sequence, solver end-of-step convention, headless signal
 config + rejections, signal Frame adapter + wire round-trip, signals CSV
-round-trip, v2/v1 serialization), `test_routing` (serial stability,
+round-trip, expression goldens + div-by-zero step freeze, table CSV replay
++ byte-exact hits, custom headless batches + rejections, v4/v3/v1
+serialization), `test_routing` (serial stability,
 1:N/N:1 subscriptions, mid-run reconfig, stride alignment, sum golden +
 operand rejections, dangling-operand failure, sink-failure isolation, v3
 round-trip + v2 fallback), `test_world`, `test_emit`,
@@ -264,11 +275,12 @@ adapter, encode/decode exactness, seqlock states incl. threaded hammer,
 version gate, lag accounting), `test_link_shm` (segment create/publish/
 read-back, headless fan-out exactness, drop-oldest, failure paths, reader
  attach/poll), `test_link_bridge` (CSV parse fidelity + rejection, inverse
- adapter, CSV->bus->CSV byte-identity), `test_sim` now also covers `--emit-shm` wiring,
+ adapter, CSV->bus->CSV byte-identity), `test_sim` now also covers `--emit-shm` wiring +
+ `sig run` expression/table goldens and usage errors,
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_signal_panel` (signal panel model validation/config + controller
-parity for signal runs),
+parity for signal runs, incl. expression batch + table rejections),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
 `test_frame_source` (source registry, channels, ring,
