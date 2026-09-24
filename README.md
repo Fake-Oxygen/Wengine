@@ -177,6 +177,23 @@ bloat `sim run`): unlimited sources, stamped U/I:
 > sig run --sig-kind lua --sig-lua wah.lua --steps 1000
 ```
 
+Python signal receivers are under `examples/` (stdlib only). Start one in
+the listening terminal, then run the publisher against that host/port:
+
+```sh
+python3 examples/link_tcp_signal_receiver.py --bind 0.0.0.0 --port 9000
+./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V \
+  --steps 100 --dt 0.1ms --emit-tcp 127.0.0.1:9000
+
+python3 examples/link_udp_signal_receiver.py --bind 0.0.0.0 --port 9001
+./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V \
+  --steps 100 --dt 0.1ms --emit-udp 127.0.0.1:9001
+```
+
+The TCP sample validates the hello/version/domain and length-prefixed frames;
+the UDP sample validates compact datagrams and prints sequence-gap counts.
+`link_socket_protocol.py` contains their shared standard-library decoder.
+
 Kinds: `sine square triangle saw dc pulse noise sum expression table lua`
 (`--sig-kind`, Tab-completed).
 `--sig-freq` (`Hz`/`kHz`), `--sig-amp`/`--sig-offset` (`V`/`mV`/`kV` or
@@ -460,6 +477,8 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   + link_bridge.cpp (CSV<->bus replay bridge: play/record, built with CLI)
   + link_fastread.cpp (minimum-loss subscriber: no per-frame print, reused
   buffers, lag/loss summary; built with CLI)
+  + link_tcp_signal_receiver.py + link_udp_signal_receiver.py (TCP/UDP
+  signal receivers; link_socket_protocol.py has the shared decoder)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
 tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp

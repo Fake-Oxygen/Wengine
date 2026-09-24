@@ -160,6 +160,28 @@ drops; `frame_seq` gaps let readers calculate loss with `LagStats`.
 - UART (SIG-8): `UartPublisher` (`--emit-uart`), ASCII line framing
   `step,time,ch_id,value` + optional COBS binary; never back-pressures sim.
 
+### Python signal receivers
+
+The stdlib-only examples `examples/link_tcp_signal_receiver.py` and
+`examples/link_udp_signal_receiver.py` listen for the signal domain, validate
+the corresponding v1 handshake/datagram layout, print `sig.*` channels, and
+report sequence gaps. Start a listener first, then run the CLI publisher:
+
+```sh
+python3 examples/link_tcp_signal_receiver.py --port 9000
+./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V \
+  --steps 100 --dt 0.1ms --emit-tcp 127.0.0.1:9000
+
+python3 examples/link_udp_signal_receiver.py --port 9001
+./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V \
+  --steps 100 --dt 0.1ms --emit-udp 127.0.0.1:9001
+```
+
+Both scripts import `examples/link_socket_protocol.py`. TCP `LinkFrame` v1
+uses the fixed same-host struct layout and the sample explicitly requires a
+little-endian host with 8-byte doubles; UDP compact entries are encoded as
+little-endian fields.
+
 ### Stream rate budget and measured loopback
 
 Emission is simulation-step based, not wall-clock paced. `--emit-every N`
