@@ -15,9 +15,10 @@
 // alone. Per-source tuning (list/add/drop, start/stop, Lua, CSV tables)
 // needs the SIG-6 family / SIG-10 control plane and is out of scope here;
 // this model drives one batch source. Expression sources work (the program
-// is plain parsed data, no I/O); table sources need a CSV file the batch
-// form has no picker for yet (SIG-9 panel follow-up) and are rejected with
-// a message, mirroring the kSum batch rule.
+// is plain parsed data, no I/O); table sources need a CSV file and Lua
+// sources need the scripting runtime, and the batch form has a picker for
+// neither yet (SIG-9 panel follow-up) — both are rejected with a message,
+// mirroring the kSum batch rule.
 
 #include "wengine/cli/args.hpp"
 #include "wengine/core/run_config.hpp"
@@ -161,6 +162,9 @@ struct SignalModel {
     }
     if (p.kind == signal::SignalKind::kTable) {
       return fail("table sources need a CSV file (not supported in batch runs)");
+    }
+    if (p.kind == signal::SignalKind::kLua) {
+      return fail("lua sources need the scripting runtime (not supported in batch runs)");
     }
     if (p.kind == signal::SignalKind::kExpression) {
       const std::string_view t = signal_detail::trim(expr);

@@ -200,6 +200,8 @@ void test_cli_shm() {
   // Bad segment name is a usage error, never a crash.
   const auto [rc3, s3] = run_sim("run --steps 5 --emit-shm no-leading-slash");
   assert(rc3 == 2 && s3.find("invalid SHM segment name") != std::string::npos);
+  assert(run_sim("run --steps 5 --emit-tcp malformed-endpoint").first == 2);
+  assert(run_sim("run --steps 5 --emit-udp host:0").first == 2);
 }
 
 std::pair<int, std::string> run_sig(std::string line) {
@@ -261,6 +263,8 @@ void test_cli_signal() {
   // the bare signal solver runs one default sine.
   assert(run_sim("run --solver projectile --sig-kind sine").first == 2);
   assert(run_sim("run --solver signal --gravity 9.81").first == 2);
+  assert(run_sig("run --emit-tcp malformed-endpoint").first == 2);
+  assert(run_sig("run --emit-udp :9000").first == 2);
   {
     const auto [rc, s] = run_sim("run --solver signal --steps 2");
     assert(rc == 0 && s.find("solver=signal") != std::string::npos &&
@@ -310,6 +314,46 @@ void test_cli_signal() {
   // Missing table file is a runtime failure, never a crash.
   assert(run_sig("run --sig-kind table --sig-table /tmp/wengine-no-such-table.csv").first ==
          1);
+  // Lua golden through the CLI: scripted sine at t = 0.2 s (2 steps x 0.1 s).
+  {
+    const std::string path = "/tmp/wengine_test_sim_sig.lua";
+    {
+      std::ofstream out(path);
+      out << "return 2*math.sin(2*math.pi*t)\n";
+    }
+    const auto [rc, s] =
+        run_sig("run --sig-kind lua --sig-lua " + path + " --steps 200 --dt 1ms");
+    assert(rc == 0);
+    assert(s.find("sig run: kind=lua") != std::string::npos);
+    assert(s.find("lua: " + path + " (") != std::string::npos);
+    // CLI prints 6 significant digits; bit-exactness is proven engine-side.
+    assert(s.find("s0: lua value=1.90211 U") != std::string::npos);
+    std::remove(path.c_str());
+  }
+  // Lua usage errors: missing script, bad syntax, cross-kind, missing file.
+  assert(run_sig("run --sig-kind lua --steps 2").first == 2);
+  assert(run_sig("run --sig-kind sine --sig-lua x.lua").first == 2);
+  {
+    const std::string path = "/tmp/wengine_test_sim_sig_bad.lua";
+    {
+      std::ofstream out(path);
+      out << "return 1+\n";
+    }
+    assert(run_sig("run --sig-kind lua --sig-lua " + path).first == 2);
+    std::remove(path.c_str());
+  }
+  assert(run_sig("run --sig-kind lua --sig-lua /tmp/wengine-no-such.lua").first == 1);
+  // Lua runtime failure mid-run: os is absent from the sandbox.
+  {
+    const std::string path = "/tmp/wengine_test_sim_sig_evil.lua";
+    {
+      std::ofstream out(path);
+      out << "return os.execute('x')\n";
+    }
+    const auto [rc, s] = run_sig("run --sig-kind lua --sig-lua " + path + " --steps 2");
+    assert(rc == 1 && s.find("lua: ") != std::string::npos);
+    std::remove(path.c_str());
+  }
   {
     const auto [rc, s] = run_sig("--help");
     assert(rc == 0 && s.find("sig run") != std::string::npos);

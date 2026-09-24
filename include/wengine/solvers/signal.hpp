@@ -18,6 +18,9 @@
 // step advances neither time nor index (Runner contract) and emits nothing.
 // Custom generators (SIG-4a: kExpression, kTable) evaluate in pass 1 on the
 // same source-time base; a failing expression fails the step the same way.
+// Lua sources (SIG-4b: kLua) are NOT evaluated here at all — the Lua extra
+// solver (wengine_signal_lua, isolated TU) owns them and steps before this
+// solver, so sums stay fresh and this header stays Lua-free.
 
 #include "wengine/core/solver.hpp"
 #include "wengine/signal/types.hpp"
@@ -33,7 +36,7 @@ class SignalSolver : public core::ISolver {
 public:
   static constexpr std::string_view kName = "signal";
   static constexpr std::string_view kDescription =
-      "Signal sources: sine/square/triangle/saw/dc/pulse/noise/sum/expression/table "
+      "Signal sources: sine/square/triangle/saw/dc/pulse/noise/sum/expression/table/lua "
       "(stamped U/I)";
 
   static std::unique_ptr<core::ISolver> create() {
@@ -50,12 +53,16 @@ public:
     // Pass 1: generators (sums read these fresh in pass 2). Expression and
     // table sources are generators: same source-time base, same slot order.
     // A failing expression (div-by-zero, out-of-domain, overflow) fails the
-    // step loudly like a dangling sum operand — never a NaN sample.
+    // step loudly like a dangling sum operand — never a NaN sample. Lua
+    // sources (SIG-4b) are skipped here: the Lua extra solver evaluates them
+    // in slot order BEFORE this solver runs (extras step first — see
+    // solvers/run.hpp), so sums over Lua operands still read fresh values.
     for (std::uint32_t i = 0; i < s.signals.capacity(); ++i) {
       if (!s.signals.has(i) || s.signals.running[i] == 0) {
         continue;
       }
-      if (s.signals.kind[i] == static_cast<std::uint8_t>(signal::SignalKind::kSum)) {
+      if (s.signals.kind[i] == static_cast<std::uint8_t>(signal::SignalKind::kSum) ||
+          s.signals.kind[i] == static_cast<std::uint8_t>(signal::SignalKind::kLua)) {
         continue;
       }
       const double t_local = t_end - s.signals.t0[i];

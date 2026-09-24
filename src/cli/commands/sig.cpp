@@ -4,6 +4,8 @@
 #include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/link/shm_publisher.hpp"
+#include "wengine/link/socket_publisher.hpp"
+#include "wengine/signal/lua.hpp"
 #include "wengine/signal/table.hpp"
 #include "wengine/signal/types.hpp"
 #include "wengine/solvers/run.hpp"
@@ -12,9 +14,11 @@
 #include <array>
 #include <cstdint>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -42,11 +46,11 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 
 constexpr std::array<std::string_view, 1> kSigModes{{"run"}};
 
-constexpr std::array<std::string_view, 19> kSigOptions{{
+constexpr std::array<std::string_view, 22> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
-    "--sig-expr", "--sig-table", "--emit-csv", "--emit-shm", "--emit-every", "--help",
-    "-h",
+    "--sig-expr", "--sig-table", "--sig-lua", "--emit-csv", "--emit-shm", "--emit-tcp",
+    "--emit-udp", "--emit-every", "--help", "-h",
 }};
 
 } // namespace
@@ -62,6 +66,8 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   long long emit_every = 1;
   std::optional<std::string_view> csv_path;
   std::optional<std::string_view> shm_name;
+  std::optional<std::string_view> tcp_endpoint;
+  std::optional<std::string_view> udp_endpoint;
 
   auto take_i64 = [&](std::initializer_list<std::string_view> names, const char *what,
                       long long &slot) -> bool {
@@ -94,6 +100,8 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   }
   csv_path = args.take_option({"--emit-csv"});
   shm_name = args.take_option({"--emit-shm"});
+  tcp_endpoint = args.take_option({"--emit-tcp"});
+  udp_endpoint = args.take_option({"--emit-udp"});
 
   // Signal vocabulary lives here (never in sim run): raw views first,
   // amp/offset parse against --sig-quantity.
@@ -108,13 +116,14 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   const auto o_sig_count = args.take_option({"--sig-count"});
   const auto o_sig_expr = args.take_option({"--sig-expr"});
   const auto o_sig_table = args.take_option({"--sig-table"});
+  const auto o_sig_lua = args.take_option({"--sig-lua"});
 
   signal::SignalParams params;
   if (o_sig_kind) {
     const auto kind = signal::parse_kind(*o_sig_kind);
     if (!kind.ok()) {
       return usage_error(out, "unknown signal kind (want sine|square|triangle|saw|dc|"
-                              "pulse|noise|sum|expression|table)");
+                              "pulse|noise|sum|expression|table|lua)");
     }
     params.kind = kind.value;
   }
@@ -196,14 +205,19 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   // table CSV loads now (app-edge file I/O — the engine never opens files).
   // Cross-kind leftovers are usage errors, never silently ignored.
   std::vector<signal::TablePoint> table_points;
+  std::string lua_script;
   const bool is_expr = params.kind == signal::SignalKind::kExpression;
   const bool is_table = params.kind == signal::SignalKind::kTable;
+  const bool is_lua = params.kind == signal::SignalKind::kLua;
   if (is_expr) {
     if (!o_sig_expr) {
       return usage_error(out, "expression kind needs --sig-expr '<math>'");
     }
     if (o_sig_table) {
       return usage_error(out, "--sig-table is table-only (no expression source to replay)");
+    }
+    if (o_sig_lua) {
+      return usage_error(out, "--sig-lua is lua-only (no script in an expression source)");
     }
     const auto prog = signal::parse_expression(*o_sig_expr);
     if (!prog.ok()) {
@@ -219,12 +233,28 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     if (o_sig_expr) {
       return usage_error(out, "--sig-expr is expression-only (no program in a table source)");
     }
+    if (o_sig_lua) {
+      return usage_error(out, "--sig-lua is lua-only (no script in a table source)");
+    }
+  } else if (is_lua) {
+    if (!o_sig_lua) {
+      return usage_error(out, "lua kind needs --sig-lua <file.lua>");
+    }
+    if (o_sig_expr) {
+      return usage_error(out, "--sig-expr is expression-only (no program in a lua source)");
+    }
+    if (o_sig_table) {
+      return usage_error(out, "--sig-table is table-only (no CSV in a lua source)");
+    }
   } else {
     if (o_sig_expr) {
       return usage_error(out, "--sig-expr needs --sig-kind expression");
     }
     if (o_sig_table) {
       return usage_error(out, "--sig-table needs --sig-kind table");
+    }
+    if (o_sig_lua) {
+      return usage_error(out, "--sig-lua needs --sig-kind lua");
     }
   }
 
@@ -272,6 +302,26 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       return core::kExitRuntime;
     }
   }
+  if (is_lua) {
+    // Script file I/O stays at the edge: the engine only ever sees text.
+    std::ifstream lua_in(std::string{*o_sig_lua});
+    if (!lua_in) {
+      out << "Error: cannot open Lua file '" << *o_sig_lua << "'\n";
+      return core::kExitRuntime;
+    }
+    std::ostringstream lua_buf;
+    lua_buf << lua_in.rdbuf();
+    if (!lua_in && !lua_in.eof()) {
+      out << "Error: cannot read Lua file '" << *o_sig_lua << "'\n";
+      return core::kExitRuntime;
+    }
+    lua_script = lua_buf.str();
+    if (!lua::check_script(std::string_view(lua_script.data(), lua_script.size())).ok()) {
+      out << "Error: invalid Lua script '" << *o_sig_lua << "' (syntax check failed)\n";
+      out << kUsage << '\n';
+      return core::kExitUsage;
+    }
+  }
   if (sig_seed < 0 || sig_count < 0 || !signal::validate_params(params).ok()) {
     return usage_error(out, "invalid signal params (freq > 0, duty in 0..1, seed/count >= 0)");
   }
@@ -286,6 +336,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   cfg.signal.count = static_cast<std::uint64_t>(sig_count);
   cfg.signal.set = true;
   cfg.signal.table = std::move(table_points);
+  cfg.signal.lua = std::move(lua_script);
 
   std::optional<emit::SignalsCsvSink> sig_csv;
   if (csv_path) {
@@ -308,8 +359,34 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
 
+  // Socket publishers ride the same emit path (best-effort ISinks owned
+  // here). Endpoint shape errors are usage errors; connect/DNS failures are
+  // runtime errors — same split as SHM names.
+  std::optional<link::TcpPublisher> tcp;
+  if (tcp_endpoint) {
+    if (!link::parse_endpoint(*tcp_endpoint).ok()) {
+      return usage_error(out, "invalid TCP endpoint (want host:port)");
+    }
+    tcp.emplace(*tcp_endpoint, cfg.solver, &link::frame_from_signal_snapshot);
+    if (!tcp->ok()) {
+      out << "Error: cannot connect TCP '" << *tcp_endpoint << "'\n";
+      return core::kExitRuntime;
+    }
+  }
+  std::optional<link::UdpPublisher> udp;
+  if (udp_endpoint) {
+    if (!link::parse_endpoint(*udp_endpoint).ok()) {
+      return usage_error(out, "invalid UDP endpoint (want host:port)");
+    }
+    udp.emplace(*udp_endpoint, cfg.solver, &link::frame_from_signal_snapshot);
+    if (!udp->ok()) {
+      out << "Error: cannot open UDP '" << *udp_endpoint << "'\n";
+      return core::kExitRuntime;
+    }
+  }
+
   world::State s;
-  std::array<emit::ISink *, 2> sink_arr{};
+  std::array<emit::ISink *, 4> sink_arr{};
   std::size_t n_sinks = 0;
   if (sig_csv) {
     sink_arr[n_sinks++] = &*sig_csv;
@@ -317,10 +394,28 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   if (shm) {
     sink_arr[n_sinks++] = &*shm;
   }
-  const core::Status st =
-      solvers::run_headless(cfg, std::span(sink_arr.data(), n_sinks), s);
+  if (tcp) {
+    sink_arr[n_sinks++] = &*tcp;
+  }
+  if (udp) {
+    sink_arr[n_sinks++] = &*udp;
+  }
+  // Lua sources evaluate in an extra solver that steps before SignalSolver
+  // (custom-source contract — see solvers/run.hpp).
+  std::unique_ptr<lua::LuaSignalSolver> lua_solver;
+  std::array<core::ISolver *, 1> extra_arr{};
+  std::size_t n_extra = 0;
+  if (is_lua) {
+    lua_solver = lua::create_lua_solver();
+    extra_arr[n_extra++] = lua_solver.get();
+  }
+  const core::Status st = solvers::run_headless(cfg, std::span(sink_arr.data(), n_sinks),
+                                                s, std::span(extra_arr.data(), n_extra));
   if (!st.ok()) {
     out << "Error: simulation step failed\n";
+    if (lua_solver && !lua_solver->last_error().empty()) {
+      out << "lua: " << lua_solver->last_error() << '\n';
+    }
     return core::kExitRuntime;
   }
 
@@ -332,6 +427,9 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   }
   if (is_table) {
     out << "table: " << *o_sig_table << " (" << cfg.signal.table.size() << " points)\n";
+  }
+  if (is_lua) {
+    out << "lua: " << *o_sig_lua << " (" << cfg.signal.lua.size() << " bytes)\n";
   }
   out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
   out << "signals: " << s.signals.live_count << '\n';
@@ -359,6 +457,22 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       return core::kExitRuntime;
     }
     out << "shm: " << shm->name() << " (" << shm->stats().published << " frames)\n";
+  }
+  if (tcp) {
+    if (!tcp->ok()) {
+      out << "Error: TCP publish failed on '" << tcp->endpoint() << "'\n";
+      return core::kExitRuntime;
+    }
+    out << "tcp: " << tcp->endpoint() << " (" << tcp->stats().published << " frames, "
+        << tcp->stats().dropped_send + tcp->stats().dropped_over_bound << " dropped)\n";
+  }
+  if (udp) {
+    if (!udp->ok()) {
+      out << "Error: UDP publish failed on '" << udp->endpoint() << "'\n";
+      return core::kExitRuntime;
+    }
+    out << "udp: " << udp->endpoint() << " (" << udp->stats().published << " frames, "
+        << udp->stats().dropped_send + udp->stats().dropped_over_bound << " dropped)\n";
   }
   return core::kExitOk;
 }

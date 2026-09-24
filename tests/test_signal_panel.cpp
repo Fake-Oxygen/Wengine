@@ -88,6 +88,9 @@ void test_model_rejections() {
   // Tables need a CSV file the batch form has no picker for (SIG-9 panel).
   m.kind = "table";
   assert(!m.build().ok);
+  // Lua needs the scripting runtime (wengine_core only here — SIG-9 panel).
+  m.kind = "lua";
+  assert(!m.build().ok);
   // Expressions work in batch (parsed data, no I/O); stray text is rejected.
   m.kind = "expression";
   m.expr.clear();
@@ -153,6 +156,11 @@ void test_controller_rejects_bad_signal() {
   assert(near(sim.snapshot().sig_value[0], 2.0, 1e-9));
   bad.signal.params.kind = signal::SignalKind::kSine;
   assert(!sim.set_config(bad).ok());
+  // Lua configs need the scripting runtime the controller does not link.
+  bad.signal.params.kind = signal::SignalKind::kLua;
+  bad.signal.lua = "return 1";
+  assert(!sim.set_config(bad).ok());
+  assert(!sim.error().empty());
 }
 
 void test_controller_expression_parity() {

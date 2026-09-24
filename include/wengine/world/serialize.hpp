@@ -2,8 +2,8 @@
 
 // Versioned binary persistence for world::State (deterministic, no deps).
 //
-// Format v4, all integers little-endian, doubles as IEEE-754 bits:
-//   'W' 'E' 'N' 'G', u32 version (= 4)
+// Format v5, all integers little-endian, doubles as IEEE-754 bits:
+//   'W' 'E' 'N' 'G', u32 version (= 5)
 //   f64 sim_time, u64 step_index
 //   u32 entity_capacity, generations[u32]..., u32 freelist_size, freelist[u32]...
 //   u32 particle_capacity, per slot: u8 present + f64 x4 (fixed stride)
@@ -11,12 +11,15 @@
 //     u8 running, u8 op_count, f64 freq/amp/offset/phase/duty/t0/value,
 //     u64 seed, u64 rng, u64 serial, u64 ops[kMaxOps],
 //     u8 expr_len, u8 expr_op[kMaxExprNodes], f64 expr_arg[kMaxExprNodes],
-//     u64 table_off, u64 table_len
+//     u64 table_off, u64 table_len, u64 lua_off, u64 lua_len
 //   u32 table_store_size, f64 table_times[]..., f64 table_values[]...
-// v3 files (no expression/table columns or store) still load: new columns
-// zero out, the store stays empty. v2 files (no serial/operands) still
-// load: serials synthesize as slot indices, operand lists come back empty.
-// v1 files (no signal section) still load: signals come back empty.
+//   u32 lua_blob_size, u8 lua_text[]... (opaque script bytes)
+// v4 files (no Lua columns or blob) still load: Lua ranges zero out, the
+// script store stays empty. v3 files (no expression/table columns or
+// store) still load: new columns zero out, both stores stay empty. v2
+// files (no serial/operands) still load: serials synthesize as slot
+// indices, operand lists come back empty. v1 files (no signal section)
+// still load: signals come back empty.
 // Freelist order is stored, so a round-trip preserves exact spawn-reuse
 // behavior. load_state() replaces the target; corrupt input (bad magic,
 // version, truncation, out-of-range indices) yields kInvalidArgument and
@@ -37,7 +40,7 @@
 
 namespace wengine::world {
 
-inline constexpr std::uint32_t kStateFormatVersion = 4;
+inline constexpr std::uint32_t kStateFormatVersion = 5;
 // Sanity cap per count field: rejects corrupt files before huge allocs.
 inline constexpr std::uint32_t kMaxStateEntries = 1u << 24;
 
@@ -168,6 +171,8 @@ inline bool get_f64_le(std::istream &in, double &v) {
     }
     detail::put_u64_le(out, s.signals.table_off[i]);
     detail::put_u64_le(out, s.signals.table_len[i]);
+    detail::put_u64_le(out, s.signals.lua_off[i]);
+    detail::put_u64_le(out, s.signals.lua_len[i]);
   }
   detail::put_u32_le(out, static_cast<std::uint32_t>(s.signals.table_times.size()));
   for (double t : s.signals.table_times) {
@@ -176,6 +181,9 @@ inline bool get_f64_le(std::istream &in, double &v) {
   for (double v : s.signals.table_values) {
     detail::put_f64_le(out, v);
   }
+  detail::put_u32_le(out, static_cast<std::uint32_t>(s.signals.lua_text.size()));
+  out.write(s.signals.lua_text.data(),
+            static_cast<std::streamsize>(s.signals.lua_text.size()));
   if (!out) {
     return {core::StatusCode::kInternal};
   }
@@ -194,7 +202,8 @@ inline bool get_f64_le(std::istream &in, double &v) {
   }
   std::uint32_t version = 0;
   if (!detail::get_u32_le(in, version) ||
-      (version != 1 && version != 2 && version != 3 && version != kStateFormatVersion)) {
+      (version != 1 && version != 2 && version != 3 && version != 4 &&
+       version != kStateFormatVersion)) {
     return invalid();
   }
   State tmp;
@@ -277,6 +286,8 @@ inline bool get_f64_le(std::istream &in, double &v) {
   tmp.signals.expr_len.resize(sig_cap);
   tmp.signals.table_off.resize(sig_cap);
   tmp.signals.table_len.resize(sig_cap);
+  tmp.signals.lua_off.resize(sig_cap);
+  tmp.signals.lua_len.resize(sig_cap);
   tmp.signals.present.resize(sig_cap);
   tmp.signals.live_count = 0;
   tmp.signals.next_serial = 0;
@@ -287,7 +298,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
     std::uint8_t run = 0;
     std::uint8_t ops = 0;
     if (!detail::get_u8(in, p) || p > 1 || !detail::get_u8(in, kind) ||
-        kind > static_cast<std::uint8_t>(signal::SignalKind::kTable) ||
+        kind > static_cast<std::uint8_t>(signal::SignalKind::kLua) ||
         !detail::get_u8(in, qty) ||
         qty > static_cast<std::uint8_t>(signal::QuantityId::kCurrent) ||
         !detail::get_u8(in, run) || run > 1) {
@@ -362,10 +373,22 @@ inline bool get_f64_le(std::istream &in, double &v) {
           tmp.signals.table_len[i] > signal::kMaxTablePoints) {
         return invalid();
       }
+      if (version >= 5) {
+        if (!detail::get_u64_le(in, tmp.signals.lua_off[i]) ||
+            !detail::get_u64_le(in, tmp.signals.lua_len[i]) ||
+            tmp.signals.lua_len[i] > signal::kMaxLuaScriptBytes) {
+          return invalid();
+        }
+      } else {
+        // v4 predates scripted sources: no script ranges.
+        tmp.signals.lua_off[i] = 0;
+        tmp.signals.lua_len[i] = 0;
+      }
       if (p != 0) {
         // Live slots re-validate the configure-time invariants: programs
-        // must be stack-balanced (expressions) or empty, and table slots
-        // must carry a non-empty range (checked against the store below).
+        // must be stack-balanced (expressions) or empty, table slots must
+        // carry a non-empty range (checked against the store below), and
+        // Lua slots must carry a non-empty script range (ditto).
         signal::ExprProgram prog;
         prog.size = expr_len;
         for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
@@ -375,6 +398,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
         }
         const bool is_expr = kind == static_cast<std::uint8_t>(signal::SignalKind::kExpression);
         const bool is_table = kind == static_cast<std::uint8_t>(signal::SignalKind::kTable);
+        const bool is_lua = kind == static_cast<std::uint8_t>(signal::SignalKind::kLua);
         if (is_expr && !signal::validate_program(prog)) {
           return invalid();
         }
@@ -388,8 +412,16 @@ inline bool get_f64_le(std::istream &in, double &v) {
             (tmp.signals.table_len[i] != 0 || tmp.signals.table_off[i] != 0)) {
           return invalid();
         }
+        if (is_lua && tmp.signals.lua_len[i] == 0) {
+          return invalid();
+        }
+        if (!is_lua &&
+            (tmp.signals.lua_len[i] != 0 || tmp.signals.lua_off[i] != 0)) {
+          return invalid();
+        }
       } else if (expr_len != 0 || tmp.signals.table_len[i] != 0 ||
-                 tmp.signals.table_off[i] != 0) {
+                 tmp.signals.table_off[i] != 0 || tmp.signals.lua_len[i] != 0 ||
+                 tmp.signals.lua_off[i] != 0) {
         return invalid(); // dead slots carry no program or range
       }
     } else {
@@ -401,6 +433,8 @@ inline bool get_f64_le(std::istream &in, double &v) {
       }
       tmp.signals.table_off[i] = 0;
       tmp.signals.table_len[i] = 0;
+      tmp.signals.lua_off[i] = 0;
+      tmp.signals.lua_len[i] = 0;
     }
   }
   if (version >= 4) {
@@ -440,6 +474,28 @@ inline bool get_f64_le(std::istream &in, double &v) {
             return invalid();
           }
         }
+      }
+    }
+  }
+  if (version >= 5) {
+    // Script blob: opaque bytes (compile-checked where Lua exists, never
+    // here); ranges validated against the blob like table ranges above.
+    std::uint32_t blob_len = 0;
+    if (!detail::get_u32_le(in, blob_len) || blob_len > kMaxStateEntries) {
+      return invalid();
+    }
+    tmp.signals.lua_text.resize(blob_len);
+    if (blob_len > 0) {
+      in.read(tmp.signals.lua_text.data(), static_cast<std::streamsize>(blob_len));
+      if (!in) {
+        return invalid();
+      }
+    }
+    for (std::uint32_t i = 0; i < sig_cap; ++i) {
+      const std::uint64_t off = tmp.signals.lua_off[i];
+      const std::uint64_t len = tmp.signals.lua_len[i];
+      if (off > blob_len || len > blob_len - off) {
+        return invalid();
       }
     }
   }

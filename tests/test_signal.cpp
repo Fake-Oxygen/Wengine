@@ -112,6 +112,7 @@ void test_parse_and_validate() {
   assert(signal::parse_kind("noise").value == signal::SignalKind::kNoise);
   assert(signal::parse_kind("expression").value == signal::SignalKind::kExpression);
   assert(signal::parse_kind("table").value == signal::SignalKind::kTable);
+  assert(signal::parse_kind("lua").value == signal::SignalKind::kLua);
   assert(!signal::parse_kind("sawtooth").ok());
   assert(!signal::parse_kind("").ok());
   assert(signal::parse_quantity("U").value == signal::QuantityId::kVoltage);

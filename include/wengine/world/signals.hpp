@@ -49,6 +49,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace wengine::world {
@@ -76,6 +77,9 @@ struct Signals {
   std::vector<std::uint64_t> table_len; // table range length per slot
   std::vector<double> table_times; // append-only global table store (times)
   std::vector<double> table_values; // append-only global table store (values)
+  std::vector<std::uint64_t> lua_off; // script range start in lua_text
+  std::vector<std::uint64_t> lua_len; // script byte length per slot
+  std::string lua_text; // append-only global script store (SIG-4b)
   std::vector<std::uint8_t> present; // 1 = live source in slot
   std::size_t live_count{0};
   std::uint64_t next_serial{0};
@@ -115,6 +119,8 @@ struct Signals {
     expr_len.resize(need, 0);
     table_off.resize(need, 0);
     table_len.resize(need, 0);
+    lua_off.resize(need, 0);
+    lua_len.resize(need, 0);
     present.resize(need, 0);
   }
 
@@ -158,6 +164,9 @@ struct Signals {
     table_len.clear();
     table_times.clear();
     table_values.clear();
+    lua_off.clear();
+    lua_len.clear();
+    lua_text.clear();
     present.clear();
     live_count = 0;
     next_serial = 0;
@@ -184,17 +193,18 @@ struct Signals {
 // Initial sample is eval(0): periodic kinds start at phase, noise starts
 // at the seed peek (RNG advances on the first step, never here), sums
 // start at the operands' current sum, expressions evaluate at t = 0 — so
-// spawn is a pure function of (params, pool, t_now). kTable is rejected
-// here by design (points live outside SignalParams — see
-// configure_table_source); every other kind zeroes the table range.
+// spawn is a pure function of (params, pool, t_now). kTable and kLua are
+// rejected here by design (points/scripts live outside SignalParams — see
+// configure_table_source and lua::configure_lua_source); every other kind
+// zeroes both ranges.
 [[nodiscard]] inline core::Status configure_source(Entity e, Signals &pool,
                                                    const signal::SignalParams &p,
                                                    double t_now) {
   if (!signal::validate_params(p).ok()) {
     return {core::StatusCode::kInvalidArgument};
   }
-  if (p.kind == signal::SignalKind::kTable) {
-    return {core::StatusCode::kInvalidArgument}; // needs points: use below
+  if (p.kind == signal::SignalKind::kTable || p.kind == signal::SignalKind::kLua) {
+    return {core::StatusCode::kInvalidArgument}; // needs points/script: see below
   }
   if (p.kind == signal::SignalKind::kSum) {
     for (std::uint8_t k = 0; k < p.op_count; ++k) {
@@ -248,6 +258,8 @@ struct Signals {
   }
   pool.table_off[i] = 0;
   pool.table_len[i] = 0;
+  pool.lua_off[i] = 0;
+  pool.lua_len[i] = 0;
   if (p.kind == signal::SignalKind::kSum) {
     double acc = p.offset;
     for (std::uint8_t k = 0; k < p.op_count; ++k) {
@@ -318,6 +330,8 @@ struct Signals {
   }
   pool.table_off[i] = off;
   pool.table_len[i] = len;
+  pool.lua_off[i] = 0;
+  pool.lua_len[i] = 0;
   const std::span<const double> times(pool.table_times.data() + off,
                                       static_cast<std::size_t>(len));
   const std::span<const double> values(pool.table_values.data() + off,
@@ -337,6 +351,67 @@ configure_table_source(Entity e, Signals &pool, std::span<const signal::TablePoi
   }
   return attach_table_source(e, pool, off, static_cast<std::uint64_t>(pts.size()),
                              quantity, t_now);
+}
+
+// Append a validated Lua script to the pool store (no attach). Script text
+// is opaque bytes to the engine (compile-checked where Lua exists:
+// lua::configure_lua_source, the CLI); the engine only bounds the size so
+// pools, batch sections, and blobs stay finite. `off` receives the start.
+[[nodiscard]] inline core::Status append_lua_script(Signals &pool,
+                                                   std::string_view script,
+                                                   std::uint64_t &off) {
+  if (script.empty() || script.size() > signal::kMaxLuaScriptBytes) {
+    return {core::StatusCode::kInvalidArgument};
+  }
+  off = static_cast<std::uint64_t>(pool.lua_text.size());
+  pool.lua_text.append(script.data(), script.size());
+  return core::Status::success();
+}
+
+// Attach entity `e` as a Lua source over the already-stored range
+// [off, off + len) (from append_lua_script). The initial sample is 0: Lua
+// sources sample on their first stepped evaluation (the Lua solver runs
+// before SignalSolver, so sums over Lua operands still read fresh values
+// within the step). Batch spawns and direct configures agree on this —
+// run_headless always steps at least once, so the 0 is never observed
+// there; direct API users read it only before the first step.
+[[nodiscard]] inline core::Status attach_lua_source(Entity e, Signals &pool,
+                                                   std::uint64_t off, std::uint64_t len,
+                                                   signal::QuantityId quantity,
+                                                   double t_now) {
+  if (len == 0 || len > signal::kMaxLuaScriptBytes || off > pool.lua_text.size() ||
+      len > pool.lua_text.size() - off) {
+    return {core::StatusCode::kInvalidArgument};
+  }
+  pool.attach(e.index);
+  const std::uint32_t i = e.index;
+  pool.serial[i] = pool.next_serial++;
+  pool.kind[i] = static_cast<std::uint8_t>(signal::SignalKind::kLua);
+  pool.quantity[i] = static_cast<std::uint8_t>(quantity);
+  pool.freq[i] = 0.0;
+  pool.amp[i] = 0.0;
+  pool.offset[i] = 0.0;
+  pool.phase[i] = 0.0;
+  pool.duty[i] = 0.0;
+  pool.seed[i] = 0;
+  pool.rng[i] = 0;
+  pool.t0[i] = t_now;
+  pool.running[i] = 1;
+  pool.op_count[i] = 0;
+  for (std::size_t k = 0; k < signal::SignalParams::kMaxOps; ++k) {
+    pool.ops[i * signal::SignalParams::kMaxOps + k] = 0;
+  }
+  pool.expr_len[i] = 0;
+  for (std::size_t k = 0; k < signal::kMaxExprNodes; ++k) {
+    pool.expr_op[i * signal::kMaxExprNodes + k] = 0;
+    pool.expr_arg[i * signal::kMaxExprNodes + k] = 0.0;
+  }
+  pool.table_off[i] = 0;
+  pool.table_len[i] = 0;
+  pool.lua_off[i] = off;
+  pool.lua_len[i] = len;
+  pool.value[i] = 0.0;
+  return core::Status::success();
 }
 
 } // namespace wengine::world

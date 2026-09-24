@@ -5,6 +5,7 @@
 #include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/link/shm_publisher.hpp"
+#include "wengine/link/socket_publisher.hpp"
 #include "wengine/signal/types.hpp"
 #include "wengine/solvers/run.hpp"
 #include "wengine/solvers/solver_registry.hpp"
@@ -45,9 +46,10 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 
 constexpr std::array<std::string_view, 1> kSimModes{{"run"}};
 
-constexpr std::array<std::string_view, 17> kSimOptions{{
+constexpr std::array<std::string_view, 19> kSimOptions{{
     "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
-    "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-every", "--help", "-h",
+    "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-tcp", "--emit-udp",
+    "--emit-every", "--help", "-h",
 }};
 
 } // namespace
@@ -67,6 +69,8 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   long long emit_every = 1;
   std::optional<std::string_view> csv_path;
   std::optional<std::string_view> shm_name;
+  std::optional<std::string_view> tcp_endpoint;
+  std::optional<std::string_view> udp_endpoint;
   std::string_view solver_name = solvers::ProjectileSolver::kName;
 
   auto take_i64 = [&](std::initializer_list<std::string_view> names, const char *what,
@@ -140,6 +144,8 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   }
   csv_path = args.take_option({"--emit-csv"});
   shm_name = args.take_option({"--emit-shm"});
+  tcp_endpoint = args.take_option({"--emit-tcp"});
+  udp_endpoint = args.take_option({"--emit-udp"});
   if (auto o = args.take_option({"--solver"})) {
     solver_name = *o;
   }
@@ -254,8 +260,38 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
 
+  // Socket publishers ride the same emit path (best-effort ISinks owned
+  // here). Endpoint shape errors are usage errors; connect/DNS failures are
+  // runtime errors — same split as SHM names.
+  std::optional<link::TcpPublisher> tcp;
+  if (tcp_endpoint) {
+    if (!link::parse_endpoint(*tcp_endpoint).ok()) {
+      return usage_error(out, "invalid TCP endpoint (want host:port)");
+    }
+    const link::FrameAdapter adapter = is_signal ? &link::frame_from_signal_snapshot
+                                                 : &link::frame_from_snapshot;
+    tcp.emplace(*tcp_endpoint, solver_name, adapter);
+    if (!tcp->ok()) {
+      out << "Error: cannot connect TCP '" << *tcp_endpoint << "'\n";
+      return core::kExitRuntime;
+    }
+  }
+  std::optional<link::UdpPublisher> udp;
+  if (udp_endpoint) {
+    if (!link::parse_endpoint(*udp_endpoint).ok()) {
+      return usage_error(out, "invalid UDP endpoint (want host:port)");
+    }
+    const link::FrameAdapter adapter = is_signal ? &link::frame_from_signal_snapshot
+                                                 : &link::frame_from_snapshot;
+    udp.emplace(*udp_endpoint, solver_name, adapter);
+    if (!udp->ok()) {
+      out << "Error: cannot open UDP '" << *udp_endpoint << "'\n";
+      return core::kExitRuntime;
+    }
+  }
+
   world::State s;
-  std::array<emit::ISink *, 3> sink_arr{};
+  std::array<emit::ISink *, 5> sink_arr{};
   std::size_t n_sinks = 0;
   if (csv) {
     sink_arr[n_sinks++] = &*csv;
@@ -265,6 +301,12 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   }
   if (shm) {
     sink_arr[n_sinks++] = &*shm;
+  }
+  if (tcp) {
+    sink_arr[n_sinks++] = &*tcp;
+  }
+  if (udp) {
+    sink_arr[n_sinks++] = &*udp;
   }
   const core::Status st =
       solvers::run_headless(cfg, std::span(sink_arr.data(), n_sinks), s);
@@ -322,6 +364,22 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       return core::kExitRuntime;
     }
     out << "shm: " << shm->name() << " (" << shm->stats().published << " frames)\n";
+  }
+  if (tcp) {
+    if (!tcp->ok()) {
+      out << "Error: TCP publish failed on '" << tcp->endpoint() << "'\n";
+      return core::kExitRuntime;
+    }
+    out << "tcp: " << tcp->endpoint() << " (" << tcp->stats().published << " frames, "
+        << tcp->stats().dropped_send + tcp->stats().dropped_over_bound << " dropped)\n";
+  }
+  if (udp) {
+    if (!udp->ok()) {
+      out << "Error: UDP publish failed on '" << udp->endpoint() << "'\n";
+      return core::kExitRuntime;
+    }
+    out << "udp: " << udp->endpoint() << " (" << udp->stats().published << " frames, "
+        << udp->stats().dropped_send + udp->stats().dropped_over_bound << " dropped)\n";
   }
   return core::kExitOk;
 }

@@ -37,6 +37,7 @@
 #include <cmath>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <variant>
@@ -55,14 +56,15 @@ enum class SignalKind : std::uint8_t {
   kSum = 7, // combinator: sums operand sources (SIG-5); solver-only kind
   kExpression = 8, // closed-form custom math (SIG-4a); solver-only evaluation
   kTable = 9, // CSV waveform replay (SIG-4a); solver-only evaluation
+  kLua = 10, // Lua scripting source (SIG-4b); evaluated by the Lua extra solver
 };
 
 // Canonical kind names for CLI/GUI/control-plane vocabularies (single
 // source of truth; `parse_kind` accepts exactly these). APPEND-ONLY:
 // serialized kind bytes must stay stable, so new kinds go last.
-inline constexpr std::array<std::string_view, 10> kKindNames{
+inline constexpr std::array<std::string_view, 11> kKindNames{
     {"sine", "square", "triangle", "saw", "dc", "pulse", "noise", "sum",
-     "expression", "table"}};
+     "expression", "table", "lua"}};
 
 // Physical-quantity tag. Stored as `uint8` in pools/snapshots/wire, never
 // as strings. U/I first; the mechanism is generic (see kQuantities).
@@ -199,9 +201,10 @@ struct SignalParams {
     return p.offset;
   case SignalKind::kExpression:
   case SignalKind::kTable:
-    // Solver-only kinds like kSum: expression needs fallible RPN eval and
-    // table needs pool-store context, so direct evaluation is the identity
-    // and the solver branches explicitly.
+  case SignalKind::kLua:
+    // Solver-only kinds like kSum: expression needs fallible RPN eval,
+    // table needs pool-store context, Lua needs the scripting runtime — so
+    // direct evaluation is the identity and the solvers branch explicitly.
     return p.offset;
   }
   return p.offset; // unreachable: every enumerator handled above
@@ -265,28 +268,36 @@ parse_quantity(std::string_view s) noexcept {
 
 // Run-scoped section owned by the signal module and aggregated by
 // core::RunConfig (one member per solver — see run_config.hpp). Parsed
-// values only (no strings): frontends parse kind/quantity/amplitude text
-// and store the result here; the driver validates + spawns. `set` marks
-// explicitly provided options so the driver can reject them with a
-// non-signal solver (same pattern as RunConfig::has_gravity). `table`
-// carries CSV points for kTable batches (config-edge allocation, copied
-// into the pool store once per run — never on the hot path); it must be
-// empty for every other kind, like `expr` must be empty unless the kind
-// is kExpression.
+// values only (frontends parse kind/quantity/amplitude/expression text and
+// store the result here; table points and Lua script text ride along as
+// bounded blobs); the driver validates + spawns. `set` marks explicitly
+// provided options so the driver can reject them with a non-signal solver
+// (same pattern as RunConfig::has_gravity). `table` carries CSV points for
+// kTable batches (config-edge allocation, copied into the pool store once
+// per run — never on the hot path); `lua` carries the script text for kLua
+// batches under the same rule (compiled and evaluated by the Lua extra
+// solver, never here). Each must be empty/non-empty exactly for its kind.
 struct SignalRunConfig {
   SignalParams params;
   std::uint64_t count = 1;
   bool set = false;
   std::vector<TablePoint> table;
+  std::string lua;
 };
+
+// Size cap for one Lua script (pool store, batch section, v5 blob alike):
+// bounds memory and keeps corrupt blobs load-rejectable. Scripts are text,
+// so 64 KiB is generous (typical sources are a few lines).
+inline constexpr std::size_t kMaxLuaScriptBytes = 65536;
 
 // Config validation: periodic kinds need f > 0; duty is checked only for
 // the kinds that read it (other kinds ignore it, lenient by design); sums
 // need 1..kMaxOps operand serials (existence/kind checked at configure
 // time against the live pool, not here); expressions need a structurally
-// valid program; tables pass here structurally (points are validated where
-// they are supplied: configure_table_source, the batch driver, the GUI
-// controller — SignalParams carries no table points by design).
+// valid program; tables and Lua pass here structurally (points/scripts are
+// validated where they are supplied: configure_table_source /
+// lua::configure_lua_source, the batch driver, the GUI controller —
+// SignalParams carries neither by design).
 [[nodiscard]] inline core::Status validate_params(const SignalParams &p) noexcept {
   switch (p.kind) {
   case SignalKind::kSine:
@@ -301,6 +312,7 @@ struct SignalRunConfig {
   case SignalKind::kDc:
   case SignalKind::kNoise:
   case SignalKind::kTable:
+  case SignalKind::kLua:
     break;
   case SignalKind::kSum:
     if (p.op_count < 1 || p.op_count > SignalParams::kMaxOps) {

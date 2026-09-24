@@ -72,7 +72,8 @@ struct SimSpec {
   static constexpr std::string_view kUsage =
       "sim run [--solver <name>] [--steps N] [--dt <s>] [--gravity <m/s^2>]\n"
       "        [--particles N] [--x0 X] [--y0 Y] [--vx0 VX] [--vy0 VY]\n"
-      "        [--emit-csv <path>] [--emit-shm <name>] [--emit-every N]\n"
+      "        [--emit-csv <path>] [--emit-shm <name>] [--emit-tcp <host:port>]\n"
+      "        [--emit-udp <host:port>] [--emit-every N]\n"
       "  sim run --steps 100 --particles 1   (projectile demo, all params named)\n"
       "Solvers come from the compile-time registry (default projectile;\n"
       "  unknown names list the available ones). --gravity applies to the\n"
@@ -81,7 +82,10 @@ struct SimSpec {
       "  are tuned in the sig command (sim run --solver signal runs one\n"
       "  default 1 Hz sine with zero particles). With solver signal,\n"
       "  --emit-csv writes the signals log and --emit-shm publishes signal\n"
-      "  channels (sig.<slot>.U).\n"
+      "  channels (sig.<slot>.U). --emit-tcp/--emit-udp stream the same\n"
+      "  frames over sockets (TCP: length-prefixed LinkFrames after a\n"
+      "  version/domain hello; UDP: compact datagrams); drops are counted,\n"
+      "  never blocking (see docs/signals.md sec. 5).\n"
       "Defaults: steps=100, dt=0.01s, gravity=9.81, particles=1,\n"
       "  x0=y0=0, vx0=vy0=10, emit-every=1. Time unit: s/ms/us/ns.";
 
@@ -93,17 +97,19 @@ struct SimSpec {
 struct SigSpec {
   static constexpr std::string_view kName = "sig";
   static constexpr std::string_view kDescription =
-      "Generate signals (sine/square/triangle/saw/dc/pulse/noise/sum/expression/table)";
+      "Generate signals (sine/square/triangle/saw/dc/pulse/noise/sum/expression/table/lua)";
   static constexpr std::string_view kUsage =
       "sig run [--sig-kind <kind>] [--sig-freq <Hz>] [--sig-amp <V|A>]\n"
       "        [--sig-offset <V|A>] [--sig-phase <rad>] [--sig-duty 0..1]\n"
       "        [--sig-seed N] [--sig-quantity U|I] [--sig-count N]\n"
-      "        [--sig-expr '<math>'] [--sig-table <csv>] [--steps N] [--dt <s>]\n"
-      "        [--emit-csv <path>] [--emit-shm <name>] [--emit-every N]\n"
+      "        [--sig-expr '<math>'] [--sig-table <csv>] [--sig-lua <file>]\n"
+      "        [--steps N] [--dt <s>] [--emit-csv <path>] [--emit-shm <name>]\n"
+      "        [--emit-tcp <host:port>] [--emit-udp <host:port>] [--emit-every N]\n"
       "  sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --steps 1000 --dt 0.1ms\n"
       "  sig run --sig-kind expression --sig-expr 'sin(2*pi*440*t)*0.5'\n"
       "  sig run --sig-kind table --sig-table wave.csv --steps 1000\n"
-      "Kinds: sine square triangle saw dc pulse noise sum expression table\n"
+      "  sig run --sig-kind lua --sig-lua wah.lua --steps 1000\n"
+      "Kinds: sine square triangle saw dc pulse noise sum expression table lua\n"
       "  (--sig-kind, Tab-completed; --sig-count spawns that many identical\n"
       "  sources; noise seeds derive as seed+k; table batches share one file).\n"
       "  sum adds operand sources' values (engine API only for now: batch\n"
@@ -114,10 +120,16 @@ struct SigSpec {
       "  div-by-zero and out-of-domain fail the step loudly, never NaN).\n"
       "  table replays a CSV waveform (header 'time,value', SI seconds + SI\n"
       "  value, linear interp, clamped ends, bit-exact on exact time hits).\n"
+      "  lua runs a sandboxed Lua 5.4 script per step (pure function of\n"
+      "  t/seed/step/dt, must return a number; math+string+small pure base\n"
+      "  only — no io/os/package/debug, instruction budget enforced, every\n"
+      "  failure stops the step loudly; see docs/signals.md sec. 7).\n"
       "  --sig-freq takes Hz/kHz; --sig-amp/--sig-offset take V/mV/kV or\n"
       "  A/mA per --sig-quantity U|I. --emit-csv writes the signals log\n"
       "  (step,time,sig_id,value,quantity); --emit-shm publishes signal\n"
-      "  channels (sig.<slot>.U). Per-source tuning is future work (SIG-6).\n"
+      "  channels (sig.<slot>.U); --emit-tcp/--emit-udp stream the same\n"
+      "  channels over sockets (see sim run above). Per-source tuning is\n"
+      "  future work (SIG-6).\n"
       "Defaults: kind=sine, freq=1Hz, amp=1, offset=0, phase=0, duty=0.5,\n"
       "  seed=1, quantity=U, count=1, steps=100, dt=0.01s, emit-every=1.";
 

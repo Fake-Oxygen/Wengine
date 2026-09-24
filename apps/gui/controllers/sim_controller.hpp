@@ -76,17 +76,21 @@ class SimController {
     }
     // Bit parity with solvers::run_headless(): same validation, same spawn
     // order (see solvers/run.hpp). Custom sources: expression programs ride
-    // in params, table points in cfg.signal.table (shared range below).
+    // in params, table points in cfg.signal.table (shared range below), Lua
+    // scripts in cfg.signal.lua — but the controller has no scripting
+    // runtime (wengine_core only), so kLua configs are rejected with a
+    // message (SIG-9 panel follow-up).
     if (is_signal && (!signal::validate_params(cfg.signal.params).ok() ||
-                      cfg.signal.params.kind == signal::SignalKind::kSum)) {
-      return reject("invalid signal params (freq > 0, duty in 0..1; no batch sums)");
+                      cfg.signal.params.kind == signal::SignalKind::kSum ||
+                      cfg.signal.params.kind == signal::SignalKind::kLua)) {
+      return reject("invalid signal params (freq > 0, duty in 0..1; no batch sums or lua)");
     }
     if (is_signal) {
       const bool is_expr = cfg.signal.params.kind == signal::SignalKind::kExpression;
       const bool is_table = cfg.signal.params.kind == signal::SignalKind::kTable;
       if ((!is_expr && cfg.signal.params.expr.size != 0) ||
-          (is_expr && !cfg.signal.table.empty())) {
-        return reject("invalid signal params (expression program misplaced)");
+          (is_expr && !cfg.signal.table.empty()) || !cfg.signal.lua.empty()) {
+        return reject("invalid signal params (custom-source payload misplaced)");
       }
       if (is_table) {
         if (!signal::validate_table_points(std::span(cfg.signal.table.data(),

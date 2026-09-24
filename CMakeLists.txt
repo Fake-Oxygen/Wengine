@@ -97,6 +97,85 @@ target_compile_options(wengine_link_shm PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
 )
 
+# wengine-link socket endpoints (SIG-7): POSIX TCP/UDP publishers as
+# emit::ISinks at the app edge. Small STATIC TU by the same justification
+# as wengine_link_shm (platform syscalls cannot live in headers); headers
+# stay platform-free (a Windows port replaces the TU, never the header).
+add_library(wengine_link_net STATIC
+    src/link/socket_publisher.cpp
+)
+target_include_directories(wengine_link_net PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(wengine_link_net PUBLIC wengine_core)
+target_compile_options(wengine_link_net PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+)
+
+# ------------------------------------------------------------------
+# Lua scripting source (SIG-4b): PUC Lua 5.4.9 (external/lua submodule,
+# pinned v5.4.9, MIT) — the engine's third third-party dep (decision
+# record: docs/signals.md sec. 7 + README dependency policy). Only the
+# interpreter core + base/math/string libs are built (io/os/package/
+# debug/coroutine/utf8 never compile — the sandbox registers selectively).
+# ------------------------------------------------------------------
+# Vendored interpreter, no project warning flags (third-party, like imgui).
+set(WENGINE_LUA_SOURCES
+    external/lua/lapi.c
+    external/lua/lcode.c
+    external/lua/lctype.c
+    external/lua/ldebug.c
+    external/lua/ldo.c
+    external/lua/ldump.c
+    external/lua/lfunc.c
+    external/lua/lgc.c
+    external/lua/llex.c
+    external/lua/lmem.c
+    external/lua/lobject.c
+    external/lua/lopcodes.c
+    external/lua/lparser.c
+    external/lua/lstate.c
+    external/lua/lstring.c
+    external/lua/ltable.c
+    external/lua/ltm.c
+    external/lua/lundump.c
+    external/lua/lvm.c
+    external/lua/lzio.c
+    external/lua/lauxlib.c
+    external/lua/lbaselib.c
+    external/lua/lmathlib.c
+    external/lua/lstrlib.c
+)
+add_library(wengine_lua STATIC ${WENGINE_LUA_SOURCES})
+# Lua compiles as C++ officially (luaconf.h handles __cplusplus, same as
+# Ubuntu's liblua5.4-c++ builds); per-file language keeps the top-level
+# LANGUAGES CXX untouched.
+set_source_files_properties(${WENGINE_LUA_SOURCES} PROPERTIES LANGUAGE CXX)
+target_include_directories(wengine_lua SYSTEM PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/lua>
+    $<INSTALL_INTERFACE:include>
+)
+
+# Scripting-source runtime: the single TU allowed to know Lua exists.
+# Engine headers stay Lua-free (see signal/lua.hpp); strict warnings like
+# wengine_cli.
+add_library(wengine_signal_lua STATIC
+    src/signal/lua_solver.cpp
+)
+target_include_directories(wengine_signal_lua PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(wengine_signal_lua PUBLIC wengine_core wengine_lua)
+target_compile_options(wengine_signal_lua PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+)
+
 add_library(wengine_core INTERFACE)
 target_link_libraries(wengine_core INTERFACE
     wengine_glm wengine_units wengine_signal wengine_solvers wengine_world wengine_emit wengine_link
@@ -122,7 +201,7 @@ if(BUILD_CLI)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     )
-    target_link_libraries(wengine_cli PUBLIC wengine_core wengine_link_shm)
+    target_link_libraries(wengine_cli PUBLIC wengine_core wengine_link_shm wengine_link_net wengine_signal_lua)
 
     target_compile_options(wengine_cli PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
@@ -243,6 +322,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_signal PRIVATE wengine_core)
     add_test(NAME signal COMMAND test_signal)
 
+    # Lua scripting source: isolated runtime + sandbox pin tests.
+    add_executable(test_lua tests/test_lua.cpp)
+    target_link_libraries(test_lua PRIVATE wengine_signal_lua)
+    add_test(NAME lua COMMAND test_lua)
+
     add_executable(test_routing tests/test_routing.cpp)
     target_link_libraries(test_routing PRIVATE wengine_core)
     add_test(NAME routing COMMAND test_routing)
@@ -267,6 +351,9 @@ if(BUILD_TESTS)
     target_link_libraries(test_link_shm PRIVATE wengine_core wengine_link_shm)
     add_test(NAME link_shm COMMAND test_link_shm)
 
+    add_executable(test_link_sockets tests/test_link_sockets.cpp)
+    target_link_libraries(test_link_sockets PRIVATE wengine_core wengine_link_net)
+    add_test(NAME link_sockets COMMAND test_link_sockets)
     add_executable(test_link_bridge tests/test_link_bridge.cpp)
     target_link_libraries(test_link_bridge PRIVATE wengine_core wengine_link_shm)
     add_test(NAME link_bridge COMMAND test_link_bridge)
@@ -358,4 +445,7 @@ if(BUILD_BENCHMARKS)
 
     add_executable(bench_link benchmarks/bench_link.cpp)
     target_link_libraries(bench_link PRIVATE wengine_core wengine_link_shm)
+
+    add_executable(bench_link_sockets benchmarks/bench_link_sockets.cpp)
+    target_link_libraries(bench_link_sockets PRIVATE wengine_core wengine_link_net)
 endif()

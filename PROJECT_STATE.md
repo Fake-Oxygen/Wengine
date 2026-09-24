@@ -44,17 +44,20 @@ GUI (Dear ImGui + SDL2 + Vulkan, `apps/gui/`) is functional:
 | View-model seam | Done | Views consume shared `link::Frame` only; 1-entry adapter registry (projectile, signal) |
 
 Signal generation (new this session, `docs/signals.md` design + decision
-log D1–D11): unlimited stamped sources (`sine/square/triangle/saw/dc/
-pulse/noise/sum/expression/table`) as a stepped `SignalSolver`; stable per-`State`
+log D1–D16): unlimited stamped sources (`sine/square/triangle/saw/dc/
+pulse/noise/sum/expression/table/lua`) as a stepped `SignalSolver` (+ Lua
+extra solver stepping first); stable per-`State`
 serials; physical stamping via the `kQuantities` single table +
 `DimensionFor`/`StampedValue` typed binding (U/I first, one-entry
 extension); N:M edge-side routing (`SignalSubsetSink` allowlists,
 `StrideSink` decimation, tick-preserving, loud counters); signals CSV
 log (`step,time,sig_id,value,quantity`) beside the particle log; CLI via
 `sig run` (`sim run` stays vocabulary-free; `--sig-expr` closed math over
-`t`, `--sig-table` CSV replay with linear interp + clamped ends);
-serialization `v4` with `v3`/`v2`/`v1` fallback loaders;
-`bench_signal` (~150 ns/source-step).
+`t`, `--sig-table` CSV replay with linear interp + clamped ends,
+`--sig-lua` sandboxed Lua 5.4 scripts — pure functions of t/seed/step/dt,
+instruction budget, vendored `external/lua` pinned v5.4.9);
+serialization `v5` with `v4`/`v3`/`v2`/`v1` fallback loaders;
+`bench_signal` (~150 ns/source-step; Lua ~7 us/source-step).
 
 ## 2. Open work (Plane, `PHYSI` project)
 
@@ -77,8 +80,10 @@ open, in build order:
 - SIG-4: custom sources — 4a closed expression + table/CSV replay SHIPPED
   2026-09-24 (RPN expr, div-by-zero→Status; table store + v4 serialization;
   CLI `--sig-expr`/`--sig-table`; GUI batch takes expressions, rejects
-  tables pending a SIG-9 picker), 4b Lua scripting source still open (dep
-  decision record required: third third-party dep after glm/imgui).
+  tables pending a SIG-9 picker), 4b Lua scripting source SHIPPED
+  2026-09-24 (vendored PUC 5.4.9, sandboxed pure-function scripts,
+  instruction budget, v5 serialization, CLI `--sig-lua`; GUI batch rejects
+  Lua pending the SIG-9 scripting panel).
 - SIG-7 / SIG-8 (independent parallel tracks): TCP/UDP socket publisher
   sinks + UART publisher + Zephyr sample consumer; owner picks order.
 - SIG-10 (v1 scope, high): generic control plane — param set/start/stop

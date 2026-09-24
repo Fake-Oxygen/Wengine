@@ -143,10 +143,13 @@ p0: x=10 y=5.04595 vx=10 vy=0.19
 > link_sample /wengine-demo --frames 5   (live SHM read in another terminal)
 > link_bridge record /wengine-demo rec.csv --frames 5 &
 > link_bridge play run.csv /wengine-demo --rate 10   (replay a CSV log onto the bus)
+> sim run --steps 1000 --emit-tcp 192.0.2.20:9000   (TCP LinkFrame stream)
+> sig run --steps 1000 --emit-udp 192.0.2.20:9001   (compact UDP frames)
 ```
 
 All `sim` parameters are named (`--solver`, `--steps`, `--dt`, `--gravity`,
 `--particles`, `--x0/--y0/--vx0/--vy0`, `--emit-csv`, `--emit-shm`,
+`--emit-tcp`, `--emit-udp`,
 `--emit-every`); the CSV log carries the full snapshot stream for replay,
 while `--emit-shm <name>` publishes every emitted snapshot to a
 wengine-link SHM segment for realtime local consumers (`examples/
@@ -154,6 +157,12 @@ link_sample` prints them live; the segment lives while `sim` runs). `--solver` s
 compile-time solver registry (default `projectile`; unknown names list what's
 available), so new stepped solvers become runnable without touching the CLI —
 `--gravity` applies to `projectile` only, particle population is generic setup.
+TCP actively connects to the listening reader at `host:port` and sends a
+version/domain hello followed by length-prefixed full frames. UDP sends
+versioned compact datagrams containing only used entries. Both transports are
+non-blocking; use `--emit-every` to decimate high-rate simulations, and use
+reader-side `LagStats` to observe network loss. Wire details and measured
+rate budgets are in [docs/signals.md, section 5](docs/signals.md#5-transports-stream-out).
 
 Signal generation (`sig run` — its own command, so solver vocabularies never
 bloat `sim run`): unlimited sources, stamped U/I:
@@ -165,9 +174,10 @@ bloat `sim run`): unlimited sources, stamped U/I:
 > sig run --sig-kind dc --sig-offset 2.5V --emit-csv sig.csv --emit-shm /wengine-sig
 > sig run --sig-kind expression --sig-expr 'sin(2*pi*440*t)*0.5'
 > sig run --sig-kind table --sig-table wave.csv --steps 1000
+> sig run --sig-kind lua --sig-lua wah.lua --steps 1000
 ```
 
-Kinds: `sine square triangle saw dc pulse noise sum expression table`
+Kinds: `sine square triangle saw dc pulse noise sum expression table lua`
 (`--sig-kind`, Tab-completed).
 `--sig-freq` (`Hz`/`kHz`), `--sig-amp`/`--sig-offset` (`V`/`mV`/`kV` or
 `A`/`mA` per `--sig-quantity U|I`), `--sig-phase` (rad), `--sig-duty`
@@ -179,6 +189,12 @@ log sqrt abs`, `min(a,b)` `max(a,b)`, parentheses — div-by-zero and
 out-of-domain fail the step loudly, never NaN. `--sig-table <csv>`
 replays a waveform file (header `time,value`, SI seconds + SI value,
 linear interp, clamped ends, bit-exact on exact time hits).
+`--sig-lua <file>` runs a sandboxed Lua 5.4 script per step (pure
+function of `t/seed/step/dt`, must return a number; `math`+`string`+small
+pure base only — no `io/os/package/debug`, instruction budget enforced,
+every failure stops the step loudly).
+Runnable examples live in `examples/lua/` (`sine`, `chirp`, `burst`,
+`seed_detune`, `softclip` — each header shows its run command).
 `--emit-csv` writes the signals log (`step,time,sig_id,value,quantity`,
 exact round-trip); `--emit-shm` publishes signal channels
 (`sig.<slot>.U`). `sim run --solver signal` runs one default 1 Hz sine
@@ -208,9 +224,10 @@ tests/  benchmarks/  examples/
 |---|---|---|
 | `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
 | `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `signal.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step`, `SignalSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
-| `signal` | `wengine/signal/types.hpp`, `expr.hpp`, `table.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial), closed expression programs (RPN, from_chars parsing, div-by-zero/out-of-domain to Status), table CSV replay (linear interp, clamped, bit-exact hits) — no I/O; pool lives in `world` |
+| `signal` | `wengine/signal/types.hpp`, `expr.hpp`, `table.hpp`, `lua.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial), closed expression programs (RPN, from_chars parsing, div-by-zero/out-of-domain to Status), table CSV replay (linear interp, clamped, bit-exact hits), Lua scripting source (sandboxed 5.4 runtime in an isolated TU — this header is Lua-free) — no I/O; pool lives in `world` |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp`, `run_config.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
-| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, expression programs, append-only table store, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ serial-carrying signal arrays, `select_signals` subset filter), versioned binary save/load (v4; v3 loads with zeroed custom columns, v2 with synthesized serials, v1 with empty signals) |
+| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, expression programs, append-only table/script stores, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ serial-carrying signal arrays, `select_signals` subset filter), versioned binary save/load (v5; v4 loads with empty script ranges, v3 with zeroed custom columns, v2 with synthesized serials, v1 with empty signals) |
+| `link` | `wengine/link/frame.hpp`, `protocol.hpp`, `socket_publisher.hpp`, `shm_publisher.hpp` | Solver-agnostic `Frame` adapters + versioned wire codec; app-edge SHM publisher and POSIX TCP/UDP stream publishers (`wengine_link_net`), exact version/domain gates, compact UDP frames, and lag/loss accounting |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions, `StrideSink` step-aligned decimation, drop counters) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion |
@@ -252,35 +269,67 @@ Vulkan loader are system packages, not vendored. CMake: `wengine_imgui`
 `WEngineGui` links `wengine_core` directly, never `wengine_cli`, and owns
 all I/O. No engine headers change for GUI work.
 
+Lua scripting decision (SIG-4b, 2026-09-24): PUC Lua (`external/lua`
+submodule, pinned v5.4.9, MIT) — the authorized third third-party dep.
+Rationale: Lua covers arbitrarily complex custom waveforms without growing
+the expression language; the 5.4 interpreter line is auditable and
+deterministic where LuaJIT's codegen/warmup is not, and 5.5.x is too fresh
+to pin. Vendored + built from source (no system headers needed):
+`wengine_lua` (`STATIC`, interpreter core + base/math/string libs only,
+compiled as C++, `SYSTEM` includes) plus `wengine_signal_lua` (`STATIC`:
+`src/signal/lua_solver.cpp`, the single TU allowed to know Lua exists,
+strict warnings) — engine headers stay Lua-free. Sandbox (math−random,
+string−dump/format behind read-only proxies, small pure base; fresh
+`_ENV` per call so scripts are pure functions of `t/seed/step/dt`;
+instruction-count budget; every failure is a loud step Status) and the
+5.4.9 pin (asserted in code and test) are locked in `docs/signals.md`
+sec. 7. No fourth third-party dep without its own decision record.
+
 CMake targets mirror this: `wengine_glm` (third-party import), `wengine_units`,
 `wengine_solvers`, `wengine_world`, `wengine_emit`, `wengine_link` (link wire
 protocol, header-only, OS-free) (all `INTERFACE`) combine
-into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
-`src/link/shm_publisher.cpp`, the POSIX endpoint TU) links `wengine_core`. `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
-`src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
-`src/cli/commands/i2c.cpp`, `src/cli/commands/sim.cpp`) links `wengine_core`;
+ into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
+ `src/link/shm_publisher.cpp`, the POSIX endpoint TU) and `wengine_link_net`
+ (`STATIC`: `src/link/socket_publisher.cpp`, POSIX TCP/UDP endpoints) link
+ `wengine_core`.
+ `wengine_signal_lua` (`STATIC`: `src/signal/lua_solver.cpp`, the Lua
+ runtime TU) links `wengine_core` + `wengine_lua` (vendored interpreter).
+ `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
+ `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
+ `src/cli/commands/i2c.cpp`, `src/cli/commands/sim.cpp`,
+  `src/cli/commands/sig.cpp`) links `wengine_core`, `wengine_link_shm`,
+  `wengine_link_net`,
+ and `wengine_signal_lua` (for `sig run --sig-lua`);
 `PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
 (link core), `test_cli_args`, `test_s0`, `test_i2c`, `test_sim` (link cli),
 `test_solver_registry`, `test_runner`, `test_signal` (waveform goldens,
 seeded-noise sequence, solver end-of-step convention, headless signal
 config + rejections, signal Frame adapter + wire round-trip, signals CSV
 round-trip, expression goldens + div-by-zero step freeze, table CSV replay
-+ byte-exact hits, custom headless batches + rejections, v4/v3/v1
-serialization), `test_routing` (serial stability,
++ byte-exact hits, custom headless batches + rejections, v5/v4/v1
+serialization), `test_lua` (5.4.9 pin, sandbox rejections incl. read-only
+proxies, instruction budget, Lua sine golden vs parametric sine, inputs,
+determinism + save/load/continue purity, headless extras + rejections, sum
+over Lua, shipped `examples/lua/` goldens, v5 round-trip + v4 fallback), `test_routing` (serial stability,
 1:N/N:1 subscriptions, mid-run reconfig, stride alignment, sum golden +
 operand rejections, dangling-operand failure, sink-failure isolation, v3
 round-trip + v2 fallback), `test_world`, `test_emit`,
 `test_link_protocol` (solver-agnostic items/channels wire frame, particle
 adapter, encode/decode exactness, seqlock states incl. threaded hammer,
 version gate, lag accounting), `test_link_shm` (segment create/publish/
-read-back, headless fan-out exactness, drop-oldest, failure paths, reader
+ read-back, headless fan-out exactness, drop-oldest, failure paths, reader
  attach/poll), `test_link_bridge` (CSV parse fidelity + rejection, inverse
- adapter, CSV->bus->CSV byte-identity), `test_sim` now also covers `--emit-shm` wiring +
- `sig run` expression/table goldens and usage errors,
+  adapter, CSV->bus->CSV byte-identity), `test_link_sockets` (TCP hello/version
+  gate, length-prefixed loopback exactness, UDP compact codec/datagrams,
+  transient backpressure, partial-TCP-frame preservation, sub-Hz/100-kHz soaks
+  and lag accounting), `test_sim` also validates `--emit-shm` wiring and
+  TCP/UDP endpoint syntax +
+ `sig run` expression/table/lua goldens and usage errors (incl. sandbox
+ failure surfacing),
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_signal_panel` (signal panel model validation/config + controller
-parity for signal runs, incl. expression batch + table rejections),
+parity for signal runs, incl. expression batch + table/lua rejections),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
 `test_frame_source` (source registry, channels, ring,
@@ -291,7 +340,9 @@ fit, zoom/pan, grid steps). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_signal`
 (ns/source-step over a live Runner + SignalSolver, opaque params), `bench_link`
 (publish ns/frame + frames/s through a live SHM segment, slow-reader
-published/received/missed/max_gap).
+published/received/missed/max_gap), `bench_link_sockets` (TCP/UDP loopback
+frames/s, sent/dropped/received bytes and reader lag; args select mode, frames,
+and particle count).
 
 ## Flow
 
@@ -411,7 +462,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   buffers, lag/loss summary; built with CLI)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,routing,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

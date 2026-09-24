@@ -12,7 +12,7 @@ plane is v1 scope; custom = closed expression + table now, Lua as gated 4b;
 U/I first with one-entry scaling; TCP/UDP || UART parallel tracks.
 
 Shipped 2026-09-24 (SIG-4a): expression + table sources (this doc, sec. 4a).
-Lua stays dep-gated 4b (sec. 7).
+Shipped 2026-09-24 (SIG-4b): Lua scripting source (sec. 7).
 
 ## 1. Engine shape
 
@@ -138,16 +138,55 @@ via `matched()`/`dropped()`/`forwarded_rows()` counters.
 ## 5. Transports (stream-out)
 
 All publishers are `emit::ISink` at the app edge, non-blocking,
-copy-and-return, drop-oldest, sticky `Status`, over-bound loud drop:
+copy-and-return; transient socket backpressure is counted, hard peer failures
+are sticky `Status`, and over-bound frames are loud drops. TCP keeps the
+kernel send buffer (256 KiB default) as its queue. An EAGAIN before any bytes
+drops that frame; a partially accepted frame is completed before any later
+frame is sent, or the TCP stream framing would be corrupted. UDP drops a
+backpressured datagram whole. `PublisherStats::dropped_send` reports publisher
+drops; `frame_seq` gaps let readers calculate loss with `LagStats`.
 
 - SHM: reuse `ShmPublisher` with the signal adapter + domain `"signal"`.
 - TCP/UDP (SIG-7): `TcpPublisher`/`UdpPublisher` (`src/link/`, POSIX-first),
-  length-prefixed `LinkFrame` bytes, same versioning wording as SHM.
+  active connection to `host:port`; TCP begins with a `WLT1` hello carrying
+  exact link version + domain, then little-endian `u32` length and full
+  `LinkFrame` bytes. A reader rejects any magic/version/domain mismatch
+  before decoding; there is no silent version fallback. UDP has no handshake:
+  each `WLU1` datagram carries exact version + domain, frame sequence/time,
+  and only used `LinkItem`/`LinkChannel` entries in portable little-endian
+  encoding. Full LinkFrames are 68,136 B and exceed UDP's 65,507 B payload
+  limit, hence the compact UDP form; both paths first run the shared LinkFrame
+  bound checks so an over-bound snapshot has the same loud verdict.
 - UART (SIG-8): `UartPublisher` (`--emit-uart`), ASCII line framing
   `step,time,ch_id,value` + optional COBS binary; never back-pressures sim.
-- Rate budget (1 kHz sine, 1 source): SHM/TCP trivial; UART 115200 8N1 ASCII
-  (~30 B/line -> ~3000 lines/s) carries 1 kHz comfortably, 100 kHz-class
-  needs `emit_every`/binary decimation. Budget table ships in SIG-7/8 docs.
+
+### Stream rate budget and measured loopback
+
+Emission is simulation-step based, not wall-clock paced. `--emit-every N`
+decimates on fixed step boundaries; use it when the transport or Zephyr
+receiver cannot sustain the solver's step rate. Values below are payload-only
+budgets (protocol headers add a few bytes per frame):
+
+| Transport / snapshot | Bytes per emission | 1 kHz | 100 kHz | Guidance |
+|---|---:|---:|---:|---|
+| TCP full `LinkFrame` | 68,140 on wire | 68.1 MB/s | 6.81 GB/s | 100x decimation at 100 kHz yields 1 kHz / 68.1 MB/s; configured 256 KiB send buffer is only a burst buffer (a few full frames) |
+| UDP compact, one particle (1 item + 6 channels) | 384 | 0.384 MB/s | 38.4 MB/s | Keep datagrams below path MTU where possible; IP fragmentation magnifies loss |
+| UDP compact, one signal source (`sig.count` + source) | 160 | 0.160 MB/s | 16.0 MB/s | `LagStats` exposes network/receiver gaps by `frame_seq` |
+| UART 115200, ASCII one source | ~30 | ~30 kB/s | ~3 MB/s | 8N1 carries ~384 such frames/s: use at least 3x decimation at 1 kHz and 300x at 100 kHz |
+
+Loopback measurement on the current development host (`bench_link_sockets`,
+active reader, no timing sleep):
+
+| Run | Attempted rate | Sender accepted / dropped | Reader | Measurement |
+|---|---:|---:|---:|---:|
+| TCP, 2,000 frames x 64 particles | 44,842 frames/s | 992 / 1,008 | 992 frames, 67.59 MB | 1,516 MB/s received while draining; remaining attempts were counted as EAGAIN drops |
+| UDP, 10,000 frames x 1 particle | 68,525 frames/s | 10,000 / 0 | 9,423 frames | 24.80 MB/s received; 442 interior sequence gaps observed, plus 135 trailing datagrams absent at end-of-run |
+
+These are flood/loopback numbers, not a promise of network capacity. The
+TCP case intentionally exceeds the receiver's sustainable rate to exercise
+backpressure; at low rates (sub-Hz through nominal 1 kHz), the same fixed
+framing is used with no pacing delay. Benchmark command: `bench_link_sockets
+[tcp|udp] [frames] [items]`.
 
 ## 6. Control plane (SIG-10, v1 scope)
 
@@ -168,13 +207,56 @@ step) resolve to the fixed order, never to arrival timing. Every applied
 command is appended to the replay log as (step, channel, verb, args), so a
 multi-endpoint session replays exactly.
 
-## 7. Lua source (SIG-4b, dep-gated)
+## 7. Lua source (SIG-4b, shipped 2026-09-24)
 
-Single shared `lua_State` in an isolated `wengine_signal_lua` STATIC TU
-(never in hot headers), per-source function refs, sandboxed libs (math only,
-no `io/os`), per-step instruction budget -> `Status` on overrun, seed
-exposed to script. Version pin + policy note required before code (third
-third-party dep after glm/imgui).
+Dependency (third after glm/imgui, decision recorded before code per
+policy): PUC Lua 5.4.9 via git submodule `external/lua` (no system
+headers or sudo needed; the pin is the submodule commit — `lua::release()`
+returns "Lua 5.4.9" and the test asserts it, so a bump fails loudly until
+goldens are re-verified). Built from source as `wengine_lua` STATIC
+(sources compiled as C++, SYSTEM includes, no project warning flags);
+only the interpreter core + base/math/string libs compile
+(io/os/package/debug/coroutine/utf8 are not built). The runtime TU
+(`src/signal/lua_solver.cpp`, `wengine_signal_lua` STATIC, strict
+warnings) is the only TU that knows Lua exists — engine headers stay
+Lua-free. 5.4 line chosen over 5.5.x (too fresh for a determinism-critical
+embed; revisit by explicit decision); PUC interpreter over LuaJIT (JIT
+codegen and warmup are determinism hazards; the interpreter is auditable).
+
+`kLua = 10` (`SignalKind`, append-only). Scripts are chunks evaluated once
+per step per live source as PURE functions of four inputs — `t` (source
+seconds, same base as every generator), `seed` (spawn seed, exposed per
+contract), `step` (1-based step being computed, matching snapshots), `dt`
+— and must return a number. Purity is structural (fresh `_ENV` per call:
+sandbox + inputs only), so scripts keep no state across steps and
+save/load/continue is exact (proven by test). No RNG in 4b (C `rand`
+differs across libcs; scripts needing noise sum a noise source).
+
+Sandbox: `math` (minus `random`/`randomseed`) and `string` (minus
+`dump`/`format`) behind read-only PROXIES (a bare `__newindex` only guards
+absent keys, so existing entries like `math.sin` stayed writable until
+the proxy landed — regression-tested), plus a small pure base (`assert`,
+`error`, `ipairs`, `next`, `pairs`, `pcall`, `select`, `tonumber`,
+`type`, `xpcall`, `_VERSION`). Absent: `io`/`os`/`package`/`debug`/
+`coroutine`/`utf8`, `load`/`dofile`/`print`/`warn`/`collectgarbage`,
+metatables, and `tostring`/`string.format` (address-exposure channels
+that would break the value-determinism contract). Chunks load text-only
+(`"t"` — bytecode rejected). Budget is an instruction count per source
+per step (default 65536, configurable, 0 rejects; never wall-clock).
+Every failure — syntax (rejected at configure/CLI as well), runtime
+error, non-number, non-finite, overrun — is a loud `kInvalidArgument`
+step failure (time/index frozen), like expressions; the solver keeps the
+last message for CLI/GUI display.
+
+Wiring: `LuaSignalSolver` is an EXTRA solver (extras step before the
+primary — see solvers/run.hpp): it evaluates `kLua` slots in slot order
+first (serial-keyed chunk cache, recompiled when the pool text differs,
+pruned on despawn; stopped slots frozen), `SignalSolver` skips them, and
+sums over Lua operands stay fresh. Scripts persist as pool text (v5);
+without an extra solver the driver rejects `kLua` rather than freezing
+silently. Cost (measured 2026-09-24): ~7 us/source-step for a small
+script vs ~165 ns parametric — fine at 1 kHz with a few sources, not for
+100 kHz-class sweeps (use expression/table there).
 
 ## 8. Determinism rules
 
@@ -227,6 +309,12 @@ CLI/GUI/control edges never grow unit tables: parsing goes through
 | D9 | Expression failures (div-by-zero, domain, overflow) | Loud `kInvalidArgument` step failure (time/index frozen), never NaN/inf; t=0 failure rejected at configure | LOCKED (SIG-4a, 2026-09-24) |
 | D10 | Table replay edges (out-of-span, exact hits) | Clamp (hold ends), bit-exact on exact hits, linear interp between; points outside `SignalParams` (pool store + batch section) | LOCKED (SIG-4a, 2026-09-24) |
 | D11 | Custom sources in batch GUI model | Expression text supported (parsed data, no I/O); tables rejected (no CSV picker — SIG-9 panel follow-up) | LOCKED (SIG-4a, 2026-09-24) |
+| D12 | Lua version + vendoring | PUC 5.4.9 submodule, built from source (no system headers/sudo; pin = commit, asserted in code+test); 5.5.x deferred, LuaJIT rejected (determinism) | LOCKED (SIG-4b, 2026-09-24) |
+| D13 | Lua sandbox set | math(−random)/string(−dump,−format) read-only proxies + small pure base; no io/os/package/debug/coroutine/load/metatables/tostring; text-only chunks | LOCKED (SIG-4b, 2026-09-24) |
+| D14 | Lua purity (save/load safety) | Fresh `_ENV` per call: pure functions of t/seed/step/dt; no RNG, no cross-step state; scripts persist as pool text (v5) | LOCKED (SIG-4b, 2026-09-24) |
+| D15 | Lua failures + budget | Instruction-count budget (never wall-clock); every failure is loud `kInvalidArgument` (frozen step), message kept for display | LOCKED (SIG-4b, 2026-09-24) |
+| D16 | Lua solver wiring | Extra `ISolver` stepping before `SignalSolver` (extras-first); driver rejects `kLua` without one (never silent freeze); GUI batch rejects (no runtime — SIG-9) | LOCKED (SIG-4b, 2026-09-24) |
 
 Build order: SIG-1 -> SIG-2+SIG-3 -> SIG-5 -> SIG-4a+SIG-6 (both shipped) ->
-SIG-7 || SIG-8 -> SIG-10 (needs SIG-7 framing) -> SIG-9 -> SIG-4b (dep-gated).
+SIG-7 || SIG-8 -> SIG-10 (needs SIG-7 framing) -> SIG-9 -> SIG-4b (shipped
+2026-09-24).

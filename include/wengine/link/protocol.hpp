@@ -262,10 +262,13 @@ struct SegmentHeader {
 };
 
 // Process-local publisher bookkeeping (S7). publish_count mirrors into the
-// header for readers; over-bound drops stay local in v1.
+// header for readers; over-bound drops stay local in v1. Socket publishers
+// add dropped_send (frames refused by a full peer/kernel buffer — transient,
+// counted, never sticky).
 struct PublisherStats {
   std::uint64_t published = 0;
   std::uint64_t dropped_over_bound = 0;
+  std::uint64_t dropped_send = 0;
 };
 
 // Reader outcome: only kOk yields a usable frame. Busy/Torn mean "retry
