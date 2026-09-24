@@ -6,11 +6,13 @@ commit pointer whenever they move. Architectural rules belong in
 `AGENTS.md`, not here.
 
 - Date: 2026-09-23
-- Tree: clean at `bc132a2` ("Link GUI SHM")
-- Tests: 21/21 pass, zero warnings (default build; strict flags everywhere)
+- Tree: `f3f5957` ("Signal routing N:M") + uncommitted SIG-9 GUI work
+  (signal batch panel + model, sim status/graph tweaks, `test_signal_panel`)
+- Tests: 24/24 pass, zero warnings (default build; strict flags everywhere)
 - GUI build (`-DBUILD_GUI=ON`): clean, windowed runs verified on this
   machine (SDL2 2.30, Vulkan 1.3.275, lavapipe software rendering;
-  8 s healthy loop, killed by timeout = exit 124, no crash)
+  8 s healthy loop, killed by timeout = exit 124, no crash), including
+  the signal batch panel + signal graphs (user-verified 2026-09-23)
 
 ## 1. Where we are
 
@@ -34,11 +36,23 @@ GUI (Dear ImGui + SDL2 + Vulkan, `apps/gui/`) is functional:
 | Backend scaffold (`backend/`) | Done | Window, swapchain, frame loop; `SYSTEM` ImGui includes |
 | Closed-form panels | Done | Ohm/S0/I2C tabs, live re-parse, CLI-identical text |
 | Stepped-sim control | Done | Play/pause/step/reset, budget-clamped exact park |
+| Signal batch panel | Done* | `models/signal_model.hpp` (CLI-parity validation) + `panels/signal_panel.hpp` (Apply-rebuild); *uncommitted, user-verified |
 | Engine linkage | Done | Source panel (in-process/SHM/CSV) + engine-only `ShmSource`/`CsvReplay`; lag-isolated, parity-tested |
-| Graphs | Done | Channel selector + trajectory over frame history |
+| Graphs | Done | Channel selector + trajectory over frame history; signal-aware default channel |
 | 2D canvas | Done | Grid, axes, glyphs, vectors, trails, Fit tracking |
 | 3D viewport | Done | Orbit camera, grid/axes, depth-sorted glyphs, Track-follows-primary |
-| View-model seam | Done | Views consume shared `link::Frame` only; 1-entry adapter registry |
+| View-model seam | Done | Views consume shared `link::Frame` only; 1-entry adapter registry (projectile, signal) |
+
+Signal generation (new this session, `docs/signals.md` design + decision
+log D1–D8): unlimited stamped sources (`sine/square/triangle/saw/dc/
+pulse/noise/sum`) as a stepped `SignalSolver`; stable per-`State`
+serials; physical stamping via the `kQuantities` single table +
+`DimensionFor`/`StampedValue` typed binding (U/I first, one-entry
+extension); N:M edge-side routing (`SignalSubsetSink` allowlists,
+`StrideSink` decimation, tick-preserving, loud counters); signals CSV
+log (`step,time,sig_id,value,quantity`) beside the particle log; CLI via
+`sig run` (`sim run` stays vocabulary-free); serialization `v3` with
+`v2`/`v1` fallback loaders; `bench_signal` (~150 ns/source-step).
 
 ## 2. Open work (Plane, `PHYSI` project)
 
@@ -51,6 +65,22 @@ GUI (Dear ImGui + SDL2 + Vulkan, `apps/gui/`) is functional:
   the remaining click-through (mode switching, replay transport feel,
   populated views per source, Track feel) needs a human pass — no
   automation tooling exists.
+
+Signals epic (new top-level epic, `4341806e`): SIG-1 (design), SIG-2
+(engine core), SIG-3 (stamping), SIG-5 (routing), SIG-9 (scoped GUI
+delivery) are Done; `sig run` shipped early under SIG-6, leaving the
+per-source family (list/add/set/drop, display names) for later. Still
+open, in build order:
+
+- SIG-4: custom sources — 4a closed expression + table/CSV replay (no new
+  dep), 4b Lua scripting source (dep decision record required: third
+  third-party dep after glm/imgui).
+- SIG-7 / SIG-8 (independent parallel tracks): TCP/UDP socket publisher
+  sinks + UART publisher + Zephyr sample consumer; owner picks order.
+- SIG-10 (v1 scope, high): generic control plane — param set/start/stop
+  over control socket + COBS UART frames, concurrent endpoints
+  (last-writer-wins, replay-logged), mux select verb, per-source add
+  with operand serials. Sensor feedback stays a follow-up.
 
 Future solvers (fields, circuits, rigid bodies) each need: engine-side
 state domains + stepped/closed-form implementation first, then exactly
@@ -66,7 +96,8 @@ no Xlib bindings, no screenshot-diff harness):
 - Source-panel flows: SHM segment switch vs Reconnect, CSV Load/play/
   step/reset across two different logs, mode-switch history resets.
 - Orbit/pan/zoom feel in 2D/3D views; Fit-button and Track-checkbox feel.
-- Populated graphs/trails after a real run (empty states screenshotted).
+- Populated graphs/trails after a real run (empty states screenshotted;
+  signal graphs user-verified 2026-09-23).
 - Multi-GPU device choice; validation-layer output once installed.
 
 ## 4. Known limitations (deferred by decision, with triggers)
@@ -84,8 +115,7 @@ no Xlib bindings, no screenshot-diff harness):
 - `SimController` drives one solver per run; multi-solver runs need a
   small extension (Runner already supports N solvers).
 - Same-name publisher restart needs explicit Reconnect (POSIX fd
-  semantics: the old mapping outlives the rerun; undetectable, by design).
-- Flood publishing (~10^5 frames/s into 8 slots) loses the bulk by policy;
+  semantics: the old mapping outlives the rerun; undetectable, by design).- Flood publishing (~10^5 frames/s into 8 slots) loses the bulk by policy;
   paced/interactive rates keep up. `link_fastread` reports exact loss%.
 - UNRESOLVED (2026-09-23): `link_fastread` goes blind for a run's last
   frames and stays blind through long timeouts while the mapping provably
@@ -93,6 +123,13 @@ no Xlib bindings, no screenshot-diff harness):
   post-exit in-process, flood tracking (1M+ frames), and unit coverage all
   pass — isolated to the live publisher-exit window, cause unknown. Needs
   a focused session with strace/gdb allowed + poll tracing. See task notes.
+- Signals (deferred by decision, with triggers): source display names
+  (`sig.motor`) wait for the SIG-6 CLI family (serials are the mechanism);
+  mux combinator waits for the SIG-10 select verb; `kSum` is rejected in
+  identical-batch runs (per-source operands only); `LinkFrame` caps at 64
+  channels — over-bound frames drop loudly, paging only on a real >64
+  run; `sig run`/`sim run` cover batch sources, per-source tuning needs
+  SIG-6/SIG-10.
 
 ## 5. Rework only on concrete need
 

@@ -267,6 +267,8 @@ read-back, headless fan-out exactness, drop-oldest, failure paths, reader
  adapter, CSV->bus->CSV byte-identity), `test_sim` now also covers `--emit-shm` wiring,
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
+`test_signal_panel` (signal panel model validation/config + controller
+parity for signal runs),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
 `test_frame_source` (source registry, channels, ring,
@@ -373,8 +375,9 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   apps/gui/controllers/sim_controller.hpp (engine-only RunConfig driver)
   + external_source.hpp (SHM subscriber + CSV replay, engine-only)
   apps/gui/models/closed_form_models.hpp (ohm/s0/i2c evaluate logic)
+  + signal_model.hpp (batch signal config: CLI-parity validation + RunConfig)
   apps/gui/panels/sim_panel.hpp + source_panel.hpp (frame-source selector)
-  + closed_form_panels.hpp/.cpp (ImGui UI)
+  + signal_panel.hpp (batch signal config + Apply) + closed_form_panels.hpp/.cpp (ImGui UI)
   apps/gui/views/ frame_source.hpp (solver-name adapter registry over the
   shared link::Frame view-model, frame history + recorder sink), camera3d.hpp
   (orbit/project math) + viewport3d_panel.hpp (ImGui 3D rasterization) +
@@ -382,7 +385,9 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   worldview2d.hpp (2D fit/zoom/pan math) + canvas2d_panel.hpp (top-down
   view with trails) + palette.hpp (shared entity colors).
   Views consume link::Frames only: new solvers add one adapter function
-  plus one registry entry, and panels stay untouched. Frames come from the
+  plus one registry entry, and panels stay untouched. Signal runs graph
+  through the shared path (signal Frame adapter + channel selector, which
+  defaults to the first signal channel). Frames come from the
   in-process sim, an SHM-subscribed headless run, or a CSV replay (source
   panel); switching sources clears the shared history (one clock per view).
   Startup layout is 1600x900: sim + live views
@@ -394,7 +399,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   buffers, lag/loss summary; built with CLI)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,routing,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,routing,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

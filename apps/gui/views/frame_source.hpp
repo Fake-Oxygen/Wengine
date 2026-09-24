@@ -64,10 +64,17 @@ inline constexpr std::array<FrameSourceDef, 2> kFrameSources = {{
   return link::frame_from_snapshot(s); // only domain today: fallback
 }
 
-// Preferred plot channel: height of the primary item, else first channel.
+// Preferred plot channel: height of the primary item, else the first
+// signal channel (skipping the "sig.count" metadata row), else the first
+// channel. Particle behavior is unchanged (their schema keeps "p0.y").
 [[nodiscard]] inline std::string default_channel(const link::Frame &f) {
   for (const auto &c : f.channels) {
     if (c.name == "p0.y") {
+      return c.name;
+    }
+  }
+  for (const auto &c : f.channels) {
+    if (c.name.size() > 4 && c.name.substr(0, 4) == "sig." && c.name != "sig.count") {
       return c.name;
     }
   }

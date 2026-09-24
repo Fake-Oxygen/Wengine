@@ -68,6 +68,13 @@ void test_default_channel() {
   g.channels.push_back({"V(out)", 3.3});
   assert(wengine::gui::default_channel(g) == "V(out)");
   assert(wengine::gui::default_channel(wengine::link::Frame{}).empty());
+  // Signal frames default to the first signal channel, never the
+  // "sig.count" metadata row.
+  wengine::link::Frame s;
+  s.channels.push_back({"sig.count", 2.0});
+  s.channels.push_back({"sig.0.U", 1.0});
+  s.channels.push_back({"sig.1.U", 2.0});
+  assert(wengine::gui::default_channel(s) == "sig.0.U");
 }
 
 void test_fit_bounds() {

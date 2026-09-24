@@ -20,13 +20,18 @@ Current state:
   by default)
 * REPL and headless execution
 * Closed-form solvers: `ohm`, `s0`, `i2c`
-* Stepped solver: `projectile`
-* `sim run` command (`--emit-csv`, `--emit-shm`)
-* Console and CSV sinks
-* GUI: solver panels, stepped-sim control, graphs, 2D canvas, 3D viewport
+* Stepped solvers: `projectile`, `signal` (registry: `projectile`, `signal`)
+* `sim run` command (`--emit-csv`, `--emit-shm`); `sig run` command for
+  signal sources (one command per solver domain — see §9)
+* Console, CSV, and signals-CSV sinks; routing wrappers (subset/stride)
+* GUI: solver panels, stepped-sim control, signal batch panel, graphs
+  (signal-aware default channel), 2D canvas, 3D viewport
 * GUI engine linkage: in-process + SHM subscribe + CSV replay (source panel)
 * `wengine-link` SHM bus: versioned seqlock snapshot bus with C++ publisher/
   reader endpoints, CSV↔bus replay bridge, sample + fast subscriber tools
+* Signal generation (`docs/signals.md`): unlimited stamped sources
+  (sine/square/triangle/saw/dc/pulse/noise/sum), stable serials, N:M
+  edge-side routing; TCP/UDP/UART transports + control plane pending
 
 ### Project priorities
 
@@ -136,6 +141,7 @@ Directory structure:
 ```text
 include/wengine/<module>/*.hpp   public engine API
 include/wengine/link/*.hpp       wire protocol + shared Frame (solver-agnostic)
+include/wengine/signal/*.hpp     signal kinds/params/quantity table (leaf types)
 src/cli/*.cpp                    CLI implementation
 src/link/*.cpp                   POSIX SHM endpoints (platform TUs, see below)
 apps/cli/main.cpp                application entry point
@@ -145,6 +151,7 @@ apps/gui/{backend,controllers,models,panels,views}/
 examples/link_{sample,bridge,fastread}.cpp
                                  link tools (built with CLI)
 tests/test_<domain>.cpp          domain tests
+docs/signals.md                  signal subsystem design + decision log
 ```
 
 Dependency direction:
@@ -157,6 +164,9 @@ link    -> world (+ core/status vocabulary; endpoints attach as emit::ISink
            at the app edge, never inside the engine)
 cli     -> solvers, core
 core/solver.hpp -> world
+core/run_config.hpp -> signal (one aggregated section type per solver, see §8)
+signal  -> units, core/status (leaf quantity/kind/eval types only)
+world/solvers/emit/cli/gui -> signal (leaf types + pool; never the reverse)
 apps    -> cli + core
 apps/gui -> wengine_core + wengine_imgui + wengine_link_shm (SHM endpoints
             only) (never the wengine_cli library; header-only cli/args.hpp
@@ -199,6 +209,11 @@ the files that need them (no empty placeholder dirs).
   re-attach non-owning sinks on every rebuild. External sources
   (`ShmSource`, `CsvReplay`) own no sim state: lag and failure stay on
   the display side by construction.
+* Panels sharing one controller must compose: each builds its candidate
+  `RunConfig` from the live `sim.config()` (preserving sections it does
+  not own), detects changes on its owned fields only, and either rebuilds
+  live (few fields, like `SimPanel`) or on explicit Apply (multi-field
+  forms, like `SignalPanel` — no per-keystroke rebuilds while typing).
 * `models/` holds engine-only logic (no ImGui): unit-tested linking
   `wengine_core` alone.
 * `panels/` renders ImGui UI; verified by windowed runs/screenshots.
@@ -301,6 +316,17 @@ solvers.
 GUI parses unit strings through the header-only `cli/args.hpp` forwarders
 (no `wengine_cli` link); the suffix tables stay owned by `units/`.
 
+Signal quantities follow the same single-table discipline:
+`signal/types.hpp` owns `kQuantities` (suffix, human name, accepted
+spellings, `units`-owned scales per tag) plus the `DimensionFor` tag→
+`Dimension` trait and the `StampedValue` typed-sample variant. Quantity
+text parses exclusively through `cli::parse_quantity_value(tag, text)` —
+no voltage/current switches at call sites, so cross-dimension text
+(`2mA` as volts) fails loudly. Display uses `quantity_suffix`/
+`quantity_name` from the same table. The hot path stays SI `double` +
+tag (zero-cost); dimensional safety lives at parse/display/control
+edges.
+
 ### Single source of truth
 
 `units/units.hpp` owns:
@@ -357,6 +383,14 @@ exact equality is not appropriate.
 Golden/reference values should come from an independent derivation or trusted
 reference, not from the implementation under test.
 
+Signal sources follow the same contract with two pinned conventions:
+snapshots stamped at time `T` carry `value(T)` (end-of-step evaluation),
+and evaluation order is slot order in two passes (generators, then `kSum`
+combinators, so sums always read fresh operand values). Noise advances its
+seeded RNG once per step per live slot; batch sources derive seeds as
+`seed+k`. Serials are monotonic per `State` and never reused, so
+subscriptions and replay stay unambiguous across despawn/respawn.
+
 ---
 
 ## 8. State, snapshots, and sinks
@@ -377,6 +411,35 @@ A sink failure must not silently alter simulation state or simulation timing.
 
 Whoever owns a run loop re-attaches its non-owning observers after every
 rebuild; sinks themselves stay unaware of rebuilds.
+
+`RunConfig` stays generic: each solver owns its section struct beside
+itself (e.g. `signal::SignalRunConfig`: parsed values, no strings), and
+`RunConfig` aggregates one member per solver. Drivers honor a section
+iff its solver is selected and reject it when `set` otherwise; batch
+paths reject per-source constructs (`kSum` needs distinct operands —
+the per-source family configures those directly). Never add flat
+per-solver fields (`--gravity` is grandfathered). GUI controllers mirror
+the driver's validation and spawn order for bit parity.
+
+Signal state (`world::Signals` pool, entity-attached like `Particles`):
+
+* sources carry stable serials (monotonic per `State`, never reused);
+  slots recycle, serials don't — subscriptions, CSV `sig_id`s, Frame
+  channels (`sig.<serial>.U`), and control-plane addressing use serials;
+* `Snapshot` carries dense serial/value/quantity arrays in slot order;
+  `select_signals` filters by serial at the edge (never in `Runner`);
+* serialization versions bump with fallback loaders (`v3` current:
+  serials + operands; `v2` synthesizes serials as slot indices; `v1`
+  loads with empty signals); kind bytes are append-only;
+* N:M routing lives in edge-side wrappers (`emit/routing.hpp`):
+  `SignalSubsetSink` (serial allowlists, mid-run reconfig, every tick
+  forwarded even when empty so reader lag accounting stays exact) and
+  `StrideSink` (step-aligned per-sink decimation); drops are loud via
+  counters, never silent;
+* `kSum` operands are validated at configure time (live non-sum sources
+  only — flattened, no dangling refs); a later-despawned operand fails
+  the step loudly with time/index frozen; stopped operands contribute
+  frozen samples.
 
 Link transports (`wengine-link` SHM bus):
 
@@ -428,8 +491,13 @@ i2c
    * `static create()` returning `unique_ptr<ISolver>`
 7. Register it in `solver_registry.hpp`.
 8. Add tests against an independently derived closed form or reference model.
-
 Registration should remain a single obvious entry.
+
+If the solver carries state, pool it in `world::State` (SoA, entity-
+attached, `despawn_entity` detaches), extend `Snapshot` + `take_snapshot`
+in slot order, bump the serialization version with a fallback loader for
+prior versions, add one `link::Frame` adapter + one frame-source registry
+entry, and give `RunConfig` one nested section struct (never flat fields).
 
 ### New CLI command
 
@@ -451,6 +519,13 @@ Registration should remain a single obvious entry.
 
 Whenever adding a command, check all existing registry-size assertions.
 
+### New CLI command (solver domains)
+
+One command per solver domain (`sig` owns all signal vocabulary).
+Never add solver-scoped options to a generic command: `sim run` takes
+no solver options beyond the grandfathered `--gravity`, and runs any
+registered solver with defaults otherwise.
+
 ### New unit
 
 1. Add the literal to `units.hpp`.
@@ -458,6 +533,17 @@ Whenever adding a command, check all existing registry-size assertions.
 3. Do not add suffix knowledge to `cli/`.
 4. Existing table-driven tests should cover parsing.
 5. Add literal spot-checks.
+
+### New physical quantity (signal stamping)
+
+1. Add the `Dimension` + literal (`units.hpp`) and one `scales_for` row
+   (`units/scales.hpp`) — the unit recipe above, no other production
+   change needed for generic parsing (prove with a test-only dimension).
+2. Append one `kQuantities` row + one `DimensionFor` line in
+   `signal/types.hpp`; extend the `StampedValue` variant + `stamp()`.
+   The `static_assert`s fail until all three agree.
+3. Nothing else changes: pool, snapshot, serialization bound, Frame/CSV
+   display, and `parse_quantity_value` derive from the table.
 
 ### New GUI view or panel
 
@@ -535,6 +621,10 @@ re-investigated without a reason:
 * The ImGui Vulkan backend owns the `VkSurface` (`DestroyWindow` destroys
   it); never destroy it separately. `SDL_Vulkan_LoadLibrary` must precede
   the instance-extension query (no lazy loading on that path).
+* `assert()` is a macro: commas inside braced init-lists still split macro
+  arguments (braces do not protect them). Multi-element container
+  comparisons in tests need a named expected value, never an inline
+  braced list.
 
 ---
 
@@ -586,6 +676,9 @@ be6e606c-836e-4eb6-810e-fcb0e67b9dde
 
 gui-integration:
 0e4374ad-ab52-4404-b72a-76c7bc8eb4c3
+
+signals (generation + stamping + routing + Zephyr transport):
+4341806e-a12f-4238-b428-1b478047c3f2
 ```
 
 New work should have a sub-task containing:

@@ -295,6 +295,14 @@ if(BUILD_TESTS)
     )
     add_test(NAME gui_sim_control COMMAND test_gui_sim_control)
 
+    # GUI signal panel model + controller parity: engine-only headers.
+    add_executable(test_signal_panel tests/test_signal_panel.cpp)
+    target_link_libraries(test_signal_panel PRIVATE wengine_core)
+    target_include_directories(test_signal_panel PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
+    )
+    add_test(NAME signal_panel COMMAND test_signal_panel)
+
     # Closed-form panel models: engine-only header (+ registry declaration),
     # no ImGui link needed.
     add_executable(test_closed_form_panels tests/test_closed_form_panels.cpp)

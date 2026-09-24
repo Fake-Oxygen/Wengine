@@ -8,7 +8,7 @@
 //   controllers/  engine drivers with GUI-owned state (SimController,
 //                 SHM/CSV external sources)
 //   models/       engine-only evaluate logic (closed-form solver models)
-//   panels/       ImGui rendering (sim/source panels, closed-form registry)
+//   panels/       ImGui rendering (sim/signal/source panels, closed-form registry)
 //   views/        reserved: graphs, 2D canvas, 3D viewport land here
 //
 // Dependency direction: apps/gui -> wengine_core + wengine_imgui only.
@@ -19,6 +19,7 @@
 #include "backend/vk_context.hpp"
 #include "controllers/external_source.hpp"
 #include "panels/closed_form_panels.hpp"
+#include "panels/signal_panel.hpp"
 #include "panels/sim_panel.hpp"
 #include "panels/source_panel.hpp"
 #include "views/canvas2d_panel.hpp"
@@ -155,6 +156,8 @@ int main(int argc, char **argv) {
   wengine::gui::SimController sim;
   wengine::gui::SimPanel sim_panel;
   sim_panel.sync_from(sim.config());
+  wengine::gui::SignalPanel signal_panel;
+  signal_panel.sync_from(sim.config());
   wengine::gui::Viewport3dPanel viewport3d;
   wengine::gui::GraphsPanel graphs;
   wengine::gui::Canvas2dPanel canvas2d;
@@ -265,6 +268,7 @@ int main(int argc, char **argv) {
     ImGui::Text("Framerate: %.1f fps", static_cast<double>(io.Framerate));
     sim_panel.draw(sim);
     sim_panel.draw_status(sim, inprocess_frame);
+    signal_panel.draw(sim);
     source_panel.draw(shm_source, replay);
     ImGui::End();
 

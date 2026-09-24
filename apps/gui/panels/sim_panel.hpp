@@ -135,14 +135,27 @@ struct SimPanel {
   }
 
   // Status renders from the adapted frame (solver-agnostic): step, time,
-  // item count, and the primary item's kinematics when present.
+  // item count, and the primary item's kinematics when present. Item-less
+  // domains (signals) show their first channels instead.
   void draw_status(SimController &sim, const link::Frame &frame) {
     ImGui::Text("step=%llu t=%.4fs solver=%.*s%s",
                 static_cast<unsigned long long>(frame.step), frame.time,
                 static_cast<int>(sim.config().solver.size()),
                 sim.config().solver.data(), sim.playing() ? " (playing)" : "");
     if (frame.items.empty()) {
-      ImGui::Text("primary: (no items)");
+      std::size_t shown = 0;
+      for (const link::FrameChannel &c : frame.channels) {
+        if (c.name == "sig.count" || c.name == "count") {
+          continue; // metadata rows, not data (preserves the empty-run text)
+        }
+        ImGui::Text("%s = %.5f", c.name.c_str(), c.value);
+        if (++shown >= 4) {
+          break;
+        }
+      }
+      if (shown == 0) {
+        ImGui::Text("primary: (no items)");
+      }
     } else {
       const link::FrameItem &p = frame.items.front();
       ImGui::Text("primary: x=%.5f y=%.5f z=%.5f", p.x, p.y, p.z);
