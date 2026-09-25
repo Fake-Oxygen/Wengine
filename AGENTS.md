@@ -152,6 +152,7 @@ examples/link_{sample,bridge,fastread}.cpp
                                  link tools (built with CLI)
 tests/test_<domain>.cpp          domain tests
 docs/signals.md                  signal subsystem design + decision log
+docs/delivery.md                 delivery guarantees + clock separation (PHYSI-28)
 ```
 
 Dependency direction:
@@ -441,16 +442,33 @@ Signal state (`world::Signals` pool, entity-attached like `Particles`):
   the step loudly with time/index frozen; stopped operands contribute
   frozen samples.
 
-Link transports (`wengine-link` SHM bus):
+Link transports (`wengine-link` SHM bus + TCP/UDP sockets;
+full policy in `docs/delivery.md`):
 
 * publishers are `ISink`s owned at the app edge, never in `RunConfig`;
-* the publish path performs no syscalls or I/O: adapt, encode, seqlock copy;
+* the publish path performs no syscalls or I/O: adapt, encode, seqlock copy
+  (SHM) or non-blocking send (sockets);
 * failures are sticky `Status`, never throws; over-bound frames are dropped
   loudly and counted, never silently truncated;
 * wire versions exact-match at attach with a loud found-version refusal;
   version 0 is reserved as the mid-construction marker, never assigned;
-* the writer drops oldest on full; readers take latest only and never drain
-  a backlog; receiver lag never alters sim state or timing;
+* three delivery classes, never conflated: latest-state viewing (writer
+  drops oldest on full, readers take latest only, lag via `frame_seq`
+  gaps), ordered bounded sample streaming (bounded buffers, transient
+  backpressure counted in `dropped_send`, no zero-loss promise to
+  arbitrarily slow receivers), complete recording (driver-paced/
+  backpressured within a budget or loud failure — faster publishing
+  alone is not a metric);
+* four independent clocks: simulation `dt`, emitted sample rate
+  (`emit_every` + per-sink `StrideSink`), wall-clock packet rate, UI
+  refresh rate — waveform frequency is none of those;
+* counter vocabulary is per edge object: generated vs. decimated
+  (`StrideSink`/`SignalSubsetSink` intentional skips) vs. over-bound vs.
+  socket-backpressure vs. received/missed (`LagStats`) vs. recorded
+  (CSV row counts + footer) vs. rendered (display eviction);
+  local socket acceptance is not remote receipt;
+* snapshot CSV is output replay, never a restart checkpoint (checkpoints
+  are the versioned binary `save_state`/`load_state`);
 * readers never unlink (the publisher owns the segment lifetime); a
   same-name publisher restart needs explicit re-attach (stale mapping).
 

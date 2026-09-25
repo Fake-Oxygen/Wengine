@@ -412,22 +412,30 @@ GUI tomorrow) build the plain-data config and call
 `solvers::run_headless()` with caller-owned sinks — the engine never sees
 frontend types.
 
-### Emit transport decision (recorded)
+### Emit transport decision (recorded, see `docs/delivery.md`)
 
-Evaluated for getting snapshots to external apps / future GUI:
+Evaluated for getting snapshots to external apps / GUI:
 file+CSV replay, stdout piping, TCP/UDP sockets, POSIX shared-memory
 seqlock ring, ZeroMQ, gRPC. **Decision: shared-memory seqlock snapshot bus
 (`wengine-link`) for realtime local consumers; CSV/file as the durable
-log + replay format.** Rationale: the GUI is local, performance is the
-project's identity, and the no-dependency policy holds — SHM gives sub-µs
-zero-copy publish with drop-oldest semantics fitting visualization, while
-the file log covers determinism, replay, and debugging for free. Sockets /
-message queues are deferred until a networked consumer actually exists.
-Tracked as a separate Plane epic (link protocol, writer, reader, replay
-bridge, versioning). Wire versions exact-match at attach: a reader refuses
-a foreign segment immediately with the found version reported
+log + replay format; TCP/UDP socket publishers for the networked
+consumer (Zephyr over IP, now shipped).** Rationale: the GUI is local,
+performance is the project's identity, and the no-dependency policy holds
+— SHM gives sub-µs zero-copy publish with drop-oldest semantics fitting
+visualization, while the file log covers determinism, replay, and
+debugging for free. Tracked as a separate Plane epic (link protocol,
+writer, reader, replay bridge, versioning). Wire versions exact-match at
+attach: a reader refuses a foreign segment immediately with the found
+version reported
 (`segment 'X' has version 2, this reader supports version 1`); version 0
 is reserved as the mid-construction marker and never assigned.
+
+Delivery promises and clocks are defined in `docs/delivery.md`:
+latest-state viewing (drop-oldest/take-latest), ordered bounded sample
+streaming (bounded, counted drops), and complete recording
+(driver-paced/backpressured or loud failure) — over the independent
+simulation clock (`dt`), emitted sample rate, wall-clock packet rate,
+and UI refresh rate (waveform frequency is none of those).
 
 ## Conventions
 

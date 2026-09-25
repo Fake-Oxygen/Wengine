@@ -137,6 +137,10 @@ via `matched()`/`dropped()`/`forwarded_rows()` counters.
 
 ## 5. Transports (stream-out)
 
+Delivery promises, clocks, counters, and CSV-vs-checkpoint roles are
+defined once in `docs/delivery.md` (PHYSI-28); this section covers the
+signal stream-out mechanics only.
+
 All publishers are `emit::ISink` at the app edge, non-blocking,
 copy-and-return; transient socket backpressure is counted, hard peer failures
 are sticky `Status`, and over-bound frames are loud drops. TCP keeps the
@@ -218,19 +222,47 @@ budgets (protocol headers add a few bytes per frame):
 | UDP compact, one signal source (`sig.count` + source) | 160 | 0.160 MB/s | 16.0 MB/s | `LagStats` exposes network/receiver gaps by `frame_seq` |
 | UART 115200, ASCII one source | ~30 | ~30 kB/s | ~3 MB/s | 8N1 carries ~384 such frames/s: use at least 3x decimation at 1 kHz and 300x at 100 kHz |
 
-Loopback measurement on the current development host (`bench_link_sockets`,
-active reader, no timing sleep):
+Loopback measurement on the current development host (2026-09-25, GCC
+13.3, default unoptimized build `cmake -S . -B build`, `ndebug=0`):
+every scenario runs an ACTIVE reader that parses and validates each
+frame (sequence IDs, complete framing, values against a deterministic
+per-step pattern, final counts); reader threads are stopped/joined
+before their descriptors close. Vocabulary follows `docs/delivery.md`:
+attempted vs. published/sent vs. dropped vs. received/missed/max_gap vs.
+incomplete tail, plus p50/p99 delivery age and process CPU.
 
-| Run | Attempted rate | Sender accepted / dropped | Reader | Measurement |
+| Run | Attempted | Sender accepted / dropped | Reader (unique / missed / tail) | Delivery age p50/p99 |
 |---|---:|---:|---:|---:|
-| TCP, 2,000 frames x 64 particles | 44,842 frames/s | 992 / 1,008 | 992 frames, 67.59 MB | 1,516 MB/s received while draining; remaining attempts were counted as EAGAIN drops |
-| UDP, 10,000 frames x 1 particle | 68,525 frames/s | 10,000 / 0 | 9,423 frames | 24.80 MB/s received; 442 interior sequence gaps observed, plus 135 trailing datagrams absent at end-of-run |
+| SHM flood, 2,000 x 1 signal, active reader | 187,272/s | 2,000 / 0 | 757 / 1,243 / 0 | 15 / 20 µs |
+| SHM paced 1 kHz, 500 x 1 signal | 999.6/s | 500 / 0 | 496 / 4 / 0 | 230 / 771 µs |
+| SHM paced 1 kHz, 500 x 64 particles | 999.6/s | 500 / 0 | 499 / 1 / 0 | 260 / 790 µs |
+| SHM stalled (attach after 500) | 209,811/s flood | 500 / 0 | 1 / 499 / — (latest-only policy) | — |
+| TCP flood, 2,000 x 64 particles | 24,197/s | 1,941 / 59 EAGAIN | 1,941 / 59 / 0, all decoded exact | 69 / 193 µs |
+| TCP paced 1 kHz, 300 x 1 signal | 999.1/s | 300 / 0 | 300 / 0 / 0, exact | 148 / 246 µs |
+| TCP stalled (no drain during 500 x 4) | 546,937/s | 7 / 492 + 1 pending | 7 / 0 / 0 after drain, exact | — |
+| UDP flood, 2,000 x 1 particle | 61,239/s | 2,000 / 0 | 2,000 / 0 / 0, exact | 22 / 99 µs |
+| UDP paced 1 kHz, 1,000 x 1 signal | 999.5/s | 1,000 / 0 | 1,000 / 0 / 0, exact | 103 / 175 µs |
+| UDP stalled (drain after 2,000 x 1) | 108,772/s | 2,000 / 0 | 167 oldest retained / 0 interior / 1,833 tail | — |
+
+Localization legs (`solo` solver-only, `snap` snapshot+encode, `fanout`
+SHM+counter or TCP+UDP): signal `solo` ~1.59 Msteps/s, `snap` ~1.33
+Msteps/s with encode alone ~5.15 Mframes/s; particle-64 `solo`
+~157 ksteps/s, `snap` ~162 ksteps/s with encode alone ~861 kframes/s —
+so the flood ceilings above are transport/reader-bound, not solver-bound.
 
 These are flood/loopback numbers, not a promise of network capacity. The
-TCP case intentionally exceeds the receiver's sustainable rate to exercise
-backpressure; at low rates (sub-Hz through nominal 1 kHz), the same fixed
-framing is used with no pacing delay. Benchmark command: `bench_link_sockets
-[tcp|udp] [frames] [items]`.
+flood cases intentionally exceed the reader's sustainable rate to exercise
+backpressure (TCP EAGAIN drops) and drop-oldest policy (SHM ring,
+UDP kernel buffer); the paced 1 kHz legs show the nominal operating
+point with zero (sockets) to single-digit (SHM ring race) gaps. Stalled
+legs show the loss policy per class: SHM keeps newest, UDP keeps oldest,
+TCP counts backpressure loudly. Benchmark commands:
+`bench_link --payload signal|particle --steps N --mode all|solo|snap|
+flood|paced|stalled|fanout --rate HZ` and `bench_link_sockets
+--transport tcp|udp|all --frames N --items N --payload signal|particle
+--mode all|solo|snap|flood|paced|stalled|fanout --rate HZ`
+(legacy `bench_link [particles] [steps]` and `bench_link_sockets
+[tcp|udp] [frames] [items]` still run the historic flood).
 
 ## 6. Control plane (SIG-10, v1 scope)
 
