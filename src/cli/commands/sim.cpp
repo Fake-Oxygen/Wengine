@@ -310,6 +310,13 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   }
   const core::Status st =
       solvers::run_headless(cfg, std::span(sink_arr.data(), n_sinks), s);
+  // Explicit bounded stream finish (PHYSI-32): drain a partially accepted
+  // TCP frame without generating a dummy snapshot. The destructor never
+  // waits, so an undrained tail would otherwise be abandoned silently.
+  core::Status tcp_finish = core::Status::success();
+  if (tcp) {
+    tcp_finish = tcp->finish(link::kTcpFinishTimeoutMs);
+  }
   if (!st.ok()) {
     out << "Error: simulation step failed\n";
     return core::kExitRuntime;
@@ -366,8 +373,12 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     out << "shm: " << shm->name() << " (" << shm->stats().published << " frames)\n";
   }
   if (tcp) {
-    if (!tcp->ok()) {
-      out << "Error: TCP publish failed on '" << tcp->endpoint() << "'\n";
+    if (!tcp_finish.ok() || tcp->has_pending_frame() || !tcp->ok()) {
+      out << "Error: TCP publish incomplete on '" << tcp->endpoint() << "' (pending_frames="
+          << (tcp->has_pending_frame() ? 1 : 0) << " pending_bytes=" << tcp->pending_bytes()
+          << " published=" << tcp->stats().published << " dropped="
+          << tcp->stats().dropped_send + tcp->stats().dropped_over_bound << " errno="
+          << tcp->last_errno() << ")\n";
       return core::kExitRuntime;
     }
     out << "tcp: " << tcp->endpoint() << " (" << tcp->stats().published << " frames, "

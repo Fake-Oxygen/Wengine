@@ -23,6 +23,14 @@
 // while over-bound frames (dropped_over_bound, kOutOfRange) and a dead
 // peer (EPIPE/reset, kInternal) are sticky like SHM.
 //
+// A partially accepted frame is held as pending bytes (at most one frame).
+// on_snapshot retries it first but never blocks; when emission is idle the
+// application edge progresses it with service_pending() (non-blocking, no
+// dummy snapshot) and drains it at shutdown with finish(timeout_ms)
+// (bounded select-wait, same edge ownership as connect). The destructor
+// never waits: undrained pending bytes are abandoned at close and must be
+// reported by the finish caller via pending_bytes()/has_pending_frame().
+//
 // UDP (UdpPublisher): connected datagrams to host:port (no handshake —
 // UDP has none). A full LinkFrame (68,136 B) always exceeds the maximum
 // UDP payload (65,507 B), so full-frame datagrams are unimplementable;
@@ -68,6 +76,9 @@ inline constexpr std::uint32_t kUdpVersion = kVersion;
 // Kernel send buffer sized at construction (best-effort setsockopt): room
 // for ~3-4 full TCP frames before backpressure drops begin.
 inline constexpr int kSocketSendBuffer = 256 * 1024;
+// Bounded shutdown drain for TcpPublisher::finish (application edge owns
+// the deadline; destructors never wait).
+inline constexpr int kTcpFinishTimeoutMs = 2000;
 // Largest UDP payload per RFC 768 (65535 - 20 IP - 8 UDP).
 inline constexpr std::size_t kMaxUdpPayload = 65507;
 // TCP frame bytes on the wire: length prefix + one full LinkFrame.
@@ -369,12 +380,35 @@ public:
 
   void on_snapshot(const world::Snapshot &snapshot) override;
 
+  // Non-blocking idle progress for a partially accepted frame: retries the
+  // pending bytes once without requiring a new snapshot and without
+  // counting a drop. Returns true when no pending frame remains. A false
+  // return with ok() still true is transient backpressure (retry later,
+  // e.g. via finish()); a false return with !ok() is a dead peer (sticky
+  // kInternal). Never blocks, never throws; safe on the sim thread.
+  bool service_pending() noexcept;
+
+  // Bounded shutdown drain owned by the application edge (never the hot
+  // path, never the destructor): waits up to timeout_ms for socket
+  // writability while servicing pending bytes. Returns success iff no
+  // pending frame remains; kInvalidArgument for timeout_ms < 0; kInternal
+  // on deadline expiry or dead peer with pending preserved for explicit
+  // reporting (pending_bytes()/has_pending_frame()). A timeout does NOT
+  // poison the publisher (retry or abandon explicitly); a dead peer DOES
+  // (sticky, like on_snapshot). timeout_ms == 0 is a single non-blocking
+  // service attempt.
+  [[nodiscard]] core::Status finish(int timeout_ms) noexcept;
+
   [[nodiscard]] bool ok() const noexcept { return status_.ok(); }
   [[nodiscard]] core::Status status() const noexcept { return status_; }
   // errno captured at the failing connect/send syscall (0 when ok).
   [[nodiscard]] int last_errno() const noexcept { return last_errno_; }
   [[nodiscard]] const PublisherStats &stats() const noexcept { return stats_; }
   [[nodiscard]] bool has_pending_frame() const noexcept { return pending_size_ != 0; }
+  // Remaining unsent bytes of the pending frame (0 when idle clean).
+  [[nodiscard]] std::size_t pending_bytes() const noexcept {
+    return pending_size_ == 0 ? 0 : pending_size_ - pending_offset_;
+  }
   [[nodiscard]] const std::string &endpoint() const noexcept { return endpoint_; }
 
 private:

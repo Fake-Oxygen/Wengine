@@ -642,6 +642,221 @@ void test_udp_soak() {
   ::close(receiver);
 }
 
+// PHYSI-32: pending TCP bytes progress while the producer is idle (no dummy
+// snapshot), then complete once the reader resumes; shutdown finish() is
+// bounded and explicit; timeouts and dead peers never claim success.
+
+void test_service_pending_idle_no_dummy_snapshot() {
+  // Stalled peer: flood until a partial frame is held, prove an idle
+  // service_pending() neither counts a drop nor advances the stream, and
+  // the pending tail stays explicitly reportable (abandoned at close).
+  std::uint16_t port = 0;
+  const int listen_fd = make_listener(port);
+  assert(listen_fd >= 0);
+  int peer = -1;
+  {
+    link::TcpPublisher pub(endpoint_for(port), "projectile");
+    assert(pub.ok());
+    peer = ::accept(listen_fd, nullptr, nullptr);
+    assert(peer >= 0); // held open, never read: backpressure is forced
+
+    world::Snapshot snap;
+    bool got_pending = false;
+    for (std::uint64_t k = 1; k <= 5000; ++k) {
+      snap.step_index = k;
+      snap.sim_time = 0.01 * static_cast<double>(k);
+      pub.on_snapshot(snap);
+      if (pub.has_pending_frame()) {
+        got_pending = true;
+        break;
+      }
+    }
+    assert(got_pending);
+    assert(pub.ok());
+    assert(pub.pending_bytes() > 0);
+    const std::uint64_t published_before = pub.stats().published;
+    const std::uint64_t dropped_before = pub.stats().dropped_send;
+
+    // Idle service with no new snapshot: kernel still full, so the tail
+    // stays pending, no drop is counted, nothing is published.
+    assert(!pub.service_pending());
+    assert(pub.has_pending_frame());
+    assert(pub.pending_bytes() > 0);
+    assert(pub.ok());
+    assert(pub.stats().published == published_before);
+    assert(pub.stats().dropped_send == dropped_before);
+    // finish(0) is one non-blocking attempt: same verdict, still explicit.
+    assert(!pub.finish(0).ok());
+    assert(pub.has_pending_frame());
+    assert(pub.ok());
+  } // dtor abandons the tail without waiting (bounded shutdown by design)
+  ::close(peer);
+  ::close(listen_fd);
+}
+
+void test_finish_completes_after_reader_resumes() {
+  // Flood stalled until pending, then let a concurrent reader drain while
+  // finish() waits: the final accepted record must complete framed and
+  // decodable, with no truncation and received == published.
+  std::uint16_t port = 0;
+  const int listen_fd = make_listener(port);
+  assert(listen_fd >= 0);
+
+  struct Drain {
+    int peer = -1;
+    std::vector<unsigned char> bytes;
+    bool hello_ok = false;
+    void run() {
+      unsigned char hello[sizeof(link::TcpHello)]{};
+      if (!recv_all(peer, hello, sizeof(hello))) {
+        return;
+      }
+      if (!link::check_tcp_hello(*reinterpret_cast<link::TcpHello *>(hello),
+                                 "projectile")
+               .ok()) {
+        return;
+      }
+      hello_ok = true;
+      unsigned char chunk[65536]{};
+      while (true) {
+        const ssize_t n = ::recv(peer, chunk, sizeof(chunk), 0);
+        if (n <= 0) {
+          return; // EOF after the publisher closes
+        }
+        bytes.insert(bytes.end(), chunk, chunk + n);
+      }
+    }
+  };
+
+  Drain drain;
+  std::thread reader;
+  int peer = -1;
+  std::uint64_t published = 0;
+  {
+    link::TcpPublisher pub(endpoint_for(port), "projectile");
+    assert(pub.ok());
+    peer = ::accept(listen_fd, nullptr, nullptr);
+    assert(peer >= 0);
+    timeval tv{};
+    tv.tv_sec = 30;
+    tv.tv_usec = 0;
+    ::setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    world::Snapshot snap;
+    bool got_pending = false;
+    for (std::uint64_t k = 1; k <= 5000; ++k) {
+      snap.step_index = k;
+      snap.sim_time = 0.01 * static_cast<double>(k);
+      pub.on_snapshot(snap);
+      if (pub.has_pending_frame()) {
+        got_pending = true;
+        break;
+      }
+    }
+    assert(got_pending);
+    assert(pub.pending_bytes() > 0);
+
+    drain.peer = peer;
+    reader = std::thread([&drain] { drain.run(); });
+    assert(pub.finish(10000).ok()); // reader resumes: tail completes
+    assert(!pub.has_pending_frame());
+    assert(pub.pending_bytes() == 0);
+    assert(pub.ok());
+    assert(pub.service_pending()); // idle-clean stays clean
+    published = pub.stats().published;
+    assert(published > 0);
+  } // FIN terminates the drain
+  reader.join();
+  ::close(peer);
+  ::close(listen_fd);
+
+  assert(drain.hello_ok);
+  assert(drain.bytes.size() % link::kTcpFrameBytes == 0); // no truncation
+  const std::uint64_t received = drain.bytes.size() / link::kTcpFrameBytes;
+  assert(received == published);
+  std::uint64_t prev_seq = 0;
+  for (std::uint64_t k = 0; k < received; ++k) {
+    const unsigned char *p = drain.bytes.data() + k * link::kTcpFrameBytes;
+    assert(link::socket_detail::get_u32_le(p) == sizeof(link::LinkFrame));
+    link::LinkFrame wire{};
+    std::memcpy(&wire, p + 4, sizeof(wire));
+    assert(wire.frame_seq > prev_seq);
+    prev_seq = wire.frame_seq;
+    link::Frame decoded;
+    assert(link::decode_frame(wire, decoded).ok());
+  }
+}
+
+void test_finish_timeout_reports_pending() {
+  // Never-drained peer: a bounded finish must fail loudly with the tail
+  // preserved (never a false success), without poisoning the publisher,
+  // and reject a negative deadline as usage error.
+  std::uint16_t port = 0;
+  const int listen_fd = make_listener(port);
+  assert(listen_fd >= 0);
+  link::TcpPublisher pub(endpoint_for(port), "projectile");
+  assert(pub.ok());
+  const int peer = ::accept(listen_fd, nullptr, nullptr);
+  assert(peer >= 0); // never read
+
+  world::Snapshot snap;
+  bool got_pending = false;
+  for (std::uint64_t k = 1; k <= 5000; ++k) {
+    snap.step_index = k;
+    snap.sim_time = 0.01 * static_cast<double>(k);
+    pub.on_snapshot(snap);
+    if (pub.has_pending_frame()) {
+      got_pending = true;
+      break;
+    }
+  }
+  assert(got_pending);
+  assert(!pub.finish(50).ok()); // deadline expires: explicit failure
+  assert(pub.has_pending_frame());
+  assert(pub.pending_bytes() > 0);
+  assert(pub.ok()); // timeout is retryable, never sticky
+  assert(!pub.finish(-1).ok());
+  assert(pub.finish(-1).code == core::StatusCode::kInvalidArgument);
+  ::close(peer);
+  ::close(listen_fd);
+}
+
+void test_finish_disconnect_reports_failure() {
+  // Peer goes away: further writes must turn sticky and finish() must
+  // never claim the stream completed.
+  std::uint16_t port = 0;
+  const int listen_fd = make_listener(port);
+  assert(listen_fd >= 0);
+  link::TcpPublisher pub(endpoint_for(port), "projectile");
+  assert(pub.ok());
+  int peer = ::accept(listen_fd, nullptr, nullptr);
+  assert(peer >= 0);
+  ::close(peer); // reader disconnects immediately
+  peer = -1;
+
+  world::Snapshot snap;
+  bool dead = false;
+  for (std::uint64_t k = 1; k <= 5000; ++k) {
+    snap.step_index = k;
+    snap.sim_time = 0.01 * static_cast<double>(k);
+    pub.on_snapshot(snap);
+    if (!pub.ok()) {
+      dead = true;
+      break;
+    }
+    if (!pub.service_pending() && !pub.ok()) {
+      dead = true;
+      break;
+    }
+  }
+  assert(dead);
+  assert(!pub.ok());
+  assert(pub.status().code == core::StatusCode::kInternal);
+  assert(!pub.service_pending());
+  assert(!pub.finish(100).ok()); // sticky failure, never success
+  ::close(listen_fd);
+}
+
 } // namespace
 
 int main() {
@@ -655,6 +870,10 @@ int main() {
   test_subhz_tcp();
   test_soak_100khz_tcp();
   test_udp_soak();
+  test_service_pending_idle_no_dummy_snapshot();
+  test_finish_completes_after_reader_resumes();
+  test_finish_timeout_reports_pending();
+  test_finish_disconnect_reports_failure();
   std::cout << "test_link_sockets: OK\n";
   return 0;
 }

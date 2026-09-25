@@ -2,10 +2,12 @@
 // around the platform-free framing in socket_publisher.hpp. This TU is the
 // same justified exception to the header-only engine rule as the SHM
 // endpoint TUs (platform syscalls cannot live in headers). Publish paths
-// (on_snapshot) perform zero blocking calls: the sockets are non-blocking
-// from construction, sends loop only while the kernel accepts bytes, and
-// EAGAIN drops the attempted frame loudly (dropped_send) without stalling
-// the sim loop or poisoning the publisher. Windows port: replace this file
+// (on_snapshot, service_pending) perform zero blocking calls: the sockets
+// are non-blocking from construction, sends loop only while the kernel
+// accepts bytes, and EAGAIN drops the attempted frame loudly (dropped_send)
+// without stalling the sim loop or poisoning the publisher. The bounded
+// blocking drain (TcpPublisher::finish) is application-edge only — never
+// the hot path, never the destructor. Windows port: replace this file
 // with Winsock2 (WSAStartup, getaddrinfo, ioctlsocket, WSAPoll); the header
 // above stays untouched.
 
@@ -16,7 +18,9 @@
 #include "wengine/link/socket_publisher.hpp"
 
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <fcntl.h>
 #include <netdb.h>
 #include <sys/select.h>
@@ -291,23 +295,14 @@ void TcpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   // TCP cannot discard a frame after some bytes have entered the stream:
   // doing so would make every later length prefix unparseable. Finish a
   // partial frame first; while it remains backpressured, drop this new
-  // snapshot and preserve stream framing.
+  // snapshot and preserve stream framing. The drain itself is
+  // service_pending() so idle periods make identical progress without a
+  // dummy snapshot.
   if (pending_size_ != 0) {
-    std::size_t sent = 0;
-    int err = 0;
-    const SendResult pending_result =
-        send_all(fd_, wire_.data() + pending_offset_, pending_size_ - pending_offset_,
-                 sent, err);
-    pending_offset_ += sent;
-    if (pending_result == SendResult::kComplete) {
-      ++stats_.published;
-      pending_size_ = 0;
-      pending_offset_ = 0;
-    } else if (pending_result == SendResult::kDead) {
-      last_errno_ = err;
-      status_ = {core::StatusCode::kInternal};
-      return;
-    } else {
+    if (!service_pending()) {
+      if (!status_.ok()) {
+        return; // dead peer: sticky, set by service_pending()
+      }
       ++stats_.dropped_send;
       ++frame_seq_;
       return;
@@ -350,6 +345,102 @@ void TcpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   }
   last_errno_ = err;
   status_ = {core::StatusCode::kInternal}; // dead peer: sticky, like SHM teardown
+}
+
+bool TcpPublisher::service_pending() noexcept {
+  if (!status_.ok()) {
+    return false;
+  }
+  if (pending_size_ == 0) {
+    return true;
+  }
+  if (fd_ < 0) {
+    last_errno_ = EBADF;
+    status_ = {core::StatusCode::kInternal};
+    return false;
+  }
+  std::size_t sent = 0;
+  int err = 0;
+  const SendResult r =
+      send_all(fd_, wire_.data() + pending_offset_, pending_size_ - pending_offset_, sent, err);
+  pending_offset_ += sent;
+  if (r == SendResult::kComplete) {
+    ++stats_.published;
+    pending_size_ = 0;
+    pending_offset_ = 0;
+    return true;
+  }
+  if (r == SendResult::kDead) {
+    last_errno_ = err;
+    status_ = {core::StatusCode::kInternal};
+    return false;
+  }
+  return false; // transient backpressure: pending preserved, no drop counted
+}
+
+core::Status TcpPublisher::finish(int timeout_ms) noexcept {
+  if (!status_.ok()) {
+    return status_;
+  }
+  if (pending_size_ == 0) {
+    return core::Status::success();
+  }
+  if (timeout_ms < 0) {
+    return {core::StatusCode::kInvalidArgument};
+  }
+  if (fd_ < 0) {
+    last_errno_ = EBADF;
+    status_ = {core::StatusCode::kInternal};
+    return status_;
+  }
+  timespec start{};
+  if (::clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
+    last_errno_ = errno;
+    status_ = {core::StatusCode::kInternal};
+    return status_;
+  }
+  const std::int64_t deadline_ns = static_cast<std::int64_t>(start.tv_sec) * 1000000000LL +
+                                   static_cast<std::int64_t>(start.tv_nsec) +
+                                   static_cast<std::int64_t>(timeout_ms) * 1000000LL;
+  for (;;) {
+    if (service_pending()) {
+      return core::Status::success();
+    }
+    if (!status_.ok()) {
+      return status_; // dead peer: sticky, pending preserved for reporting
+    }
+    timespec now{};
+    if (::clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+      last_errno_ = errno;
+      status_ = {core::StatusCode::kInternal};
+      return status_;
+    }
+    const std::int64_t now_ns = static_cast<std::int64_t>(now.tv_sec) * 1000000000LL +
+                                static_cast<std::int64_t>(now.tv_nsec);
+    const std::int64_t remain_ns = deadline_ns - now_ns;
+    if (remain_ns <= 0) {
+      return {core::StatusCode::kInternal}; // deadline: pending kept, not sticky
+    }
+    fd_set wfds{};
+    FD_ZERO(&wfds);
+    FD_SET(fd_, &wfds);
+    timeval tv{};
+    tv.tv_sec = static_cast<decltype(tv.tv_sec)>(remain_ns / 1000000000LL);
+    tv.tv_usec = static_cast<decltype(tv.tv_usec)>((remain_ns % 1000000000LL) / 1000LL);
+    const int rc = ::select(fd_ + 1, nullptr, &wfds, nullptr, &tv);
+    if (rc == 0) {
+      return {core::StatusCode::kInternal}; // select timeout: same as deadline
+    }
+    if (rc < 0) {
+      const int e = errno;
+      if (e == EINTR) {
+        continue;
+      }
+      last_errno_ = e;
+      status_ = {core::StatusCode::kInternal};
+      return status_;
+    }
+  }
 }
 
 void TcpPublisher::cleanup() noexcept {
