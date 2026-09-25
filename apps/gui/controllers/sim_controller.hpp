@@ -1,33 +1,31 @@
 #pragma once
 
 // Frontend-owned stepped-sim driver for apps/gui (Dear ImGui panel) and its
-// unit test. Owns a core::Runner plus its solver, rebuilds both from a plain
-// core::RunConfig on every accepted edit, and exposes snapshots/status for
-// display. Transport: play (wall-clock advance), pause, exact single-step,
-// reset to the current config.
+// unit test. Owns a solvers::ConfiguredRun (shared validation/population
+// with solvers::run_headless() — see solvers/configured_run.hpp), rebuilds
+// it from a plain core::RunConfig on every accepted edit, and exposes
+// snapshots/status for display. Transport: play (wall-clock advance),
+// pause, exact single-step, reset to the current config.
 //
 // Determinism contract: rebuild + fixed-step driving reproduce
 // solvers::run_headless() bit-for-bit for the same config (same Runner
-// sequencing, same spawn order and initial values). Validation mirrors
-// run_headless(): dt > 0, steps >= 1, known solver name,
-// projectile-scoped gravity, signal-scoped section. A dedicated test
-// guards this parity, so the small spawn block duplicated from
-// solvers/run.hpp cannot drift silently.
+// sequencing, same spawn order and initial values) because both frontends
+// use the one shared builder — there is no duplicated spawn block left to
+// drift.
 //
 // Engine-only includes: no ImGui, SDL, or Vulkan here, so unit tests link
 // wengine_core alone. GUI owns all I/O; failures surface as Status plus an
 // inquiryable message (frontend code may allocate — the hot path inside
-// Runner::run/advance still does not).
+// Runner::run/advance still does not). The controller provides no Lua
+// scripting runtime (wengine_core only), so kLua configs are rejected by
+// the shared builder with a message (SIG-9 panel follow-up).
 
 #include "wengine/core/run_config.hpp"
-#include "wengine/core/runner.hpp"
 #include "wengine/emit/sink.hpp"
-#include "wengine/signal/types.hpp"
-#include "wengine/solvers/solver_registry.hpp"
+#include "wengine/solvers/configured_run.hpp"
 #include "wengine/world/state.hpp"
 
 #include <cstdint>
-#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -55,56 +53,19 @@ class SimController {
   // Validate and adopt a new config, rebuilding the run from step 0.
   // Rejected edits leave the live run untouched; the message explains why.
   core::Status set_config(const core::RunConfig &cfg) {
-    if (!(cfg.loop.dt > 0.0)) {
-      return reject("dt must be > 0");
-    }
-    if (cfg.steps < 1) {
-      return reject("steps must be >= 1");
-    }
-    const solvers::SolverDef *sdef = solvers::SolverRegistry::find(cfg.solver);
-    if (sdef == nullptr) {
-      return reject(std::string("unknown solver '") + std::string(cfg.solver) +
-                    "'");
-    }
-    const bool is_projectile = sdef->name == solvers::ProjectileSolver::kName;
-    if (!is_projectile && cfg.has_gravity) {
-      return reject("--gravity only applies to solver 'projectile'");
-    }
-    const bool is_signal = sdef->name == solvers::SignalSolver::kName;
-    if (!is_signal && cfg.signal.set) {
-      return reject("signal options only apply to solver 'signal'");
-    }
-    // Bit parity with solvers::run_headless(): same validation, same spawn
-    // order (see solvers/run.hpp). Custom sources: expression programs ride
-    // in params, table points in cfg.signal.table (shared range below), Lua
-    // scripts in cfg.signal.lua — but the controller has no scripting
-    // runtime (wengine_core only), so kLua configs are rejected with a
-    // message (SIG-9 panel follow-up).
-    if (is_signal && (!signal::validate_params(cfg.signal.params).ok() ||
-                      cfg.signal.params.kind == signal::SignalKind::kSum ||
-                      cfg.signal.params.kind == signal::SignalKind::kLua)) {
-      return reject("invalid signal params (freq > 0, duty in 0..1; no batch sums or lua)");
-    }
-    if (is_signal) {
-      const bool is_expr = cfg.signal.params.kind == signal::SignalKind::kExpression;
-      const bool is_table = cfg.signal.params.kind == signal::SignalKind::kTable;
-      if ((!is_expr && cfg.signal.params.expr.size != 0) ||
-          (is_expr && !cfg.signal.table.empty()) || !cfg.signal.lua.empty()) {
-        return reject("invalid signal params (custom-source payload misplaced)");
-      }
-      if (is_table) {
-        if (!signal::validate_table_points(std::span(cfg.signal.table.data(),
-                                                     cfg.signal.table.size()))
-                 .ok()) {
-          return reject("invalid signal params (table needs CSV points)");
-        }
-      } else if (!cfg.signal.table.empty()) {
-        return reject("invalid signal params (table points need kind=table)");
-      }
+    solvers::ConfiguredRun next;
+    std::string message;
+    const core::Status st = solvers::ConfiguredRun::build(
+        cfg, std::span<core::ISolver *>{}, /*has_lua_runtime=*/false, next, &message);
+    if (!st.ok()) {
+      error_ = message.empty() ? "invalid config" : message;
+      last_status_ = st;
+      return last_status_;
     }
     config_ = cfg;
-    if (!rebuild()) {
-      return last_status_; // error_ set inside (unreachable post-validation)
+    run_ = std::move(next);
+    for (emit::ISink *sink : observers_) {
+      run_.add_sink(*sink);
     }
     error_.clear();
     last_status_ = core::Status::success();
@@ -114,8 +75,18 @@ class SimController {
   // Rebuild from the current (already validated) config. Step index and
   // clock return to 0; transport keeps its play/pause state.
   void reset() {
-    if (!rebuild()) {
-      return; // last_status_/error_ set inside (unreachable post-validation)
+    solvers::ConfiguredRun next;
+    std::string message;
+    const core::Status st = solvers::ConfiguredRun::build(
+        config_, std::span<core::ISolver *>{}, /*has_lua_runtime=*/false, next, &message);
+    if (!st.ok()) {
+      error_ = message.empty() ? "signal setup failed" : message;
+      last_status_ = st;
+      return; // unreachable post-validation; live run left intact
+    }
+    run_ = std::move(next);
+    for (emit::ISink *sink : observers_) {
+      run_.add_sink(*sink);
     }
     error_.clear();
     last_status_ = core::Status::success();
@@ -124,7 +95,7 @@ class SimController {
   // Advance exactly `steps` fixed steps (single-step = run_exact(1)).
   // Deterministic: identical call sequences give identical states.
   core::Status run_exact(std::uint64_t steps) {
-    last_status_ = runner_.run(steps);
+    last_status_ = run_.run(steps);
     if (!last_status_.ok()) {
       error_ = "simulation step failed";
     }
@@ -138,7 +109,7 @@ class SimController {
   // bit-for-bit regardless of frame rate. Reaching the budget auto-pauses.
   core::Status advance_frame(double frame_dt_seconds) {
     if (playing_) {
-      const std::uint64_t done = runner_.state().step_index;
+      const std::uint64_t done = run_.state().step_index;
       if (done < config_.steps) {
         const std::uint64_t remaining = config_.steps - done;
         const double budget_dt =
@@ -148,12 +119,12 @@ class SimController {
         }
       }
     }
-    last_status_ = runner_.advance(frame_dt_seconds);
+    last_status_ = run_.runner().advance(frame_dt_seconds);
     if (!last_status_.ok()) {
       error_ = "simulation step failed";
       return last_status_;
     }
-    if (runner_.state().step_index >= config_.steps) {
+    if (run_.state().step_index >= config_.steps) {
       playing_ = false;
     }
     return last_status_;
@@ -168,99 +139,25 @@ class SimController {
   // config edits and resets never silently detach observers.
   void add_sink(emit::ISink &sink) {
     observers_.push_back(&sink);
-    runner_.add_sink(sink);
+    run_.add_sink(sink);
   }
 
   [[nodiscard]] const core::RunConfig &config() const noexcept { return config_; }
   [[nodiscard]] const world::State &state() const noexcept {
-    return runner_.state();
+    return run_.state();
   }
   // Independent deep copy: safe to hold across rebuilds and frames.
   [[nodiscard]] world::Snapshot snapshot() const {
-    return world::take_snapshot(runner_.state());
+    return world::take_snapshot(run_.state());
   }
   [[nodiscard]] bool ok() const noexcept { return last_status_.ok(); }
   [[nodiscard]] const std::string &error() const noexcept { return error_; }
 
  private:
-  core::Status reject(const std::string &msg) {
-    error_ = msg;
-    last_status_ = core::Status::failure(core::StatusCode::kInvalidArgument);
-    return last_status_;
-  }
-
-  // False on signal-setup failure (unreachable: set_config validated).
-  bool rebuild() {
-    runner_ = core::Runner(config_.loop);
-    // set_config() validated the name, so this resolve cannot fail.
-    const solvers::SolverDef *sdef =
-        solvers::SolverRegistry::find(config_.solver);
-    solver_ = sdef->create();
-    if (solver_->name() == solvers::ProjectileSolver::kName) {
-      static_cast<solvers::ProjectileSolver *>(solver_.get())
-          ->set_gravity(config_.gravity);
-    }
-    runner_.add_solver(*solver_);
-    for (emit::ISink *sink : observers_) {
-      runner_.add_sink(*sink);
-    }
-    // Population identical to solvers::run_headless() (see solvers/run.hpp):
-    // same spawn order, same initial values — batch parity is exact.
-    for (std::uint64_t k = 0; k < config_.particles; ++k) {
-      world::Entity e = runner_.state().spawn_entity();
-      runner_.state().particles.attach(e.index);
-      runner_.state().particles.pos_x[e.index] = config_.x0;
-      runner_.state().particles.pos_y[e.index] = config_.y0;
-      runner_.state().particles.vel_x[e.index] = config_.vx0;
-      runner_.state().particles.vel_y[e.index] = config_.vy0;
-    }
-    if (solver_->name() == solvers::SignalSolver::kName) {
-      // set_config() rejected sums and validated params, so configure
-      // cannot fail here; the check is defense in depth (same as run_headless).
-      // Table batches share one appended range (same as run_headless).
-      const bool is_table = config_.signal.params.kind == signal::SignalKind::kTable;
-      std::uint64_t table_off = 0;
-      std::uint64_t table_len = 0;
-      if (is_table) {
-        if (!world::append_table_points(
-                 runner_.state().signals,
-                 std::span(config_.signal.table.data(), config_.signal.table.size()),
-                 table_off)
-                 .ok()) {
-          last_status_ = core::Status::failure(core::StatusCode::kInvalidArgument);
-          error_ = "signal setup failed";
-          return false;
-        }
-        table_len = static_cast<std::uint64_t>(config_.signal.table.size());
-      }
-      for (std::uint64_t k = 0; k < config_.signal.count; ++k) {
-        world::Entity e = runner_.state().spawn_entity();
-        if (is_table) {
-          if (!world::attach_table_source(e, runner_.state().signals, table_off, table_len,
-                                          config_.signal.params.quantity, 0.0)
-                   .ok()) {
-            last_status_ = core::Status::failure(core::StatusCode::kInvalidArgument);
-            error_ = "signal setup failed";
-            return false;
-          }
-          continue;
-        }
-        signal::SignalParams p = config_.signal.params;
-        p.seed = config_.signal.params.seed + k;
-        if (!world::configure_source(e, runner_.state().signals, p, 0.0).ok()) {
-          last_status_ = core::Status::failure(core::StatusCode::kInvalidArgument);
-          error_ = "signal setup failed";
-          return false;
-        }
-      }
-    }
-    return true;
-  }
-
   core::RunConfig config_{};
-  // Declared before runner_: Runner only borrows the solver pointer.
-  std::unique_ptr<core::ISolver> solver_;
-  core::Runner runner_;
+  // Shared builder output: owns the primary solver + initialized Runner.
+  // Extras are unsupported here (no scripting runtime in wengine_core).
+  solvers::ConfiguredRun run_;
   // Non-owning observers, re-attached on every rebuild (see add_sink).
   std::vector<emit::ISink *> observers_;
   bool playing_ = false;

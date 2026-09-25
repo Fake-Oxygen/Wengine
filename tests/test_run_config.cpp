@@ -1,4 +1,5 @@
 #include "wengine/core/run_config.hpp"
+#include "wengine/solvers/configured_run.hpp"
 #include "wengine/solvers/run.hpp"
 
 #include <array>
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <iostream>
 #include <span>
+#include <string_view>
 #include <vector>
 
 // Tests for the CLI/GUI seam: frontends build core::RunConfig (plain data)
@@ -121,6 +123,71 @@ void test_emit_every_through_config() {
   assert(out.step_index == 100);
 }
 
+void test_chunked_matches_one_shot() {
+  // Shared builder drives multiple run(N) chunks over one state: 37 + 63
+  // must equal a one-shot headless batch bit-for-bit (PHYSI-35).
+  core::RunConfig cfg = make_config();
+  wengine::solvers::ConfiguredRun chunked;
+  assert(wengine::solvers::ConfiguredRun::build(
+             cfg, std::span<wengine::core::ISolver *>{}, false, chunked)
+             .ok());
+  assert(chunked.run(37).ok());
+  assert(chunked.run(63).ok());
+  wengine::world::State ref;
+  assert(wengine::solvers::run_headless(cfg, std::span<wengine::emit::ISink *>{}, ref)
+             .ok());
+  assert(chunked.state() == ref);
+  assert(wengine::world::take_snapshot(chunked.state()) ==
+         wengine::world::take_snapshot(ref));
+
+  // Same for a signal run (covers the signal spawn path, not just particles).
+  core::RunConfig sig = make_config();
+  sig.solver = "signal";
+  sig.particles = 0;
+  sig.signal.set = true;
+  wengine::solvers::ConfiguredRun sig_chunked;
+  assert(wengine::solvers::ConfiguredRun::build(
+             sig, std::span<wengine::core::ISolver *>{}, false, sig_chunked)
+             .ok());
+  assert(sig_chunked.run(40).ok());
+  assert(sig_chunked.run(60).ok());
+  wengine::world::State sig_ref;
+  assert(wengine::solvers::run_headless(sig, std::span<wengine::emit::ISink *>{}, sig_ref)
+             .ok());
+  assert(sig_chunked.state() == sig_ref);
+}
+
+struct DummySolver : wengine::core::ISolver {
+  [[nodiscard]] std::string_view name() const noexcept override { return "dummy"; }
+  wengine::core::Status step(wengine::world::State &, double) noexcept override {
+    return wengine::core::Status::success();
+  }
+};
+
+void test_dummy_extra_rejected_for_lua() {
+  // Explicit Lua requirement (PHYSI-35): an arbitrary nonempty extra span
+  // must not satisfy kLua — only a live "lua" solver plus the runtime flag.
+  core::RunConfig cfg = make_config();
+  cfg.solver = "signal";
+  cfg.particles = 0;
+  cfg.signal.set = true;
+  cfg.signal.params.kind = wengine::signal::SignalKind::kLua;
+  cfg.signal.lua = "return 1";
+  DummySolver dummy;
+  std::array<wengine::core::ISolver *, 1> extras{&dummy};
+  wengine::world::State out;
+  assert(!wengine::solvers::run_headless(cfg, std::span<wengine::emit::ISink *>{}, out,
+                                         std::span(extras.data(), extras.size()))
+              .ok());
+  wengine::solvers::ConfiguredRun run;
+  assert(!wengine::solvers::ConfiguredRun::build(
+              cfg, std::span(extras.data(), extras.size()), true, run)
+              .ok());
+  assert(!wengine::solvers::ConfiguredRun::build(
+              cfg, std::span<wengine::core::ISolver *>{}, false, run)
+              .ok());
+}
+
 } // namespace
 
 int main() {
@@ -128,6 +195,8 @@ int main() {
   test_gravity_flows_through_config();
   test_bad_config_rejected();
   test_emit_every_through_config();
+  test_chunked_matches_one_shot();
+  test_dummy_extra_rejected_for_lua();
   std::cout << "test_run_config: OK\n";
   return 0;
 }
