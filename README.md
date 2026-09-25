@@ -145,12 +145,14 @@ p0: x=10 y=5.04595 vx=10 vy=0.19
 > link_bridge play run.csv /wengine-demo --rate 10   (replay a CSV log onto the bus)
 > sim run --steps 1000 --emit-tcp 192.0.2.20:9000   (TCP LinkFrame stream)
 > sig run --steps 1000 --emit-udp 192.0.2.20:9001   (compact UDP frames)
+> sim run --steps 100 --paced                       (real-time wall-clock pacing)
+> sig run --sig-kind sine --sig-freq 1kHz --dt 0.1ms --paced --rate 1kHz --emit-shm /wengine-sig
 ```
 
 All `sim` parameters are named (`--solver`, `--steps`, `--dt`, `--gravity`,
 `--particles`, `--x0/--y0/--vx0/--vy0`, `--emit-csv`, `--emit-shm`,
 `--emit-tcp`, `--emit-udp`,
-`--emit-every`); the CSV log carries the full snapshot stream for replay,
+`--emit-every`, `--paced`, `--rate`); the CSV log carries the full snapshot stream for replay,
 while `--emit-shm <name>` publishes every emitted snapshot to a
 wengine-link SHM segment for realtime local consumers (`examples/
 link_sample` prints them live; the segment lives while `sim` runs). `--solver` selects from the
@@ -161,7 +163,14 @@ TCP actively connects to the listening reader at `host:port` and sends a
 version/domain hello followed by length-prefixed full frames. UDP sends
 versioned compact datagrams containing only used entries. Both transports are
 non-blocking; use `--emit-every` to decimate high-rate simulations, and use
-reader-side `LagStats` to observe network loss. Wire details and measured
+reader-side `LagStats` to observe network loss. Both commands run a fast
+batch by default; `--paced` spaces fixed-dt steps against absolute
+steady-clock deadlines instead (no drift, no skipped steps, `dt`
+unchanged), with `--rate <Hz>` setting wall steps per second (default
+`1/dt` = real-time). Late steps run immediately and are counted in the
+`paced:` summary line, never skipped; Ctrl-C stops at a step boundary.
+Three clocks stay separate: waveform Hz (`--sig-freq`, the physics),
+sample rate `1/(dt*emit_every)`, and paced packet rate. Wire details and measured
 rate budgets are in [docs/signals.md, section 5](docs/signals.md#5-transports-stream-out).
 
 Signal generation (`sig run` — its own command, so solver vocabularies never
@@ -512,7 +521,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   signal receivers; link_socket_protocol.py has the shared decoder)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_bridge,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

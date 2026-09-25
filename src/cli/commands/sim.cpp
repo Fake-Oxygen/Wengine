@@ -7,11 +7,14 @@
 #include "wengine/link/shm_publisher.hpp"
 #include "wengine/link/socket_publisher.hpp"
 #include "wengine/signal/types.hpp"
+#include "wengine/solvers/configured_run.hpp"
+#include "wengine/solvers/paced_run.hpp"
 #include "wengine/solvers/run.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <array>
 #include <cstdint>
+#include <csignal>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -46,10 +49,16 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 
 constexpr std::array<std::string_view, 1> kSimModes{{"run"}};
 
-constexpr std::array<std::string_view, 19> kSimOptions{{
+volatile std::sig_atomic_t g_sigint_requested = 0;
+
+void request_sigint(int) noexcept { g_sigint_requested = 1; }
+
+bool sigint_requested() noexcept { return g_sigint_requested != 0; }
+
+constexpr std::array<std::string_view, 21> kSimOptions{{
     "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
     "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-tcp", "--emit-udp",
-    "--emit-every", "--help", "-h",
+    "--emit-every", "--paced", "--rate", "--help", "-h",
 }};
 
 } // namespace
@@ -67,6 +76,8 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   long long n_particles = 1;
   double x0 = 0.0, y0 = 0.0, vx0 = 10.0, vy0 = 10.0;
   long long emit_every = 1;
+  const bool paced = args.take_flag({"--paced"});
+  const auto o_rate = args.take_option({"--rate"});
   std::optional<std::string_view> csv_path;
   std::optional<std::string_view> shm_name;
   std::optional<std::string_view> tcp_endpoint;
@@ -181,6 +192,28 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   if (emit_every < 0) {
     return usage_error(out, "emit stride must be >= 0");
   }
+  // Paced mode: explicit opt-in wall-clock spacing (default off = fast
+  // batch). --rate is wall steps/s; without it paced means real-time.
+  double rate_hz = 0.0;
+  if (o_rate && !paced) {
+    return usage_error(out, "--rate needs --paced");
+  }
+  if (paced) {
+    if (o_rate) {
+      const auto p = parse_frequency(*o_rate);
+      if (!p.ok()) {
+        out << "Error: invalid wall-clock rate '" << *o_rate << "'\n";
+        out << kUsage << '\n';
+        return core::kExitUsage;
+      }
+      rate_hz = p.value;
+    } else {
+      rate_hz = 1.0 / dt;
+    }
+    if (!solvers::paced::validate(rate_hz, 1).ok()) {
+      return usage_error(out, "invalid wall-clock rate (want finite Hz > 0)");
+    }
+  }
 
   const solvers::SolverDef *sdef = solvers::SolverRegistry::find(solver_name);
   if (sdef == nullptr) {
@@ -290,6 +323,18 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
 
+  // Persistent configured run (PHYSI-35): one build, then either a fast
+  // batch or paced chunks against absolute deadlines (PHYSI-36). Sinks stay
+  // caller-owned and are attached once; the engine never sleeps.
+  solvers::ConfiguredRun run;
+  {
+    const core::Status built = solvers::ConfiguredRun::build(
+        cfg, std::span<core::ISolver *>{}, false, run, nullptr);
+    if (!built.ok()) {
+      out << "Error: simulation step failed\n";
+      return core::kExitRuntime;
+    }
+  }
   world::State s;
   std::array<emit::ISink *, 5> sink_arr{};
   std::size_t n_sinks = 0;
@@ -308,8 +353,34 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   if (udp) {
     sink_arr[n_sinks++] = &*udp;
   }
-  const core::Status st =
-      solvers::run_headless(cfg, std::span(sink_arr.data(), n_sinks), s);
+  for (std::size_t k = 0; k < n_sinks; ++k) {
+    run.add_sink(*sink_arr[k]);
+  }
+  core::Status st = core::Status::success();
+  solvers::paced::Stats paced_stats;
+  const std::uint64_t total_steps = static_cast<std::uint64_t>(steps);
+  using SignalHandler = void (*)(int);
+  SignalHandler previous_sigint = nullptr;
+  if (paced) {
+    g_sigint_requested = 0;
+    previous_sigint = std::signal(SIGINT, request_sigint);
+    if (previous_sigint == SIG_ERR) {
+      out << "Error: cannot install Ctrl-C handler\n";
+      return core::kExitRuntime;
+    }
+    const auto epoch = solvers::paced::SteadyClock::now();
+    auto idle = [&] {
+      if (tcp) {
+        (void)tcp->service_pending();
+      }
+    };
+    st = solvers::paced::run_paced<solvers::paced::SteadyClock>(
+        run, total_steps, rate_hz, 1, epoch, sigint_requested, idle, paced_stats);
+    (void)std::signal(SIGINT, previous_sigint);
+  } else {
+    st = run.run(total_steps);
+  }
+  s = run.state();
   // Explicit bounded stream finish (PHYSI-32): drain a partially accepted
   // TCP frame without generating a dummy snapshot. The destructor never
   // waits, so an undrained tail would otherwise be abandoned silently.
@@ -327,7 +398,17 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     out << " g=" << gravity;
   }
   out << '\n';
-  out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
+  if (paced && paced_stats.steps_done < total_steps) {
+    out << "steps: interrupted by Ctrl-C at " << s.step_index << " x " << dt
+        << "s -> t=" << s.sim_time << "s\n";
+  } else {
+    out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
+  }
+  if (paced) {
+    out << "paced: rate=" << rate_hz << "Hz steps=" << paced_stats.steps_done
+        << " late=" << paced_stats.late_steps
+        << " max_late_us=" << paced_stats.max_late_s * 1.0e6 << '\n';
+  }
   out << "particles: " << s.particles.live_count << '\n';
   if (s.particles.live_count > 0) {
     std::uint32_t first = 0;

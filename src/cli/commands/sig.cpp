@@ -8,6 +8,8 @@
 #include "wengine/signal/lua.hpp"
 #include "wengine/signal/table.hpp"
 #include "wengine/signal/types.hpp"
+#include "wengine/solvers/configured_run.hpp"
+#include "wengine/solvers/paced_run.hpp"
 #include "wengine/solvers/run.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 
@@ -53,11 +55,11 @@ void request_sigint(int) noexcept { g_sigint_requested = 1; }
 
 bool sigint_requested() noexcept { return g_sigint_requested != 0; }
 
-constexpr std::array<std::string_view, 23> kSigOptions{{
+constexpr std::array<std::string_view, 25> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
     "--sig-expr", "--sig-table", "--sig-lua", "--emit-csv", "--emit-shm", "--emit-tcp",
-    "--emit-udp", "--emit-every", "--forever", "--help", "-h",
+    "--emit-udp", "--emit-every", "--forever", "--paced", "--rate", "--help", "-h",
 }};
 
 } // namespace
@@ -72,6 +74,8 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   double dt = 0.01;
   long long emit_every = 1;
   const bool forever = args.take_flag({"--forever"});
+  const bool paced = args.take_flag({"--paced"});
+  const auto o_rate = args.take_option({"--rate"});
   std::optional<std::string_view> csv_path;
   std::optional<std::string_view> shm_name;
   std::optional<std::string_view> tcp_endpoint;
@@ -291,6 +295,28 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   if (emit_every < 0) {
     return usage_error(out, "emit stride must be >= 0");
   }
+  // Paced mode: explicit opt-in wall-clock spacing (default off = fast
+  // batch). --rate is wall steps/s; without it paced means real-time.
+  double rate_hz = 0.0;
+  if (o_rate && !paced) {
+    return usage_error(out, "--rate needs --paced");
+  }
+  if (paced) {
+    if (o_rate) {
+      const auto p = parse_frequency(*o_rate);
+      if (!p.ok()) {
+        out << "Error: invalid wall-clock rate '" << *o_rate << "'\n";
+        out << kUsage << '\n';
+        return core::kExitUsage;
+      }
+      rate_hz = p.value;
+    } else {
+      rate_hz = 1.0 / dt;
+    }
+    if (!solvers::paced::validate(rate_hz, 1).ok()) {
+      return usage_error(out, "invalid wall-clock rate (want finite Hz > 0)");
+    }
+  }
   // Engine re-validates (freq/duty/expression); the CLI reports them as usage errors.
   // Batch runs reject sums: identical batch sources cannot hold distinct
   // per-source operands (the SIG-6 family configures sums directly).
@@ -393,6 +419,32 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
 
+  // Lua sources evaluate in an extra solver that steps before SignalSolver
+  // (custom-source contract — see solvers/run.hpp).
+  std::unique_ptr<lua::LuaSignalSolver> lua_solver;
+  std::array<core::ISolver *, 1> extra_arr{};
+  std::size_t n_extra = 0;
+  if (is_lua) {
+    lua_solver = lua::create_lua_solver();
+    extra_arr[n_extra++] = lua_solver.get();
+  }
+  // Persistent configured run (PHYSI-35): one build, then either a fast
+  // batch or paced chunks against absolute deadlines (PHYSI-36). Sinks stay
+  // caller-owned and are attached once; the engine never sleeps.
+  solvers::ConfiguredRun run;
+  {
+    const std::span<core::ISolver *> extra(extra_arr.data(), n_extra);
+    const bool has_lua = solvers::contains_lua_solver(extra);
+    const core::Status built =
+        solvers::ConfiguredRun::build(cfg, extra, has_lua, run, nullptr);
+    if (!built.ok()) {
+      out << "Error: simulation step failed\n";
+      if (lua_solver && !lua_solver->last_error().empty()) {
+        out << "lua: " << lua_solver->last_error() << '\n';
+      }
+      return core::kExitRuntime;
+    }
+  }
   world::State s;
   std::array<emit::ISink *, 4> sink_arr{};
   std::size_t n_sinks = 0;
@@ -408,18 +460,13 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   if (udp) {
     sink_arr[n_sinks++] = &*udp;
   }
-  // Lua sources evaluate in an extra solver that steps before SignalSolver
-  // (custom-source contract — see solvers/run.hpp).
-  std::unique_ptr<lua::LuaSignalSolver> lua_solver;
-  std::array<core::ISolver *, 1> extra_arr{};
-  std::size_t n_extra = 0;
-  if (is_lua) {
-    lua_solver = lua::create_lua_solver();
-    extra_arr[n_extra++] = lua_solver.get();
+  for (std::size_t k = 0; k < n_sinks; ++k) {
+    run.add_sink(*sink_arr[k]);
   }
   using SignalHandler = void (*)(int);
   SignalHandler previous_sigint = nullptr;
-  if (forever) {
+  const bool handles_sigint = forever || paced;
+  if (handles_sigint) {
     g_sigint_requested = 0;
     previous_sigint = std::signal(SIGINT, request_sigint);
     if (previous_sigint == SIG_ERR) {
@@ -427,12 +474,25 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       return core::kExitRuntime;
     }
   }
-  const core::Status st = solvers::run_headless(
-      cfg, std::span(sink_arr.data(), n_sinks), s,
-      std::span(extra_arr.data(), n_extra), forever ? &sigint_requested : nullptr);
-  if (forever) {
+  core::Status st = core::Status::success();
+  solvers::paced::Stats paced_stats;
+  const std::uint64_t total_steps = cfg.steps;
+  if (paced) {
+    const auto epoch = solvers::paced::SteadyClock::now();
+    auto idle = [&] {
+      if (tcp) {
+        (void)tcp->service_pending();
+      }
+    };
+    st = solvers::paced::run_paced<solvers::paced::SteadyClock>(
+        run, total_steps, rate_hz, 1, epoch, sigint_requested, idle, paced_stats);
+  } else {
+    st = run.run(total_steps, forever ? &sigint_requested : nullptr);
+  }
+  if (handles_sigint) {
     (void)std::signal(SIGINT, previous_sigint);
   }
+  s = run.state();
   // Explicit bounded stream finish (PHYSI-32): normal completion and the
   // Ctrl-C step-boundary stop above both drain here. The destructor never
   // waits, so an undrained tail would otherwise be abandoned silently.
@@ -460,11 +520,16 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   if (is_lua) {
     out << "lua: " << *o_sig_lua << " (" << cfg.signal.lua.size() << " bytes)\n";
   }
-  if (forever) {
+  if (forever || (paced && paced_stats.steps_done < total_steps)) {
     out << "steps: interrupted by Ctrl-C at " << s.step_index << " x " << dt
         << "s -> t=" << s.sim_time << "s\n";
   } else {
     out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
+  }
+  if (paced) {
+    out << "paced: rate=" << rate_hz << "Hz steps=" << paced_stats.steps_done
+        << " late=" << paced_stats.late_steps
+        << " max_late_us=" << paced_stats.max_late_s * 1.0e6 << '\n';
   }
   out << "signals: " << s.signals.live_count << '\n';
   for (std::uint32_t i = 0; i < s.signals.capacity(); ++i) {

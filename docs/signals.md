@@ -188,7 +188,11 @@ little-endian fields.
 
 `examples/link_tcp_signal_plot.py` uses the same TCP decoder and displays each
 `sig.*` channel as a live Matplotlib line. Install Matplotlib and optionally
-limit the rolling graph history with `--history`:
+limit the rolling graph history with `--history`. Both plotters drain every
+pending frame/datagram but redraw at most `--draw-hz` times per second
+(default 30), so receiving keeps up with fast publishers while drawing stays
+at a sustainable display rate; the legend rebuilds only when the channel set
+changes:
 
 ```sh
 python3 -m pip install matplotlib
@@ -210,10 +214,26 @@ Ctrl-C at the next fixed-step boundary before flushing and closing sinks:
 
 ### Stream rate budget and measured loopback
 
-Emission is simulation-step based, not wall-clock paced. `--emit-every N`
-decimates on fixed step boundaries; use it when the transport or Zephyr
-receiver cannot sustain the solver's step rate. Values below are payload-only
-budgets (protocol headers add a few bytes per frame):
+Emission is simulation-step based. By default the driver runs a fast batch
+(tight loop, no wall-clock pacing); `--paced` spaces fixed-dt steps against
+absolute steady-clock deadlines instead, with `--rate <Hz>` setting wall
+steps per second (default `1/dt` = real-time). Late steps run immediately
+and are counted in the trailing `paced:` line (`late=`, `max_late_us=`),
+never skipped and never changing `dt` (delivery class policy is in
+`docs/delivery.md`). Waiting happens outside the solver/Runner, so TCP
+pending bytes are serviced during idle and Ctrl-C stays responsive at step
+boundaries. `--paced` works for finite runs and with `--forever`:
+
+```sh
+./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V \
+  --dt 0.1ms --paced --rate 1kHz --emit-shm /wengine-sig
+```
+
+Three rates stay separate: waveform frequency (`--sig-freq`, the physics
+being simulated), sample rate `1/(dt*emit_every)`, and paced packet rate.
+`--emit-every N` decimates on fixed step boundaries; use it when the
+transport or Zephyr receiver cannot sustain the solver's step rate. Values
+below are payload-only budgets (protocol headers add a few bytes per frame):
 
 | Transport / snapshot | Bytes per emission | 1 kHz | 100 kHz | Guidance |
 |---|---:|---:|---:|---|
