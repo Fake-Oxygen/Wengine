@@ -284,7 +284,7 @@ void test_completion() {
     const auto c = complete_line("sig --", 6, all);
     assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
            has(c, "--emit-shm") && has(c, "--emit-tcp") && has(c, "--emit-udp") &&
-           has(c, "--sig-kind") && has(c, "--sig-freq") &&
+           has(c, "--forever") && has(c, "--sig-kind") && has(c, "--sig-freq") &&
            has(c, "--sig-quantity") && has(c, "--sig-count") && has(c, "--sig-expr") &&
            has(c, "--sig-table") && has(c, "--sig-lua"));
   }

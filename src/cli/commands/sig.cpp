@@ -12,6 +12,7 @@
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <array>
+#include <csignal>
 #include <cstdint>
 #include <fstream>
 #include <memory>
@@ -46,11 +47,17 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 
 constexpr std::array<std::string_view, 1> kSigModes{{"run"}};
 
-constexpr std::array<std::string_view, 22> kSigOptions{{
+volatile std::sig_atomic_t g_sigint_requested = 0;
+
+void request_sigint(int) noexcept { g_sigint_requested = 1; }
+
+bool sigint_requested() noexcept { return g_sigint_requested != 0; }
+
+constexpr std::array<std::string_view, 23> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
     "--sig-expr", "--sig-table", "--sig-lua", "--emit-csv", "--emit-shm", "--emit-tcp",
-    "--emit-udp", "--emit-every", "--help", "-h",
+    "--emit-udp", "--emit-every", "--forever", "--help", "-h",
 }};
 
 } // namespace
@@ -64,6 +71,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   long long steps = 100;
   double dt = 0.01;
   long long emit_every = 1;
+  const bool forever = args.take_flag({"--forever"});
   std::optional<std::string_view> csv_path;
   std::optional<std::string_view> shm_name;
   std::optional<std::string_view> tcp_endpoint;
@@ -274,7 +282,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     return usage_error(out, "missing mode (run)");
   }
 
-  if (steps < 1) {
+  if (!forever && steps < 1) {
     return usage_error(out, "steps must be >= 1");
   }
   if (!(dt > 0.0)) {
@@ -329,7 +337,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   core::RunConfig cfg;
   cfg.loop.dt = dt;
   cfg.loop.emit_every = static_cast<std::uint64_t>(emit_every);
-  cfg.steps = static_cast<std::uint64_t>(steps);
+  cfg.steps = forever ? UINT64_MAX : static_cast<std::uint64_t>(steps);
   cfg.solver = solvers::SignalSolver::kName;
   cfg.particles = 0;
   cfg.signal.params = params;
@@ -409,8 +417,22 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     lua_solver = lua::create_lua_solver();
     extra_arr[n_extra++] = lua_solver.get();
   }
-  const core::Status st = solvers::run_headless(cfg, std::span(sink_arr.data(), n_sinks),
-                                                s, std::span(extra_arr.data(), n_extra));
+  using SignalHandler = void (*)(int);
+  SignalHandler previous_sigint = nullptr;
+  if (forever) {
+    g_sigint_requested = 0;
+    previous_sigint = std::signal(SIGINT, request_sigint);
+    if (previous_sigint == SIG_ERR) {
+      out << "Error: cannot install Ctrl-C handler\n";
+      return core::kExitRuntime;
+    }
+  }
+  const core::Status st = solvers::run_headless(
+      cfg, std::span(sink_arr.data(), n_sinks), s,
+      std::span(extra_arr.data(), n_extra), forever ? &sigint_requested : nullptr);
+  if (forever) {
+    (void)std::signal(SIGINT, previous_sigint);
+  }
   if (!st.ok()) {
     out << "Error: simulation step failed\n";
     if (lua_solver && !lua_solver->last_error().empty()) {
@@ -431,7 +453,12 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   if (is_lua) {
     out << "lua: " << *o_sig_lua << " (" << cfg.signal.lua.size() << " bytes)\n";
   }
-  out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
+  if (forever) {
+    out << "steps: interrupted by Ctrl-C at " << s.step_index << " x " << dt
+        << "s -> t=" << s.sim_time << "s\n";
+  } else {
+    out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
+  }
   out << "signals: " << s.signals.live_count << '\n';
   for (std::uint32_t i = 0; i < s.signals.capacity(); ++i) {
     if (!s.signals.has(i)) {

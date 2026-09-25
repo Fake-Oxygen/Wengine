@@ -175,6 +175,7 @@ bloat `sim run`): unlimited sources, stamped U/I:
 > sig run --sig-kind expression --sig-expr 'sin(2*pi*440*t)*0.5'
 > sig run --sig-kind table --sig-table wave.csv --steps 1000
 > sig run --sig-kind lua --sig-lua wah.lua --steps 1000
+> sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --forever
 ```
 
 Python signal receivers are under `examples/` (stdlib only). Start one in
@@ -193,6 +194,25 @@ python3 examples/link_udp_signal_receiver.py --bind 0.0.0.0 --port 9001
 The TCP sample validates the hello/version/domain and length-prefixed frames;
 the UDP sample validates compact datagrams and prints sequence-gap counts.
 `link_socket_protocol.py` contains their shared standard-library decoder.
+
+For a live graph instead of terminal output, install Matplotlib and use the
+TCP plotter:
+
+```sh
+python3 -m pip install matplotlib
+python3 examples/link_tcp_signal_plot.py --port 9000 --history 1000
+./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V \
+  --steps 1000 --dt 0.1ms --emit-tcp 127.0.0.1:9000
+```
+
+The equivalent UDP plotter listens on port `9001` and exits after three idle
+seconds by default:
+
+```sh
+python3 examples/link_udp_signal_plot.py --port 9001 --history 1000
+./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V \
+  --steps 1000 --dt 0.1ms --emit-udp 127.0.0.1:9001
+```
 
 Kinds: `sine square triangle saw dc pulse noise sum expression table lua`
 (`--sig-kind`, Tab-completed).
@@ -216,6 +236,9 @@ Runnable examples live in `examples/lua/` (`sine`, `chirp`, `burst`,
 exact round-trip); `--emit-shm` publishes signal channels
 (`sig.<slot>.U`). `sim run --solver signal` runs one default 1 Hz sine
 (zero particles); mixed particle+signal runs pass `--particles N` there.
+`--forever` ignores `--steps` and keeps one continuous fixed-step run alive
+until Ctrl-C; interruption is handled at a step boundary and then sinks are
+flushed and closed normally.
 See `docs/signals.md` for the full design (routing, control plane, Lua,
 Zephyr transports).
 

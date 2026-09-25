@@ -104,7 +104,8 @@ struct SigSpec {
       "        [--sig-seed N] [--sig-quantity U|I] [--sig-count N]\n"
       "        [--sig-expr '<math>'] [--sig-table <csv>] [--sig-lua <file>]\n"
       "        [--steps N] [--dt <s>] [--emit-csv <path>] [--emit-shm <name>]\n"
-      "        [--emit-tcp <host:port>] [--emit-udp <host:port>] [--emit-every N]\n"
+       "        [--emit-tcp <host:port>] [--emit-udp <host:port>] [--emit-every N]\n"
+       "        [--forever]  (run until Ctrl-C; --steps is ignored)\n"
       "  sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --steps 1000 --dt 0.1ms\n"
       "  sig run --sig-kind expression --sig-expr 'sin(2*pi*440*t)*0.5'\n"
       "  sig run --sig-kind table --sig-table wave.csv --steps 1000\n"
@@ -131,7 +132,8 @@ struct SigSpec {
       "  channels over sockets (see sim run above). Per-source tuning is\n"
       "  future work (SIG-6).\n"
       "Defaults: kind=sine, freq=1Hz, amp=1, offset=0, phase=0, duty=0.5,\n"
-      "  seed=1, quantity=U, count=1, steps=100, dt=0.01s, emit-every=1.";
+       "  seed=1, quantity=U, count=1, steps=100, dt=0.01s, emit-every=1;\n"
+       "  --forever runs continuously until Ctrl-C.";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial,

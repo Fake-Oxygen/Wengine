@@ -41,10 +41,21 @@ public:
 
   // Advance exactly `steps` fixed steps (0 is a no-op success).
   Status run(std::uint64_t steps) {
+    return run_until(steps, nullptr);
+  }
+
+  // Run until `steps` are complete or the optional callback requests a stop.
+  // The callback is checked at fixed-step boundaries, before the next solver
+  // invocation, so interruption never leaves a partially advanced step.
+  Status run_until(std::uint64_t steps,
+                   bool (*stop_requested)() noexcept) {
     if (!(config_.dt > 0.0)) {
       return {StatusCode::kInvalidArgument};
     }
     for (std::uint64_t k = 0; k < steps; ++k) {
+      if (stop_requested != nullptr && stop_requested()) {
+        break;
+      }
       const Status st = step_once();
       if (!st.ok()) {
         return st;

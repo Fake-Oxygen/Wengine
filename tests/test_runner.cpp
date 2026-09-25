@@ -55,6 +55,11 @@ struct RecSink : emit::ISink {
   void on_snapshot(const world::Snapshot &s) override { snaps.push_back(s); }
 };
 
+bool stop_after_three() noexcept {
+  static int checks = 0;
+  return ++checks > 3;
+}
+
 void test_exact_stepping() {
   core::Runner runner{{.dt = 0.01}};
   CountingSolver a;
@@ -123,6 +128,15 @@ void test_emit_decimation() {
   assert(every.run(3).ok() && all.snaps.size() == 3);
 }
 
+void test_stop_callback() {
+  core::Runner runner{{.dt = 0.01}};
+  CountingSolver solver;
+  runner.add_solver(solver);
+  assert(runner.run_until(100, stop_after_three).ok());
+  assert(solver.calls == 3);
+  assert(runner.state().step_index == 3);
+}
+
 void test_error_propagation() {
   core::Runner runner{{.dt = 0.01}};
   FailingSolver f;
@@ -175,6 +189,7 @@ int main() {
   test_exact_stepping();
   test_determinism();
   test_emit_decimation();
+  test_stop_callback();
   test_error_propagation();
   test_accumulator();
   test_budgets();

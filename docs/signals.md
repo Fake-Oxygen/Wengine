@@ -182,6 +182,28 @@ uses the fixed same-host struct layout and the sample explicitly requires a
 little-endian host with 8-byte doubles; UDP compact entries are encoded as
 little-endian fields.
 
+`examples/link_tcp_signal_plot.py` uses the same TCP decoder and displays each
+`sig.*` channel as a live Matplotlib line. Install Matplotlib and optionally
+limit the rolling graph history with `--history`:
+
+```sh
+python3 -m pip install matplotlib
+python3 examples/link_tcp_signal_plot.py --port 9000 --history 1000
+```
+
+The UDP equivalent is `examples/link_udp_signal_plot.py`. It has the same
+rolling graph and exits after three seconds without a datagram by default;
+`--idle-timeout 0` waits indefinitely.
+
+For a continuous stream, use `sig run --forever`. It ignores `--steps`, keeps
+one runner/state alive so phase and source state do not reset, and handles
+Ctrl-C at the next fixed-step boundary before flushing and closing sinks:
+
+```sh
+./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V \
+  --dt 0.1ms --forever --emit-tcp 127.0.0.1:9000
+```
+
 ### Stream rate budget and measured loopback
 
 Emission is simulation-step based, not wall-clock paced. `--emit-every N`

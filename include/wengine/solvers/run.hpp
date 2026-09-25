@@ -35,9 +35,10 @@
 namespace wengine::solvers {
 
 [[nodiscard]] inline core::Status run_headless(const core::RunConfig &cfg,
-                                              std::span<emit::ISink *> sinks,
-                                              world::State &out_state,
-                                              std::span<core::ISolver *> extra = {}) {
+                                               std::span<emit::ISink *> sinks,
+                                               world::State &out_state,
+                                               std::span<core::ISolver *> extra = {},
+                                               bool (*stop_requested)() noexcept = nullptr) {
   if (!(cfg.loop.dt > 0.0) || cfg.steps < 1) {
     return {core::StatusCode::kInvalidArgument};
   }
@@ -179,7 +180,7 @@ namespace wengine::solvers {
   for (emit::ISink *sink : sinks) {
     runner.add_sink(*sink);
   }
-  const core::Status st = runner.run(cfg.steps);
+  const core::Status st = runner.run_until(cfg.steps, stop_requested);
   if (!st.ok()) {
     return st;
   }
