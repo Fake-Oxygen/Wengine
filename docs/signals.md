@@ -238,8 +238,8 @@ below are payload-only budgets (protocol headers add a few bytes per frame):
 | Transport / snapshot | Bytes per emission | 1 kHz | 100 kHz | Guidance |
 |---|---:|---:|---:|---|
 | TCP compact record, one signal source (`sig.count` + source) | ~120 | 0.120 MB/s | 12.0 MB/s | 100x decimation at 100 kHz yields 1 kHz / 0.12 MB/s; 256 KiB send buffer now holds thousands of records; measured 2000/2000 frames, 0 drops |
-| UDP compact record, one particle (1 item + 6 channels) | ~230 | 0.230 MB/s | 23.0 MB/s | Keep datagrams below path MTU where possible; IP fragmentation magnifies loss |
-| UDP compact record, one signal source (`sig.count` + source) | ~120 | 0.120 MB/s | 12.0 MB/s | `LagStats` exposes network/receiver gaps by `frame_seq` |
+| UDP compact record, one particle (1 item + 6 channels) | ~230 | 0.230 MB/s | 23.0 MB/s | Budget default 1,200 carries ~16 particles; IP fragmentation magnifies loss, so the budget (not the 65,507 protocol maximum) is the safe ceiling |
+| UDP compact record, one signal source (`sig.count` + source) | ~120 | 0.120 MB/s | 12.0 MB/s | Budget default 1,200 carries a full 63-source batch (~1.1 KB); `LagStats` exposes network/receiver gaps by `frame_seq` |
 | UART 115200, ASCII one source | ~30 | ~30 kB/s | ~3 MB/s | 8N1 carries ~384 such frames/s: use at least 3x decimation at 1 kHz and 300x at 100 kHz |
 
 Loopback measurement on the current development host (2026-09-25, GCC
@@ -285,6 +285,20 @@ flood|paced|stalled|fanout --rate HZ` and `bench_link_sockets
 --mode all|solo|snap|flood|paced|stalled|fanout --rate HZ`
 (legacy `bench_link [particles] [steps]` and `bench_link_sockets
 [tcp|udp] [frames] [items]` still run the historic flood).
+
+UDP payload budget (`--emit-udp-budget BYTES`, default 1,200, headers
+included): every emitted datagram satisfies bytes <= budget. 1,200 bytes
+avoids IP fragmentation on 1,280-byte IPv6-minimum and 1,500-byte Ethernet
+paths — loss of one fragment loses the whole datagram, so the 65,507-byte
+protocol maximum is never a safe operating point. A record that does not
+fit its budget is indivisible (UDP has no fragmentation or batch-splitting
+here) and is refused loudly: over-bound counter, sticky `kOutOfRange`
+status, and the required bytes reported as `need=` in CLI summaries
+(compare against `budget=`), never silently truncated. Shrink records with
+`--emit-udp-select` (fewer channels); `--emit-udp-stride`/`--emit-every`
+lower the datagram rate but never the size. Splitting one tick across
+several budgeted datagrams is the sample-batch packetizer's extension
+point (PHYSI-44).
 
 ## 6. Control plane (SIG-10, v1 scope)
 

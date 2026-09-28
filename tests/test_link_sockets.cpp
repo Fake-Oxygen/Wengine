@@ -146,8 +146,13 @@ void test_parse_endpoint() {
     const auto r = link::parse_endpoint("[::1]:65535");
     assert(r.ok() && r.value.host == "::1" && r.value.port == 65535);
   }
+  {
+    const auto r = link::parse_endpoint("[2001:db8::1]:9000");
+    assert(r.ok() && r.value.host == "2001:db8::1" && r.value.port == 9000);
+  }
   const char *bad[] = {"",          "no-colon",  ":8080",  "host:",   "host:0",
-                       "host:65536", "host:abc", "host:80x", "host:123456"};
+                       "host:65536", "host:abc", "host:80x", "host:123456",
+                       "[::1]",     "[::1]:",   "[]:9000"};
   for (const char *text : bad) {
     assert(!link::parse_endpoint(text).ok());
   }
@@ -325,6 +330,17 @@ link::Frame too_many_channels(const world::Snapshot &) {
   for (std::size_t k = 0; k <= link::kMaxChannels; ++k) {
     f.channels.push_back({"c", 1.0});
   }
+  return f;
+}
+
+// Fixed probe frame for the budget tests: each test sets its channels, then
+// publish through this adapter so the encoded size is exactly known.
+link::Frame g_budget_frame;
+
+link::Frame budget_frame_adapter(const world::Snapshot &s) {
+  link::Frame f = g_budget_frame;
+  f.step = s.step_index;
+  f.time = s.sim_time;
   return f;
 }
 
@@ -1047,6 +1063,114 @@ void test_tcp_stall_pending_finish() {
   ::close(listen_fd);
 }
 
+void test_udp_payload_budget() {
+  // Explicit MTU-sized payload budget (PHYSI-41): the default is the
+  // conservative 1,200-byte profile, construction rejects out-of-range
+  // budgets, exact-fit records publish byte-exact, and one-byte-over
+  // records refuse loudly with the needed size recorded.
+  static_assert(link::kDefaultUdpPayloadBudget == 1200);
+  static_assert(link::kDefaultUdpPayloadBudget <= link::kMaxUdpPayload);
+  {
+    link::UdpPublisher pub("127.0.0.1:9", "d");
+    assert(pub.ok());
+    assert(pub.payload_budget() == link::kDefaultUdpPayloadBudget);
+    assert(pub.last_over_bound_bytes() == 0);
+  }
+  {
+    link::UdpPublisher zero("127.0.0.1:9", "d", &link::frame_from_snapshot, 0);
+    assert(!zero.ok() && zero.status().code == core::StatusCode::kInvalidArgument);
+  }
+  {
+    link::UdpPublisher huge("127.0.0.1:9", "d", &link::frame_from_snapshot,
+                            link::kMaxUdpPayload + 1);
+    assert(!huge.ok() && huge.status().code == core::StatusCode::kInvalidArgument);
+  }
+  {
+    // Codec over-bound frames have no finite encoded size: need stays 0.
+    link::UdpPublisher pub("127.0.0.1:9", "d", &too_many_channels);
+    assert(pub.ok());
+    world::Snapshot snap;
+    pub.on_snapshot(snap);
+    assert(!pub.ok() && pub.status().code == core::StatusCode::kOutOfRange);
+    assert(pub.stats().published == 0 && pub.stats().dropped_over_bound == 1);
+    assert(pub.last_over_bound_bytes() == 0);
+  }
+  // Nine signal-shaped channels: sig.count + eight sources.
+  g_budget_frame = link::Frame{};
+  g_budget_frame.channels.push_back({"sig.count", 8.0});
+  for (int k = 0; k < 8; ++k) {
+    g_budget_frame.channels.push_back({"sig." + std::to_string(k) + ".U", 1.0});
+  }
+  const std::size_t need = link::compact::encoded_size(g_budget_frame);
+  assert(need > 0 && need <= link::kMaxUdpPayload);
+  {
+    // Exact fit: the datagram IS the record, so bytes == need <= budget.
+    std::uint16_t port = 0;
+    const int receiver = make_udp_receiver(port);
+    assert(receiver >= 0);
+    link::UdpPublisher pub(endpoint_for(port), "d", &budget_frame_adapter, need);
+    assert(pub.ok() && pub.payload_budget() == need);
+    world::Snapshot snap;
+    snap.step_index = 4;
+    snap.sim_time = 0.04;
+    pub.on_snapshot(snap);
+    assert(pub.ok());
+    assert(pub.stats().published == 1 && pub.stats().dropped_over_bound == 0);
+    assert(pub.last_over_bound_bytes() == 0);
+    std::array<unsigned char, link::kMaxUdpPayload> buf{};
+    const ssize_t n = ::recvfrom(receiver, buf.data(), buf.size(), 0, nullptr, nullptr);
+    assert(n > 0 && static_cast<std::size_t>(n) == need);
+    assert(static_cast<std::size_t>(n) <= pub.payload_budget());
+    link::Frame got;
+    std::uint64_t got_run = 0;
+    std::uint64_t seq = 0;
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(buf.data(), static_cast<std::size_t>(n), "d",
+                                        got, got_run, seq, kind)
+               .ok());
+    assert(seq == 1 && got_run == pub.run_id());
+    assert(kind == link::compact::RecordKind::kFrame);
+    assert(got == budget_frame_adapter(snap));
+    ::close(receiver);
+  }
+  {
+    // One byte over: indivisible, refused loudly with need recorded.
+    link::UdpPublisher pub("127.0.0.1:9", "d", &budget_frame_adapter, need - 1);
+    assert(pub.ok() && pub.payload_budget() == need - 1);
+    world::Snapshot snap;
+    pub.on_snapshot(snap);
+    assert(!pub.ok() && pub.status().code == core::StatusCode::kOutOfRange);
+    assert(pub.stats().published == 0 && pub.stats().dropped_over_bound == 1);
+    assert(pub.last_over_bound_bytes() == need);
+  }
+  g_budget_frame = link::Frame{};
+}
+
+void test_udp_budget_representative_sizes() {
+  // Representative frames fit the default MTU-safe budget: a full 63-source
+  // signal batch (sig.count + 63 sources = 64 channels) and a
+  // single-particle frame.
+  {
+    link::Frame full;
+    full.channels.push_back({"sig.count", 63.0});
+    for (int k = 0; k < 63; ++k) {
+      full.channels.push_back({"sig." + std::to_string(k) + ".U", 0.0});
+    }
+    const std::size_t need = link::compact::encoded_size(full);
+    assert(need > 0 && need <= link::kDefaultUdpPayloadBudget);
+  }
+  {
+    world::Snapshot snap;
+    snap.pos_x = {1.0};
+    snap.pos_y = {2.0};
+    snap.vel_x = {3.0};
+    snap.vel_y = {4.0};
+    const link::Frame f = link::frame_from_snapshot(snap);
+    const std::size_t need = link::compact::encoded_size(f);
+    assert(need > 0 && need <= link::kDefaultUdpPayloadBudget);
+  }
+}
+
 int main() {
   test_parse_endpoint();
   test_hello_gate();
@@ -1063,6 +1187,8 @@ int main() {
   test_finish_disconnect_reports_failure();
   test_tcp_empty_and_max_records();
   test_tcp_stall_pending_finish();
+  test_udp_payload_budget();
+  test_udp_budget_representative_sizes();
   std::cout << "test_link_sockets: OK\n";
   return 0;
 }

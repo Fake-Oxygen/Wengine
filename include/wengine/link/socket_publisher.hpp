@@ -35,12 +35,28 @@
 //
 // UDP (UdpPublisher): connected datagrams to host:port (no handshake —
 // UDP has none), carrying the same compact v2 records (each one always
-// fits a maximum-size datagram by codec construction). Datagrams
+// fits its configured payload budget by construction). Datagrams
 // self-describe per packet (magic/schema/run/frame_seq/clock/counts).
 // Readers gate each datagram with compact::decode_record (exact length,
 // else kInvalidArgument) and account loss with LagStats over frame_seq —
 // same vocabulary as the SHM ring. Over-bound frames are refused by the
 // compact bound verdict, identical on every transport.
+//
+// MTU BUDGET (PHYSI-41): kMaxUdpPayload (65,507) is the protocol maximum,
+// not a safe network budget — a 64 KiB datagram fragments on ordinary
+// paths and loss of one fragment loses the whole datagram. UdpPublisher
+// therefore enforces an explicit per-publisher payload budget
+// (payload_budget(), default kDefaultUdpPayloadBudget = 1,200 bytes):
+// every emitted datagram satisfies record_bytes <= budget, headers
+// included (the datagram IS the record, no extra framing). A record that
+// does not fit its budget is indivisible — UDP has no fragmentation or
+// batch-splitting here — so it is refused loudly (dropped_over_bound,
+// sticky kOutOfRange, last_over_bound_bytes() records the needed size,
+// 0 when over the codec maximum) exactly like a codec over-bound frame.
+// Shrink records with --emit-udp-select (fewer channels) or
+// --emit-udp-stride/--emit-every (fewer datagrams, same size); the
+// PHYSI-44 sample-batch packetizer is the extension point for splitting
+// one tick across several budgeted datagrams.
 //
 // PORTABILITY: POSIX-only TU (src/link/socket_publisher.cpp) — sockets,
 // getaddrinfo, non-blocking I/O; the Windows port replaces that TU, never
@@ -79,6 +95,14 @@ inline constexpr int kSocketSendBuffer = 256 * 1024;
 inline constexpr int kTcpFinishTimeoutMs = 2000;
 // Largest UDP payload per RFC 768 (65535 - 20 IP - 8 UDP).
 inline constexpr std::size_t kMaxUdpPayload = 65507;
+// Default UDP payload budget (PHYSI-41): conservative MTU-safe profile.
+// 1,200 bytes fits the 1,280-byte IPv6 minimum MTU (minus v6/UDP headers)
+// and any 1,500-byte Ethernet path with margin, so datagrams avoid IP
+// fragmentation (one lost fragment loses the whole datagram). One signal
+// source is ~120 bytes, so the default carries ~8 sources; larger frames
+// must select/stride down or raise the budget explicitly up to
+// kMaxUdpPayload. Documented in docs/signals.md sec. 5.
+inline constexpr std::size_t kDefaultUdpPayloadBudget = 1200;
 // TCP wire buffer: length prefix + the largest encodable record.
 inline constexpr std::size_t kTcpWireBytes = 4 + compact::kMaxRecordBytes;
 
@@ -256,7 +280,8 @@ private:
 class UdpPublisher : public emit::ISink {
 public:
   explicit UdpPublisher(std::string_view endpoint, std::string_view domain,
-                        FrameAdapter adapter = &frame_from_snapshot);
+                        FrameAdapter adapter = &frame_from_snapshot,
+                        std::size_t payload_budget = kDefaultUdpPayloadBudget);
   ~UdpPublisher() override;
 
   UdpPublisher(const UdpPublisher &) = delete;
@@ -273,6 +298,16 @@ public:
   [[nodiscard]] const PublisherStats &stats() const noexcept { return stats_; }
   [[nodiscard]] const std::string &endpoint() const noexcept { return endpoint_; }
   [[nodiscard]] std::uint64_t run_id() const noexcept { return run_id_; }
+  // Configured datagram payload budget (bytes, 1..kMaxUdpPayload). Every
+  // emitted datagram satisfies bytes <= budget, headers included.
+  [[nodiscard]] std::size_t payload_budget() const noexcept { return payload_budget_; }
+  // Needed record bytes from the most recent over-bound refusal (0 when the
+  // frame exceeds the codec maximum and has no finite encoded size, or when
+  // no refusal has occurred yet). Compare against payload_budget() for the
+  // "need X > budget Y" diagnostic; never silently truncated.
+  [[nodiscard]] std::size_t last_over_bound_bytes() const noexcept {
+    return last_over_bound_bytes_;
+  }
 
 private:
   void cleanup() noexcept;
@@ -283,6 +318,8 @@ private:
   std::uint64_t run_id_ = 0; // run identity (opaque, fixed at construction)
   int fd_ = -1;
   std::array<unsigned char, kMaxUdpPayload> datagram_{}; // record encode target
+  std::size_t payload_budget_ = kDefaultUdpPayloadBudget;
+  std::size_t last_over_bound_bytes_ = 0;
   std::uint64_t frame_seq_ = 0;
   PublisherStats stats_{};
   core::Status status_{};

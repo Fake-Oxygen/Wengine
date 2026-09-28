@@ -153,7 +153,8 @@ All `sim` parameters are named (`--solver`, `--steps`, `--dt`, `--gravity`,
 `--particles`, `--x0/--y0/--vx0/--vy0`, `--emit-csv`, `--emit-shm`,
 `--emit-tcp`, `--emit-udp`,
 `--emit-every`, `--emit-<csv|shm|tcp|udp>-stride`,
-`--emit-<csv|shm|tcp|udp>-select`, `--paced`, `--rate`); the CSV log carries the full snapshot stream for replay,
+`--emit-<csv|shm|tcp|udp>-select`, `--emit-udp-budget BYTES`,
+`--paced`, `--rate`); the CSV log carries the full snapshot stream for replay,
 while `--emit-shm <name>` publishes every emitted snapshot to a
 wengine-link SHM segment for realtime local consumers (`examples/
 link_sample` prints them live; the segment lives while `sim` runs). `--solver` selects from the
@@ -162,7 +163,11 @@ available), so new stepped solvers become runnable without touching the CLI —
 `--gravity` applies to `projectile` only, particle population is generic setup.
 TCP actively connects to the listening reader at `host:port` and sends a
 version/domain hello followed by length-prefixed full frames. UDP sends
-versioned compact datagrams containing only used entries. Both transports are
+versioned compact datagrams containing only used entries, each fitting the
+`--emit-udp-budget` payload budget (default 1200 bytes: MTU-safe on
+1280-byte IPv6-minimum and 1500-byte Ethernet paths); an indivisible
+over-budget record is refused loudly with a `need=` diagnostic instead of
+fragmenting. Both transports are
 non-blocking; use `--emit-every` (global Runner gate) plus per-output
 `--emit-<out>-stride N` (step-aligned, `0` = muted) and, for signal outputs,
 `--emit-<out>-select <s0,s1>` (stable serials) to decimate high-rate
@@ -380,12 +385,15 @@ version gate, lag accounting), `test_link_shm` (segment create/publish/
     pre-attach/skipped/confirmed separation, trailing-loss gating),
     `test_link_sockets` (TCP hello/version
    gate, length-prefixed loopback exactness, UDP compact codec/datagrams,
+   UDP payload budget (exact fit/one-over, endpoint forms, representative
+   sizes),
    transient backpressure, partial-TCP-frame preservation, sub-Hz/100-kHz soaks
     and lag accounting), `test_output_health` (per-cause live-output
    accounting, shared health report, over-bound/disconnect fault injection,
    telemetry-failure numerical isolation), `test_sim` also validates `--emit-shm` wiring,
    TCP/UDP endpoint syntax, per-output strides/selects (global+per-output
-   intersection, full-rate CSV + decimated live output, capacity refusal) +
+   intersection, full-rate CSV + decimated live output, capacity refusal),
+   UDP budget wiring/diagnostics +
   `sig run` expression/table/lua goldens and usage errors (incl. sandbox
   failure surfacing),
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),

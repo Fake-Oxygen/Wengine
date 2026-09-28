@@ -61,12 +61,13 @@ void request_sigint(int) noexcept { g_sigint_requested = 1; }
 
 bool sigint_requested() noexcept { return g_sigint_requested != 0; }
 
-constexpr std::array<std::string_view, 30> kSimOptions{{
+constexpr std::array<std::string_view, 31> kSimOptions{{
     "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
     "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-tcp", "--emit-udp",
     "--emit-every", "--emit-csv-stride", "--emit-shm-stride", "--emit-tcp-stride",
-    "--emit-udp-stride", "--emit-csv-select", "--emit-shm-select", "--emit-tcp-select",
-    "--emit-udp-select", "--emit-health", "--paced", "--rate", "--help", "-h",
+    "--emit-udp-stride", "--emit-udp-budget", "--emit-csv-select", "--emit-shm-select",
+    "--emit-tcp-select", "--emit-udp-select", "--emit-health", "--paced", "--rate",
+    "--help", "-h",
 }};
 
 // Chunked live-output health (PHYSI-39): fast batches step in bounded
@@ -141,6 +142,8 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   std::optional<std::string_view> shm_name;
   std::optional<std::string_view> tcp_endpoint;
   std::optional<std::string_view> udp_endpoint;
+  long long udp_budget = static_cast<long long>(link::kDefaultUdpPayloadBudget);
+  bool udp_budget_given = false;
   std::string_view solver_name = solvers::ProjectileSolver::kName;
 
   auto take_i64 = [&](std::initializer_list<std::string_view> names, const char *what,
@@ -254,6 +257,18 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       !take_stride({"--emit-udp-stride"}, "udp stride", udp_sampling)) {
     return core::kExitUsage;
   }
+  if (auto o = args.take_option({"--emit-udp-budget"})) {
+    const auto p = parse_i64(*o);
+    if (!p.ok() || p.value < 1 ||
+        static_cast<std::uint64_t>(p.value) > link::kMaxUdpPayload) {
+      out << "Error: invalid udp budget '" << *o << "' (want 1.."
+          << link::kMaxUdpPayload << ")\n";
+      out << kUsage << '\n';
+      return core::kExitUsage;
+    }
+    udp_budget = p.value;
+    udp_budget_given = true;
+  }
   if (!take_select({"--emit-csv-select"}, "csv selection", csv_sampling) ||
       !take_select({"--emit-shm-select"}, "shm selection", shm_sampling) ||
       !take_select({"--emit-tcp-select"}, "tcp selection", tcp_sampling) ||
@@ -354,6 +369,9 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   }
   if (udp_sampling.stride_given && !udp_endpoint) {
     return usage_error(out, "--emit-udp-stride needs --emit-udp");
+  }
+  if (udp_budget_given && !udp_endpoint) {
+    return usage_error(out, "--emit-udp-budget needs --emit-udp");
   }
   if (csv_sampling.select_given && !csv_path) {
     return usage_error(out, "--emit-csv-select needs --emit-csv");
@@ -500,7 +518,8 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     }
     const link::FrameAdapter adapter = is_signal ? &link::frame_from_signal_snapshot
                                                  : &link::frame_from_snapshot;
-    udp.emplace(*udp_endpoint, solver_name, adapter);
+    udp.emplace(*udp_endpoint, solver_name, adapter,
+                static_cast<std::size_t>(udp_budget));
     if (!udp->ok()) {
       out << "Error: cannot open UDP '" << *udp_endpoint << "'\n";
       return core::kExitRuntime;
@@ -827,13 +846,14 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       out << "Error: UDP publish failed on '" << udp->endpoint() << "' ("
           << link::format_publisher_health(udp->stats(), udp->status(),
                                            udp->last_errno(), 0, 0, 0)
-          << ")\n";
+          << " budget=" << udp->payload_budget()
+          << " need=" << udp->last_over_bound_bytes() << ")\n";
       return core::kExitRuntime;
     }
     out << "udp: " << udp->endpoint() << " (" << udp->stats().published << " frames, "
         << udp->stats().dropped_over_bound + udp->stats().dropped_send +
                udp->stats().dropped_pending_blocked + udp->stats().dropped_queue_full
-        << " dropped";
+        << " dropped, budget=" << udp->payload_budget();
     if (emit_health) {
       out << ", " << link::format_publisher_health(udp->stats(), udp->status(),
                                                    udp->last_errno(), 0, 0, 0);

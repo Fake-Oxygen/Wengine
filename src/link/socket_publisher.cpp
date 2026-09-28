@@ -491,9 +491,13 @@ void TcpPublisher::cleanup() noexcept {
 }
 
 UdpPublisher::UdpPublisher(std::string_view endpoint, std::string_view domain,
-                           FrameAdapter adapter)
-    : adapter_(adapter) {
+                           FrameAdapter adapter, std::size_t payload_budget)
+    : adapter_(adapter), payload_budget_(payload_budget) {
   if (adapter_ == nullptr) {
+    status_ = {core::StatusCode::kInvalidArgument};
+    return;
+  }
+  if (payload_budget_ == 0 || payload_budget_ > kMaxUdpPayload) {
     status_ = {core::StatusCode::kInvalidArgument};
     return;
   }
@@ -527,6 +531,8 @@ UdpPublisher::UdpPublisher(UdpPublisher &&other) noexcept
       adapter_(other.adapter_),
       run_id_(other.run_id_),
       fd_(other.fd_),
+      payload_budget_(other.payload_budget_),
+      last_over_bound_bytes_(other.last_over_bound_bytes_),
       frame_seq_(other.frame_seq_),
       stats_(other.stats_),
       status_(other.status_),
@@ -534,6 +540,8 @@ UdpPublisher::UdpPublisher(UdpPublisher &&other) noexcept
   other.fd_ = -1;
   other.frame_seq_ = 0;
   other.run_id_ = 0;
+  other.payload_budget_ = kDefaultUdpPayloadBudget;
+  other.last_over_bound_bytes_ = 0;
   other.stats_ = PublisherStats{};
   other.status_ = {core::StatusCode::kInternal}; // moved-from: inert
   other.last_errno_ = 0;
@@ -547,6 +555,8 @@ UdpPublisher &UdpPublisher::operator=(UdpPublisher &&other) noexcept {
     adapter_ = other.adapter_;
     run_id_ = other.run_id_;
     fd_ = other.fd_;
+    payload_budget_ = other.payload_budget_;
+    last_over_bound_bytes_ = other.last_over_bound_bytes_;
     frame_seq_ = other.frame_seq_;
     stats_ = other.stats_;
     status_ = other.status_;
@@ -554,6 +564,8 @@ UdpPublisher &UdpPublisher::operator=(UdpPublisher &&other) noexcept {
     other.fd_ = -1;
     other.frame_seq_ = 0;
     other.run_id_ = 0;
+    other.payload_budget_ = kDefaultUdpPayloadBudget;
+    other.last_over_bound_bytes_ = 0;
     other.stats_ = PublisherStats{};
     other.status_ = {core::StatusCode::kInternal};
     other.last_errno_ = 0;
@@ -577,13 +589,16 @@ void UdpPublisher::on_snapshot(const world::Snapshot &snapshot) {
     return;
   }
   const std::uint64_t seq = ++frame_seq_;
-  // One shared verdict for every transport: the compact bound (counts,
-  // names, datagram fit) refuses over-bound frames identically on
-  // TCP/SHM/UDP alike — loud (S7), never silently truncated.
+  // One shared verdict for every transport, plus the UDP payload budget
+  // (PHYSI-41): the encode capacity is the configured budget, so every
+  // emitted datagram satisfies bytes <= budget, headers included (the
+  // datagram IS the record). An over-budget record is indivisible here —
+  // refused loudly (S7) with the needed size recorded, never truncated.
   std::size_t datagram_len = 0;
   if (!compact::encode_record(frame, domain_, run_id_, seq, datagram_.data(),
-                              datagram_.size(), datagram_len)
+                              payload_budget_, datagram_len)
            .ok()) {
+    last_over_bound_bytes_ = compact::encoded_size(frame);
     ++stats_.dropped_over_bound;
     status_ = {core::StatusCode::kOutOfRange}; // loud (S7), frame skipped
     return;

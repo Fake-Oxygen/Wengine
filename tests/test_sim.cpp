@@ -512,6 +512,28 @@ void test_cli_per_output_sampling() {
   assert(run_sig("run --steps 2 --emit-csv-stride 2").first == 2);
   assert(run_sig("run --steps 2 --emit-shm-stride 2").first == 2);
   assert(run_sig("run --steps 2 --emit-csv-select 0").first == 2);
+  // UDP payload budget (PHYSI-41): orphan/invalid budgets are usage errors.
+  assert(run_sig("run --steps 2 --emit-udp-budget 1200").first == 2);
+  assert(run_sim("run --steps 2 --emit-udp-budget 1200").first == 2);
+  assert(run_sig("run --steps 2 --emit-udp 127.0.0.1:9 --emit-udp-budget 0").first == 2);
+  assert(run_sig("run --steps 2 --emit-udp 127.0.0.1:9 --emit-udp-budget 65508").first == 2);
+  {
+    // Default budget is reported; a single datagram to a closed port still
+    // sends (the first send on a fresh connected socket cannot observe the
+    // async ICMP refusal yet).
+    const auto [rc, s] = run_sig("run --sig-kind dc --steps 1 --emit-udp 127.0.0.1:9");
+    assert(rc == 0);
+    assert(s.find("budget=1200") != std::string::npos);
+  }
+  {
+    // An indivisible over-budget record fails loudly with the need=
+    // diagnostic (dc source: sig.count + sig.0.U = 84 + 18 + 16 = 118 > 100).
+    const auto [rc, s] = run_sig(
+        "run --sig-kind dc --steps 2 --emit-udp 127.0.0.1:9 --emit-udp-budget 100");
+    assert(rc == 1);
+    assert(s.find("budget=100") != std::string::npos);
+    assert(s.find("need=118") != std::string::npos);
+  }
   assert(run_sig("run --sig-kind dc --steps 2 --emit-csv /tmp/x.csv --emit-csv-select 5").first ==
          2);
   {
