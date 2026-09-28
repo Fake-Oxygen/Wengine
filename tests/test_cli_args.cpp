@@ -290,7 +290,9 @@ void test_completion() {
            has(c, "--emit-every") && has(c, "--emit-csv-stride") &&
            has(c, "--emit-shm-select") && has(c, "--emit-udp-budget") &&
            has(c, "--emit-health") && has(c, "--forever") &&
-           has(c, "--control-tcp") &&
+           has(c, "--control-tcp") && has(c, "--control-uart") &&
+           has(c, "--emit-uart") && has(c, "--emit-uart-mode") &&
+           has(c, "--emit-uart-stride") && has(c, "--emit-uart-select") &&
            has(c, "--paced") && has(c, "--rate") && has(c, "--sig-kind") &&
            has(c, "--sig-freq") && has(c, "--sig-quantity") && has(c, "--sig-count") &&
            has(c, "--sig-expr") && has(c, "--sig-table") && has(c, "--sig-lua"));
@@ -309,6 +311,16 @@ void test_completion() {
   {
     const std::vector<std::string> want{"U", "I"};
     assert(complete_line("sig run --sig-quantity ", 23, all) == want);
+  }
+  {
+    const std::vector<std::string> want{"ascii", "cobs"};
+    assert(complete_line("sig run --emit-uart-mode ", 25, all) == want);
+    assert(complete_line("sim run --emit-uart-mode ", 25, all) == want);
+  }
+  {
+    const auto c = complete_line("sim --", 6, all);
+    assert(has(c, "--emit-uart") && has(c, "--emit-uart-mode") &&
+           has(c, "--emit-uart-stride") && has(c, "--emit-uart-select"));
   }
   assert(complete_line("help ", 5, all).size() == complete_line("", 0, all).size());
   assert(complete_line("help o", 6, all) == std::vector<std::string>{"ohm"});

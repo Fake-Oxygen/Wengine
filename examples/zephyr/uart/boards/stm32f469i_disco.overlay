@@ -1,0 +1,14 @@
+/* STM32F469I-DISCO console UART (explicit = board default): UART3 on
+ * PB10/PB11 is the ST-Link Virtual COM Port, 115200 8N1, visible on the
+ * host as /dev/ttyACM0. Single-UART operation shares this wire for the
+ * stream (RX), diagnostics, and control (TX) — see WUART_QUIET. */
+/ {
+	chosen {
+		zephyr,console = &usart3;
+	};
+};
+
+&usart3 {
+	status = "okay";
+	current-speed = <115200>;
+};

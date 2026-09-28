@@ -1,0 +1,9 @@
+# WEngine socket sample options.
+config WENGINE_HOST
+	string "Host running `sig run --emit-tcp`"
+	default "192.0.2.10"
+
+config WENGINE_PORT
+	int "Host TCP port"
+	default 9000
+	range 1 65535

@@ -1,0 +1,13 @@
+/* nRF52-DK console UART at the HIL default rate (matches the host
+ * --emit-uart default baud). Other boards: point zephyr,console at the
+ * UART wired to the host instead. */
+/ {
+	chosen {
+		zephyr,console = &uart0;
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+};

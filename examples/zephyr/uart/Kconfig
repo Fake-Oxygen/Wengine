@@ -1,0 +1,20 @@
+# WEngine UART sample options.
+config WUART_COBS
+	bool "Use COBS framing (match host --emit-uart-mode cobs)"
+	default n
+	help
+	  n selects raw ASCII lines (host default); y selects COBS
+	  frames. The two sides must agree or every unit is malformed.
+
+config WUART_QUIET
+	bool "Silent wire: TX control frames only (single-UART boards)"
+	default n
+	help
+	  y suppresses every diagnostic print (samples, gaps, malformed
+	  tallies, ctl echoes) so the device TX carries control frames
+	  only. Use it on single-UART boards (e.g. stm32f469i_disco)
+	  together with host --control-uart: the host control-uart
+	  summary (commands=/responses=) is then the round-trip proof,
+	  and its malformed counter stays at zero. The boot banner
+	  still prints. With streaming only (no --control-uart), leave
+	  n so the console shows the samples.

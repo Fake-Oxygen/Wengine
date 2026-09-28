@@ -161,8 +161,13 @@ drops; `frame_seq` gaps let readers calculate loss with `LagStats`.
   the same explicitly encoded entries. Every record fits UDP's 65,507 B
   payload limit by codec construction; both paths share one bound verdict
   so an over-bound snapshot is refused identically everywhere.
-- UART (SIG-8): `UartPublisher` (`--emit-uart`), ASCII line framing
-  `step,time,ch_id,value` + optional COBS binary; never back-pressures sim.
+- UART (SIG-8): `UartPublisher` (`--emit-uart device[,baud]`,
+  `--emit-uart-mode ascii|cobs`), ASCII line framing
+  `step,time,sig_id,value,quantity` (the signals-CSV row shape) + COBS
+  binary framing of the same bytes; control interleaves on the same wire
+  (`--control-uart`, D4b-A); never back-pressures sim (overdriven lines
+  drop loudly). Wiring, budgets, and the Zephyr sample live in
+  `docs/zephyr-hil.md`.
 
 ### Python signal receivers
 
@@ -240,7 +245,7 @@ below are payload-only budgets (protocol headers add a few bytes per frame):
 | TCP compact record, one signal source (`sig.count` + source) | ~120 | 0.120 MB/s | 12.0 MB/s | 100x decimation at 100 kHz yields 1 kHz / 0.12 MB/s; 256 KiB send buffer now holds thousands of records; measured 2000/2000 frames, 0 drops |
 | UDP compact record, one particle (1 item + 6 channels) | ~230 | 0.230 MB/s | 23.0 MB/s | Budget default 1,200 carries ~16 particles; IP fragmentation magnifies loss, so the budget (not the 65,507 protocol maximum) is the safe ceiling |
 | UDP compact record, one signal source (`sig.count` + source) | ~120 | 0.120 MB/s | 12.0 MB/s | Budget default 1,200 carries a full 63-source batch (~1.1 KB); `LagStats` exposes network/receiver gaps by `frame_seq` |
-| UART 115200, ASCII one source | ~30 | ~30 kB/s | ~3 MB/s | 8N1 carries ~384 such frames/s: use at least 3x decimation at 1 kHz and 300x at 100 kHz |
+| UART 115200, ASCII one source | ~46 (measured) | ~46 kB/s at 1 kHz | ~4.6 MB/s | 8N1 carries ~250 such lines/s: at least 4x decimation at 1 kHz (emit_every/stride), 400x at 100 kHz; COBS mode adds ~6%. Full budget table in docs/zephyr-hil.md |
 
 Loopback measurement on the current development host (2026-09-25, GCC
 13.3, default unoptimized build `cmake -S . -B build`, `ndebug=0`):
@@ -369,9 +374,11 @@ socket is closed immediately and counted). The server never blocks the
 sim loop (non-blocking accept/recv/send, sticky Status); overlong lines
 (> 4096 B) are refused per-client; per-client send buffers are bounded
 (past the cap the client is closed and counted — applied commands stay
-applied, clients reconcile with LIST). UART control (SIG-8) speaks the
-same lines over COBS-escaped frames; the framing lives there, the verbs
-live here.
+applied, clients reconcile with LIST). UART control (SIG-8, shipped):
+`sig run --emit-uart <device> --control-uart` interleaves the same verbs
+on the serial wire (`!line` in ascii mode, `Q`/`R` COBS frames in cobs
+mode), drained after the TCP slots; framing, budgets, and the Zephyr
+sample live in `docs/zephyr-hil.md`, the verbs live here.
 
 Concurrent endpoints (LOCKED 2026-09-23, user): any number of control
 endpoints may be attached at once (e.g. Zephyr via UART + PC via TCP) and

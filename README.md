@@ -197,6 +197,7 @@ bloat `sim run`): unlimited sources, stamped U/I:
 > sig run --sig-kind table --sig-table wave.csv --steps 1000
 > sig run --sig-kind lua --sig-lua wah.lua --steps 1000
 > sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --forever
+> sig run --sig-kind sine --sig-freq 1kHz --dt 0.1ms --emit-uart /dev/ttyUSB0 --emit-every 4
 ```
 
 Python signal receivers are under `examples/` (stdlib only). Start one in
@@ -215,6 +216,9 @@ python3 examples/link_udp_signal_receiver.py --bind 0.0.0.0 --port 9001
 The TCP sample validates the hello/version/domain and length-prefixed frames;
 the UDP sample validates compact datagrams and prints sequence-gap counts.
 `link_socket_protocol.py` contains their shared standard-library decoder.
+The Zephyr HIL samples live in `examples/zephyr/` (UART stream + control
+app, TCP socket app, shared C99 parsers): wiring, baud budgets, and build
+steps are in `docs/zephyr-hil.md`.
 
 For a live graph instead of terminal output, install Matplotlib and use the
 TCP plotter:
@@ -294,7 +298,7 @@ tests/  benchmarks/  examples/
 | `signal` | `wengine/signal/types.hpp`, `expr.hpp`, `table.hpp`, `lua.hpp`, `control.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial), closed expression programs (RPN, from_chars parsing, div-by-zero/out-of-domain to Status), table CSV replay (linear interp, clamped, bit-exact hits), Lua scripting source (sandboxed 5.4 runtime in an isolated TU — this header is Lua-free), control-plane line protocol vocabulary (strict verb parsing + response builders, no state, no I/O) — no I/O; pool lives in `world` |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp`, `run_config.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
 | `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, expression programs, append-only table/script stores, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ serial-carrying signal arrays, `select_signals` subset filter), versioned binary save/load (v5; v4 loads with empty script ranges, v3 with zeroed custom columns, v2 with synthesized serials, v1 with empty signals) |
-| `link` | `wengine/link/frame.hpp`, `protocol.hpp`, `socket_publisher.hpp`, `shm_publisher.hpp`, `control_server.hpp` | Solver-agnostic `Frame` adapters + versioned wire codec; app-edge SHM publisher and POSIX TCP/UDP stream publishers (`wengine_link_net`), exact version/domain gates, compact UDP frames, and lag/loss accounting; domain-free TCP line server for the control plane (same package) |
+| `link` | `wengine/link/frame.hpp`, `protocol.hpp`, `socket_publisher.hpp`, `shm_publisher.hpp`, `control_server.hpp`, `uart_codec.hpp`, `uart_publisher.hpp` | Solver-agnostic `Frame` adapters + versioned wire codec; app-edge SHM publisher and POSIX TCP/UDP stream publishers (`wengine_link_net`), exact version/domain gates, compact UDP frames, and lag/loss accounting; domain-free TCP line server for the control plane (same package); UART serial publisher + control pump with COBS framing (same package) |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions, `StrideSink` step-aligned decimation, drop counters) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion |
@@ -358,7 +362,9 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
  into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
   `src/link/shm_publisher.cpp`, the POSIX endpoint TU) and `wengine_link_net`
   (`STATIC`: `src/link/socket_publisher.cpp`, POSIX TCP/UDP endpoints, plus
-  `src/link/control_server.cpp`, the POSIX TCP control-plane line server) link
+  `src/link/control_server.cpp`, the POSIX TCP control-plane line server,
+  plus `src/link/uart_publisher.cpp`, the POSIX UART serial publisher +
+  control pump) link
   `wengine_core`.
  `wengine_signal_lua` (`STATIC`: `src/signal/lua_solver.cpp`, the Lua
  runtime TU) links `wengine_core` + `wengine_lua` (vendored interpreter).
@@ -402,9 +408,9 @@ version gate, lag accounting), `test_link_shm` (segment create/publish/
     `test_output_health` (per-cause live-output
    accounting, shared health report, over-bound/disconnect fault injection,
    telemetry-failure numerical isolation), `test_sim` also validates `--emit-shm` wiring,
-   TCP/UDP endpoint syntax, per-output strides/selects (global+per-output
-   intersection, full-rate CSV + decimated live output, capacity refusal),
-   UDP budget wiring/diagnostics +
+    TCP/UDP endpoint syntax, per-output strides/selects (global+per-output
+    intersection, full-rate CSV + decimated live output, capacity refusal),
+    UDP budget wiring/diagnostics +
    `sig run` expression/table/lua goldens and usage errors (incl. sandbox
    failure surfacing), `--control-tcp` flag/completion/shape errors,
    step-synchronous control drive + summary,
@@ -416,7 +422,13 @@ version gate, lag accounting), `test_link_shm` (segment create/publish/
   exactness), `test_control_server` (loopback handshake/version gate,
   mid-run set/start/stop over TCP, malformed + overlong rejection,
   two-client conflict order, LIST census, disconnect survival, `sig run
-  --control-tcp` CLI smoke),
+  --control-tcp` CLI smoke), `test_uart_codec` (COBS vectors, endpoint/
+  mode parsing, stream line goldens, ascii/cobs demux + resync, Zephyr C
+  parser parity incl. compact v2 decode of real encoder bytes),
+  `test_uart_pub` (pty-loopback ASCII/COBS exactness, UART control
+  round-trips through the bus, garbage resync, flood drops without
+  stalls, decimated soak + `sig run`/`sim run` UART CLI smoke and usage
+  errors),
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_signal_panel` (signal panel model validation/config + controller

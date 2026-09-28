@@ -104,6 +104,7 @@ target_compile_options(wengine_link_shm PRIVATE
 add_library(wengine_link_net STATIC
     src/link/socket_publisher.cpp
     src/link/control_server.cpp
+    src/link/uart_publisher.cpp
 )
 target_include_directories(wengine_link_net PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -340,6 +341,24 @@ if(BUILD_TESTS)
     add_executable(test_control_server tests/test_control_server.cpp)
     target_link_libraries(test_control_server PRIVATE wengine_cli)
     add_test(NAME control_server COMMAND test_control_server)
+
+    # SIG-8 UART HIL track: wire codec (+ shared Zephyr C parsers, built
+    # here as C++ for the host cross-check) and pty-loopback publisher.
+    add_executable(test_uart_codec tests/test_uart_codec.cpp
+        examples/zephyr/common/wuart.c
+        examples/zephyr/common/wcompact.c
+    )
+    target_link_libraries(test_uart_codec PRIVATE wengine_core)
+    target_include_directories(test_uart_codec PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/zephyr/common
+    )
+    set_source_files_properties(examples/zephyr/common/wuart.c
+        examples/zephyr/common/wcompact.c PROPERTIES LANGUAGE CXX)
+    add_test(NAME uart_codec COMMAND test_uart_codec)
+
+    add_executable(test_uart_pub tests/test_uart_pub.cpp)
+    target_link_libraries(test_uart_pub PRIVATE wengine_cli)
+    add_test(NAME uart_pub COMMAND test_uart_pub)
 
     add_executable(test_runner tests/test_runner.cpp)
     target_link_libraries(test_runner PRIVATE wengine_core)

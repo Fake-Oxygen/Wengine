@@ -10,6 +10,7 @@
 #include "wengine/link/protocol.hpp"
 #include "wengine/link/shm_publisher.hpp"
 #include "wengine/link/socket_publisher.hpp"
+#include "wengine/link/uart_publisher.hpp"
 #include "wengine/signal/lua.hpp"
 #include "wengine/signal/table.hpp"
 #include "wengine/signal/types.hpp"
@@ -63,14 +64,15 @@ void request_sigint(int) noexcept { g_sigint_requested = 1; }
 
 bool sigint_requested() noexcept { return g_sigint_requested != 0; }
 
-constexpr std::array<std::string_view, 36> kSigOptions{{
+constexpr std::array<std::string_view, 41> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
     "--sig-expr", "--sig-table", "--sig-lua", "--emit-csv", "--emit-shm", "--emit-tcp",
     "--emit-udp", "--emit-every", "--emit-csv-stride", "--emit-shm-stride",
     "--emit-tcp-stride", "--emit-udp-stride", "--emit-udp-budget", "--emit-csv-select",
     "--emit-shm-select", "--emit-tcp-select", "--emit-udp-select", "--emit-health",
-    "--control-tcp", "--forever", "--paced", "--rate", "--help", "-h",
+    "--emit-uart", "--emit-uart-mode", "--emit-uart-stride", "--emit-uart-select",
+    "--control-tcp", "--control-uart", "--forever", "--paced", "--rate", "--help", "-h",
 }};
 
 // Chunked live-output health (PHYSI-39): shared with sim run. Fast batches
@@ -82,7 +84,8 @@ inline constexpr std::uint64_t kHealthChunkSteps = 4096;
 void print_live_health(std::uint64_t done_steps,
                        const std::optional<link::ShmPublisher> &shm,
                        const std::optional<link::TcpPublisher> &tcp,
-                       const std::optional<link::UdpPublisher> &udp, double elapsed_s,
+                       const std::optional<link::UdpPublisher> &udp,
+                       const link::uart::UartPublisher *uart, double elapsed_s,
                        double sample_rate_hz) {
   std::cerr << "live: steps=" << done_steps << " sample_rate=" << sample_rate_hz
             << "Hz elapsed=" << elapsed_s << "s";
@@ -98,6 +101,10 @@ void print_live_health(std::uint64_t done_steps,
     if (udp) {
       std::cerr << " udp_bytes_s="
                 << static_cast<double>(udp->stats().bytes_accepted) / elapsed_s;
+    }
+    if (uart != nullptr) {
+      std::cerr << " uart_bytes_s="
+                << static_cast<double>(uart->stats().bytes_accepted) / elapsed_s;
     }
   }
   std::cerr << '\n';
@@ -119,6 +126,12 @@ void print_live_health(std::uint64_t done_steps,
     std::cerr << "live udp: "
               << link::format_publisher_health(udp->stats(), udp->status(),
                                               udp->last_errno(), 0, 0, 0)
+              << '\n';
+  }
+  if (uart != nullptr) {
+    std::cerr << "live uart: "
+              << link::format_publisher_health(uart->stats(), uart->status(),
+                                              uart->last_errno(), 0, 0, 0)
               << '\n';
   }
 }
@@ -143,6 +156,9 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   std::optional<std::string_view> tcp_endpoint;
   std::optional<std::string_view> udp_endpoint;
   std::optional<std::string_view> control_endpoint;
+  std::optional<std::string_view> uart_device;
+  std::optional<std::string_view> uart_mode_text;
+  const bool control_uart = args.take_flag({"--control-uart"});
   long long udp_budget = static_cast<long long>(link::kDefaultUdpPayloadBudget);
   bool udp_budget_given = false;
 
@@ -180,10 +196,13 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   tcp_endpoint = args.take_option({"--emit-tcp"});
   udp_endpoint = args.take_option({"--emit-udp"});
   control_endpoint = args.take_option({"--control-tcp"});
+  uart_device = args.take_option({"--emit-uart"});
+  uart_mode_text = args.take_option({"--emit-uart-mode"});
   cli::EmitOutputSampling csv_sampling;
   cli::EmitOutputSampling shm_sampling;
   cli::EmitOutputSampling tcp_sampling;
   cli::EmitOutputSampling udp_sampling;
+  cli::EmitOutputSampling uart_sampling;
   auto take_stride = [&](std::initializer_list<std::string_view> names, const char *what,
                          cli::EmitOutputSampling &slot) -> bool {
     if (auto o = args.take_option(names)) {
@@ -215,7 +234,8 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   if (!take_stride({"--emit-csv-stride"}, "csv stride", csv_sampling) ||
       !take_stride({"--emit-shm-stride"}, "shm stride", shm_sampling) ||
       !take_stride({"--emit-tcp-stride"}, "tcp stride", tcp_sampling) ||
-      !take_stride({"--emit-udp-stride"}, "udp stride", udp_sampling)) {
+      !take_stride({"--emit-udp-stride"}, "udp stride", udp_sampling) ||
+      !take_stride({"--emit-uart-stride"}, "uart stride", uart_sampling)) {
     return core::kExitUsage;
   }
   if (auto o = args.take_option({"--emit-udp-budget"})) {
@@ -233,7 +253,8 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   if (!take_select({"--emit-csv-select"}, "csv selection", csv_sampling) ||
       !take_select({"--emit-shm-select"}, "shm selection", shm_sampling) ||
       !take_select({"--emit-tcp-select"}, "tcp selection", tcp_sampling) ||
-      !take_select({"--emit-udp-select"}, "udp selection", udp_sampling)) {
+      !take_select({"--emit-udp-select"}, "udp selection", udp_sampling) ||
+      !take_select({"--emit-uart-select"}, "uart selection", uart_sampling)) {
     return core::kExitUsage;
   }
 
@@ -496,6 +517,9 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   if (udp_sampling.stride_given && !udp_endpoint) {
     return usage_error(out, "--emit-udp-stride needs --emit-udp");
   }
+  if (uart_sampling.stride_given && !uart_device) {
+    return usage_error(out, "--emit-uart-stride needs --emit-uart");
+  }
   if (udp_budget_given && !udp_endpoint) {
     return usage_error(out, "--emit-udp-budget needs --emit-udp");
   }
@@ -510,6 +534,25 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   }
   if (udp_sampling.select_given && !udp_endpoint) {
     return usage_error(out, "--emit-udp-select needs --emit-udp");
+  }
+  if (uart_sampling.select_given && !uart_device) {
+    return usage_error(out, "--emit-uart-select needs --emit-uart");
+  }
+  // UART wire mode is explicit (never silent): ascii lines by default,
+  // COBS frames on request. A mode without its device is a usage error.
+  link::uart::UartMode uart_mode = link::uart::UartMode::kAscii;
+  if (uart_mode_text) {
+    if (!uart_device) {
+      return usage_error(out, "--emit-uart-mode needs --emit-uart");
+    }
+    const auto m = link::uart::parse_mode(*uart_mode_text);
+    if (!m.ok()) {
+      return usage_error(out, "unknown uart mode (want ascii|cobs)");
+    }
+    uart_mode = m.value;
+  }
+  if (control_uart && !uart_device) {
+    return usage_error(out, "--control-uart needs --emit-uart");
   }
   {
     const cli::EmitOutputSampling *outs[4] = {&csv_sampling, &shm_sampling, &tcp_sampling,
@@ -540,6 +583,8 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       }
     }
     // Unfiltered transports must fit the whole batch (1 + count <= 64).
+    // UART is exempt: lines are unbounded (no 64-channel frame cap), so
+    // only the serial range below applies to it.
     for (int k = 1; k < 4; ++k) {
       if (!requested[k] || outs[k]->select_given) {
         continue;
@@ -548,6 +593,17 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
         out << "Error: --emit-" << names[k] << " needs " << (n_live + 1)
             << " channels, transport holds " << link::kMaxChannels
             << " (subscribe with --emit-" << names[k] << "-select)\n";
+        out << kUsage << '\n';
+        return core::kExitUsage;
+      }
+    }
+  }
+  if (uart_sampling.select_given) {
+    const auto n_live = static_cast<std::uint64_t>(sig_count < 0 ? 0 : sig_count);
+    for (std::uint64_t id : uart_sampling.serials) {
+      if (id >= n_live) {
+        out << "Error: --emit-uart-select serial " << id << " out of range (count=" << n_live
+            << ", serials 0.." << (n_live == 0 ? 0 : n_live - 1) << ")\n";
         out << kUsage << '\n';
         return core::kExitUsage;
       }
@@ -614,6 +670,31 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
 
+  // UART serial publisher (SIG-8 HIL track): device[,baud] shape errors
+  // are usage errors; open/configure failures are runtime errors — the
+  // same split as the socket endpoints above.
+  std::optional<link::uart::UartPort> uart_port;
+  std::optional<link::uart::UartPublisher> uart;
+  if (uart_device) {
+    const auto ep = link::uart::parse_uart_endpoint(*uart_device);
+    if (!ep.ok()) {
+      return usage_error(out, "invalid UART device (want device[,baud])");
+    }
+    uart_port.emplace(ep.value.device, ep.value.baud);
+    if (!uart_port->ok()) {
+      if (uart_port->status().code == core::StatusCode::kInvalidArgument) {
+        return usage_error(out, "invalid UART device (want device[,baud])");
+      }
+      out << "Error: cannot open UART '" << ep.value.device << "'\n";
+      return core::kExitRuntime;
+    }
+    uart.emplace(*uart_port, uart_mode);
+    if (!uart->ok()) {
+      out << "Error: cannot open UART '" << ep.value.device << "'\n";
+      return core::kExitRuntime;
+    }
+  }
+
   // Per-output sampling wrappers (PHYSI-34, edge-side only — Runner keeps
   // its single global emit_every gate; each output further selects via
   // StrideSink step%stride==0 and/or SignalSubsetSink serial allowlists).
@@ -626,10 +707,13 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   std::optional<emit::StrideSink> tcp_stride;
   std::optional<emit::SignalSubsetSink> udp_subset;
   std::optional<emit::StrideSink> udp_stride;
+  std::optional<emit::SignalSubsetSink> uart_subset;
+  std::optional<emit::StrideSink> uart_stride;
   emit::ISink *csv_out = nullptr;
   emit::ISink *shm_out = nullptr;
   emit::ISink *tcp_out = nullptr;
   emit::ISink *udp_out = nullptr;
+  emit::ISink *uart_out = nullptr;
   if (sig_csv) {
     csv_out = &*sig_csv;
     if (csv_sampling.select_given) {
@@ -678,6 +762,18 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       udp_out = &*udp_stride;
     }
   }
+  if (uart) {
+    uart_out = &*uart;
+    if (uart_sampling.select_given) {
+      uart_subset.emplace(*uart_out);
+      uart_subset->set_subscription(uart_sampling.serials);
+      uart_out = &*uart_subset;
+    }
+    if (uart_sampling.stride_given && uart_sampling.stride != 1) {
+      uart_stride.emplace(*uart_out, uart_sampling.stride);
+      uart_out = &*uart_stride;
+    }
+  }
 
   // Lua sources evaluate in an extra solver that steps before SignalSolver
   // (custom-source contract — see solvers/run.hpp).
@@ -706,7 +802,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
   world::State s;
-  std::array<emit::ISink *, 4> sink_arr{};
+  std::array<emit::ISink *, 5> sink_arr{};
   std::size_t n_sinks = 0;
   if (csv_out) {
     sink_arr[n_sinks++] = csv_out;
@@ -719,6 +815,9 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   }
   if (udp_out) {
     sink_arr[n_sinks++] = udp_out;
+  }
+  if (uart_out) {
+    sink_arr[n_sinks++] = uart_out;
   }
   for (std::size_t k = 0; k < n_sinks; ++k) {
     run.add_sink(*sink_arr[k]);
@@ -738,45 +837,89 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       return core::kExitRuntime;
     }
   }
-  solvers::ControlBus ctl_bus(ctl ? ctl->run_id() : 0);
+  // UART control (SIG-8, D4b-A) shares the stream port: commands arrive
+  // as control frames on the same wire and drain after the TCP slots.
+  std::optional<link::uart::UartControl> uctl;
+  if (control_uart) {
+    uctl.emplace(*uart_port, uart_mode);
+    if (!uctl->ok()) {
+      out << "Error: UART control failed on '" << uart_port->device() << "'\n";
+      return core::kExitRuntime;
+    }
+  }
+  const bool has_control = ctl.has_value() || uctl.has_value();
+  solvers::ControlBus ctl_bus(ctl ? ctl->run_id() : (uctl ? uctl->run_id() : 0));
   ctl_bus.add_channel(); // channel 0: local CLI (reserved, first in drain order)
   if (ctl) {
     for (std::uint32_t i = 0; i < ctl->max_clients(); ++i) {
       ctl_bus.add_channel(); // channel 1+i: TCP slot i (fixed order)
     }
   }
+  std::uint32_t uart_channel = 0;
+  if (uctl) {
+    uart_channel = ctl_bus.add_channel(); // UART channel: after TCP slots
+  }
   std::vector<link::ControlSlotLines> ctl_polled;
+  std::vector<std::string> uctl_lines;
   auto ctl_service = [&] {
-    if (!ctl) {
+    if (!has_control) {
       return;
     }
-    ctl->poll(ctl_polled);
-    for (auto &sl : ctl_polled) {
-      for (auto &ln : sl.lines) {
-        ctl_bus.enqueue(1 + sl.slot, std::move(ln));
+    if (ctl) {
+      ctl->poll(ctl_polled);
+      for (auto &sl : ctl_polled) {
+        for (auto &ln : sl.lines) {
+          ctl_bus.enqueue(1 + sl.slot, std::move(ln));
+        }
+      }
+    }
+    if (uctl) {
+      uctl->poll_lines(uctl_lines);
+      for (auto &ln : uctl_lines) {
+        ctl_bus.enqueue(uart_channel, std::move(ln));
       }
     }
     ctl_bus.drain(run.state(), run.state().step_index);
-    for (std::uint32_t c = 1; c < ctl_bus.channel_count(); ++c) {
-      for (auto &r : ctl_bus.take_responses(c)) {
-        ctl->push_response(c - 1, r);
+    if (ctl) {
+      for (std::uint32_t c = 1; c < ctl_bus.channel_count(); ++c) {
+        if (uctl && c == uart_channel) {
+          continue; // UART channel answers over the serial wire below
+        }
+        for (auto &r : ctl_bus.take_responses(c)) {
+          ctl->push_response(c - 1, r);
+        }
       }
+      ctl->flush();
     }
-    ctl->flush();
+    if (uctl) {
+      for (auto &r : ctl_bus.take_responses(uart_channel)) {
+        uctl->push_response(r);
+      }
+      uctl->flush();
+    }
   };
   // Paced waits only buffer arrivals (poll) and flush answers; the drain
   // stays in before_chunk so commands still apply at exact step starts.
   auto ctl_on_idle = [&] {
-    if (!ctl) {
+    if (!has_control) {
       return;
     }
-    ctl->poll(ctl_polled);
-    for (auto &sl : ctl_polled) {
-      for (auto &ln : sl.lines) {
-        ctl_bus.enqueue(1 + sl.slot, std::move(ln));
+    if (ctl) {
+      ctl->poll(ctl_polled);
+      for (auto &sl : ctl_polled) {
+        for (auto &ln : sl.lines) {
+          ctl_bus.enqueue(1 + sl.slot, std::move(ln));
+        }
       }
+      ctl->flush();
     }
-    ctl->flush();
+    if (uctl) {
+      uctl->poll_lines(uctl_lines);
+      for (auto &ln : uctl_lines) {
+        ctl_bus.enqueue(uart_channel, std::move(ln));
+      }
+      uctl->flush();
+    }
   };
   using SignalHandler = void (*)(int);
   SignalHandler previous_sigint = nullptr;
@@ -792,7 +935,8 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   core::Status st = core::Status::success();
   solvers::paced::Stats paced_stats;
   const std::uint64_t total_steps = cfg.steps;
-  const bool has_live = shm || tcp || udp;
+  const link::uart::UartPublisher *uart_live = uart ? &*uart : nullptr;
+  const bool has_live = shm || tcp || udp || uart;
   const double sample_rate_hz =
       (dt > 0.0 && emit_every > 0)
           ? 1.0 / (dt * static_cast<double>(emit_every))
@@ -815,7 +959,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
         const auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration<double>(now - last_report).count() >= 1.0) {
           last_report = now;
-          print_live_health(run.state().step_index, shm, tcp, udp,
+          print_live_health(run.state().step_index, shm, tcp, udp, uart_live,
                             wall_elapsed_s(), sample_rate_hz);
         }
       }
@@ -824,7 +968,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     st = solvers::paced::run_paced<solvers::paced::SteadyClock>(
         run, total_steps, rate_hz, 1, epoch, sigint_requested, idle, paced_stats,
         before_chunk);
-  } else if (ctl) {
+  } else if (has_control) {
     // Step-synchronous control: poll + drain before every single step
     // (finite and --forever alike); health stays chunked as usual.
     std::uint64_t done = 0;
@@ -839,7 +983,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       }
       ++done;
       if (emit_health && has_live && done % kHealthChunkSteps == 0) {
-        print_live_health(done, shm, tcp, udp, wall_elapsed_s(),
+        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(),
                           sample_rate_hz);
       }
     }
@@ -859,7 +1003,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       }
       done += kHealthChunkSteps;
       if (emit_health && has_live) {
-        print_live_health(done, shm, tcp, udp, wall_elapsed_s(),
+        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(),
                           sample_rate_hz);
       }
     }
@@ -879,7 +1023,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       }
       done += n;
       if (emit_health && has_live && done < total_steps) {
-        print_live_health(done, shm, tcp, udp, wall_elapsed_s(),
+        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(),
                           sample_rate_hz);
       }
     }
@@ -1045,11 +1189,48 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     }
     out << ")\n";
   }
+  if (uart) {
+    if (!uart->ok()) {
+      out << "Error: UART publish failed on '" << uart->device() << "' ("
+          << link::format_publisher_health(uart->stats(), uart->status(),
+                                           uart->last_errno(), 0, 0, 0)
+          << " mode=" << (uart->mode() == link::uart::UartMode::kCobs ? "cobs" : "ascii")
+          << " baud=" << uart->baud() << ")\n";
+      return core::kExitRuntime;
+    }
+    out << "uart: " << uart->device() << " (" << uart->stats().published << " frames, "
+        << uart->lines_written() << " lines, " << uart->lines_dropped() << " lines dropped"
+        << ", mode=" << (uart->mode() == link::uart::UartMode::kCobs ? "cobs" : "ascii")
+        << " baud=" << uart->baud();
+    if (emit_health) {
+      out << ", " << link::format_publisher_health(uart->stats(), uart->status(),
+                                                   uart->last_errno(), 0, 0, 0);
+    }
+    if (uart_sampling.select_given) {
+      out << ", select=" << cli::format_emit_select(uart_sampling.serials);
+      if (uart_subset) {
+        out << " matched=" << uart_subset->matched() << " dropped=" << uart_subset->dropped()
+            << " forwarded_rows=" << uart_subset->forwarded_rows();
+      }
+    }
+    if (uart_stride) {
+      out << ", stride=" << uart_stride->stride() << " matched=" << uart_stride->matched()
+          << " dropped=" << uart_stride->dropped();
+    }
+    out << ")\n";
+  }
   if (ctl) {
     ctl->flush();
     out << "control: " << ctl->endpoint() << " (applied=" << ctl_bus.applied()
         << " readonly=" << ctl_bus.readonly() << " rejected=" << ctl_bus.rejected()
         << " clients=" << ctl->stats().accepted << ")\n";
+  }
+  if (uctl) {
+    uctl->flush();
+    out << "control-uart: " << uart_port->device() << " (malformed="
+        << uctl->malformed() << " commands=" << uctl->commands_rx()
+        << " responses=" << uctl->responses_tx()
+        << " dropped=" << uctl->responses_dropped() << ")\n";
   }
   return core::kExitOk;
 }
@@ -1080,6 +1261,15 @@ void SigSpec::complete(std::span<const std::string_view> prior_args, std::string
     for (std::string_view q : {"U", "I"}) {
       if (q.substr(0, partial.size()) == partial) {
         out.emplace_back(q);
+      }
+    }
+    return;
+  }
+  // Values for a preceding "--emit-uart-mode".
+  if (!prior_args.empty() && prior_args.back() == "--emit-uart-mode") {
+    for (std::string_view m : {"ascii", "cobs"}) {
+      if (m.substr(0, partial.size()) == partial) {
+        out.emplace_back(m);
       }
     }
     return;

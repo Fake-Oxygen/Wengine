@@ -84,12 +84,15 @@ open, in build order:
   2026-09-24 (vendored PUC 5.4.9, sandboxed pure-function scripts,
   instruction budget, v5 serialization, CLI `--sig-lua`; GUI batch rejects
   Lua pending the SIG-9 scripting panel).
-- SIG-7 / SIG-8 (independent parallel tracks): TCP/UDP socket publisher
-  sinks + UART publisher + Zephyr sample consumer; owner picks order.
-- SIG-10 (v1 scope, high): generic control plane — param set/start/stop
-  over control socket + COBS UART frames, concurrent endpoints
-  (last-writer-wins, replay-logged), mux select verb, per-source add
-  with operand serials. Sensor feedback stays a follow-up.
+- SIG-7 / SIG-8 (independent parallel tracks): SHIPPED — TCP/UDP
+  socket publisher sinks (SIG-7) and UART publisher + Zephyr sample
+  consumer (SIG-8, 2026-09-28: `--emit-uart device[,baud]` ascii/COBS
+  lines, `--control-uart` COBS/`!` control interleave, `examples/zephyr/`
+  UART + socket apps with shared C99 parsers, `docs/zephyr-hil.md`).
+- SIG-10 (v1 scope, high): SHIPPED 2026-09-28 — generic control plane
+  (param set/start/stop over TCP control socket + UART control frames,
+  concurrent endpoints with last-writer-wins, replay-logged, mux select
+  verb reserved). Sensor feedback stays a follow-up.
 
 Future solvers (fields, circuits, rigid bodies) each need: engine-side
 state domains + stepped/closed-form implementation first, then exactly
