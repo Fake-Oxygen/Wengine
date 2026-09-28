@@ -1,9 +1,12 @@
 #include "wengine/cli/commands.hpp"
+#include "wengine/cli/emit_options.hpp"
 #include "wengine/cli/status.hpp"
 #include "wengine/core/run_config.hpp"
 #include "wengine/emit/csv_sink.hpp"
+#include "wengine/emit/routing.hpp"
 #include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
+#include "wengine/link/protocol.hpp"
 #include "wengine/link/shm_publisher.hpp"
 #include "wengine/link/socket_publisher.hpp"
 #include "wengine/signal/types.hpp"
@@ -55,10 +58,12 @@ void request_sigint(int) noexcept { g_sigint_requested = 1; }
 
 bool sigint_requested() noexcept { return g_sigint_requested != 0; }
 
-constexpr std::array<std::string_view, 21> kSimOptions{{
+constexpr std::array<std::string_view, 29> kSimOptions{{
     "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
     "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-tcp", "--emit-udp",
-    "--emit-every", "--paced", "--rate", "--help", "-h",
+    "--emit-every", "--emit-csv-stride", "--emit-shm-stride", "--emit-tcp-stride",
+    "--emit-udp-stride", "--emit-csv-select", "--emit-shm-select", "--emit-tcp-select",
+    "--emit-udp-select", "--paced", "--rate", "--help", "-h",
 }};
 
 } // namespace
@@ -157,6 +162,50 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   shm_name = args.take_option({"--emit-shm"});
   tcp_endpoint = args.take_option({"--emit-tcp"});
   udp_endpoint = args.take_option({"--emit-udp"});
+  cli::EmitOutputSampling csv_sampling;
+  cli::EmitOutputSampling shm_sampling;
+  cli::EmitOutputSampling tcp_sampling;
+  cli::EmitOutputSampling udp_sampling;
+  auto take_stride = [&](std::initializer_list<std::string_view> names, const char *what,
+                         cli::EmitOutputSampling &slot) -> bool {
+    if (auto o = args.take_option(names)) {
+      const auto p = cli::parse_emit_stride(*o);
+      if (!p.ok()) {
+        out << "Error: invalid " << what << " '" << *o << "' (want >= 0, 0 = muted)\n";
+        out << kUsage << '\n';
+        return false;
+      }
+      slot.stride = p.value;
+      slot.stride_given = true;
+    }
+    return true;
+  };
+  auto take_select = [&](std::initializer_list<std::string_view> names, const char *what,
+                         cli::EmitOutputSampling &slot) -> bool {
+    if (auto o = args.take_option(names)) {
+      const auto p = cli::parse_emit_select(*o);
+      if (!p.ok()) {
+        out << "Error: invalid " << what << " '" << *o << "' (want e.g. 0,2,5)\n";
+        out << kUsage << '\n';
+        return false;
+      }
+      slot.serials = p.value;
+      slot.select_given = true;
+    }
+    return true;
+  };
+  if (!take_stride({"--emit-csv-stride"}, "csv stride", csv_sampling) ||
+      !take_stride({"--emit-shm-stride"}, "shm stride", shm_sampling) ||
+      !take_stride({"--emit-tcp-stride"}, "tcp stride", tcp_sampling) ||
+      !take_stride({"--emit-udp-stride"}, "udp stride", udp_sampling)) {
+    return core::kExitUsage;
+  }
+  if (!take_select({"--emit-csv-select"}, "csv selection", csv_sampling) ||
+      !take_select({"--emit-shm-select"}, "shm selection", shm_sampling) ||
+      !take_select({"--emit-tcp-select"}, "tcp selection", tcp_sampling) ||
+      !take_select({"--emit-udp-select"}, "udp selection", udp_sampling)) {
+    return core::kExitUsage;
+  }
   if (auto o = args.take_option({"--solver"})) {
     solver_name = *o;
   }
@@ -236,6 +285,87 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   // Domain dispatch for outputs only (no solver vocabulary): signal runs
   // log the signals table and publish signal channels.
   const bool is_signal = sdef->name == solvers::SignalSolver::kName;
+
+  // Per-output sampling validation (PHYSI-34): a stride/select without its
+  // output is a usage error, never silently ignored; selections need the
+  // signal solver (stable serials exist only there).
+  if (csv_sampling.stride_given && !csv_path) {
+    return usage_error(out, "--emit-csv-stride needs --emit-csv");
+  }
+  if (shm_sampling.stride_given && !shm_name) {
+    return usage_error(out, "--emit-shm-stride needs --emit-shm");
+  }
+  if (tcp_sampling.stride_given && !tcp_endpoint) {
+    return usage_error(out, "--emit-tcp-stride needs --emit-tcp");
+  }
+  if (udp_sampling.stride_given && !udp_endpoint) {
+    return usage_error(out, "--emit-udp-stride needs --emit-udp");
+  }
+  if (csv_sampling.select_given && !csv_path) {
+    return usage_error(out, "--emit-csv-select needs --emit-csv");
+  }
+  if (shm_sampling.select_given && !shm_name) {
+    return usage_error(out, "--emit-shm-select needs --emit-shm");
+  }
+  if (tcp_sampling.select_given && !tcp_endpoint) {
+    return usage_error(out, "--emit-tcp-select needs --emit-tcp");
+  }
+  if (udp_sampling.select_given && !udp_endpoint) {
+    return usage_error(out, "--emit-udp-select needs --emit-udp");
+  }
+  if (!is_signal && (csv_sampling.select_given || shm_sampling.select_given ||
+                     tcp_sampling.select_given || udp_sampling.select_given)) {
+    return usage_error(out, "--emit-<out>-select needs solver 'signal'");
+  }
+  // Known transport capacity before running: signal frames carry sig.count
+  // plus one channel per selected source (1 + N <= 64); particle frames carry
+  // <= 6 channels but one item per particle (<= 1024). CSV is unbounded.
+  if (is_signal) {
+    // sim signal runs one default sine (serial 0); a select list addresses it.
+    const cli::EmitOutputSampling *outs[4] = {&csv_sampling, &shm_sampling, &tcp_sampling,
+                                              &udp_sampling};
+    const char *names[4] = {"csv", "shm", "tcp", "udp"};
+    const bool requested[4] = {csv_path.has_value(), shm_name.has_value(),
+                               tcp_endpoint.has_value(), udp_endpoint.has_value()};
+    for (int k = 0; k < 4; ++k) {
+      if (!outs[k]->select_given) {
+        continue;
+      }
+      for (std::uint64_t id : outs[k]->serials) {
+        if (id != 0) {
+          out << "Error: --emit-" << names[k] << "-select serial " << id
+              << " out of range (sim signal runs one source, serial 0)\n";
+          out << kUsage << '\n';
+          return core::kExitUsage;
+        }
+      }
+    }
+    for (int k = 1; k < 4; ++k) {  // transports only (csv unbounded)
+      if (!requested[k] || !outs[k]->select_given) {
+        continue;
+      }
+      if (!cli::signal_channels_fit(outs[k]->serials.size())) {
+        out << "Error: --emit-" << names[k] << "-select needs "
+            << (outs[k]->serials.size() + 1) << " channels, transport holds "
+            << link::kMaxChannels << '\n';
+        out << kUsage << '\n';
+        return core::kExitUsage;
+      }
+    }
+    if (!requested[1] && !requested[2] && !requested[3]) {
+      // No transport: nothing to validate (single default source always fits).
+    } else if (!csv_sampling.select_given && !shm_sampling.select_given &&
+               !tcp_sampling.select_given && !udp_sampling.select_given) {
+      // Unfiltered single-source signal run: 2 channels, always fits.
+    }
+  } else if (shm_name || tcp_endpoint || udp_endpoint) {
+    if (n_particles > static_cast<long long>(link::kMaxItems)) {
+      out << "Error: " << n_particles << " particles need " << n_particles
+          << " items, transport holds " << link::kMaxItems << '\n';
+      out << kUsage << '\n';
+      return core::kExitUsage;
+    }
+  }
 
   // Headless run goes through the engine seam: the CLI builds a RunConfig
   // (plain data, no engine wiring here) and the driver owns the rest.
@@ -323,6 +453,83 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
 
+  // Per-output sampling wrappers (PHYSI-34, edge-side only — Runner keeps
+  // its single global emit_every gate; each output further selects via
+  // StrideSink step%stride==0 and/or SignalSubsetSink serial allowlists).
+  // Chain per output: publisher <- Subset (if select) <- Stride (if != 1).
+  // Wrappers borrow their inner sink and outlive the run; TCP servicing and
+  // finish() stay on the inner publisher. Counters make drops loud.
+  std::optional<emit::SignalSubsetSink> csv_subset;
+  std::optional<emit::StrideSink> csv_stride;
+  std::optional<emit::SignalSubsetSink> sig_csv_subset;
+  std::optional<emit::StrideSink> sig_csv_stride;
+  std::optional<emit::SignalSubsetSink> shm_subset;
+  std::optional<emit::StrideSink> shm_stride;
+  std::optional<emit::SignalSubsetSink> tcp_subset;
+  std::optional<emit::StrideSink> tcp_stride;
+  std::optional<emit::SignalSubsetSink> udp_subset;
+  std::optional<emit::StrideSink> udp_stride;
+  emit::ISink *csv_out = nullptr;
+  emit::ISink *sig_csv_out = nullptr;
+  emit::ISink *shm_out = nullptr;
+  emit::ISink *tcp_out = nullptr;
+  emit::ISink *udp_out = nullptr;
+  if (csv) {
+    csv_out = &*csv;
+    if (csv_sampling.stride_given && csv_sampling.stride != 1) {
+      csv_stride.emplace(*csv_out, csv_sampling.stride);
+      csv_out = &*csv_stride;
+    }
+  }
+  if (sig_csv) {
+    sig_csv_out = &*sig_csv;
+    if (csv_sampling.select_given) {
+      sig_csv_subset.emplace(*sig_csv_out);
+      sig_csv_subset->set_subscription(csv_sampling.serials);
+      sig_csv_out = &*sig_csv_subset;
+    }
+    if (csv_sampling.stride_given && csv_sampling.stride != 1) {
+      sig_csv_stride.emplace(*sig_csv_out, csv_sampling.stride);
+      sig_csv_out = &*sig_csv_stride;
+    }
+  }
+  if (shm) {
+    shm_out = &*shm;
+    if (is_signal && shm_sampling.select_given) {
+      shm_subset.emplace(*shm_out);
+      shm_subset->set_subscription(shm_sampling.serials);
+      shm_out = &*shm_subset;
+    }
+    if (shm_sampling.stride_given && shm_sampling.stride != 1) {
+      shm_stride.emplace(*shm_out, shm_sampling.stride);
+      shm_out = &*shm_stride;
+    }
+  }
+  if (tcp) {
+    tcp_out = &*tcp;
+    if (is_signal && tcp_sampling.select_given) {
+      tcp_subset.emplace(*tcp_out);
+      tcp_subset->set_subscription(tcp_sampling.serials);
+      tcp_out = &*tcp_subset;
+    }
+    if (tcp_sampling.stride_given && tcp_sampling.stride != 1) {
+      tcp_stride.emplace(*tcp_out, tcp_sampling.stride);
+      tcp_out = &*tcp_stride;
+    }
+  }
+  if (udp) {
+    udp_out = &*udp;
+    if (is_signal && udp_sampling.select_given) {
+      udp_subset.emplace(*udp_out);
+      udp_subset->set_subscription(udp_sampling.serials);
+      udp_out = &*udp_subset;
+    }
+    if (udp_sampling.stride_given && udp_sampling.stride != 1) {
+      udp_stride.emplace(*udp_out, udp_sampling.stride);
+      udp_out = &*udp_stride;
+    }
+  }
+
   // Persistent configured run (PHYSI-35): one build, then either a fast
   // batch or paced chunks against absolute deadlines (PHYSI-36). Sinks stay
   // caller-owned and are attached once; the engine never sleeps.
@@ -338,20 +545,20 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   world::State s;
   std::array<emit::ISink *, 5> sink_arr{};
   std::size_t n_sinks = 0;
-  if (csv) {
-    sink_arr[n_sinks++] = &*csv;
+  if (csv_out) {
+    sink_arr[n_sinks++] = csv_out;
   }
-  if (sig_csv) {
-    sink_arr[n_sinks++] = &*sig_csv;
+  if (sig_csv_out) {
+    sink_arr[n_sinks++] = sig_csv_out;
   }
-  if (shm) {
-    sink_arr[n_sinks++] = &*shm;
+  if (shm_out) {
+    sink_arr[n_sinks++] = shm_out;
   }
-  if (tcp) {
-    sink_arr[n_sinks++] = &*tcp;
+  if (tcp_out) {
+    sink_arr[n_sinks++] = tcp_out;
   }
-  if (udp) {
-    sink_arr[n_sinks++] = &*udp;
+  if (udp_out) {
+    sink_arr[n_sinks++] = udp_out;
   }
   for (std::size_t k = 0; k < n_sinks; ++k) {
     run.add_sink(*sink_arr[k]);
@@ -437,21 +644,51 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       out << "Error: failed writing CSV file '" << csv->path() << "'\n";
       return core::kExitRuntime;
     }
-    out << "csv: " << csv->path() << " (" << csv->rows_written() << " rows)\n";
+    out << "csv: " << csv->path() << " (" << csv->rows_written() << " rows";
+    if (csv_stride) {
+      out << ", stride=" << csv_stride->stride() << " matched=" << csv_stride->matched()
+          << " dropped=" << csv_stride->dropped();
+    }
+    out << ")\n";
   }
   if (sig_csv) {
     if (!sig_csv->flush().ok()) {
       out << "Error: failed writing CSV file '" << sig_csv->path() << "'\n";
       return core::kExitRuntime;
     }
-    out << "csv: " << sig_csv->path() << " (" << sig_csv->rows_written() << " rows)\n";
+    out << "csv: " << sig_csv->path() << " (" << sig_csv->rows_written() << " rows";
+    if (csv_sampling.select_given) {
+      out << ", select=" << cli::format_emit_select(csv_sampling.serials);
+      if (sig_csv_subset) {
+        out << " matched=" << sig_csv_subset->matched()
+            << " dropped=" << sig_csv_subset->dropped()
+            << " forwarded_rows=" << sig_csv_subset->forwarded_rows();
+      }
+    }
+    if (sig_csv_stride) {
+      out << ", stride=" << sig_csv_stride->stride() << " matched=" << sig_csv_stride->matched()
+          << " dropped=" << sig_csv_stride->dropped();
+    }
+    out << ")\n";
   }
   if (shm) {
     if (!shm->ok()) {
       out << "Error: SHM publish failed on '" << shm->name() << "'\n";
       return core::kExitRuntime;
     }
-    out << "shm: " << shm->name() << " (" << shm->stats().published << " frames)\n";
+    out << "shm: " << shm->name() << " (" << shm->stats().published << " frames";
+    if (shm_sampling.select_given) {
+      out << ", select=" << cli::format_emit_select(shm_sampling.serials);
+      if (shm_subset) {
+        out << " matched=" << shm_subset->matched() << " dropped=" << shm_subset->dropped()
+            << " forwarded_rows=" << shm_subset->forwarded_rows();
+      }
+    }
+    if (shm_stride) {
+      out << ", stride=" << shm_stride->stride() << " matched=" << shm_stride->matched()
+          << " dropped=" << shm_stride->dropped();
+    }
+    out << ")\n";
   }
   if (tcp) {
     if (!tcp_finish.ok() || tcp->has_pending_frame() || !tcp->ok()) {
@@ -463,7 +700,19 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       return core::kExitRuntime;
     }
     out << "tcp: " << tcp->endpoint() << " (" << tcp->stats().published << " frames, "
-        << tcp->stats().dropped_send + tcp->stats().dropped_over_bound << " dropped)\n";
+        << tcp->stats().dropped_send + tcp->stats().dropped_over_bound << " dropped";
+    if (tcp_sampling.select_given) {
+      out << ", select=" << cli::format_emit_select(tcp_sampling.serials);
+      if (tcp_subset) {
+        out << " matched=" << tcp_subset->matched() << " dropped=" << tcp_subset->dropped()
+            << " forwarded_rows=" << tcp_subset->forwarded_rows();
+      }
+    }
+    if (tcp_stride) {
+      out << ", stride=" << tcp_stride->stride() << " matched=" << tcp_stride->matched()
+          << " dropped=" << tcp_stride->dropped();
+    }
+    out << ")\n";
   }
   if (udp) {
     if (!udp->ok()) {
@@ -471,7 +720,19 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       return core::kExitRuntime;
     }
     out << "udp: " << udp->endpoint() << " (" << udp->stats().published << " frames, "
-        << udp->stats().dropped_send + udp->stats().dropped_over_bound << " dropped)\n";
+        << udp->stats().dropped_send + udp->stats().dropped_over_bound << " dropped";
+    if (udp_sampling.select_given) {
+      out << ", select=" << cli::format_emit_select(udp_sampling.serials);
+      if (udp_subset) {
+        out << " matched=" << udp_subset->matched() << " dropped=" << udp_subset->dropped()
+            << " forwarded_rows=" << udp_subset->forwarded_rows();
+      }
+    }
+    if (udp_stride) {
+      out << ", stride=" << udp_stride->stride() << " matched=" << udp_stride->matched()
+          << " dropped=" << udp_stride->dropped();
+    }
+    out << ")\n";
   }
   return core::kExitOk;
 }

@@ -368,6 +368,168 @@ void test_cli_signal() {
   }
 }
 
+void test_cli_per_output_sampling() {
+  // Per-output stride: decimated CSV keeps step-aligned steps only.
+  {
+    const std::string path = "/tmp/wengine_test_sim_stride.csv";
+    std::remove(path.c_str());
+    const auto [rc, s] =
+        run_sig("run --sig-kind dc --sig-offset 1V --steps 6 --emit-csv " + path +
+                " --emit-csv-stride 2");
+    assert(rc == 0);
+    assert(s.find("stride=2") != std::string::npos);
+    std::ifstream in(path);
+    std::string header;
+    assert(static_cast<bool>(std::getline(in, header)));
+    std::vector<std::string> rows;
+    std::string line;
+    while (std::getline(in, line)) {
+      rows.push_back(line);
+    }
+    assert(rows.size() == 3);  // steps 2,4,6 (decimation aliases bandwidth)
+    assert(rows[0].rfind("2,", 0) == 0);
+    assert(rows[1].rfind("4,", 0) == 0);
+    assert(rows[2].rfind("6,", 0) == 0);
+    std::remove(path.c_str());
+  }
+  // Per-output select: subset CSV keeps serials only (rows filter, ticks stay).
+  {
+    const std::string path = "/tmp/wengine_test_sim_select.csv";
+    std::remove(path.c_str());
+    const auto [rc, s] =
+        run_sig("run --sig-kind dc --sig-offset 1V --sig-count 3 --steps 2 --emit-csv " +
+                path + " --emit-csv-select 0,2");
+    assert(rc == 0);
+    assert(s.find("select=0,2") != std::string::npos);
+    std::ifstream in(path);
+    std::string header;
+    assert(static_cast<bool>(std::getline(in, header)));
+    std::vector<std::string> rows;
+    std::string line;
+    while (std::getline(in, line)) {
+      rows.push_back(line);
+    }
+    assert(rows.size() == 4);  // 2 steps x 2 serials
+    for (const std::string &r : rows) {
+      // CSV columns: step,time,sig_id,value,quantity — check sig_id exactly.
+      const std::size_t c1 = r.find(',');
+      const std::size_t c2 = r.find(',', c1 + 1);
+      const std::size_t c3 = r.find(',', c2 + 1);
+      const std::size_t c4 = r.find(',', c3 + 1);
+      assert(c1 != std::string::npos && c2 != std::string::npos &&
+             c3 != std::string::npos && c4 != std::string::npos);
+      const std::string id = r.substr(c2 + 1, c3 - c2 - 1);
+      assert(id == "0" || id == "2");
+    }
+    std::remove(path.c_str());
+  }
+  // Global + per-output intersection: emit-every=2, stride=3 -> steps 6,12.
+  {
+    const std::string path = "/tmp/wengine_test_sim_both.csv";
+    std::remove(path.c_str());
+    const auto [rc, s] =
+        run_sig("run --sig-kind dc --sig-offset 1V --steps 12 --emit-every 2 --emit-csv " +
+                path + " --emit-csv-stride 3");
+    assert(rc == 0);
+    std::ifstream in(path);
+    std::string header;
+    assert(static_cast<bool>(std::getline(in, header)));
+    std::vector<std::string> rows;
+    std::string line;
+    while (std::getline(in, line)) {
+      rows.push_back(line);
+    }
+    assert(rows.size() == 2);
+    assert(rows[0].rfind("6,", 0) == 0);
+    assert(rows[1].rfind("12,", 0) == 0);
+    std::remove(path.c_str());
+  }
+  // Full-rate recorder + decimated live output: identical final State.
+  {
+    const std::string full = "/tmp/wengine_test_sim_full.csv";
+    const std::string seg = "/wengine-test-sim-samp-" + std::to_string(::getpid());
+    std::remove(full.c_str());
+    const auto [rc1, s1] = run_sig("run --sig-kind dc --sig-offset 2V --steps 6 --emit-csv " +
+                                   full + " --emit-shm " + seg + " --emit-shm-stride 3");
+    assert(rc1 == 0);
+    assert(s1.find("csv: " + full + " (6 rows") != std::string::npos);
+    assert(s1.find("shm: " + seg) != std::string::npos);
+    assert(s1.find("stride=3") != std::string::npos);
+    assert(s1.find("s0: dc value=2 U") != std::string::npos);
+    std::ifstream in(full);
+    std::string header;
+    assert(static_cast<bool>(std::getline(in, header)));
+    std::size_t n_rows = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+      ++n_rows;
+    }
+    assert(n_rows == 6);  // recorder stayed complete while live decimated
+    std::remove(full.c_str());
+    const auto [rc2, s2] = run_sig("run --sig-kind dc --sig-offset 2V --steps 6");
+    assert(rc2 == 0);
+    // Same final value with and without sampling wrappers.
+    assert(s1.find("s0: dc value=2 U") != std::string::npos);
+    assert(s2.find("s0: dc value=2 U") != std::string::npos);
+  }
+  // Muted stride drops everything loudly but still succeeds.
+  {
+    const std::string path = "/tmp/wengine_test_sim_muted.csv";
+    std::remove(path.c_str());
+    const auto [rc, s] = run_sig("run --sig-kind dc --steps 3 --emit-csv " + path +
+                                 " --emit-csv-stride 0");
+    assert(rc == 0);
+    assert(s.find("dropped=3") != std::string::npos);
+    std::ifstream in(path);
+    std::string header;
+    assert(static_cast<bool>(std::getline(in, header)));
+    std::string tail;
+    assert(!static_cast<bool>(std::getline(in, tail)));
+    std::remove(path.c_str());
+  }
+  // Usage errors: orphan stride/select, bad lists, out-of-range, over capacity.
+  assert(run_sig("run --steps 2 --emit-csv-stride 2").first == 2);
+  assert(run_sig("run --steps 2 --emit-shm-stride 2").first == 2);
+  assert(run_sig("run --steps 2 --emit-csv-select 0").first == 2);
+  assert(run_sig("run --sig-kind dc --steps 2 --emit-csv /tmp/x.csv --emit-csv-select 5").first ==
+         2);
+  {
+    const std::string path = "/tmp/wengine_test_sim_dup.csv";
+    assert(run_sig("run --sig-kind dc --sig-count 3 --steps 2 --emit-csv " + path +
+                   " --emit-csv-select 0,0")
+               .first == 2);
+    assert(run_sig("run --sig-kind dc --steps 2 --emit-csv " + path +
+                   " --emit-csv-select ' '")
+               .first == 2);
+    assert(run_sig("run --sig-kind dc --steps 2 --emit-csv " + path +
+                   " --emit-csv-stride -1")
+               .first == 2);
+  }
+  {
+    const std::string seg = "/wengine-test-sim-cap-" + std::to_string(::getpid());
+    // 70 sources need 71 channels > 64: unfiltered transport refuses fast.
+    assert(run_sig("run --sig-kind dc --sig-count 70 --steps 2 --emit-shm " + seg).first == 2);
+    // ...but a fitting subset is accepted.
+    const auto [rc, s] = run_sig("run --sig-kind dc --sig-count 70 --steps 2 --emit-shm " +
+                                 seg + " --emit-shm-select 0,1,2");
+    assert(rc == 0);
+    assert(s.find("select=0,1,2") != std::string::npos);
+  }
+  // sim projectile: strides allowed, selections need the signal solver.
+  assert(run_sim("run --steps 2 --emit-shm-stride 2").first == 2);
+  assert(run_sim("run --steps 2 --emit-csv /tmp/x.csv --emit-csv-select 0").first == 2);
+  {
+    const std::string path = "/tmp/wengine_test_sim_pstride.csv";
+    std::remove(path.c_str());
+    const auto [rc, s] =
+        run_sim("run --steps 4 --particles 1 --emit-csv " + path + " --emit-csv-stride 2");
+    assert(rc == 0);
+    assert(s.find("stride=2") != std::string::npos);
+    assert(s.find("csv: " + path + " (2 rows") != std::string::npos);
+    std::remove(path.c_str());
+  }
+}
+
 } // namespace
 
 int main() {
@@ -380,6 +542,7 @@ int main() {
   test_cli_solver_selection();
   test_cli_errors();
   test_cli_signal();
+  test_cli_per_output_sampling();
   std::cout << "test_sim: OK\n";
   return 0;
 }

@@ -267,8 +267,9 @@ void test_completion() {
     const auto c = complete_line("sim --", 6, all);
     assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
            has(c, "--emit-shm") && has(c, "--emit-tcp") &&
-           has(c, "--emit-udp") && has(c, "--solver") && has(c, "--paced") &&
-           has(c, "--rate"));
+           has(c, "--emit-udp") && has(c, "--emit-every") &&
+           has(c, "--emit-shm-stride") && has(c, "--emit-shm-select") &&
+           has(c, "--solver") && has(c, "--paced") && has(c, "--rate"));
   }
   assert(complete_line("sim run --steps 10", 18, all).empty()); // numeric value
   {
@@ -285,8 +286,9 @@ void test_completion() {
     const auto c = complete_line("sig --", 6, all);
     assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
            has(c, "--emit-shm") && has(c, "--emit-tcp") && has(c, "--emit-udp") &&
-           has(c, "--forever") && has(c, "--paced") && has(c, "--rate") &&
-           has(c, "--sig-kind") && has(c, "--sig-freq") &&
+           has(c, "--emit-every") && has(c, "--emit-csv-stride") &&
+           has(c, "--emit-shm-select") && has(c, "--forever") && has(c, "--paced") &&
+           has(c, "--rate") && has(c, "--sig-kind") && has(c, "--sig-freq") &&
            has(c, "--sig-quantity") && has(c, "--sig-count") && has(c, "--sig-expr") &&
            has(c, "--sig-table") && has(c, "--sig-lua"));
   }

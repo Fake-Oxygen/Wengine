@@ -152,7 +152,8 @@ p0: x=10 y=5.04595 vx=10 vy=0.19
 All `sim` parameters are named (`--solver`, `--steps`, `--dt`, `--gravity`,
 `--particles`, `--x0/--y0/--vx0/--vy0`, `--emit-csv`, `--emit-shm`,
 `--emit-tcp`, `--emit-udp`,
-`--emit-every`, `--paced`, `--rate`); the CSV log carries the full snapshot stream for replay,
+`--emit-every`, `--emit-<csv|shm|tcp|udp>-stride`,
+`--emit-<csv|shm|tcp|udp>-select`, `--paced`, `--rate`); the CSV log carries the full snapshot stream for replay,
 while `--emit-shm <name>` publishes every emitted snapshot to a
 wengine-link SHM segment for realtime local consumers (`examples/
 link_sample` prints them live; the segment lives while `sim` runs). `--solver` selects from the
@@ -162,7 +163,13 @@ available), so new stepped solvers become runnable without touching the CLI —
 TCP actively connects to the listening reader at `host:port` and sends a
 version/domain hello followed by length-prefixed full frames. UDP sends
 versioned compact datagrams containing only used entries. Both transports are
-non-blocking; use `--emit-every` to decimate high-rate simulations, and use
+non-blocking; use `--emit-every` (global Runner gate) plus per-output
+`--emit-<out>-stride N` (step-aligned, `0` = muted) and, for signal outputs,
+`--emit-<out>-select <s0,s1>` (stable serials) to decimate high-rate
+simulations — an output sees steps divisible by both gates, and decimation
+may alias a waveform (see `docs/delivery.md` sec. 2). Keep the recorder at
+full rate while live outputs decimate/subscribe; outputs needing >64 channels
+are rejected before running. Use
 reader-side `LagStats` to observe network loss. Both commands run a fast
 batch by default; `--paced` spaces fixed-dt steps against absolute
 steady-clock deadlines instead (no drift, no skipped steps, `dt`
@@ -371,10 +378,11 @@ version gate, lag accounting), `test_link_shm` (segment create/publish/
   adapter, CSV->bus->CSV byte-identity), `test_link_sockets` (TCP hello/version
   gate, length-prefixed loopback exactness, UDP compact codec/datagrams,
   transient backpressure, partial-TCP-frame preservation, sub-Hz/100-kHz soaks
-  and lag accounting), `test_sim` also validates `--emit-shm` wiring and
-  TCP/UDP endpoint syntax +
- `sig run` expression/table/lua goldens and usage errors (incl. sandbox
- failure surfacing),
+   and lag accounting), `test_sim` also validates `--emit-shm` wiring,
+   TCP/UDP endpoint syntax, per-output strides/selects (global+per-output
+   intersection, full-rate CSV + decimated live output, capacity refusal) +
+  `sig run` expression/table/lua goldens and usage errors (incl. sandbox
+  failure surfacing),
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_signal_panel` (signal panel model validation/config + controller

@@ -643,6 +643,10 @@ re-investigated without a reason:
   arguments (braces do not protect them). Multi-element container
   comparisons in tests need a named expected value, never an inline
   braced list.
+* ThreadSanitizer on this host (WSL2): GCC 13 `libtsan` cannot start —
+  `FATAL: unexpected memory mapping` even for hello-world (ASAN is fine,
+  `-no-pie` does not help). Run TSAN builds with Clang
+  (`clang++ -fsanitize=thread`, v18.1.3 known good), never GCC here.
 
 ---
 
