@@ -318,10 +318,43 @@ struct SegmentHeader {
 // header for readers; over-bound drops stay local in v1. Socket publishers
 // add dropped_send (frames refused by a full peer/kernel buffer — transient,
 // counted, never sticky).
+//
+// PHYSI-39 per-cause vocabulary: every on_snapshot call counts exactly once
+// in `attempted`. At any quiescent point (no TCP pending frame) the
+// accounting is exact:
+//   attempted == published + dropped_over_bound + dropped_send
+//              + dropped_pending_blocked + dropped_queue_full
+//              + disabled_after_error (+ 1 while a TCP frame is pending).
+// Field notes:
+// - published: frames accepted locally (SHM bus / kernel). Local
+//   acceptance only — remote receipt is unknown unless a receiver reports
+//   its own LagStats.
+// - dropped_send: socket backpressure (TCP zero-byte EAGAIN, UDP datagram
+//   refused) — transient, counted, never sticky.
+// - dropped_pending_blocked: TCP only — a new frame dropped because the
+//   depth-1 pending tail was still blocked (stream framing forbids
+//   discarding a partial prefix). Previously folded into dropped_send.
+// - dropped_queue_full: reserved 0 for the PHYSI-45 bounded owning queue;
+//   no queue exists yet, so this stays 0 (kept so the report vocabulary
+//   is complete today).
+// - disabled_after_error: snapshots ignored after the publisher went
+//   sticky (including the frame that triggered a sticky local failure
+//   such as an adapter throw or a dead peer).
+// - bytes_accepted: wire bytes accepted locally (TCP length-prefix +
+//   record, UDP datagram, SHM slot image) for effective bytes/s.
+// - Intentional stride/subset skips live in the routing wrappers
+//   (emit/routing.hpp), never here; pending/abandoned-at-close is
+//   publisher state (has_pending_frame/pending_bytes), reported by the
+//   edge at finish/close rather than as a cumulative counter.
 struct PublisherStats {
+  std::uint64_t attempted = 0;
   std::uint64_t published = 0;
   std::uint64_t dropped_over_bound = 0;
   std::uint64_t dropped_send = 0;
+  std::uint64_t dropped_pending_blocked = 0;
+  std::uint64_t dropped_queue_full = 0;
+  std::uint64_t disabled_after_error = 0;
+  std::uint64_t bytes_accepted = 0;
 };
 
 // Reader outcome: only kOk yields a usable frame. Busy/Torn mean "retry

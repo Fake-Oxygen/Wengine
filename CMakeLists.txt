@@ -355,6 +355,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_link_sockets PRIVATE wengine_core wengine_link_net)
     add_test(NAME link_sockets COMMAND test_link_sockets)
 
+    add_executable(test_output_health tests/test_output_health.cpp)
+    target_link_libraries(test_output_health PRIVATE wengine_core wengine_link_shm wengine_link_net)
+    add_test(NAME output_health COMMAND test_output_health)
+
     add_executable(test_link_compact tests/test_link_compact.cpp)
     target_link_libraries(test_link_compact PRIVATE wengine_core)
     add_test(NAME link_compact COMMAND test_link_compact)

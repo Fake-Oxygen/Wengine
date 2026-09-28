@@ -118,7 +118,9 @@ ShmPublisher &ShmPublisher::operator=(ShmPublisher &&other) noexcept {
 }
 
 void ShmPublisher::on_snapshot(const world::Snapshot &snapshot) {
+  ++stats_.attempted;
   if (!status_.ok()) {
+    ++stats_.disabled_after_error;
     return;
   }
   Frame frame;
@@ -127,6 +129,7 @@ void ShmPublisher::on_snapshot(const world::Snapshot &snapshot) {
   } catch (...) {
     // Best-effort observer: sticky failure, never break the sim loop.
     status_ = {core::StatusCode::kInternal};
+    ++stats_.disabled_after_error;
     return;
   }
   const std::uint64_t seq = stats_.published + 1;
@@ -142,6 +145,7 @@ void ShmPublisher::on_snapshot(const world::Snapshot &snapshot) {
   slot_end_write(slot);
   header_note_publish(*header_);
   ++stats_.published;
+  stats_.bytes_accepted += static_cast<std::uint64_t>(sizeof(Slot));
 }
 
 void ShmPublisher::cleanup() noexcept {

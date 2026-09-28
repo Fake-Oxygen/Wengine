@@ -33,8 +33,12 @@
 //   ftruncate/mmap errno in last_errno()) leave an inert !ok() publisher.
 //
 // COUNTERS: stats().published == header publish_count (frames on the bus);
-// stats().dropped_over_bound counts refused frames. Readers derive exact
-// loss from per-frame frame_seq gaps (reader_missed).
+// stats().dropped_over_bound counts refused frames; see
+// link/output_report.hpp for the full per-cause vocabulary (attempted,
+// over-bound, queue-full, backpressure, pending-blocked, pending,
+// abandoned-at-close, disabled-after-error). Readers derive exact
+// loss from per-frame frame_seq gaps (reader_missed). Counts are local
+// acceptance only; remote receipt needs a receiver LagStats.
 //
 // PORTABILITY: POSIX-only TU (shm_open/ftruncate/mmap, src/link/
 // shm_publisher.cpp) — the one justified exception to the header-only

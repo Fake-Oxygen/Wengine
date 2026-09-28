@@ -8,6 +8,7 @@
 #include "wengine/emit/sink.hpp"
 #include "wengine/link/compact_codec.hpp"
 #include "wengine/link/frame.hpp"
+#include "wengine/link/output_report.hpp"
 #include "wengine/link/protocol.hpp"
 #include "wengine/link/socket_publisher.hpp"
 #include "wengine/solvers/run.hpp"
@@ -265,10 +266,13 @@ void test_tcp_backpressure_drops_without_stalling() {
     published = pub.stats().published;
     dropped_send = pub.stats().dropped_send;
     pending_frame = pub.has_pending_frame();
-    assert(published + dropped_send +
+    assert(published + dropped_send + pub.stats().dropped_pending_blocked +
                static_cast<std::uint64_t>(pending_frame) ==
            kAttempts);
-    assert(dropped_send > 0);
+    assert(pub.stats().attempted == kAttempts);
+    assert(pub.stats().disabled_after_error == 0);
+    assert(link::output_accounting_ok(pub.stats(), pending_frame ? 1 : 0));
+    assert(pub.stats().dropped_send + pub.stats().dropped_pending_blocked > 0);
     assert(pub.stats().dropped_over_bound == 0);
   }
   set_recv_timeout(peer);
@@ -475,6 +479,8 @@ void test_soak_100khz_tcp() {
   std::uint64_t published = 0;
   std::uint64_t dropped_send = 0;
   std::uint64_t dropped_bound = 0;
+  std::uint64_t dropped_blocked = 0;
+  std::uint64_t attempted = 0;
   bool pending_frame = false;
   Recorder rec;
   {
@@ -499,13 +505,16 @@ void test_soak_100khz_tcp() {
     published = pub.stats().published;
     dropped_send = pub.stats().dropped_send;
     dropped_bound = pub.stats().dropped_over_bound;
+    dropped_blocked = pub.stats().dropped_pending_blocked;
+    attempted = pub.stats().attempted;
     pending_frame = pub.has_pending_frame();
   } // publisher dtor closes the socket: FIN terminates the drain
   reader.join();
   ::close(peer);
   ::close(listen_fd);
 
-  assert(published + dropped_send +
+  assert(attempted == kSteps);
+  assert(published + dropped_send + dropped_blocked +
              static_cast<std::uint64_t>(pending_frame) ==
          kSteps); // exact accounting, no stall
   assert(dropped_bound == 0);
@@ -997,7 +1006,11 @@ void test_tcp_stall_pending_finish() {
     assert(got_pending);
     assert(pub.ok()); // transient drops never poison
     assert(pub.pending_bytes() > 0);
-    assert(pub.stats().published + pub.stats().dropped_send + 1 == attempts);
+    assert(pub.stats().attempted == attempts);
+    assert(pub.stats().published + pub.stats().dropped_send +
+               pub.stats().dropped_pending_blocked + 1 ==
+           attempts);
+    assert(link::output_accounting_ok(pub.stats(), 1));
 
     drain.peer = peer;
     reader = std::thread([&drain] { drain.run(); });

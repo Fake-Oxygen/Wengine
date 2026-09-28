@@ -314,7 +314,9 @@ TcpPublisher &TcpPublisher::operator=(TcpPublisher &&other) noexcept {
 }
 
 void TcpPublisher::on_snapshot(const world::Snapshot &snapshot) {
+  ++stats_.attempted;
   if (!status_.ok()) {
+    ++stats_.disabled_after_error;
     return;
   }
 
@@ -327,9 +329,10 @@ void TcpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   if (pending_size_ != 0) {
     if (!service_pending()) {
       if (!status_.ok()) {
+        ++stats_.disabled_after_error;
         return; // dead peer: sticky, set by service_pending()
       }
-      ++stats_.dropped_send;
+      ++stats_.dropped_pending_blocked;
       ++frame_seq_;
       return;
     }
@@ -341,6 +344,7 @@ void TcpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   } catch (...) {
     // Best-effort observer: sticky failure, never break the sim loop.
     status_ = {core::StatusCode::kInternal};
+    ++stats_.disabled_after_error;
     return;
   }
   // frame_seq counts attempts (not just sends) so readers account publisher
@@ -365,6 +369,7 @@ void TcpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   const SendResult r = send_all(fd_, wire_.data(), wire_len, sent, err);
   if (r == SendResult::kComplete) {
     ++stats_.published;
+    stats_.bytes_accepted += static_cast<std::uint64_t>(wire_len);
     return;
   }
   if (r == SendResult::kBackpressure) {
@@ -378,6 +383,7 @@ void TcpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   }
   last_errno_ = err;
   status_ = {core::StatusCode::kInternal}; // dead peer: sticky, like SHM teardown
+  ++stats_.disabled_after_error;
 }
 
 bool TcpPublisher::service_pending() noexcept {
@@ -399,6 +405,7 @@ bool TcpPublisher::service_pending() noexcept {
   pending_offset_ += sent;
   if (r == SendResult::kComplete) {
     ++stats_.published;
+    stats_.bytes_accepted += static_cast<std::uint64_t>(pending_size_);
     pending_size_ = 0;
     pending_offset_ = 0;
     return true;
@@ -555,7 +562,9 @@ UdpPublisher &UdpPublisher::operator=(UdpPublisher &&other) noexcept {
 }
 
 void UdpPublisher::on_snapshot(const world::Snapshot &snapshot) {
+  ++stats_.attempted;
   if (!status_.ok()) {
+    ++stats_.disabled_after_error;
     return;
   }
   Frame frame;
@@ -564,6 +573,7 @@ void UdpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   } catch (...) {
     // Best-effort observer: sticky failure, never break the sim loop.
     status_ = {core::StatusCode::kInternal};
+    ++stats_.disabled_after_error;
     return;
   }
   const std::uint64_t seq = ++frame_seq_;
@@ -582,6 +592,7 @@ void UdpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   const SendResult r = send_datagram(fd_, datagram_.data(), datagram_len, err);
   if (r == SendResult::kComplete) {
     ++stats_.published;
+    stats_.bytes_accepted += static_cast<std::uint64_t>(datagram_len);
     return;
   }
   if (r == SendResult::kBackpressure) {
@@ -590,6 +601,7 @@ void UdpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   }
   last_errno_ = err;
   status_ = {core::StatusCode::kInternal}; // socket dead: sticky
+  ++stats_.disabled_after_error;
 }
 
 void UdpPublisher::cleanup() noexcept {

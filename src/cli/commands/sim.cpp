@@ -6,6 +6,7 @@
 #include "wengine/emit/routing.hpp"
 #include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
+#include "wengine/link/output_report.hpp"
 #include "wengine/link/protocol.hpp"
 #include "wengine/link/shm_publisher.hpp"
 #include "wengine/link/socket_publisher.hpp"
@@ -16,8 +17,10 @@
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <csignal>
+#include <iostream>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -58,13 +61,63 @@ void request_sigint(int) noexcept { g_sigint_requested = 1; }
 
 bool sigint_requested() noexcept { return g_sigint_requested != 0; }
 
-constexpr std::array<std::string_view, 29> kSimOptions{{
+constexpr std::array<std::string_view, 30> kSimOptions{{
     "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
     "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-tcp", "--emit-udp",
     "--emit-every", "--emit-csv-stride", "--emit-shm-stride", "--emit-tcp-stride",
     "--emit-udp-stride", "--emit-csv-select", "--emit-shm-select", "--emit-tcp-select",
-    "--emit-udp-select", "--paced", "--rate", "--help", "-h",
+    "--emit-udp-select", "--emit-health", "--paced", "--rate", "--help", "-h",
 }};
+
+// Chunked live-output health (PHYSI-39): fast batches step in bounded
+// chunks so a mid-run sticky failure or backpressure burst surfaces on
+// stderr while the sim continues (telemetry never alters numerics).
+// Chunked run(N) accumulation is bit-identical to one run(total).
+inline constexpr std::uint64_t kHealthChunkSteps = 4096;
+
+void print_live_health(std::uint64_t done_steps,
+                       const std::optional<link::ShmPublisher> &shm,
+                       const std::optional<link::TcpPublisher> &tcp,
+                       const std::optional<link::UdpPublisher> &udp, double elapsed_s,
+                       double sample_rate_hz) {
+  std::cerr << "live: steps=" << done_steps << " sample_rate=" << sample_rate_hz
+            << "Hz elapsed=" << elapsed_s << "s";
+  if (elapsed_s > 0.0) {
+    if (shm) {
+      std::cerr << " shm_bytes_s="
+                << static_cast<double>(shm->stats().bytes_accepted) / elapsed_s;
+    }
+    if (tcp) {
+      std::cerr << " tcp_bytes_s="
+                << static_cast<double>(tcp->stats().bytes_accepted) / elapsed_s;
+    }
+    if (udp) {
+      std::cerr << " udp_bytes_s="
+                << static_cast<double>(udp->stats().bytes_accepted) / elapsed_s;
+    }
+  }
+  std::cerr << '\n';
+  if (shm) {
+    std::cerr << "live shm: "
+              << link::format_publisher_health(shm->stats(), shm->status(),
+                                              shm->last_errno(), 0, 0, 0)
+              << '\n';
+  }
+  if (tcp) {
+    const std::uint64_t pending = tcp->has_pending_frame() ? 1 : 0;
+    std::cerr << "live tcp: "
+              << link::format_publisher_health(tcp->stats(), tcp->status(),
+                                              tcp->last_errno(), pending,
+                                              tcp->pending_bytes(), pending)
+              << '\n';
+  }
+  if (udp) {
+    std::cerr << "live udp: "
+              << link::format_publisher_health(udp->stats(), udp->status(),
+                                              udp->last_errno(), 0, 0, 0)
+              << '\n';
+  }
+}
 
 } // namespace
 
@@ -82,6 +135,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   double x0 = 0.0, y0 = 0.0, vx0 = 10.0, vy0 = 10.0;
   long long emit_every = 1;
   const bool paced = args.take_flag({"--paced"});
+  const bool emit_health = args.take_flag({"--emit-health"});
   const auto o_rate = args.take_option({"--rate"});
   std::optional<std::string_view> csv_path;
   std::optional<std::string_view> shm_name;
@@ -566,6 +620,17 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   core::Status st = core::Status::success();
   solvers::paced::Stats paced_stats;
   const std::uint64_t total_steps = static_cast<std::uint64_t>(steps);
+  const bool has_live = shm || tcp || udp;
+  const double sample_rate_hz =
+      (dt > 0.0 && emit_every > 0)
+          ? 1.0 / (dt * static_cast<double>(emit_every))
+          : 0.0;
+  const auto wall_start = std::chrono::steady_clock::now();
+  auto wall_elapsed_s = [&] {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                         wall_start)
+        .count();
+  };
   using SignalHandler = void (*)(int);
   SignalHandler previous_sigint = nullptr;
   if (paced) {
@@ -576,16 +641,44 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
       return core::kExitRuntime;
     }
     const auto epoch = solvers::paced::SteadyClock::now();
+    auto last_report = std::chrono::steady_clock::now();
     auto idle = [&] {
       if (tcp) {
         (void)tcp->service_pending();
+      }
+      if (emit_health && has_live) {
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - last_report).count() >= 1.0) {
+          last_report = now;
+          print_live_health(run.state().step_index, shm, tcp, udp,
+                            wall_elapsed_s(), sample_rate_hz);
+        }
       }
     };
     st = solvers::paced::run_paced<solvers::paced::SteadyClock>(
         run, total_steps, rate_hz, 1, epoch, sigint_requested, idle, paced_stats);
     (void)std::signal(SIGINT, previous_sigint);
   } else {
-    st = run.run(total_steps);
+    // Chunked fast batch: bit-identical to one run(total_steps) while
+    // surfacing mid-run sticky/backpressure/over-bound on stderr for long
+    // runs when --emit-health is passed (PHYSI-39). Short runs and default
+    // runs stay silent beyond the final summary.
+    std::uint64_t done = 0;
+    while (done < total_steps) {
+      std::uint64_t n = kHealthChunkSteps;
+      if (n > total_steps - done) {
+        n = total_steps - done;
+      }
+      st = run.run(n);
+      if (!st.ok()) {
+        break;
+      }
+      done += n;
+      if (emit_health && has_live && done < total_steps) {
+        print_live_health(done, shm, tcp, udp, wall_elapsed_s(),
+                          sample_rate_hz);
+      }
+    }
   }
   s = run.state();
   // Explicit bounded stream finish (PHYSI-32): drain a partially accepted
@@ -673,10 +766,17 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   }
   if (shm) {
     if (!shm->ok()) {
-      out << "Error: SHM publish failed on '" << shm->name() << "'\n";
+      out << "Error: SHM publish failed on '" << shm->name() << "' ("
+          << link::format_publisher_health(shm->stats(), shm->status(),
+                                           shm->last_errno(), 0, 0, 0)
+          << ")\n";
       return core::kExitRuntime;
     }
     out << "shm: " << shm->name() << " (" << shm->stats().published << " frames";
+    if (emit_health) {
+      out << ", " << link::format_publisher_health(shm->stats(), shm->status(),
+                                                   shm->last_errno(), 0, 0, 0);
+    }
     if (shm_sampling.select_given) {
       out << ", select=" << cli::format_emit_select(shm_sampling.serials);
       if (shm_subset) {
@@ -691,16 +791,24 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     out << ")\n";
   }
   if (tcp) {
+    const std::uint64_t pending = tcp->has_pending_frame() ? 1 : 0;
     if (!tcp_finish.ok() || tcp->has_pending_frame() || !tcp->ok()) {
-      out << "Error: TCP publish incomplete on '" << tcp->endpoint() << "' (pending_frames="
-          << (tcp->has_pending_frame() ? 1 : 0) << " pending_bytes=" << tcp->pending_bytes()
-          << " published=" << tcp->stats().published << " dropped="
-          << tcp->stats().dropped_send + tcp->stats().dropped_over_bound << " errno="
-          << tcp->last_errno() << ")\n";
+      out << "Error: TCP publish incomplete on '" << tcp->endpoint() << "' ("
+          << link::format_publisher_health(tcp->stats(), tcp->status(),
+                                           tcp->last_errno(), pending,
+                                           tcp->pending_bytes(), pending)
+          << ")\n";
       return core::kExitRuntime;
     }
     out << "tcp: " << tcp->endpoint() << " (" << tcp->stats().published << " frames, "
-        << tcp->stats().dropped_send + tcp->stats().dropped_over_bound << " dropped";
+        << tcp->stats().dropped_over_bound + tcp->stats().dropped_send +
+               tcp->stats().dropped_pending_blocked + tcp->stats().dropped_queue_full
+        << " dropped";
+    if (emit_health) {
+      out << ", " << link::format_publisher_health(tcp->stats(), tcp->status(),
+                                                   tcp->last_errno(), pending,
+                                                   tcp->pending_bytes(), 0);
+    }
     if (tcp_sampling.select_given) {
       out << ", select=" << cli::format_emit_select(tcp_sampling.serials);
       if (tcp_subset) {
@@ -716,11 +824,20 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   }
   if (udp) {
     if (!udp->ok()) {
-      out << "Error: UDP publish failed on '" << udp->endpoint() << "'\n";
+      out << "Error: UDP publish failed on '" << udp->endpoint() << "' ("
+          << link::format_publisher_health(udp->stats(), udp->status(),
+                                           udp->last_errno(), 0, 0, 0)
+          << ")\n";
       return core::kExitRuntime;
     }
     out << "udp: " << udp->endpoint() << " (" << udp->stats().published << " frames, "
-        << udp->stats().dropped_send + udp->stats().dropped_over_bound << " dropped";
+        << udp->stats().dropped_over_bound + udp->stats().dropped_send +
+               udp->stats().dropped_pending_blocked + udp->stats().dropped_queue_full
+        << " dropped";
+    if (emit_health) {
+      out << ", " << link::format_publisher_health(udp->stats(), udp->status(),
+                                                   udp->last_errno(), 0, 0, 0);
+    }
     if (udp_sampling.select_given) {
       out << ", select=" << cli::format_emit_select(udp_sampling.serials);
       if (udp_subset) {

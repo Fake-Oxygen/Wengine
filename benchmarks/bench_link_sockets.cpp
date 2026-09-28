@@ -423,9 +423,11 @@ void print_row(std::string_view transport, std::string_view scenario,
             << ": payload=" << (p.is_signal ? "signal" : "particle")
             << " frames=" << frames << " items=" << p.items
             << " attempted=" << attempted << "/s goodput=" << goodput << "/s"
-            << " sent=" << stats.published
+            << " published_local=" << stats.published
             << " dropped_send=" << stats.dropped_send
             << " dropped_over_bound=" << stats.dropped_over_bound
+            << " pending_blocked=" << stats.dropped_pending_blocked
+            << " disabled=" << stats.disabled_after_error
             << " pending=" << (pending ? 1 : 0)
             << " received=" << r.lag.received << " missed=" << r.lag.missed
             << " max_gap=" << r.lag.max_gap << " tail=" << tail
@@ -643,7 +645,7 @@ int run_tcp(const Pattern &p, std::uint64_t frames, double rate_hz, bool paced,
     ::close(peer);
     ::close(listen_fd);
     print_row("tcp", label, p, frames, wall, cpu, stats, pending, result);
-    if (stats.published + stats.dropped_send +
+    if (stats.published + stats.dropped_send + stats.dropped_pending_blocked +
             static_cast<std::uint64_t>(pending) !=
         frames) {
       std::cout << "bench_link_sockets tcp stalled: accounting mismatch\n";

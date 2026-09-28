@@ -375,10 +375,12 @@ adapter, encode/decode exactness, seqlock states incl. threaded hammer,
 version gate, lag accounting), `test_link_shm` (segment create/publish/
  read-back, headless fan-out exactness, drop-oldest, failure paths, reader
  attach/poll), `test_link_bridge` (CSV parse fidelity + rejection, inverse
-  adapter, CSV->bus->CSV byte-identity), `test_link_sockets` (TCP hello/version
-  gate, length-prefixed loopback exactness, UDP compact codec/datagrams,
-  transient backpressure, partial-TCP-frame preservation, sub-Hz/100-kHz soaks
-   and lag accounting), `test_sim` also validates `--emit-shm` wiring,
+   adapter, CSV->bus->CSV byte-identity), `test_link_sockets` (TCP hello/version
+   gate, length-prefixed loopback exactness, UDP compact codec/datagrams,
+   transient backpressure, partial-TCP-frame preservation, sub-Hz/100-kHz soaks
+    and lag accounting), `test_output_health` (per-cause live-output
+   accounting, shared health report, over-bound/disconnect fault injection,
+   telemetry-failure numerical isolation), `test_sim` also validates `--emit-shm` wiring,
    TCP/UDP endpoint syntax, per-output strides/selects (global+per-output
    intersection, full-rate CSV + decimated live output, capacity refusal) +
   `sig run` expression/table/lua goldens and usage errors (incl. sandbox
@@ -398,7 +400,7 @@ fit, zoom/pan, grid steps). Benchmarks:
 (ns/source-step over a live Runner + SignalSolver, opaque params), `bench_link`
 (publish ns/frame + frames/s through a live SHM segment, slow-reader
 published/received/missed/max_gap), `bench_link_sockets` (TCP/UDP loopback
-frames/s, sent/dropped/received bytes and reader lag; args select mode, frames,
+frames/s, published-local/dropped/received bytes and reader lag; args select mode, frames,
 and particle count).
 
 ## Flow
@@ -529,7 +531,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   signal receivers; link_socket_protocol.py has the shared decoder)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,link_compact,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,output_health,link_compact,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

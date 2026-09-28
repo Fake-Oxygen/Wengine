@@ -143,7 +143,25 @@ across threads without external sync.
 - Over-bound (loud refusal): `PublisherStats::dropped_over_bound`
   (every transport agrees: the shared `encode_frame` gate runs first).
 - Socket backpressure (transient, counted, non-sticky):
-  `PublisherStats::dropped_send`; published frames:
+  `PublisherStats::dropped_send` (TCP zero-byte EAGAIN + UDP datagram
+  refusal); TCP frames dropped while the depth-1 pending tail is still
+  blocked count separately as `dropped_pending_blocked` (previously
+  folded into `dropped_send`). `dropped_queue_full` is reserved 0 until
+  the bounded owning queue lands.
+- Attempted/disabled/bytes: `attempted` counts every `on_snapshot` call;
+  `disabled_after_error` counts snapshots ignored once sticky (including
+  the frame that triggered the sticky failure); `bytes_accepted` counts
+  wire bytes accepted locally for effective bytes/s. At rest
+  `attempted == published + over_bound + backpressure + pending_blocked
+  + queue_full + disabled (+ 1 while a TCP frame is pending)` — see
+  `link/output_report.hpp::output_accounting_ok`. Intentional
+  stride/subset skips live in the routing wrappers, never here; pending
+  (`has_pending_frame`/`pending_bytes`) and abandoned-at-close are edge
+  state reported at finish/close. `sim run` / `sig run` print the
+  per-cause line on stderr per chunk (long runs) and on stdout at
+  completion only with `--emit-health`; default output stays concise.
+  Publish failures are always loud, with or without the flag.
+- Published frames:
   `PublisherStats::published` (mirrors SHM header `publish_count`).
 - Received/observed: `LagStats::received`, `missed`, `max_gap`
   (from `frame_seq` gaps; pre-attach history counts as `missed`;
@@ -155,7 +173,8 @@ across threads without external sync.
 - Rendered: `FrameHistory::size()` / capacity evictions on the display
   side; eviction is display coalescing, never transport loss.
 
-Local socket acceptance (`sent`) is not remote receipt. Remote receipt
+Local socket acceptance (`published_local`, formerly `sent` in benches)
+is not remote receipt. Remote receipt
 is unknown unless a receiver reports it via its own `LagStats`.
 
 ## 6. CSV is output replay, not a restart checkpoint

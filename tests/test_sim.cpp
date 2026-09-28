@@ -189,7 +189,19 @@ void test_cli_shm() {
   const auto [rc, s] =
       run_sim("run --steps 10 --particles 1 --emit-shm " + seg);
   assert(rc == 0);
+  // Default output stays concise; the per-cause breakdown needs --emit-health.
   assert(s.find("shm: " + seg + " (10 frames)") != std::string::npos);
+  assert(s.find("attempted=") == std::string::npos);
+  const auto [rc_h, s_h] =
+      run_sim("run --steps 10 --particles 1 --emit-shm " + seg + " --emit-health");
+  assert(rc_h == 0);
+  assert(s_h.find("shm: " + seg + " (10 frames, attempted=10") != std::string::npos);
+  assert(s_h.find("published_local=10") != std::string::npos);
+  assert(s_h.find("over_bound=0") != std::string::npos);
+  assert(s_h.find("backpressure=0") != std::string::npos);
+  assert(s_h.find("pending_blocked=0") != std::string::npos);
+  assert(s_h.find("disabled=0") != std::string::npos);
+  assert(s_h.find("local acceptance only") != std::string::npos);
   // CSV + SHM fan out together through one run.
   const auto [rc2, s2] = run_sim("run --steps 4 --emit-every 2 --emit-shm " + seg +
                                  " --emit-csv /tmp/wengine_test_sim_shm.csv");
@@ -359,12 +371,21 @@ void test_cli_signal() {
     assert(rc == 0 && s.find("sig run") != std::string::npos);
   }
   // SHM publishes signal channels through the signal adapter.
+  // Default output stays concise; --emit-health adds the per-cause breakdown.
   {
     const std::string seg = "/wengine-test-sim-sig-" + std::to_string(::getpid());
     const auto [rc, s] = run_sig("run --sig-kind dc --sig-offset 1V --steps 5 --emit-shm " +
                                  seg);
     assert(rc == 0);
     assert(s.find("shm: " + seg + " (5 frames)") != std::string::npos);
+    assert(s.find("attempted=") == std::string::npos);
+    const auto [rc_h, s_h] =
+        run_sig("run --sig-kind dc --sig-offset 1V --steps 5 --emit-shm " + seg +
+                " --emit-health");
+    assert(rc_h == 0);
+    assert(s_h.find("shm: " + seg + " (5 frames, attempted=5") != std::string::npos);
+    assert(s_h.find("published_local=5") != std::string::npos);
+    assert(s_h.find("local acceptance only") != std::string::npos);
   }
 }
 
