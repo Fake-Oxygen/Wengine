@@ -1,8 +1,9 @@
 #pragma once
 
 // External frame sources for apps/gui: (b) SHM subscriber mode attached to
-// a headless publisher, (c) CSV replay playback of a CsvSink log.
-// (a) in-process interactive runs stay in SimController, untouched.
+// a headless publisher, (c) CSV replay playback of a CsvSink or
+// SignalsCsvSink log. (a) in-process interactive runs stay in SimController,
+// untouched.
 //
 // Both classes are engine-only (no ImGui, SDL, or Vulkan): views consume
 // their link::Frame output exactly like in-process frames, so graphs, 2D
@@ -16,14 +17,20 @@
 // SHM notes: attach is lazy (ensure_attached each UI tick), so the GUI
 // auto-connects when the headless run starts; missing/unready segments
 // read as "waiting", refusals/errors as messages with the reader's own
-// status. CSV notes: logs carry no provenance, so replay adapts through
-// the FrameAdapter parameter (default particle, like ShmPublisher);
-// playback is paced by the log's own time deltas x rate, parks at the end
+// status. The wire Frame decode is solver-agnostic, so SHM replay of
+// signal runs needs no new code (same shared Frame path as TCP/UDP).
+// CSV notes: logs carry no provenance, so replay sniffs the header —
+// particle logs adapt through the particle adapter, signal logs through
+// the signal adapter (explicit set_adapter after load still overrides).
+// Playback is paced by the log's own time deltas x rate, parks at the end
 // like SimController parks at its step budget, and Reset + Play replays
-// deterministically for identical wall-tick sequences.
+// deterministically for identical wall-tick sequences. Known parser limit
+// (dedicated task): slot-recycled serial orders are rejected by
+// parse_signals_log — replay covers fresh-serial logs.
 
 #include "wengine/core/status.hpp"
 #include "wengine/emit/csv_sink.hpp"
+#include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/link/protocol.hpp"
 #include "wengine/link/shm_reader.hpp"
@@ -33,6 +40,7 @@
 #include <cstring>
 #include <fstream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -170,11 +178,31 @@ class CsvReplay {
 
   // Load from an open stream (or directly from a file: GUI owns file I/O,
   // so load_file keeps the "cannot open" error beside the parse errors).
-  // Replaces any previous log, parks at snapshot 0, stops playback.
+  // Replaces any previous log, parks at snapshot 0, stops playback. The
+  // header selects the parser + adapter (particle vs signal logs); empty
+  // signal ticks replay as count-only frames, exactly like live ones.
   [[nodiscard]] core::Status load(std::istream &in) {
+    std::ostringstream raw;
+    raw << in.rdbuf();
+    if (!in && !in.eof()) {
+      clear();
+      error_ = "cannot read log";
+      last_ = {core::StatusCode::kInternal};
+      return last_;
+    }
+    const std::string text = raw.str();
+    const std::string header = text.substr(0, text.find('\n'));
+    const bool is_signal = header == "step,time,sig_id,value,quantity";
     std::vector<world::Snapshot> snaps;
     std::string error;
-    const core::Status st = emit::parse_csv_log(in, snaps, error);
+    core::Status st{core::StatusCode::kInternal};
+    if (is_signal) {
+      std::istringstream sig_in(text);
+      st = emit::parse_signals_log(sig_in, snaps, error);
+    } else {
+      std::istringstream csv_in(text);
+      st = emit::parse_csv_log(csv_in, snaps, error);
+    }
     if (!st.ok()) {
       clear();
       error_ = error;
@@ -182,6 +210,7 @@ class CsvReplay {
       return st;
     }
     snaps_ = std::move(snaps);
+    adapter_ = is_signal ? &link::frame_from_signal_snapshot : &link::frame_from_snapshot;
     cursor_ = 0;
     acc_ = 0.0;
     playing_ = false;

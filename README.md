@@ -449,13 +449,17 @@ version gate, lag accounting), `test_link_shm` (segment create/publish/
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_signal_panel` (signal panel model validation/config + controller
-parity for signal runs, incl. expression batch + table/lua rejections),
+parity for signal runs, incl. expression/table/lua batch, verb-session
+parity vs headless bus, verb rejections), `test_signal_panel_lua`
+(controller Lua runtime wiring: batch parity, failure text, rejection
+matrix),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
 `test_frame_source` (source registry, channels, ring,
-CSV-exactness, sink re-attach, plot bounds), `test_gui_stream_source`
+particle + signal CSV-exactness, sink re-attach, plot bounds),
+`test_gui_stream_source`
 (SHM subscribe parity + lag isolation, CSV replay transport/pacing,
-CLI/frame/CSV exactness), `test_canvas2d` (2D mapping,
+CLI/frame/CSV exactness, signal-log replay), `test_canvas2d` (2D mapping,
 fit, zoom/pan, grid steps). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_signal`
 (ns/source-step over a live Runner + SignalSolver, opaque params), `bench_link`
@@ -568,9 +572,11 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   apps/gui/controllers/sim_controller.hpp (engine-only RunConfig driver)
   + external_source.hpp (SHM subscriber + CSV replay, engine-only)
   apps/gui/models/closed_form_models.hpp (ohm/s0/i2c evaluate logic)
-  + signal_model.hpp (batch signal config: CLI-parity validation + RunConfig)
+  + signal_model.hpp (batch signal config: CLI-parity validation + RunConfig,
+  incl. expression/table/lua payloads)
   apps/gui/panels/sim_panel.hpp + source_panel.hpp (frame-source selector)
-  + signal_panel.hpp (batch signal config + Apply) + closed_form_panels.hpp/.cpp (ImGui UI)
+  + signal_panel.hpp (batch Apply + live source verbs over the SIG-10 bus)
+  + closed_form_panels.hpp/.cpp (ImGui UI)
   apps/gui/views/ frame_source.hpp (solver-name adapter registry over the
   shared link::Frame view-model, frame history + recorder sink), camera3d.hpp
   (orbit/project math) + viewport3d_panel.hpp (ImGui 3D rasterization) +
@@ -595,7 +601,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,output_health,link_compact,link_sample_block,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,output_health,link_compact,link_sample_block,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

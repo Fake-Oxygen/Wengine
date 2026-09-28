@@ -513,6 +513,10 @@ CLI/GUI/control edges never grow unit tables: parsing goes through
 | D14 | Lua purity (save/load safety) | Fresh `_ENV` per call: pure functions of t/seed/step/dt; no RNG, no cross-step state; scripts persist as pool text (v5) | LOCKED (SIG-4b, 2026-09-24) |
 | D15 | Lua failures + budget | Instruction-count budget (never wall-clock); every failure is loud `kInvalidArgument` (frozen step), message kept for display | LOCKED (SIG-4b, 2026-09-24) |
 | D16 | Lua solver wiring | Extra `ISolver` stepping before `SignalSolver` (extras-first); driver rejects `kLua` without one (never silent freeze); GUI batch rejects (no runtime — SIG-9) | LOCKED (SIG-4b, 2026-09-24) |
+| D17 | GUI per-source verbs (SIG-9) | `SimController` owns a `ControlBus` (local channel 0); panels enqueue the same ADD/SET/START/STOP/DROP lines as CLI/Zephyr, drained immediately + before every step; empty-bus runs stay bit-identical to headless | LOCKED (SIG-9, 2026-09-28) |
+| D18 | GUI scripting runtime (SIG-9) | App-owned `LuaSignalSolver` extra + explicit flag into the shared builder (defaults: no extras, no Lua); panels forward the stored runtime on every Apply; script text shows inline via the lent solver error string; extends D16, absorbs the SIG-9 Lua picker | LOCKED (SIG-9, 2026-09-28) |
+| D19 | GUI batch custom sources (SIG-9) | Table CSV + Lua script text load at the panel edge (GUI owns file I/O), parsed/carried by `SignalModel`; extends D11 (table picker shipped); one-line verbs still refuse table/lua (bulk payloads ride batch, like the CLI family) | LOCKED (SIG-9, 2026-09-28) |
+| D20 | GUI CSV replay source detection | `CsvReplay` sniffs the header (particle vs `step,time,sig_id,value,quantity`) and adapts through the matching Frame adapter; explicit `set_adapter` after load still overrides | LOCKED (SIG-9, 2026-09-28) |
 
 Build order: SIG-1 -> SIG-2+SIG-3 -> SIG-5 -> SIG-4a+SIG-6 (both shipped) ->
 SIG-7 || SIG-8 -> SIG-10 (needs SIG-7 framing) -> SIG-9 -> SIG-4b (shipped

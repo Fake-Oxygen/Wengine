@@ -5,6 +5,8 @@
 #include "controllers/external_source.hpp"
 #include "wengine/core/run_config.hpp"
 #include "wengine/emit/csv_sink.hpp"
+#include "wengine/emit/signal_sink.hpp"
+#include "wengine/link/frame.hpp"
 #include "wengine/link/shm_publisher.hpp"
 #include "wengine/solvers/run.hpp"
 
@@ -363,6 +365,57 @@ void test_csv_load_rejects() {
   assert(replay.count() == 0 && !replay.has_frame());
 }
 
+void test_csv_signal_replay() {
+  // Signal CSV logs replay through the signal adapter: header sniffing
+  // selects parser + adapter, and replayed frames equal the live adapter
+  // output exactly (==, not near).
+  core::RunConfig cfg;
+  cfg.loop.dt = 0.01;
+  cfg.loop.emit_every = 1;
+  cfg.steps = 4;
+  cfg.solver = "signal";
+  cfg.particles = 0;
+  cfg.signal.params.kind = signal::SignalKind::kSine;
+  cfg.signal.params.freq_hz = 5.0;
+  cfg.signal.set = true;
+  const std::string path = "/tmp/wengine_test_guisrc_sig.csv";
+  std::remove(path.c_str());
+  world::State final_state;
+  {
+    emit::SignalsCsvSink sig_csv(path);
+    assert(sig_csv.ok());
+    std::array<emit::ISink *, 1> sinks{&sig_csv};
+    assert(solvers::run_headless(cfg, sinks, final_state).ok());
+    assert(sig_csv.flush().ok());
+    assert(sig_csv.rows_written() == 4); // one source x four emissions
+  }
+  std::vector<world::Snapshot> file_snaps;
+  {
+    std::ifstream in(path);
+    std::string error;
+    assert(emit::parse_signals_log(in, file_snaps, error).ok());
+    assert(file_snaps.size() == 4);
+  }
+  gui::CsvReplay replay;
+  assert(replay.load_file(path).ok());
+  assert(replay.count() == 4 && replay.has_frame());
+  for (std::size_t k = 0; k < file_snaps.size(); ++k) {
+    const link::Frame want = link::frame_from_signal_snapshot(file_snaps[k]);
+    if (k > 0) {
+      replay.step_once();
+    }
+    assert(replay.frame() == want);
+  }
+  assert(replay.frame().channels.size() == 2); // sig.count + sig.0.U
+  assert(replay.frame().channels[1].name == "sig.0.U");
+  assert(replay.frame().channels[1].value == file_snaps.back().sig_value[0]);
+  // Switching back to a particle log re-sniffs the adapter.
+  write_log(path, make_log_snaps());
+  assert(replay.load_file(path).ok());
+  assert(replay.frame() == link::frame_from_snapshot(make_log_snaps()[0]));
+  std::remove(path.c_str());
+}
+
 } // namespace
 
 int main() {
@@ -376,6 +429,7 @@ int main() {
   test_csv_parity_exact();
   test_csv_load_file();
   test_csv_load_rejects();
+  test_csv_signal_replay();
   std::cout << "test_gui_stream_source: OK\n";
   return 0;
 }

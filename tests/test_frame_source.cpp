@@ -8,8 +8,10 @@
 #include "views/graphs_panel.hpp"
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/csv_sink.hpp"
+#include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/solvers/projectile.hpp"
+#include "wengine/solvers/signal.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -179,6 +181,50 @@ void test_csv_exactness() {
   std::remove(path.c_str());
 }
 
+void test_signals_csv_exactness() {
+  // Signal-domain three-level parity: emitted snapshots through
+  // SignalsCsvSink and the recorder agree bit-for-bit, and re-reading the
+  // artifact adapts to the same frames (== on re-read, max_digits10).
+  const std::string path = "/tmp/wengine_test_frames_sig.csv";
+  std::remove(path.c_str());
+  wengine::gui::FrameHistory history;
+  wengine::gui::FrameRecorder recorder(history);
+  recorder.set_solver("signal");
+  {
+    wengine::core::Runner runner{{.dt = 0.01, .emit_every = 2}};
+    wengine::solvers::SignalSolver solver;
+    runner.add_solver(solver);
+    wengine::world::Entity e = runner.state().spawn_entity();
+    wengine::signal::SignalParams p;
+    p.kind = wengine::signal::SignalKind::kDc;
+    p.offset = 2.5;
+    assert(wengine::world::configure_source(e, runner.state().signals, p, 0.0).ok());
+    wengine::emit::SignalsCsvSink csv(path);
+    assert(csv.ok());
+    runner.add_sink(csv);
+    runner.add_sink(recorder);
+    assert(runner.run(10).ok());
+    assert(csv.flush().ok());
+    assert(csv.rows_written() == 5); // steps 2,4,6,8,10
+  }
+  assert(history.size() == 5);
+
+  std::ifstream in(path);
+  std::vector<wengine::world::Snapshot> snaps;
+  std::string error;
+  assert(wengine::emit::parse_signals_log(in, snaps, error).ok());
+  assert(snaps.size() == history.size());
+  for (std::size_t k = 0; k < snaps.size(); ++k) {
+    const wengine::link::Frame want =
+        wengine::link::frame_from_signal_snapshot(snaps[k]);
+    assert(want == history.frames()[k]);
+  }
+  assert(history.frames().back().channels.size() == 2);
+  assert(history.frames().back().channels[1].name == "sig.0.U");
+  assert(history.frames().back().channels[1].value == 2.5);
+  std::remove(path.c_str());
+}
+
 wengine::core::RunConfig batch_cfg() {
   wengine::core::RunConfig cfg;
   cfg.loop.dt = 0.01;
@@ -216,6 +262,7 @@ int main() {
   test_fit_bounds();
   test_history_ring_and_reset();
   test_csv_exactness();
+  test_signals_csv_exactness();
   test_controller_sink_reattach();
   std::printf("test_frame_source: OK\n");
   return 0;

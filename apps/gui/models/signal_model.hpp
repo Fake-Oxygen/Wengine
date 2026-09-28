@@ -12,21 +12,26 @@
 // exactly like a missing CLI option.
 //
 // Engine-only includes (no ImGui/SDL/Vulkan): unit tests link wengine_core
-// alone. Per-source tuning (list/add/drop, start/stop, Lua, CSV tables)
-// needs the SIG-6 family / SIG-10 control plane and is out of scope here;
-// this model drives one batch source. Expression sources work (the program
-// is plain parsed data, no I/O); table sources need a CSV file and Lua
-// sources need the scripting runtime, and the batch form has a picker for
-// neither yet (SIG-9 panel follow-up) — both are rejected with a message,
-// mirroring the kSum batch rule.
+// alone. File reading stays in the panel (GUI owns file I/O); the model
+// takes loaded text: table_csv (a table-format CSV document, parsed with
+// signal::parse_table_csv) and lua_script (script text, carried as a
+// bounded blob like the CLI). The Lua syntax gate lives in the scripting
+// runtime (wengine_signal_lua, never linked here): the model only checks
+// presence + size, and the shared builder rejects kLua without a runtime.
+// Per-source tuning (add/drop, start/stop) speaks the SIG-10 verb bus on
+// the controller, not this batch model. Batch sums stay rejected (sums
+// need distinct per-source operands — the SIG-6 family configures those
+// directly), mirroring the kSum batch rule.
 
 #include "wengine/cli/args.hpp"
 #include "wengine/core/run_config.hpp"
+#include "wengine/signal/table.hpp"
 #include "wengine/signal/types.hpp"
 #include "wengine/solvers/signal.hpp"
 
 #include <cstdint>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -63,6 +68,8 @@ struct SignalModel {
   std::string quantity = "U";
   std::string count = "1";
   std::string expr; // expression source text (kind=expression only)
+  std::string table_csv; // table CSV document text (kind=table only)
+  std::string lua_script; // Lua script text (kind=lua only)
   std::string dt = "0.01";
   std::string steps = "100";
   std::string emit_every = "1";
@@ -160,13 +167,37 @@ struct SignalModel {
     if (p.kind == signal::SignalKind::kSum) {
       return fail("sum needs per-source operands (not supported in batch runs)");
     }
-    if (p.kind == signal::SignalKind::kTable) {
-      return fail("table sources need a CSV file (not supported in batch runs)");
+    std::vector<signal::TablePoint> table_points;
+    std::string lua_text;
+    const bool is_expr = p.kind == signal::SignalKind::kExpression;
+    const bool is_table = p.kind == signal::SignalKind::kTable;
+    const bool is_lua = p.kind == signal::SignalKind::kLua;
+    if (is_table) {
+      // Bulk payload rides the batch section (parsed data, no file I/O
+      // here — the panel loads the file, like the CLI `sig run` edge).
+      if (signal_detail::trim(table_csv).empty()) {
+        return fail("table kind needs CSV text (load a file in the panel)");
+      }
+      std::istringstream csv_in(table_csv);
+      std::string table_error;
+      if (!signal::parse_table_csv(csv_in, table_points, table_error).ok()) {
+        return fail("invalid table CSV (" + table_error + ")");
+      }
+    } else if (!signal_detail::trim(table_csv).empty()) {
+      return fail("table CSV needs kind=table");
     }
-    if (p.kind == signal::SignalKind::kLua) {
-      return fail("lua sources need the scripting runtime (not supported in batch runs)");
+    if (is_lua) {
+      if (signal_detail::trim(lua_script).empty()) {
+        return fail("lua kind needs script text (load a file in the panel)");
+      }
+      if (lua_script.size() > signal::kMaxLuaScriptBytes) {
+        return fail("lua script too large (max 65536 bytes)");
+      }
+      lua_text = lua_script; // syntax/runtime gates live downstream
+    } else if (!signal_detail::trim(lua_script).empty()) {
+      return fail("lua script needs kind=lua");
     }
-    if (p.kind == signal::SignalKind::kExpression) {
+    if (is_expr) {
       const std::string_view t = signal_detail::trim(expr);
       if (t.empty()) {
         return fail("expression kind needs expression text");
@@ -193,6 +224,8 @@ struct SignalModel {
     out.cfg.particles = 0;
     out.cfg.signal.params = p;
     out.cfg.signal.count = static_cast<std::uint64_t>(count_v);
+    out.cfg.signal.table = std::move(table_points);
+    out.cfg.signal.lua = std::move(lua_text);
     out.cfg.signal.set = true;
     out.ok = true;
     return out;

@@ -280,7 +280,8 @@ if(BUILD_GUI)
     target_include_directories(WEngineGui PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
     )
-    target_link_libraries(WEngineGui PRIVATE wengine_core wengine_imgui wengine_link_shm)
+    target_link_libraries(WEngineGui PRIVATE wengine_core wengine_imgui wengine_link_shm
+        wengine_signal_lua)
     target_compile_options(WEngineGui PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
         $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
@@ -439,6 +440,14 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
     )
     add_test(NAME signal_panel COMMAND test_signal_panel)
+
+    # GUI controller scripting-runtime wiring: needs the Lua extra solver.
+    add_executable(test_signal_panel_lua tests/test_signal_panel_lua.cpp)
+    target_link_libraries(test_signal_panel_lua PRIVATE wengine_core wengine_signal_lua)
+    target_include_directories(test_signal_panel_lua PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
+    )
+    add_test(NAME signal_panel_lua COMMAND test_signal_panel_lua)
 
     # Closed-form panel models: engine-only header (+ registry declaration),
     # no ImGui link needed.

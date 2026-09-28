@@ -26,7 +26,12 @@
 #include "views/frame_source.hpp"
 #include "views/graphs_panel.hpp"
 #include "views/viewport3d_panel.hpp"
+#include "wengine/core/solver.hpp"
 #include "wengine/core/status.hpp"
+#include "wengine/signal/lua.hpp"
+
+#include <array>
+#include <span>
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -153,7 +158,18 @@ int main(int argc, char **argv) {
   ImGui_ImplVulkan_Init(&init_info);
   ImGui_ImplVulkan_CreateFontsTexture();
 
+  // Scripting runtime (SIG-4b): app-owned extra solver stepped before the
+  // primary, lent to the controller with the explicit runtime flag (same
+  // contract as the headless driver). Declared before `sim` so it outlives
+  // every controller rebuild; panels forward it on every Apply.
+  wengine::lua::LuaSignalSolver lua_runtime;
+  std::array<wengine::core::ISolver *, 1> lua_extra{&lua_runtime};
   wengine::gui::SimController sim;
+  sim.set_script_error(&lua_runtime.last_error());
+  (void)sim.set_config(sim.config(),
+                       std::span<wengine::core::ISolver *>(lua_extra.data(),
+                                                           lua_extra.size()),
+                       /*has_lua_runtime=*/true);
   wengine::gui::SimPanel sim_panel;
   sim_panel.sync_from(sim.config());
   wengine::gui::SignalPanel signal_panel;

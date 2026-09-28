@@ -170,7 +170,9 @@ signal  -> units, core/status (leaf quantity/kind/eval types only)
 world/solvers/emit/cli/gui -> signal (leaf types + pool; never the reverse)
 apps    -> cli + core
 apps/gui -> wengine_core + wengine_imgui + wengine_link_shm (SHM endpoints
-            only) (never the wengine_cli library; header-only cli/args.hpp
+            only) + wengine_signal_lua (app-owned scripting runtime extra,
+            created in main and lent to the controller — never in engine
+            headers) (never the wengine_cli library; header-only cli/args.hpp
             parsing may be included — it adds no link dependency and reads
             the same units tables)
 views   -> link::Frame view-model only (never Snapshot internals;

@@ -111,7 +111,9 @@ struct SimPanel {
         cfg.x0 != sim.config().x0 || cfg.y0 != sim.config().y0 ||
         cfg.vx0 != sim.config().vx0 || cfg.vy0 != sim.config().vy0 ||
         cfg.solver != sim.config().solver) {
-      sim.set_config(cfg);
+      // Forward the stored runtime so transport tweaks never silently drop
+      // the scripting solver (panels must preserve what they don't own).
+      sim.set_config(cfg, sim.extras(), sim.has_lua_runtime());
     }
 
     if (sim.playing()) {
