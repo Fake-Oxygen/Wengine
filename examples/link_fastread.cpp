@@ -15,6 +15,24 @@
 // the poll rate, i.e. every paced/interactive use: `sim run --emit-every
 // N`, bridge playback, or the GUI-driven publisher.
 //
+// STOPPING (receive-count, not final-sequence): --frames N counts frames
+// this reader CONSUMES, not frames the publisher emitted. Under drop-oldest
+// loss one poll jumps straight to the newest frame, so consumed < emitted
+// and an exact published count may be unreachable — the run then ends in
+// an idle timeout that prints the same loss summary as the done line
+// (received/missed/max_gap/last_seq, exit 1), never silence. For exact
+// capture use paced rates or per-sink strides so nothing is skipped.
+//
+// LIFETIME: the segment exists only while the publisher lives (it unlinks
+// on exit). A short flood can finish before this reader attaches — late
+// attach after exit is impossible by design, and reports `timed out
+// waiting for segment`. An attached reader keeps its mapping after the
+// publisher exits and still drains the retained final frames. A same-name
+// republish is invisible to an attached reader (POSIX fd semantics: the
+// old mapping parks on the old run's frozen final frame, reported as "no
+// new frames"); restart the reader to see the new run — explicit
+// reconnect, mirroring gui::ShmSource::reconnect().
+//
 // Usage:
 //   link_fastread <segment> [--frames N] [--timeout-ms T] [--status-every M]
 // Exit codes mirror the CLI convention: 0 ok, 1 timeout/attach failure,
@@ -39,7 +57,10 @@ namespace {
 
 constexpr std::uint64_t kDefaultTimeoutMs = 5000;
 constexpr std::uint64_t kPollMs = 1;
-constexpr std::uint64_t kAttachRetryMs = 10;
+// Missing/unready attach retry: 1 ms like link_sample. Short floods live
+// only a few ms, so every millisecond of attach latency is a wider blind
+// window (PHYSI-43); the wait stays bounded by --timeout-ms.
+constexpr std::uint64_t kAttachRetryMs = 1;
 constexpr std::uint64_t kDefaultStatusEvery = 1000;
 
 int usage_error(const std::string &msg) {
@@ -77,6 +98,24 @@ std::uint64_t rate_per_s(std::uint64_t n, double secs) {
     return n;
   }
   return static_cast<std::uint64_t>(static_cast<double>(n) / secs);
+}
+
+// Final accounting line, shared by the done and idle-timeout exits so a
+// stall never goes silent: received/missed/max_gap/last_seq distinguish an
+// unreachable receive-count target (cursor parked on the published final
+// frame, missed > 0) from a genuinely starved bus (cursor never advanced).
+void print_summary(const char *tag, std::uint64_t received,
+                   std::uint64_t missed, std::uint64_t max_gap,
+                   std::uint64_t last_seq, double secs) {
+  const double loss_pct =
+      received + missed == 0
+          ? 0.0
+          : 100.0 * static_cast<double>(missed) /
+                static_cast<double>(received + missed);
+  std::cout << tag << " received=" << received << " missed=" << missed
+            << " max_gap=" << max_gap << " last_seq=" << last_seq
+            << " loss=" << loss_pct << "% rate=" << rate_per_s(received, secs)
+            << "/s\n";
 }
 
 } // namespace
@@ -157,8 +196,6 @@ int main(int argc, char **argv) {
 
   // Reused across polls: vector/string capacity survives after warmup, so
   // steady-state reading performs no allocations.
-  // Reused across polls: vector/string capacity survives after warmup, so
-  // steady-state reading performs no allocations.
   wengine::link::Frame frame;
   std::uint64_t last_seq = 0;
   std::uint64_t received = 0;
@@ -188,6 +225,13 @@ int main(int argc, char **argv) {
       continue;
     }
     if (timeout_ms != 0 && elapsed_ms(last_new) >= timeout_ms) {
+      // Idle end-of-run: the receive-count target was unreachable (loss
+      // skipped it, the publisher exited, or the mapping is a stale
+      // same-name run). Report where the cursor parked before failing.
+      const double total_secs =
+          std::chrono::duration<double>(Clock::now() - flow_start).count();
+      print_summary("timeout", received, lag.missed, lag.max_gap, last_seq,
+                    total_secs);
       std::cerr << "link_fastread: timed out waiting for new frames\n";
       return 1;
     }
@@ -195,12 +239,7 @@ int main(int argc, char **argv) {
   }
   const double total_secs =
       std::chrono::duration<double>(Clock::now() - flow_start).count();
-  const double loss_pct = received + lag.missed == 0
-                              ? 0.0
-                              : 100.0 * static_cast<double>(lag.missed) /
-                                    static_cast<double>(received + lag.missed);
-  std::cout << "done received=" << received << " missed=" << lag.missed
-            << " max_gap=" << lag.max_gap << " loss=" << loss_pct << "% rate="
-            << rate_per_s(received, total_secs) << "/s\n";
+  print_summary("done", received, lag.missed, lag.max_gap, last_seq,
+                total_secs);
   return 0;
 }

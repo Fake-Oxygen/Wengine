@@ -14,6 +14,22 @@
 // 2 usage error. Human-readable output only; the exact machine log stays
 // CSV (CsvSink). Start order is free: the sample waits for the segment to
 // appear until the timeout expires.
+//
+// STOPPING (receive-count, not final-sequence): --frames N counts frames
+// this reader CONSUMES, not frames the publisher emitted. Under drop-oldest
+// loss one poll jumps straight to the newest frame, so consumed < emitted
+// and an exact published count may be unreachable — the run then ends in
+// an idle timeout that prints a final `timeout shown=... missed=...
+// last_seq=...` summary (exit 1), never silence.
+//
+// LIFETIME: the segment exists only while the publisher lives (it unlinks
+// on exit), so a short flood can finish before attach and late attach
+// after exit is impossible by design (`timed out waiting for segment`).
+// An attached reader keeps its mapping after the publisher exits and still
+// drains the retained final frames. A same-name republish is invisible to
+// an attached reader (the old mapping parks on the old run's frozen final
+// frame); restart the reader to see the new run — explicit reconnect,
+// mirroring gui::ShmSource::reconnect().
 
 #include "wengine/link/frame.hpp"
 #include "wengine/link/protocol.hpp"
@@ -150,12 +166,18 @@ int main(int argc, char **argv) {
 
   std::uint64_t last_seq = 0;
   std::uint64_t shown = 0;
+  std::uint64_t missed_total = 0;
+  std::uint64_t max_gap = 0;
   Clock::time_point last_new = Clock::now();
   for (;;) {
     wengine::link::LinkFrame wire{};
     const std::uint64_t prev = last_seq;
     if (reader->poll_newer(last_seq, wire)) {
       const std::uint64_t missed = wengine::link::reader_missed(prev, wire.frame_seq);
+      missed_total += missed;
+      if (missed > max_gap) {
+        max_gap = missed;
+      }
       wengine::link::Frame frame;
       if (!wengine::link::decode_frame(wire, frame).ok()) {
         std::cerr << "link_sample: corrupt frame data\n";
@@ -169,6 +191,11 @@ int main(int argc, char **argv) {
       continue;
     }
     if (timeout_ms != 0 && elapsed_ms(last_new) >= timeout_ms) {
+      // Idle end-of-run: same reporting contract as link_fastread — say
+      // where the cursor parked (unreachable receive count, exited
+      // publisher, or stale same-name mapping) before failing.
+      std::cout << "timeout shown=" << shown << " missed=" << missed_total
+                << " max_gap=" << max_gap << " last_seq=" << last_seq << "\n";
       std::cerr << "link_sample: timed out waiting for new frames\n";
       return 1;
     }

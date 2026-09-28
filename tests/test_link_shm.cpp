@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <iostream>
+#include <memory>
 #include <new>
 #include <string>
 #include <sys/mman.h>
@@ -404,8 +405,7 @@ void test_version_negotiation() {
   }
 }
 
-void test_reader_move() {
-  const std::string name = seg_name("rmove");
+void test_reader_move() {  const std::string name = seg_name("rmove");
   link::ShmPublisher pub(name, "projectile");
   assert(pub.ok());
   world::State unused;
@@ -422,6 +422,85 @@ void test_reader_move() {
   assert(!moved.ok()); // moved-from: inert, destroys safely
 }
 
+void test_attached_reader_survives_publisher_exit() {
+  // PHYSI-43: the segment lives only while the publisher lives, but an
+  // attached reader keeps its mapping across exit/unlink and still drains
+  // the retained final frames. Attaching after the exit is kMissing by
+  // design (a short flood can finish before a reader ever attaches).
+  const std::string name = seg_name("exit");
+  auto pub = std::make_unique<link::ShmPublisher>(name, "projectile");
+  assert(pub->ok());
+  link::ShmReader reader(name); // reader-first: attached before any publish
+  assert(reader.ok());
+
+  world::State unused;
+  std::array<emit::ISink *, 1> sinks{pub.get()};
+  assert(solvers::run_headless(batch_cfg(5, 1), sinks, unused).ok());
+  assert(pub->stats().published == 5);
+
+  // Live drain: latest-only jump to the final frame with exact accounting.
+  std::uint64_t cursor = 0;
+  link::LinkFrame wire{};
+  assert(reader.poll_newer(cursor, wire));
+  assert(cursor == 5 && wire.step_index == 5);
+  assert(link::reader_missed(0, 5) == 4);
+  assert(!reader.poll_newer(cursor, wire));
+
+  pub.reset(); // publisher exit: unmaps, closes, unlinks the name.
+
+  // The attached mapping still holds the retained final frame.
+  link::LinkFrame retained{};
+  assert(reader.read_latest(retained));
+  assert(retained.frame_seq == 5 && retained.step_index == 5);
+  assert(!reader.poll_newer(cursor, retained)); // cursor parked, no phantom
+  assert(cursor == 5);
+
+  // Late attach after the exit can never succeed: the bus is gone.
+  link::ShmReader late(name);
+  assert(!late.ok());
+  assert(late.state() == link::AttachState::kMissing);
+}
+
+void test_stale_reader_parks_on_same_name_republish() {
+  // PHYSI-43 endpoint-level mirror of the GUI reconnect test: after exit +
+  // same-name republish, the stale mapping parks on the old run's final
+  // frame (never advances, never corrupts); only a fresh attach — explicit
+  // reconnect — sees the new run.
+  const std::string name = seg_name("repub");
+  world::State unused;
+  auto pub = std::make_unique<link::ShmPublisher>(name, "projectile");
+  assert(pub->ok());
+  link::ShmReader stale(name);
+  assert(stale.ok());
+  std::array<emit::ISink *, 1> sinks{pub.get()};
+  assert(solvers::run_headless(batch_cfg(2, 1), sinks, unused).ok());
+
+  std::uint64_t cursor = 0;
+  link::LinkFrame wire{};
+  assert(stale.poll_newer(cursor, wire));
+  assert(cursor == 2 && wire.step_index == 2);
+
+  pub.reset(); // first run exits.
+  pub = std::make_unique<link::ShmPublisher>(name, "projectile");
+  assert(pub->ok());
+  sinks[0] = pub.get();
+  assert(solvers::run_headless(batch_cfg(5, 1), sinks, unused).ok());
+
+  // Stale mapping: nothing newer than the old final; content frozen.
+  assert(!stale.poll_newer(cursor, wire));
+  assert(cursor == 2);
+  link::LinkFrame frozen{};
+  assert(stale.read_latest(frozen));
+  assert(frozen.frame_seq == 2 && frozen.step_index == 2);
+
+  // Fresh attach (reconnect) sees the new run's final frame.
+  link::ShmReader fresh(name);
+  assert(fresh.ok());
+  link::LinkFrame latest{};
+  assert(fresh.read_latest(latest));
+  assert(latest.frame_seq == 5 && latest.step_index == 5);
+}
+
 } // namespace
 
 int main() {
@@ -434,6 +513,8 @@ int main() {
   test_reader_rejects_foreign();
   test_version_negotiation();
   test_reader_move();
+  test_attached_reader_survives_publisher_exit();
+  test_stale_reader_parks_on_same_name_republish();
   std::cout << "test_link_shm: OK\n";
   return 0;
 }

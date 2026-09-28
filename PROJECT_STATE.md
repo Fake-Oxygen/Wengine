@@ -126,12 +126,21 @@ no Xlib bindings, no screenshot-diff harness):
 - Same-name publisher restart needs explicit Reconnect (POSIX fd
   semantics: the old mapping outlives the rerun; undetectable, by design).- Flood publishing (~10^5 frames/s into 8 slots) loses the bulk by policy;
   paced/interactive rates keep up. `link_fastread` reports exact loss%.
-- UNRESOLVED (2026-09-23): `link_fastread` goes blind for a run's last
-  frames and stays blind through long timeouts while the mapping provably
-  holds them; `link_sample` on identical runs completes. In-process,
-  post-exit in-process, flood tracking (1M+ frames), and unit coverage all
-  pass — isolated to the live publisher-exit window, cause unknown. Needs
-  a focused session with strace/gdb allowed + poll tracing. See task notes.
+- RESOLVED (2026-09-28, PHYSI-43): the `link_fastread` end-of-run blind
+  spot was termination/reporting, not reads — attached readers provably
+  drain the retained final frame after publisher exit/unlink (v2 slot
+  protocol holds). Three causes, all reproduced cross-process: (a) the
+  10 ms attach retry missed short-flood segment lifetimes (<5 ms for a
+  5-step burst) → now 1 ms like `link_sample`; late attach after exit
+  stays impossible by design (segment lives only while the publisher
+  lives). (b) `--frames` counts frames RECEIVED, unreachable under
+  drop-oldest loss → idle timeouts went silent; both tools now print a
+  final loss summary with the parked cursor (`timeout ... last_seq=N`,
+  exit 1). (c) same-name republish parks stale readers on the old final
+  frame (POSIX fd semantics, undetectable by design) → explicit reconnect
+  documented in both tools. Regression: `test_link_shm` (post-exit
+  readability, stale/reconnect, attach-miss) + 4-scenario
+  `examples/link_fastread_stall_repro.py` (4/4).
 - Signals (deferred by decision, with triggers): source display names
   (`sig.motor`) wait for the SIG-6 CLI family (serials are the mechanism);
   mux combinator waits for the SIG-10 select verb; `kSum` is rejected in
