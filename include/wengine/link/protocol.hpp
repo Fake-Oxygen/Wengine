@@ -78,29 +78,51 @@
 //       adapters, not structs. LinkFrame is frozen except via the
 //       versioning task's compat matrix.
 //
-// WIRE LAYOUT (v1, same-host — see portability note):
+// WIRE LAYOUT (v2, same-host — see portability note):
 //
 //   segment  = SegmentHeader + Slot[kSlotCount]
-//   Slot     = seq (u64 seqlock) + LinkFrame
+//   Slot     = seq (u64 seqlock) + words[kFrameWords] (atomic u64 payload)
 //   LinkFrame = frame_seq, step_index, sim_time,
 //               item_count, items[kMaxItems],
 //               channel_count, channels[kMaxChannels]
 //   LinkItem  = x,y,z, vx,vy,vz, size, color, has_velocity (+ pad to 64 B)
 //   LinkChannel = name[kChannelNameSize] (NUL-terminated), value
 //
+//   LinkFrame is the local POD codec type only: encode/decode targets and
+//   staging buffers stay ordinary structs. Only the atomic word image ever
+//   sits in shared memory — slots are never memcpy'd as a whole, and the
+//   shared words are never touched through a plain LinkFrame lvalue.
+//   kFrameWords == sizeof(LinkFrame) / 8; word 0 carries frame_seq
+//   (offset-asserted), so the latest-scan peek needs no plain access.
+//
 //   Frame ~= 40 B + 64 KiB items + 2.5 KiB channels (~= 67 KiB);
 //   8 slots ~= 540 KiB per segment. Bounds are compile-time constants so
 //   every peer agrees without negotiation; over-bound frames (too many
 //   items/channels, over-long names) are dropped loudly (S7).
+//   v2 keeps the v1 byte size (atomic u64 == u64 in size) but changes the
+//   synchronization semantics, hence the version bump: v1 peers refuse v2
+//   segments loudly at attach instead of racing them.
 //
-// SEQLOCK PROTOCOL (single writer, many readers):
-//   Writer: seq -> odd (relaxed) | memcpy frame | seq -> even (release).
+// SEQLOCK PROTOCOL (single writer, many readers — v2 atomic slot protocol):
+//   Writer: seq -> odd (relaxed) | atomic word stores (relaxed) |
+//           seq -> even (release).
 //   Reader: a = seq (acquire); odd -> Busy (writer active, retry later);
-//           zero -> Empty (never written); else memcpy out, b = seq
-//           (acquire); a != b -> Torn (discard, retry). A Torn/Busy read
-//           never yields corrupt data (unit-tested, incl. threaded hammer).
+//           zero -> Empty (never written); else atomic word loads
+//           (acquire) into a reader-local LinkFrame, b = seq (acquire);
+//           a != b -> Torn (discard, retry). A Torn/Busy read never yields
+//           corrupt data, and — unlike v1 — no shared access is a C++ data
+//           race: every concurrently touched shared word is an atomic.
 //   Header init completes before any reader attaches, so version/domain/
 //   capacities are observed without tearing by construction.
+//   Ordering (conservative): payload stores are relaxed and sequenced
+//   before the release seq store that publishes them; payload loads are
+//   acquire and sandwiched between two acquire seq loads. An accepted read
+//   (a == b, even, non-zero) observed no overlapping writer critical
+//   section: any odd mark or even bump between the two seq loads discards
+//   the copy, so mixed-epoch words can never be accepted (64-bit seq wrap
+//   is the only ABA path and is practically unreachable). Readers are
+//   bounded (fixed rescan budget in read_latest) and the writer never
+//   waits for readers.
 //
 // VERSIONING + NEGOTIATION (v1 contract):
 //   There is no back-and-forth to negotiate on a SHM bus: the writer stamps
@@ -117,11 +139,13 @@
 //   version verdict — a partially initialized header can never be mistaken
 //   for an incompatible writer.
 //
-// COMPAT MATRIX (v1: first and only version):
+// COMPAT MATRIX (v2 current; v1 refused loudly):
 //   same version + capacities + valid domain -> attach, full interop.
-//   anything else -> loud refusal with found-version report. Old-reader /
-//   new-writer and new-reader / old-writer pairs cannot occur yet; when v2
-//   lands, its matrix row is added beside these tests, not instead of them.
+//   anything else -> loud refusal with found-version report. v1 segments
+//   (plain-payload layout) are refused by v2 readers with a version
+//   verdict, and v2 segments are refused by v1 readers the same way —
+//   same size, different synchronization, never interoperable. When v3
+//   lands, its matrix row is added beside these rows, not instead of them.
 //
 // MIGRATION POLICY (for v2 authors):
 //   Bump kVersion; never reuse a version number. Version 0 is reserved as
@@ -166,6 +190,7 @@
 #include "wengine/core/status.hpp"
 #include "wengine/link/frame.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -177,7 +202,11 @@
 namespace wengine::link {
 
 // Protocol version peers must match exactly (see check_header).
-inline constexpr std::uint32_t kVersion = 1;
+// v2: atomic slot payload (PHYSI-31). Socket-schema versions evolve
+// independently (compact_codec.hpp) and never see this word.
+inline constexpr std::uint32_t kVersion = 2;
+// v1 segment version, refused loudly by v2 readers (and vice versa).
+inline constexpr std::uint32_t kVersionV1 = 1;
 // Fixed frame bounds: every peer agrees without negotiation (see S1/S7).
 inline constexpr std::size_t kMaxItems = 1024;
 inline constexpr std::size_t kMaxChannels = 64;
@@ -232,12 +261,33 @@ static_assert(sizeof(LinkFrame) == 5U * sizeof(std::uint64_t) +
                                         kMaxItems * sizeof(LinkItem) +
                                         kMaxChannels * sizeof(LinkChannel));
 
-// One seqlock slot. The seq word is the only shared atomic; frames are
-// never read or written concurrently with a matching even seq (protocol
-// above). Slots are never memcpy'd as a whole — only frames are.
+// Payload word count of the atomic slot image: LinkFrame bits carried as
+// u64 words. LinkFrame stays the local POD codec type; only this word
+// image is ever shared.
+inline constexpr std::size_t kFrameWords =
+    sizeof(LinkFrame) / sizeof(std::uint64_t);
+static_assert(sizeof(LinkFrame) % sizeof(std::uint64_t) == 0);
+static_assert(offsetof(LinkFrame, frame_seq) == 0);
+
+// One seqlock slot. The seq word is the seqlock parity; the payload words
+// are the only shared frame storage and are ALWAYS accessed atomically
+// (writer stores, reader loads). Reader-local LinkFrame objects stay
+// ordinary POD — only the shared image is atomic. Slots are never
+// memcpy'd as a whole — only word images cross the critical section.
 struct Slot {
-  std::atomic<std::uint64_t> seq{0}; // even = ready, odd = writer active
-  LinkFrame frame{};
+  std::atomic<std::uint64_t> seq;
+  std::array<std::atomic<std::uint64_t>, kFrameWords> words;
+
+  Slot() noexcept : seq(0) {
+    for (auto &w : words) {
+      w.store(0, std::memory_order_relaxed);
+    }
+  }
+
+  Slot(const Slot &) = delete;
+  Slot &operator=(const Slot &) = delete;
+  Slot(Slot &&) = delete;
+  Slot &operator=(Slot &&) = delete;
 };
 
 // Cross-process atomics need lock-free u64/u32; fail loudly where untrue.
@@ -245,11 +295,14 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(sizeof(std::atomic<std::uint64_t>) == sizeof(std::uint64_t));
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 static_assert(sizeof(std::atomic<std::uint32_t>) == sizeof(std::uint32_t));
+// Same byte size as the v1 slot (seq + frame bits); only the sharing
+// semantics changed, which is exactly what the version bump distinguishes.
+static_assert(sizeof(Slot) == sizeof(std::uint64_t) + sizeof(LinkFrame));
 
 // Segment header, written once at creation before readers attach.
 // publish_count is the only field mutated post-init (writer only).
 // Not copyable (atomic members): init in place via init_header, never
-// memcpy'd as a whole — only LinkFrames cross the wire by value.
+// memcpy'd as a whole — only slot word images cross the wire by value.
 // version is the commit word: plain readers must observe it via acquire
 // (see inspect_header); version == 0 means mid-construction.
 struct SegmentHeader {
@@ -484,8 +537,9 @@ struct HeaderReport {
   return core::Status::success();
 }
 
-// Writer side of the seqlock: mark active (odd), caller copies the staged
-// frame into slot.frame, then mark ready (even, release).
+// Writer side of the seqlock: mark active (odd), caller stores the staged
+// frame words into the slot, then mark ready (even, release). The release
+// store publishes the relaxed payload stores sequenced before it.
 inline void slot_begin_write(Slot &slot) noexcept {
   const std::uint64_t s = slot.seq.load(std::memory_order_relaxed);
   slot.seq.store(s + std::uint64_t{1}, std::memory_order_relaxed);
@@ -496,7 +550,28 @@ inline void slot_end_write(Slot &slot) noexcept {
   slot.seq.store(s + std::uint64_t{1}, std::memory_order_release);
 }
 
-// Reader side: torn/busy reads report without touching `out`.
+// Copy a reader-local frame into shared atomic words. Writer-only, called
+// strictly between slot_begin_write and slot_end_write; `frame` itself is
+// never shared, so plain byte access to it is race-free.
+inline void slot_store_frame(Slot &slot, const LinkFrame &frame) noexcept {
+  const auto *src = reinterpret_cast<const unsigned char *>(&frame);
+  for (std::size_t i = 0; i < kFrameWords; ++i) {
+    std::uint64_t w = 0;
+    std::memcpy(&w, src + i * sizeof(std::uint64_t), sizeof(std::uint64_t));
+    slot.words[i].store(w, std::memory_order_relaxed);
+  }
+}
+
+// Peek the frame_seq word without a full copy. Must be bracketed by the
+// caller with seq loads (see ShmReader::read_latest): the peek alone
+// proves nothing, the unchanged seq around it does.
+[[nodiscard]] inline std::uint64_t slot_peek_seq(const Slot &slot) noexcept {
+  return slot.words[0].load(std::memory_order_acquire);
+}
+
+// Reader side: torn/busy reads report without the caller using `out`
+// (out is clobbered on Torn, matching the historic contract — callers
+// must only consume it on kOk).
 [[nodiscard]] inline SlotRead slot_try_read(const Slot &slot, LinkFrame &out) noexcept {
   const std::uint64_t before = slot.seq.load(std::memory_order_acquire);
   if ((before & std::uint64_t{1}) != std::uint64_t{0}) {
@@ -505,7 +580,11 @@ inline void slot_end_write(Slot &slot) noexcept {
   if (before == std::uint64_t{0}) {
     return SlotRead::kEmpty;
   }
-  std::memcpy(&out, &slot.frame, sizeof(LinkFrame));
+  auto *dst = reinterpret_cast<unsigned char *>(&out);
+  for (std::size_t i = 0; i < kFrameWords; ++i) {
+    const std::uint64_t w = slot.words[i].load(std::memory_order_acquire);
+    std::memcpy(dst + i * sizeof(std::uint64_t), &w, sizeof(std::uint64_t));
+  }
   const std::uint64_t after = slot.seq.load(std::memory_order_acquire);
   if (before != after) {
     return SlotRead::kTorn;

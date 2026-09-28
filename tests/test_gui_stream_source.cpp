@@ -103,7 +103,8 @@ void test_shm_wait_and_refuse() {
   assert(!src.attached() && !src.ok());
   assert(src.error().find("invalid segment name") != std::string::npos);
 
-  // Refused segment fails fast with the versioned message (crafted v2).
+  // Refused segment fails fast with the versioned message (crafted future
+  // version: this reader supports kVersion).
   const std::string name = seg_name("refused");
   ::shm_unlink(name.c_str());
   const int fd = ::shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
@@ -121,12 +122,14 @@ void test_shm_wait_and_refuse() {
   header->max_items = static_cast<std::uint64_t>(link::kMaxItems);
   header->max_channels = static_cast<std::uint64_t>(link::kMaxChannels);
   header->slot_count = static_cast<std::uint64_t>(link::kSlotCount);
-  header->version.store(2, std::memory_order_release);
+  header->version.store(link::kVersion + 1, std::memory_order_release);
   src.set_segment(name);
   assert(!src.ensure_attached().ok());
   assert(!src.attached());
-  assert(src.error().find("has version 2") != std::string::npos);
-  assert(src.error().find("supports version 1") != std::string::npos);
+  assert(src.error().find("has version " + std::to_string(link::kVersion + 1)) !=
+         std::string::npos);
+  assert(src.error().find("supports version " + std::to_string(link::kVersion)) !=
+         std::string::npos);
   ::munmap(base, size);
   ::close(fd);
   ::shm_unlink(name.c_str());

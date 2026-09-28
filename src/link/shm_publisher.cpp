@@ -138,7 +138,7 @@ void ShmPublisher::on_snapshot(const world::Snapshot &snapshot) {
   Slot &slot = slots_[static_cast<std::size_t>(
       ring_slot(stats_.published, static_cast<std::uint64_t>(kSlotCount)))];
   slot_begin_write(slot);
-  slot.frame = staging_;
+  slot_store_frame(slot, staging_);
   slot_end_write(slot);
   header_note_publish(*header_);
   ++stats_.published;

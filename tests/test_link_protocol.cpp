@@ -117,7 +117,7 @@ void test_compat_matrix() {
 
   // Foreign versions: older, newer, zero (mid-construction), max.
   for (std::uint32_t v : {std::uint32_t{0}, link::kVersion + 1,
-                          std::uint32_t{0xFFFFFFFFu}}) {
+                           std::uint32_t{0xFFFFFFFFu}}) {
     if (v == link::kVersion) {
       continue;
     }
@@ -130,6 +130,19 @@ void test_compat_matrix() {
     assert(rep.issue == link::HeaderIssue::kVersionMismatch);
     assert(rep.found_version == v); // the clear error carries the version
     assert(!link::check_header(foreign).ok());
+  }
+
+  // v1 plain-payload segments refuse loudly under v2 (same size, different
+  // synchronization — never interoperable).
+  {
+    link::SegmentHeader v1;
+    assert(link::init_header(v1, "projectile").ok());
+    v1.version.store(link::kVersionV1, std::memory_order_release);
+    const link::HeaderReport rep = link::inspect_header(v1);
+    assert(!rep.status.ok());
+    assert(rep.issue == link::HeaderIssue::kVersionMismatch);
+    assert(rep.found_version == link::kVersionV1);
+    assert(!link::check_header(v1).ok());
   }
 
   // Capacity drift under a matching version: capacity cause, not version.
@@ -290,7 +303,9 @@ void test_seqlock_states() {
   assert(link::slot_try_read(slot, out) == link::SlotRead::kBusy);
 
   const link::Frame src = make_frame(5, 0.05);
-  assert(link::encode_frame(src, slot.frame, 5).ok());
+  link::LinkFrame staged{};
+  assert(link::encode_frame(src, staged, 5).ok());
+  link::slot_store_frame(slot, staged);
   link::slot_end_write(slot);
   assert(link::slot_try_read(slot, out) == link::SlotRead::kOk);
   assert(out.frame_seq == 5);
@@ -470,7 +485,7 @@ void test_seqlock_concurrent() {
       const std::size_t slot = static_cast<std::size_t>(
           link::ring_slot(i, static_cast<std::uint64_t>(link::kSlotCount)));
       link::slot_begin_write(ring[slot]);
-      ring[slot].frame = wire;
+      link::slot_store_frame(ring[slot], wire);
       link::slot_end_write(ring[slot]);
       link::header_note_publish(header);
     }
@@ -504,6 +519,96 @@ void test_seqlock_concurrent() {
   assert(link::header_published(header) == kFrames);
 }
 
+// Repeated slot reuse under multiple concurrent readers: every kOk read
+// must be self-consistent (step == seq, payload == f(seq)). Readers share
+// nothing but the ring; the writer never waits. This is the in-process
+// equivalent for ThreadSanitizer runs (race-free by construction: every
+// shared word is atomic).
+void test_seqlock_concurrent_multi_reader() {
+  constexpr std::uint64_t kFrames = 300;
+  std::array<link::Slot, link::kSlotCount> ring{};
+
+  auto check_clean = [](const link::LinkFrame &got) {
+    assert(got.step_index == got.frame_seq);
+    assert(got.item_count == 1 && got.channel_count == 1);
+    assert(got.items[0].x == static_cast<double>(got.frame_seq) * 0.25);
+    assert(got.items[0].y == static_cast<double>(got.frame_seq) * 0.5);
+    assert(got.channels[0].value == static_cast<double>(got.frame_seq) * 1.5);
+  };
+
+  std::atomic<bool> writer_done{false};
+  std::atomic<std::uint64_t> reader_hits{0};
+
+  auto reader_fn = [&]() {
+    std::uint64_t local_hits = 0;
+    while (!writer_done.load(std::memory_order_acquire)) {
+      for (auto &s : ring) {
+        link::LinkFrame got{};
+        if (link::slot_try_read(s, got) != link::SlotRead::kOk) {
+          continue;
+        }
+        if (got.frame_seq == 0 || got.frame_seq > kFrames) {
+          continue; // never-written peek raced past the seq guard: skip
+        }
+        check_clean(got);
+        ++local_hits;
+      }
+    }
+    // Final drain after the writer finished: still self-consistent.
+    for (auto &s : ring) {
+      link::LinkFrame got{};
+      if (link::slot_try_read(s, got) != link::SlotRead::kOk) {
+        continue;
+      }
+      if (got.frame_seq == 0 || got.frame_seq > kFrames) {
+        continue;
+      }
+      check_clean(got);
+      ++local_hits;
+    }
+    reader_hits.fetch_add(local_hits, std::memory_order_relaxed);
+  };
+
+  std::thread writer([&]() {
+    for (std::uint64_t i = 1; i <= kFrames; ++i) {
+      link::Frame staged;
+      staged.step = i;
+      staged.time = static_cast<double>(i) * 0.01;
+      link::FrameItem it;
+      it.x = static_cast<double>(i) * 0.25;
+      it.y = static_cast<double>(i) * 0.5;
+      staged.items.push_back(it);
+      staged.channels.push_back({"probe", static_cast<double>(i) * 1.5});
+      link::LinkFrame wire{};
+      assert(link::encode_frame(staged, wire, i).ok());
+      const std::size_t slot = static_cast<std::size_t>(
+          link::ring_slot(i, static_cast<std::uint64_t>(link::kSlotCount)));
+      link::slot_begin_write(ring[slot]);
+      link::slot_store_frame(ring[slot], wire);
+      link::slot_end_write(ring[slot]);
+    }
+    writer_done.store(true, std::memory_order_release);
+  });
+
+  std::thread r1(reader_fn);
+  std::thread r2(reader_fn);
+  writer.join();
+  r1.join();
+  r2.join();
+  assert(reader_hits.load(std::memory_order_relaxed) > 0);
+  // Latest slot holds the final frame intact after all reuse.
+  bool found_final = false;
+  for (auto &s : ring) {
+    link::LinkFrame got{};
+    if (link::slot_try_read(s, got) == link::SlotRead::kOk &&
+        got.frame_seq == kFrames) {
+      check_clean(got);
+      found_final = true;
+    }
+  }
+  assert(found_final);
+}
+
 } // namespace
 
 int main() {
@@ -519,6 +624,7 @@ int main() {
   test_header_init_staged_unready();
   test_header_init_concurrent_attach();
   test_seqlock_concurrent();
+  test_seqlock_concurrent_multi_reader();
   std::cout << "test_link_protocol: OK\n";
   return 0;
 }

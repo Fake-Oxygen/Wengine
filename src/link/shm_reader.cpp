@@ -145,14 +145,15 @@ bool ShmReader::read_latest(LinkFrame &out) const {
   if (slots_ == nullptr) {
     return false;
   }
-  // Two-pass scan: peek frame_seq words first (cheap acquire loads, no
+  // Two-pass scan: peek frame_seq words first (atomic acquire loads, no
   // copies), then a single guarded copy of the newest slot. Copying every
   // clean slot would move up to kSlotCount full frames per poll (~0.5 MB);
   // this moves one. NOTE: the seqlock seq words are per-slot write parity,
   // not ordering — only frame_seq orders frames across slots. The peek is
-  // verified (seq unchanged across it) and the copy is fully guarded by
-  // slot_try_read; a writer recycling mid-read just costs a bounded rescan
-  // — never corrupt data, never a misreported frame.
+  // an atomic word load verified by unchanged seq across it (never a plain
+  // payload access) and the copy is fully guarded by slot_try_read; a
+  // writer recycling mid-read just costs a bounded rescan — never corrupt
+  // data, never a misreported frame, never a data race.
   for (int attempt = 0; attempt < 4; ++attempt) {
     std::uint64_t best = 0;
     std::size_t index = 0;
@@ -163,7 +164,7 @@ bool ShmReader::read_latest(LinkFrame &out) const {
           (before & std::uint64_t{1}) != std::uint64_t{0}) {
         continue; // never written, or writer active
       }
-      const std::uint64_t candidate = slots_[i].frame.frame_seq;
+      const std::uint64_t candidate = slot_peek_seq(slots_[i]);
       const std::uint64_t after = slots_[i].seq.load(std::memory_order_acquire);
       if (before != after || candidate == std::uint64_t{0}) {
         continue; // recycled mid-peek: skip this pass

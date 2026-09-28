@@ -436,7 +436,7 @@ debugging for free. Tracked as a separate Plane epic (link protocol,
 writer, reader, replay bridge, versioning). Wire versions exact-match at
 attach: a reader refuses a foreign segment immediately with the found
 version reported
-(`segment 'X' has version 2, this reader supports version 1`); version 0
+(`segment 'X' has version 1, this reader supports version 2`); version 0
 is reserved as the mid-construction marker and never assigned.
 
 Delivery promises and clocks are defined in `docs/delivery.md`:

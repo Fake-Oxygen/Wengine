@@ -332,11 +332,13 @@ struct CraftedSegment {
 };
 
 void test_version_negotiation() {
-  // Old-reader / new-writer row: a v2 header (capacities intact) refuses
-  // fast with the found version reported — the clear error. Same verdict
-  // on every attempt (deterministic negotiation, nothing to retry).
+  // New-reader / old-writer row: a v1 header (capacities intact, plain
+  // payload) refuses fast with the found version reported — the clear
+  // error. Same verdict on every attempt (deterministic negotiation,
+  // nothing to retry). v1 and v2 share the byte size but never interop:
+  // different synchronization.
   {
-    CraftedSegment seg(seg_name("v2"));
+    CraftedSegment seg(seg_name("v1"));
     const char *domain = "projectile";
     for (std::size_t i = 0; domain[i] != '\0'; ++i) {
       seg.header->domain[i] = domain[i];
@@ -344,12 +346,33 @@ void test_version_negotiation() {
     seg.header->max_items = static_cast<std::uint64_t>(link::kMaxItems);
     seg.header->max_channels = static_cast<std::uint64_t>(link::kMaxChannels);
     seg.header->slot_count = static_cast<std::uint64_t>(link::kSlotCount);
-    seg.header->version.store(2, std::memory_order_release);
+    seg.header->version.store(link::kVersionV1, std::memory_order_release);
     link::ShmReader reader(seg.name);
     assert(!reader.ok());
     assert(reader.state() == link::AttachState::kRefused);
     assert(reader.report().issue == link::HeaderIssue::kVersionMismatch);
-    assert(reader.report().found_version == 2);
+    assert(reader.report().found_version == link::kVersionV1);
+    assert(reader.header() == nullptr);
+    // Repeatable: negotiation has no transient component.
+    link::ShmReader retry(seg.name);
+    assert(retry.state() == link::AttachState::kRefused);
+  }
+  // Old-reader / new-writer row: a future v3 header refuses the same way.
+  {
+    CraftedSegment seg(seg_name("v3"));
+    const char *domain = "projectile";
+    for (std::size_t i = 0; domain[i] != '\0'; ++i) {
+      seg.header->domain[i] = domain[i];
+    }
+    seg.header->max_items = static_cast<std::uint64_t>(link::kMaxItems);
+    seg.header->max_channels = static_cast<std::uint64_t>(link::kMaxChannels);
+    seg.header->slot_count = static_cast<std::uint64_t>(link::kSlotCount);
+    seg.header->version.store(link::kVersion + 1, std::memory_order_release);
+    link::ShmReader reader(seg.name);
+    assert(!reader.ok());
+    assert(reader.state() == link::AttachState::kRefused);
+    assert(reader.report().issue == link::HeaderIssue::kVersionMismatch);
+    assert(reader.report().found_version == link::kVersion + 1);
     assert(reader.header() == nullptr);
     // Repeatable: negotiation has no transient component.
     link::ShmReader retry(seg.name);
