@@ -1,30 +1,32 @@
 """Small Python decoder for the WEngine signal TCP/UDP socket examples.
 
 Wire constants follow include/wengine/link/socket_publisher.hpp and
-include/wengine/link/protocol.hpp (currently protocol v1).
+include/wengine/link/compact_codec.hpp. Both transports carry compact v2
+records (magic "WLV2", schema 2, explicit little-endian fields, used
+entries only); TCP adds a u32 length prefix per record plus a "WLT2" hello,
+UDP sends bare datagrams (no handshake).
 """
 
 from __future__ import annotations
 
 import struct
 
-LINK_VERSION = 1
+SOCKET_SCHEMA = 2
 DOMAIN_SIZE = 32
 CHANNEL_NAME_SIZE = 32
 MAX_ITEMS = 1024
 MAX_CHANNELS = 64
 MAX_UDP_PAYLOAD = 65507
+MAX_COMPACT_RECORD = 65507  # == MAX_UDP_PAYLOAD: every v2 record fits a datagram
 
-TCP_MAGIC = b"WLT1"
-UDP_MAGIC = b"WLU1"
+TCP_MAGIC = b"WLT2"
 
-LINK_ITEM_SIZE = 64
-LINK_CHANNEL_SIZE = 40
-TCP_FRAME_SIZE = 8 * 4 + MAX_ITEMS * LINK_ITEM_SIZE + 8 + MAX_CHANNELS * LINK_CHANNEL_SIZE
 TCP_FRAME_PREFIX_SIZE = 4
 TCP_HELLO_SIZE = 8 + DOMAIN_SIZE
-UDP_HEADER_FORMAT = "<II32sQQdQQ"
-UDP_HEADER_SIZE = struct.calcsize(UDP_HEADER_FORMAT)
+
+COMPACT_HEADER_SIZE = 84
+COMPACT_ITEM_SIZE = 61
+COMPACT_MAX_NAME = CHANNEL_NAME_SIZE - 1
 
 
 def _decode_domain(raw: bytes) -> str:
@@ -37,78 +39,67 @@ def _decode_domain(raw: bytes) -> str:
         raise ValueError("domain is not ASCII") from exc
 
 
-def _decode_channels(data: bytes, offset: int, count: int) -> list[tuple[str, float]]:
-    channels = []
-    for index in range(count):
-        entry = offset + index * LINK_CHANNEL_SIZE
-        raw_name = data[entry : entry + CHANNEL_NAME_SIZE]
-        end = raw_name.find(b"\0")
-        if end < 0:
-            raise ValueError(f"channel {index} name is unterminated")
-        try:
-            name = raw_name[:end].decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError(f"channel {index} name is not UTF-8") from exc
-        value = struct.unpack_from("<d", data, entry + CHANNEL_NAME_SIZE)[0]
-        channels.append((name, value))
-    return channels
-
-
 def decode_tcp_hello(data: bytes) -> str:
     if len(data) != TCP_HELLO_SIZE:
         raise ValueError(f"TCP hello must be {TCP_HELLO_SIZE} bytes")
     magic, version, raw_domain = struct.unpack("<II32s", data)
     if magic != int.from_bytes(TCP_MAGIC, "little"):
-        raise ValueError("bad TCP hello magic (expected WLT1)")
-    if version != LINK_VERSION:
-        raise ValueError(f"unsupported link version {version}, expected {LINK_VERSION}")
+        raise ValueError("bad TCP hello magic (expected WLT2)")
+    if version != SOCKET_SCHEMA:
+        raise ValueError(f"unsupported socket schema {version}, expected {SOCKET_SCHEMA}")
     return _decode_domain(raw_domain)
 
 
-def decode_tcp_frame(data: bytes) -> tuple[int, int, float, list[tuple[str, float]]]:
-    """Decode a full fixed-capacity LinkFrame payload (without its u32 prefix).
+def decode_compact_record(data: bytes) -> tuple[int, int, int, float, list[tuple[str, float]]]:
+    """Decode one compact v2 record (variable length, explicit LE fields).
 
-    TCP LinkFrame is the v1 same-host layout. This sample expects little-endian
-    IEEE-754 doubles, as used by the WEngine POSIX/Linux build and typical
-    little-endian Zephyr targets.
+    Returns (run_id, frame_seq, step_index, sim_time, channels). Only kind 1
+    (frame) records decode; anything else raises, mirroring the C++ codec's
+    loud refusal (see compact_codec.hpp for the full layout).
     """
-    if len(data) != TCP_FRAME_SIZE:
-        raise ValueError(f"TCP frame must be {TCP_FRAME_SIZE} bytes, got {len(data)}")
-    frame_seq, step_index, sim_time, item_count = struct.unpack_from("<QQdQ", data, 0)
-    if item_count > MAX_ITEMS:
-        raise ValueError(f"item count exceeds protocol bound: {item_count}")
-    channel_count_offset = 32 + MAX_ITEMS * LINK_ITEM_SIZE
-    channel_count = struct.unpack_from("<Q", data, channel_count_offset)[0]
-    if channel_count > MAX_CHANNELS:
-        raise ValueError(f"channel count exceeds protocol bound: {channel_count}")
-    channels_offset = channel_count_offset + 8
-    channels = _decode_channels(data, channels_offset, channel_count)
-    return frame_seq, step_index, sim_time, channels
-
-
-def decode_udp_datagram(
-    data: bytes, expected_domain: str = "signal"
-) -> tuple[int, int, float, list[tuple[str, float]]]:
-    if len(data) < UDP_HEADER_SIZE or len(data) > MAX_UDP_PAYLOAD:
-        raise ValueError(f"invalid UDP datagram length: {len(data)}")
-    magic, version, raw_domain, frame_seq, step_index, sim_time, item_count, channel_count = (
-        struct.unpack_from(UDP_HEADER_FORMAT, data, 0)
-    )
-    if magic != int.from_bytes(UDP_MAGIC, "little"):
-        raise ValueError("bad UDP datagram magic (expected WLU1)")
-    if version != LINK_VERSION:
-        raise ValueError(f"unsupported link version {version}, expected {LINK_VERSION}")
-    domain = _decode_domain(raw_domain)
-    if domain != expected_domain:
-        raise ValueError(f"expected {expected_domain!r} domain, received {domain!r}")
+    if len(data) < COMPACT_HEADER_SIZE:
+        raise ValueError(f"compact record shorter than {COMPACT_HEADER_SIZE}-byte header")
+    magic, schema = struct.unpack_from("<II", data, 0)
+    if magic != int.from_bytes(b"WLV2", "little"):
+        raise ValueError("bad compact record magic (expected WLV2)")
+    if schema != SOCKET_SCHEMA:
+        raise ValueError(f"unsupported socket schema {schema}, expected {SOCKET_SCHEMA}")
+    kind = data[8]
+    if kind != 1:
+        raise ValueError(f"unsupported compact record kind {kind}")
+    if bytes(data[9:12]) != b"\0\0\0":
+        raise ValueError("compact record reserved bytes must be zero")
+    run_id, frame_seq, step_index = struct.unpack_from("<QQQ", data, 12)
+    (sim_time,) = struct.unpack_from("<d", data, 36)
+    # Domain shape is validated here; the value itself rides the TCP hello
+    # gate (UDP has no hello: datagrams stand alone, domain included).
+    _decode_domain(data[44:76])
+    item_count, channel_count = struct.unpack_from("<II", data, 76)
     if item_count > MAX_ITEMS or channel_count > MAX_CHANNELS:
-        raise ValueError("UDP entry count exceeds protocol bounds")
-    expected = UDP_HEADER_SIZE + item_count * LINK_ITEM_SIZE + channel_count * LINK_CHANNEL_SIZE
-    if len(data) != expected:
-        raise ValueError(f"UDP datagram length mismatch: expected {expected}, got {len(data)}")
-    channels_offset = UDP_HEADER_SIZE + item_count * LINK_ITEM_SIZE
-    channels = _decode_channels(data, channels_offset, channel_count)
-    return frame_seq, step_index, sim_time, channels
+        raise ValueError("compact record entry count exceeds protocol bounds")
+    offset = COMPACT_HEADER_SIZE + item_count * COMPACT_ITEM_SIZE
+    if offset > len(data):
+        raise ValueError("compact record truncated in item block")
+    # Items carry spatial glyphs the signal samples ignore, but lengths
+    # still gate the parse: skip the block exactly.
+    channels: list[tuple[str, float]] = []
+    for index in range(channel_count):
+        if offset + 1 > len(data):
+            raise ValueError(f"compact channel {index} truncated")
+        name_len = data[offset]
+        if name_len > COMPACT_MAX_NAME or offset + 1 + name_len + 8 > len(data):
+            raise ValueError(f"compact channel {index} has a bad name length")
+        raw_name = data[offset + 1 : offset + 1 + name_len]
+        try:
+            name = raw_name.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"compact channel {index} name is not UTF-8") from exc
+        (value,) = struct.unpack_from("<d", data, offset + 1 + name_len)
+        channels.append((name, value))
+        offset += 1 + name_len + 8
+    if offset != len(data):
+        raise ValueError("compact record has trailing garbage")
+    return run_id, frame_seq, step_index, sim_time, channels
 
 
 def format_signal_frame(

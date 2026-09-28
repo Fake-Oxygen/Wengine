@@ -152,15 +152,15 @@ drops; `frame_seq` gaps let readers calculate loss with `LagStats`.
 
 - SHM: reuse `ShmPublisher` with the signal adapter + domain `"signal"`.
 - TCP/UDP (SIG-7): `TcpPublisher`/`UdpPublisher` (`src/link/`, POSIX-first),
-  active connection to `host:port`; TCP begins with a `WLT1` hello carrying
-  exact link version + domain, then little-endian `u32` length and full
-  `LinkFrame` bytes. A reader rejects any magic/version/domain mismatch
-  before decoding; there is no silent version fallback. UDP has no handshake:
-  each `WLU1` datagram carries exact version + domain, frame sequence/time,
-  and only used `LinkItem`/`LinkChannel` entries in portable little-endian
-  encoding. Full LinkFrames are 68,136 B and exceed UDP's 65,507 B payload
-  limit, hence the compact UDP form; both paths first run the shared LinkFrame
-  bound checks so an over-bound snapshot has the same loud verdict.
+  active connection to `host:port`; TCP begins with a `WLT2` hello carrying
+  exact socket schema + domain, then little-endian `u32` length and compact
+  v2 records (explicit portable bytes, used entries only). A reader rejects
+  any magic/schema/domain mismatch before decoding; there is no silent
+  version fallback. UDP has no handshake: each `WLV2` datagram carries
+  schema, run identity, frame sequence/time, domain and counts, followed by
+  the same explicitly encoded entries. Every record fits UDP's 65,507 B
+  payload limit by codec construction; both paths share one bound verdict
+  so an over-bound snapshot is refused identically everywhere.
 - UART (SIG-8): `UartPublisher` (`--emit-uart`), ASCII line framing
   `step,time,ch_id,value` + optional COBS binary; never back-pressures sim.
 
@@ -168,7 +168,7 @@ drops; `frame_seq` gaps let readers calculate loss with `LagStats`.
 
 The stdlib-only examples `examples/link_tcp_signal_receiver.py` and
 `examples/link_udp_signal_receiver.py` listen for the signal domain, validate
-the corresponding v1 handshake/datagram layout, print `sig.*` channels, and
+the hello/datagram layout, print `sig.*` channels, and
 report sequence gaps. Start a listener first, then run the CLI publisher:
 
 ```sh
@@ -237,9 +237,9 @@ below are payload-only budgets (protocol headers add a few bytes per frame):
 
 | Transport / snapshot | Bytes per emission | 1 kHz | 100 kHz | Guidance |
 |---|---:|---:|---:|---|
-| TCP full `LinkFrame` | 68,140 on wire | 68.1 MB/s | 6.81 GB/s | 100x decimation at 100 kHz yields 1 kHz / 68.1 MB/s; configured 256 KiB send buffer is only a burst buffer (a few full frames) |
-| UDP compact, one particle (1 item + 6 channels) | 384 | 0.384 MB/s | 38.4 MB/s | Keep datagrams below path MTU where possible; IP fragmentation magnifies loss |
-| UDP compact, one signal source (`sig.count` + source) | 160 | 0.160 MB/s | 16.0 MB/s | `LagStats` exposes network/receiver gaps by `frame_seq` |
+| TCP compact record, one signal source (`sig.count` + source) | ~120 | 0.120 MB/s | 12.0 MB/s | 100x decimation at 100 kHz yields 1 kHz / 0.12 MB/s; 256 KiB send buffer now holds thousands of records; measured 2000/2000 frames, 0 drops |
+| UDP compact record, one particle (1 item + 6 channels) | ~230 | 0.230 MB/s | 23.0 MB/s | Keep datagrams below path MTU where possible; IP fragmentation magnifies loss |
+| UDP compact record, one signal source (`sig.count` + source) | ~120 | 0.120 MB/s | 12.0 MB/s | `LagStats` exposes network/receiver gaps by `frame_seq` |
 | UART 115200, ASCII one source | ~30 | ~30 kB/s | ~3 MB/s | 8N1 carries ~384 such frames/s: use at least 3x decimation at 1 kHz and 300x at 100 kHz |
 
 Loopback measurement on the current development host (2026-09-25, GCC
@@ -249,7 +249,9 @@ frame (sequence IDs, complete framing, values against a deterministic
 per-step pattern, final counts); reader threads are stopped/joined
 before their descriptors close. Vocabulary follows `docs/delivery.md`:
 attempted vs. published/sent vs. dropped vs. received/missed/max_gap vs.
-incomplete tail, plus p50/p99 delivery age and process CPU.
+incomplete tail, plus p50/p99 delivery age and process CPU. The socket
+rows were re-measured 2026-09-26 after sockets went compact-v2-only
+(SHM rows are unaffected and unchanged).
 
 | Run | Attempted | Sender accepted / dropped | Reader (unique / missed / tail) | Delivery age p50/p99 |
 |---|---:|---:|---:|---:|
@@ -257,12 +259,12 @@ incomplete tail, plus p50/p99 delivery age and process CPU.
 | SHM paced 1 kHz, 500 x 1 signal | 999.6/s | 500 / 0 | 496 / 4 / 0 | 230 / 771 µs |
 | SHM paced 1 kHz, 500 x 64 particles | 999.6/s | 500 / 0 | 499 / 1 / 0 | 260 / 790 µs |
 | SHM stalled (attach after 500) | 209,811/s flood | 500 / 0 | 1 / 499 / — (latest-only policy) | — |
-| TCP flood, 2,000 x 64 particles | 24,197/s | 1,941 / 59 EAGAIN | 1,941 / 59 / 0, all decoded exact | 69 / 193 µs |
-| TCP paced 1 kHz, 300 x 1 signal | 999.1/s | 300 / 0 | 300 / 0 / 0, exact | 148 / 246 µs |
-| TCP stalled (no drain during 500 x 4) | 546,937/s | 7 / 492 + 1 pending | 7 / 0 / 0 after drain, exact | — |
-| UDP flood, 2,000 x 1 particle | 61,239/s | 2,000 / 0 | 2,000 / 0 / 0, exact | 22 / 99 µs |
-| UDP paced 1 kHz, 1,000 x 1 signal | 999.5/s | 1,000 / 0 | 1,000 / 0 / 0, exact | 103 / 175 µs |
-| UDP stalled (drain after 2,000 x 1) | 108,772/s | 2,000 / 0 | 167 oldest retained / 0 interior / 1,833 tail | — |
+| TCP flood, 2,000 x 64 particles | 48,140/s | 2,000 / 0 | 2,000 / 0 / 0, all decoded exact | 226 / 452 µs |
+| TCP paced 1 kHz, 300 x 1 signal | 999.6/s | 300 / 0 | 300 / 0 / 0, exact | 101 / 190 µs |
+| TCP stalled (no drain during 500 x 64) | 145,949/s | 129 / 370 + 1 pending | 129 / 0 / 0 after drain, exact | — |
+| UDP flood, 2,000 x 1 particle | 72,630/s | 2,000 / 0 | 2,000 / 0 / 0, exact | 21 / 545 µs |
+| UDP paced 1 kHz, 1,000 x 1 signal | 999.8/s | 1,000 / 0 | 1,000 / 0 / 0, exact | 84 / 142 µs |
+| UDP stalled (drain after 2,000 x 1) | 118,402/s | 2,000 / 0 | 238 oldest retained / 0 interior / 1,762 tail | — |
 
 Localization legs (`solo` solver-only, `snap` snapshot+encode, `fanout`
 SHM+counter or TCP+UDP): signal `solo` ~1.59 Msteps/s, `snap` ~1.33

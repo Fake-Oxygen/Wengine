@@ -22,7 +22,7 @@ import socket
 import sys
 import time
 
-from link_socket_protocol import decode_udp_datagram
+from link_socket_protocol import decode_compact_record
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,7 +73,7 @@ def main() -> int:
     receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     receiver.bind((args.bind, args.port))
     receiver.setblocking(False)
-    print(f"Listening for WLU1 signal datagrams on {args.bind}:{args.port}", flush=True)
+    print(f"Listening for WLV2 signal datagrams on {args.bind}:{args.port}", flush=True)
 
     try:
         plt.ion()
@@ -91,6 +91,7 @@ def main() -> int:
         count = 0
         draws = 0
         last_seq = 0
+        last_run = 0
         missed_total = 0
         draw_period = 1.0 / args.draw_hz
         last_draw = 0.0
@@ -107,10 +108,13 @@ def main() -> int:
                     packet, address = receiver.recvfrom(65535)
                 except BlockingIOError:
                     break
-                seq, _step, sim_time, channels = decode_udp_datagram(packet)
-                if last_seq and seq <= last_seq:
-                    print(f"duplicate/out-of-order seq={seq} from {address[0]}", file=sys.stderr)
-                    continue
+            run_id, seq, _step, sim_time, channels = decode_compact_record(packet)
+            if last_run and run_id != last_run:
+                last_seq = 0  # new publisher run: reset the cursor
+            last_run = run_id
+            if last_seq and seq <= last_seq:
+                print(f"duplicate/out-of-order seq={seq} from {address[0]}", file=sys.stderr)
+                continue
                 missed = max(0, seq - last_seq - 1) if last_seq else 0
                 missed_total += missed
                 last_seq = seq

@@ -6,6 +6,7 @@
 
 #include "wengine/core/run_config.hpp"
 #include "wengine/emit/sink.hpp"
+#include "wengine/link/compact_codec.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/link/protocol.hpp"
 #include "wengine/link/socket_publisher.hpp"
@@ -152,6 +153,9 @@ void test_parse_endpoint() {
 }
 
 void test_hello_gate() {
+  // Exact magic/schema/domain; garbage, foreign magics and future schemas
+  // refuse loudly at attach, never mid-stream.
+  static_assert(sizeof(link::TcpHello) == 40);
   link::TcpHello good{};
   good.magic = link::kTcpMagic;
   good.version = link::kTcpVersion;
@@ -164,8 +168,11 @@ void test_hello_gate() {
   link::TcpHello bad_magic = good;
   bad_magic.magic = 0;
   assert(!link::check_tcp_hello(bad_magic, "projectile").ok());
+  link::TcpHello foreign_magic = good;
+  foreign_magic.magic = 0x31544C57u; // retired "WLT1": refused, never parsed
+  assert(!link::check_tcp_hello(foreign_magic, "projectile").ok());
   link::TcpHello bad_version = good;
-  bad_version.version = 999;
+  bad_version.version = 999; // future schema: refused, never guessed
   assert(!link::check_tcp_hello(bad_version, "projectile").ok());
   link::TcpHello bad_domain = good;
   bad_domain.domain[0] = 'x';
@@ -179,104 +186,16 @@ void test_hello_gate() {
   assert(!link::check_tcp_hello(unterminated, "projectile").ok());
 }
 
-link::Frame sample_frame() {
-  link::Frame f;
-  f.step = 7;
-  f.time = 0.07;
-  link::FrameItem it;
-  it.x = 1.5;
-  it.vx = -2.5;
-  f.items.push_back(it);
-  f.channels.push_back({"sig.count", 2.0});
-  f.channels.push_back({"sig.0.U", 3.3});
-  return f;
-}
-
-void test_udp_codec() {
-  const link::Frame in = sample_frame();
-  std::array<unsigned char, link::kMaxUdpPayload> buf{};
-  std::size_t len = 0;
-  assert(link::encode_udp(in, "signal", 42, buf.data(), buf.size(), len).ok());
-  // Compact: header + 1 item + 2 channels, far below a full LinkFrame.
-  assert(len == 80 + 64 + 2 * 40);
-  link::Frame back;
-  std::uint64_t seq = 0;
-  assert(link::decode_udp(buf.data(), len, "signal", back, seq).ok());
-  assert(seq == 42 && back == in);
-
-  // Empty frame round-trips (ticks with no rows stay observable).
-  const link::Frame empty;
-  assert(link::encode_udp(empty, "d", 1, buf.data(), buf.size(), len).ok());
-  assert(len == 80);
-  link::Frame back_empty;
-  assert(link::decode_udp(buf.data(), len, "", back_empty, seq).ok());
-  assert(seq == 1 && back_empty == empty);
-
-  // Over-bound inputs refused loudly, outputs untouched.
-  link::Frame many = in;
-  for (std::size_t k = many.channels.size(); k <= link::kMaxChannels; ++k) {
-    many.channels.push_back({"c", 1.0});
-  }
-  const std::size_t keep_len = len;
-  assert(!link::encode_udp(many, "d", 1, buf.data(), buf.size(), len).ok());
-  assert(len == keep_len);
-  link::Frame long_name = in;
-  long_name.channels[0].name.assign(32, 'x');
-  assert(!link::encode_udp(long_name, "d", 1, buf.data(), buf.size(), len).ok());
-  assert(!link::encode_udp(in, "", 1, buf.data(), buf.size(), len).ok());
-  assert(!link::encode_udp(in, "d", 1, nullptr, buf.size(), len).ok());
-  assert(!link::encode_udp(in, "d", 1, buf.data(), 79, len).ok()); // tiny cap
-
-  // Payload-size boundary: 1022 items fit, 1023 do not (80 + N*64 ≤ 65507).
-  link::Frame boundary;
-  for (std::size_t k = 0; k < 1022; ++k) {
-    boundary.items.push_back(link::FrameItem{});
-  }
-  assert(link::encode_udp(boundary, "d", 1, buf.data(), buf.size(), len).ok());
-  assert(len == 80 + 1022 * 64);
-  boundary.items.push_back(link::FrameItem{});
-  assert(!link::encode_udp(boundary, "d", 1, buf.data(), buf.size(), len).ok());
-
-  // Decode refusals: short buffer, bad magic/version, domain problems,
-  // count/length mismatch, over-limit counts, unterminated names.
-  link::Frame out;
-  assert(link::encode_udp(in, "signal", 9, buf.data(), buf.size(), len).ok());
-  assert(!link::decode_udp(buf.data(), 79, "signal", out, seq).ok());
-  assert(!link::decode_udp(nullptr, len, "signal", out, seq).ok());
-  std::array<unsigned char, link::kMaxUdpPayload> bad{};
-  std::memcpy(bad.data(), buf.data(), len);
-  bad[0] ^= 0xFFu;
-  assert(!link::decode_udp(bad.data(), len, "signal", out, seq).ok());
-  std::memcpy(bad.data(), buf.data(), len);
-  bad[4] ^= 0xFFu;
-  assert(!link::decode_udp(bad.data(), len, "signal", out, seq).ok());
-  assert(!link::decode_udp(buf.data(), len, "other", out, seq).ok());
-  assert(!link::decode_udp(buf.data(), len - 1, "signal", out, seq).ok());
-  assert(!link::decode_udp(buf.data(), len + 1, "signal", out, seq).ok());
-  std::memcpy(bad.data(), buf.data(), len);
-  for (std::size_t i = 8; i < 8 + link::kDomainSize; ++i) {
-    bad[i] = 'x'; // unterminated domain
-  }
-  assert(!link::decode_udp(bad.data(), len, "", out, seq).ok());
-  std::memcpy(bad.data(), buf.data(), len);
-  bad[64] += 1; // item count no longer matches the length
-  assert(!link::decode_udp(bad.data(), len, "signal", out, seq).ok());
-  std::memcpy(bad.data(), buf.data(), len);
-  // Channel name loses its NUL only when all 32 bytes are non-NUL.
-  for (std::size_t i = 0; i < link::kChannelNameSize; ++i) {
-    bad[80 + 64 + i] = 'y';
-  }
-  assert(!link::decode_udp(bad.data(), len, "signal", out, seq).ok());
-}
-
 void test_tcp_round_trip() {
-  // Live loopback: hello gate + every emitted frame bit-exact to the
-  // engine truth recorded beside the publisher.
+  // Live loopback: hello gate + every emitted compact record bit-exact to
+  // the engine truth recorded beside the publisher. Variable lengths carry
+  // exactly the used entries; run_id is stable across the run.
   std::uint16_t port = 0;
   const int listen_fd = make_listener(port);
   assert(listen_fd >= 0);
   link::TcpPublisher pub(endpoint_for(port), "projectile");
   assert(pub.ok());
+  const std::uint64_t run_id = pub.run_id();
   const int peer = ::accept(listen_fd, nullptr, nullptr);
   assert(peer >= 0);
   set_recv_timeout(peer);
@@ -296,15 +215,22 @@ void test_tcp_round_trip() {
   for (std::size_t k = 0; k < 5; ++k) {
     unsigned char prefix[4]{};
     assert(recv_all(peer, prefix, sizeof(prefix)));
-    const std::uint32_t frame_len = link::socket_detail::get_u32_le(prefix);
-    assert(frame_len == sizeof(link::LinkFrame));
-    link::LinkFrame wire{};
-    assert(recv_all(peer, reinterpret_cast<unsigned char *>(&wire), frame_len));
-    link::Frame got;
-    assert(link::decode_frame(wire, got).ok());
+    const std::uint32_t rec_len = link::socket_detail::get_u32_le(prefix);
     const link::Frame want = link::frame_from_snapshot(rec.snaps[k]);
+    assert(rec_len == link::compact::encoded_size(want)); // used entries only
+    std::vector<unsigned char> rec_bytes(rec_len);
+    assert(recv_all(peer, rec_bytes.data(), rec_len));
+    link::Frame got;
+    std::uint64_t got_run = 0;
+    std::uint64_t seq = 0;
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(rec_bytes.data(), rec_len, "projectile", got,
+                                        got_run, seq, kind)
+               .ok());
     assert(got == want);
-    assert(wire.frame_seq == k + 1 && wire.step_index == k + 1);
+    assert(got_run == run_id && seq == k + 1);
+    assert(kind == link::compact::RecordKind::kFrame);
+    assert(got.step == k + 1);
   }
   ::close(peer);
   ::close(listen_fd);
@@ -312,11 +238,13 @@ void test_tcp_round_trip() {
 
 void test_tcp_backpressure_drops_without_stalling() {
   // Accepted but never drained: the kernel buffers fill, the publisher
-  // drops loudly (counted, not sticky) and the loop never blocks.
+  // drops loudly (counted, not sticky) and the loop never blocks. The
+  // received byte stream walks as variable-length records landing exactly
+  // on its end — every sent byte arrives, framing intact.
   std::uint16_t port = 0;
   const int listen_fd = make_listener(port);
   assert(listen_fd >= 0);
-  constexpr std::uint64_t kAttempts = 3000; // ~200 MB: far past any buffer
+  constexpr std::uint64_t kAttempts = 20000; // ~2 MB compact: past any buffer
   int peer = -1;
   std::uint64_t published = 0;
   std::uint64_t dropped_send = 0;
@@ -327,7 +255,7 @@ void test_tcp_backpressure_drops_without_stalling() {
     peer = ::accept(listen_fd, nullptr, nullptr);
     assert(peer >= 0); // held open, never read
 
-    world::Snapshot snap; // empty frame: valid ticks, smallest encode
+    world::Snapshot snap; // empty state: smallest valid encode (~100 B)
     for (std::uint64_t k = 1; k <= kAttempts; ++k) {
       snap.step_index = k;
       snap.sim_time = 0.01 * static_cast<double>(k);
@@ -356,20 +284,33 @@ void test_tcp_backpressure_drops_without_stalling() {
     }
     bytes.insert(bytes.end(), chunk.begin(), chunk.begin() + n);
   }
-  assert((bytes.size() % link::kTcpFrameBytes != 0) == pending_frame);
-  const std::uint64_t received = bytes.size() / link::kTcpFrameBytes;
-  assert(received == published);
   link::LagStats lag;
   std::uint64_t prev_seq = 0;
-  for (std::uint64_t k = 0; k < received; ++k) {
-    const unsigned char *p = bytes.data() + k * link::kTcpFrameBytes;
-    assert(link::socket_detail::get_u32_le(p) == sizeof(link::LinkFrame));
-    link::LinkFrame wire{};
-    std::memcpy(&wire, p + 4, sizeof(wire));
-    assert(wire.frame_seq > prev_seq);
-    prev_seq = wire.frame_seq;
-    (void)link::lag_observe(lag, wire.frame_seq);
+  std::uint64_t received = 0;
+  std::size_t cursor = 0;
+  while (cursor + 4 <= bytes.size()) {
+    const std::uint32_t rec_len =
+        link::socket_detail::get_u32_le(bytes.data() + cursor);
+    assert(rec_len >= link::compact::kHeaderSize);
+    assert(rec_len <= link::compact::kMaxRecordBytes);
+    if (cursor + 4 + rec_len > bytes.size()) {
+      break; // trailing partial record: only possible while one is pending
+    }
+    link::Frame got;
+    std::uint64_t run_id = 0;
+    std::uint64_t seq = 0;
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(bytes.data() + cursor + 4, rec_len,
+                                        "projectile", got, run_id, seq, kind)
+               .ok());
+    assert(seq > prev_seq);
+    prev_seq = seq;
+    (void)link::lag_observe(lag, seq);
+    ++received;
+    cursor += 4 + rec_len;
   }
+  assert((cursor < bytes.size()) == pending_frame);
+  assert(received == published); // TCP delivers every sent byte
   assert(lag.received == received);
   ::close(peer);
   ::close(listen_fd);
@@ -423,6 +364,7 @@ void test_udp_round_trip() {
   assert(pub.ok());
   assert(pub.stats().published == 5 && pub.stats().dropped_send == 0);
 
+  const std::uint64_t run_id = pub.run_id();
   link::LagStats lag;
   std::array<unsigned char, link::kMaxUdpPayload> buf{};
   for (std::size_t k = 0; k < 5; ++k) {
@@ -432,11 +374,14 @@ void test_udp_round_trip() {
                                  reinterpret_cast<sockaddr *>(&from), &from_len);
     assert(n > 0);
     link::Frame got;
+    std::uint64_t got_run = 0;
     std::uint64_t seq = 0;
-    assert(link::decode_udp(buf.data(), static_cast<std::size_t>(n), "signal", got,
-                            seq)
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(buf.data(), static_cast<std::size_t>(n),
+                                        "signal", got, got_run, seq, kind)
                .ok());
-    assert(seq == k + 1);
+    assert(seq == k + 1 && got_run == run_id);
+    assert(kind == link::compact::RecordKind::kFrame);
     assert(got == link::frame_from_signal_snapshot(rec.snaps[k]));
     (void)lag_observe(lag, seq);
   }
@@ -467,12 +412,18 @@ void test_subhz_tcp() {
   for (std::size_t k = 0; k < 3; ++k) {
     unsigned char prefix[4]{};
     assert(recv_all(peer, prefix, sizeof(prefix)));
-    link::LinkFrame wire{};
-    assert(recv_all(peer, reinterpret_cast<unsigned char *>(&wire), sizeof(wire)));
+    const std::uint32_t rec_len = link::socket_detail::get_u32_le(prefix);
+    std::vector<unsigned char> rec_bytes(rec_len);
+    assert(recv_all(peer, rec_bytes.data(), rec_len));
     link::Frame got;
-    assert(link::decode_frame(wire, got).ok());
+    std::uint64_t run_id = 0;
+    std::uint64_t seq = 0;
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(rec_bytes.data(), rec_len, "projectile", got,
+                                        run_id, seq, kind)
+               .ok());
     assert(got == link::frame_from_snapshot(rec.snaps[k]));
-    assert(wire.step_index == k + 1);
+    assert(got.step == k + 1 && seq == k + 1);
   }
   ::close(peer);
   ::close(listen_fd);
@@ -493,13 +444,11 @@ struct TcpDrain {
   std::vector<unsigned char> bytes; // raw stream after the hello
   bool hello_ok = false;
   void run() {
-    unsigned char hello[sizeof(link::TcpHello)]{};
-    if (!recv_all(peer, hello, sizeof(hello))) {
+    link::TcpHello hello{};
+    if (!recv_all(peer, reinterpret_cast<unsigned char *>(&hello), sizeof(hello))) {
       return;
     }
-    if (!link::check_tcp_hello(*reinterpret_cast<link::TcpHello *>(hello),
-                               "signal")
-             .ok()) {
+    if (!link::check_tcp_hello(hello, "signal").ok()) {
       return;
     }
     hello_ok = true;
@@ -561,28 +510,39 @@ void test_soak_100khz_tcp() {
          kSteps); // exact accounting, no stall
   assert(dropped_bound == 0);
   assert(drain.hello_ok);
-  assert((drain.bytes.size() % link::kTcpFrameBytes != 0) == pending_frame);
-  const std::uint64_t received = drain.bytes.size() / link::kTcpFrameBytes;
-  assert(received == published); // TCP delivers every sent byte
 
-  // Every received frame decodes bit-exact to its recorded snapshot.
+  // Every received record decodes bit-exact to its recorded snapshot; the
+  // walk lands exactly on the stream end unless a record is pending.
   std::uint64_t prev_seq = 0;
+  std::uint64_t received = 0;
+  std::size_t cursor = 0;
   link::LagStats lag;
-  for (std::uint64_t k = 0; k < received; ++k) {
-    const unsigned char *p = drain.bytes.data() + k * link::kTcpFrameBytes;
-    assert(link::socket_detail::get_u32_le(p) == sizeof(link::LinkFrame));
-    link::LinkFrame wire{};
-    std::memcpy(&wire, p + 4, sizeof(wire));
-    assert(wire.frame_seq > prev_seq); // strictly increasing, never reordered
-    prev_seq = wire.frame_seq;
-    (void)link::lag_observe(lag, wire.frame_seq);
-    assert(wire.step_index >= 1 && wire.step_index <= kSteps);
+  while (cursor + 4 <= drain.bytes.size()) {
+    const std::uint32_t rec_len =
+        link::socket_detail::get_u32_le(drain.bytes.data() + cursor);
+    assert(rec_len >= link::compact::kHeaderSize);
+    assert(rec_len <= link::compact::kMaxRecordBytes);
+    if (cursor + 4 + rec_len > drain.bytes.size()) {
+      break; // trailing partial record: only possible while one is pending
+    }
     link::Frame got;
-    assert(link::decode_frame(wire, got).ok());
-    const link::Frame want =
-        link::frame_from_signal_snapshot(rec.snaps[wire.step_index - 1]);
+    std::uint64_t run_id = 0;
+    std::uint64_t seq = 0;
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(drain.bytes.data() + cursor + 4, rec_len,
+                                        "signal", got, run_id, seq, kind)
+               .ok());
+    assert(seq > prev_seq); // strictly increasing, never reordered
+    prev_seq = seq;
+    (void)link::lag_observe(lag, seq);
+    assert(got.step >= 1 && got.step <= kSteps);
+    const link::Frame want = link::frame_from_signal_snapshot(rec.snaps[got.step - 1]);
     assert(got == want);
+    ++received;
+    cursor += 4 + rec_len;
   }
+  assert((cursor < drain.bytes.size()) == pending_frame);
+  assert(received == published); // TCP delivers every sent byte
   if (dropped_send > 0) {
     assert(lag.missed > 0); // receiver observes publisher-side drops as seq gaps
   }
@@ -626,14 +586,18 @@ void test_udp_soak() {
   assert(pub.stats().published == kSteps && pub.stats().dropped_send == 0);
   reader.join();
 
+  const std::uint64_t run_id = pub.run_id();
   link::LagStats lag;
   std::uint64_t previous = 0;
   for (const auto &packet : drain.packets) {
     link::Frame got;
+    std::uint64_t got_run = 0;
     std::uint64_t seq = 0;
-    assert(link::decode_udp(packet.data(), packet.size(), "signal", got, seq)
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(packet.data(), packet.size(), "signal", got,
+                                        got_run, seq, kind)
                .ok());
-    assert(seq > previous && seq <= kSteps);
+    assert(seq > previous && seq <= kSteps && got_run == run_id);
     previous = seq;
     assert(got == link::frame_from_signal_snapshot(rec.snaps[seq - 1]));
     (void)lag_observe(lag, seq);
@@ -707,13 +671,11 @@ void test_finish_completes_after_reader_resumes() {
     std::vector<unsigned char> bytes;
     bool hello_ok = false;
     void run() {
-      unsigned char hello[sizeof(link::TcpHello)]{};
-      if (!recv_all(peer, hello, sizeof(hello))) {
+      link::TcpHello hello{};
+      if (!recv_all(peer, reinterpret_cast<unsigned char *>(&hello), sizeof(hello))) {
         return;
       }
-      if (!link::check_tcp_hello(*reinterpret_cast<link::TcpHello *>(hello),
-                                 "projectile")
-               .ok()) {
+      if (!link::check_tcp_hello(hello, "projectile").ok()) {
         return;
       }
       hello_ok = true;
@@ -771,20 +733,31 @@ void test_finish_completes_after_reader_resumes() {
   ::close(listen_fd);
 
   assert(drain.hello_ok);
-  assert(drain.bytes.size() % link::kTcpFrameBytes == 0); // no truncation
-  const std::uint64_t received = drain.bytes.size() / link::kTcpFrameBytes;
-  assert(received == published);
+  // Variable-length walk landing exactly on the stream end: no truncation,
+  // no garbage, every record decodable with increasing seqs.
   std::uint64_t prev_seq = 0;
-  for (std::uint64_t k = 0; k < received; ++k) {
-    const unsigned char *p = drain.bytes.data() + k * link::kTcpFrameBytes;
-    assert(link::socket_detail::get_u32_le(p) == sizeof(link::LinkFrame));
-    link::LinkFrame wire{};
-    std::memcpy(&wire, p + 4, sizeof(wire));
-    assert(wire.frame_seq > prev_seq);
-    prev_seq = wire.frame_seq;
+  std::uint64_t received = 0;
+  std::size_t cursor = 0;
+  while (cursor < drain.bytes.size()) {
+    assert(cursor + 4 <= drain.bytes.size());
+    const std::uint32_t rec_len =
+        link::socket_detail::get_u32_le(drain.bytes.data() + cursor);
+    assert(rec_len >= link::compact::kHeaderSize);
+    assert(rec_len <= link::compact::kMaxRecordBytes);
+    assert(cursor + 4 + rec_len <= drain.bytes.size());
     link::Frame decoded;
-    assert(link::decode_frame(wire, decoded).ok());
+    std::uint64_t run_id = 0;
+    std::uint64_t seq = 0;
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(drain.bytes.data() + cursor + 4, rec_len,
+                                        "projectile", decoded, run_id, seq, kind)
+               .ok());
+    assert(seq > prev_seq);
+    prev_seq = seq;
+    ++received;
+    cursor += 4 + rec_len;
   }
+  assert(received == published);
 }
 
 void test_finish_timeout_reports_pending() {
@@ -859,10 +832,211 @@ void test_finish_disconnect_reports_failure() {
 
 } // namespace
 
+link::Frame empty_frame_adapter(const world::Snapshot &) { return link::Frame{}; }
+
+void test_tcp_empty_and_max_records() {
+  // Wire extremes over loopback: an empty Frame is exactly a header
+  // (84-byte record); a 1024-particle snapshot is the maximum-shape record.
+  // Both decode exactly, proving variable framing at both ends.
+  {
+    std::uint16_t port = 0;
+    const int listen_fd = make_listener(port);
+    assert(listen_fd >= 0);
+    link::TcpPublisher pub(endpoint_for(port), "projectile", &empty_frame_adapter);
+    assert(pub.ok());
+    const int peer = ::accept(listen_fd, nullptr, nullptr);
+    assert(peer >= 0);
+    set_recv_timeout(peer);
+    world::Snapshot snap;
+    snap.step_index = 3;
+    pub.on_snapshot(snap);
+    assert(pub.ok() && pub.stats().published == 1);
+    unsigned char hello[40]{};
+    assert(recv_all(peer, hello, sizeof(hello)));
+    assert(link::check_tcp_hello(*reinterpret_cast<link::TcpHello *>(hello),
+                                    "projectile")
+               .ok());
+    unsigned char prefix[4]{};
+    assert(recv_all(peer, prefix, sizeof(prefix)));
+    assert(link::socket_detail::get_u32_le(prefix) == link::compact::kHeaderSize);
+    std::array<unsigned char, link::compact::kHeaderSize> rec{};
+    assert(recv_all(peer, rec.data(), rec.size()));
+    link::Frame got;
+    got.step = 0xBEEF;
+    std::uint64_t run_id = 0;
+    std::uint64_t seq = 0;
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(rec.data(), rec.size(), "projectile", got,
+                                        run_id, seq, kind)
+               .ok());
+    assert(got == link::Frame{});
+    assert(seq == 1);
+    ::close(peer);
+    ::close(listen_fd);
+  }
+  {
+    std::uint16_t port = 0;
+    const int listen_fd = make_listener(port);
+    assert(listen_fd >= 0);
+    link::TcpPublisher pub(endpoint_for(port), "projectile");
+    assert(pub.ok());
+    const int peer = ::accept(listen_fd, nullptr, nullptr);
+    assert(peer >= 0);
+    set_recv_timeout(peer);
+    world::Snapshot snap;
+    snap.step_index = 7;
+    snap.sim_time = 0.07;
+    snap.pos_x.resize(1024);
+    snap.pos_y.resize(1024);
+    snap.vel_x.resize(1024);
+    snap.vel_y.resize(1024);
+    for (std::size_t k = 0; k < 1024; ++k) {
+      snap.pos_x[k] = 0.125 * static_cast<double>(k);
+      snap.pos_y[k] = -0.25 * static_cast<double>(k);
+      snap.vel_x[k] = 1.0;
+      snap.vel_y[k] = 2.0;
+    }
+    pub.on_snapshot(snap);
+    assert(pub.ok() && pub.stats().published == 1);
+    unsigned char hello[40]{};
+    assert(recv_all(peer, hello, sizeof(hello)));
+    unsigned char prefix[4]{};
+    assert(recv_all(peer, prefix, sizeof(prefix)));
+    const std::uint32_t rec_len = link::socket_detail::get_u32_le(prefix);
+    const link::Frame want = link::frame_from_snapshot(snap);
+    assert(rec_len == link::compact::encoded_size(want));
+    assert(rec_len <= link::compact::kMaxRecordBytes);
+    std::vector<unsigned char> rec_bytes(rec_len);
+    assert(recv_all(peer, rec_bytes.data(), rec_len));
+    link::Frame got;
+    std::uint64_t run_id = 0;
+    std::uint64_t seq = 0;
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(rec_bytes.data(), rec_len, "projectile", got,
+                                        run_id, seq, kind)
+               .ok());
+    assert(got == want);
+    assert(run_id == pub.run_id() && seq == 1);
+    ::close(peer);
+    ::close(listen_fd);
+  }
+}
+
+void test_tcp_stall_pending_finish() {
+  // Stalled reader + variable-length records: exactly one partial record
+  // held, accounting identity intact, finish() completes it framed once the
+  // reader resumes, and every received record parses with increasing seqs
+  // landing exactly on the byte-stream end (no truncation, no garbage).
+  std::uint16_t port = 0;
+  const int listen_fd = make_listener(port);
+  assert(listen_fd >= 0);
+
+  struct Drain {
+    int peer = -1;
+    std::vector<unsigned char> bytes;
+    bool hello_ok = false;
+    void run() {
+      link::TcpHello hello_msg{};
+      if (!recv_all(peer, reinterpret_cast<unsigned char *>(&hello_msg),
+                    sizeof(hello_msg))) {
+        return;
+      }
+      if (!link::check_tcp_hello(hello_msg, "projectile").ok()) {
+        return;
+      }
+      hello_ok = true;
+      unsigned char chunk[65536]{};
+      while (true) {
+        const ssize_t n = ::recv(peer, chunk, sizeof(chunk), 0);
+        if (n <= 0) {
+          return; // EOF after the publisher closes
+        }
+        bytes.insert(bytes.end(), chunk, chunk + n);
+      }
+    }
+  };
+
+  // ~12 KB records x 500 attempts (~6 MB) far past the kernel buffer.
+  world::Snapshot snap;
+  snap.pos_x.resize(200);
+  snap.pos_y.resize(200);
+  snap.vel_x.resize(200);
+  snap.vel_y.resize(200);
+  for (std::size_t k = 0; k < 200; ++k) {
+    snap.pos_x[k] = static_cast<double>(k);
+  }
+
+  Drain drain;
+  std::thread reader;
+  int peer = -1;
+  std::uint64_t published = 0;
+  std::uint64_t run_id = 0;
+  {
+    link::TcpPublisher pub(endpoint_for(port), "projectile");
+    assert(pub.ok());
+    run_id = pub.run_id();
+    peer = ::accept(listen_fd, nullptr, nullptr);
+    assert(peer >= 0); // held open, never read: backpressure is forced
+    timeval tv{};
+    tv.tv_sec = 30;
+    tv.tv_usec = 0;
+    ::setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    bool got_pending = false;
+    std::uint64_t attempts = 0;
+    for (std::uint64_t k = 1; k <= 500; ++k) {
+      snap.step_index = k;
+      snap.sim_time = 0.01 * static_cast<double>(k);
+      pub.on_snapshot(snap);
+      attempts = k;
+      if (pub.has_pending_frame()) {
+        got_pending = true;
+        break;
+      }
+    }
+    assert(got_pending);
+    assert(pub.ok()); // transient drops never poison
+    assert(pub.pending_bytes() > 0);
+    assert(pub.stats().published + pub.stats().dropped_send + 1 == attempts);
+
+    drain.peer = peer;
+    reader = std::thread([&drain] { drain.run(); });
+    assert(pub.finish(30000).ok());
+    assert(!pub.has_pending_frame() && pub.ok());
+    published = pub.stats().published;
+  } // dtor closes: drain thread sees EOF and stops
+  reader.join();
+  assert(drain.hello_ok);
+  std::size_t cursor = 0;
+  std::uint64_t prev_seq = 0;
+  std::uint64_t received = 0;
+  while (cursor < drain.bytes.size()) {
+    assert(cursor + 4 <= drain.bytes.size());
+    const std::uint32_t rec_len =
+        link::socket_detail::get_u32_le(drain.bytes.data() + cursor);
+    assert(rec_len >= link::compact::kHeaderSize);
+    assert(rec_len <= link::compact::kMaxRecordBytes);
+    assert(cursor + 4 + rec_len <= drain.bytes.size());
+    link::Frame got;
+    std::uint64_t got_run = 0;
+    std::uint64_t seq = 0;
+    link::compact::RecordKind kind{};
+    assert(link::compact::decode_record(drain.bytes.data() + cursor + 4, rec_len,
+                                        "projectile", got, got_run, seq, kind)
+               .ok());
+    assert(got_run == run_id && seq > prev_seq);
+    prev_seq = seq;
+    ++received;
+    cursor += 4 + rec_len;
+  }
+  assert(received == published);
+  ::close(peer);
+  ::close(listen_fd);
+}
+
 int main() {
   test_parse_endpoint();
   test_hello_gate();
-  test_udp_codec();
   test_tcp_round_trip();
   test_tcp_backpressure_drops_without_stalling();
   test_over_bound_poison();
@@ -874,6 +1048,8 @@ int main() {
   test_finish_completes_after_reader_resumes();
   test_finish_timeout_reports_pending();
   test_finish_disconnect_reports_failure();
+  test_tcp_empty_and_max_records();
+  test_tcp_stall_pending_finish();
   std::cout << "test_link_sockets: OK\n";
   return 0;
 }

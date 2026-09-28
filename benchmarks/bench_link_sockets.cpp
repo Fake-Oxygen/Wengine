@@ -293,31 +293,38 @@ void tcp_reader_loop(int listen_fd, const std::string &domain,
     }
     const std::uint32_t len =
         wengine::link::socket_detail::get_u32_le(prefix);
-    if (len != sizeof(wengine::link::LinkFrame)) {
+    if (len < wengine::link::compact::kHeaderSize ||
+        len > wengine::link::compact::kMaxRecordBytes) {
       ++out.bad;
       break;
     }
-    wengine::link::LinkFrame wire{};
-    if (!recv_exact(peer, reinterpret_cast<unsigned char *>(&wire), len)) {
+    std::vector<unsigned char> rec(len);
+    if (!recv_exact(peer, rec.data(), len)) {
       ++out.bad;
       break;
     }
     const std::int64_t recv = now_ns();
     out.bytes += 4 + len;
-    if (!first && wire.frame_seq <= prev_seq) {
+    wengine::link::Frame frame;
+    std::uint64_t run_id = 0;
+    std::uint64_t seq = 0;
+    wengine::link::compact::RecordKind kind{};
+    if (!wengine::link::compact::decode_record(rec.data(), len, domain, frame,
+                                               run_id, seq, kind)
+             .ok()) {
+      ++out.bad;
+      continue;
+    }
+    (void)run_id;
+    if (!first && seq <= prev_seq) {
       ++out.bad;
       continue;
     }
     first = false;
-    prev_seq = wire.frame_seq;
-    (void)wengine::link::lag_observe(out.lag, wire.frame_seq);
-    out.last_seq = wire.frame_seq;
-    wengine::link::Frame frame;
-    if (!wengine::link::decode_frame(wire, frame).ok()) {
-      ++out.bad;
-      continue;
-    }
-    if (!check_frame_values(frame, pattern, wire.frame_seq)) {
+    prev_seq = seq;
+    (void)wengine::link::lag_observe(out.lag, seq);
+    out.last_seq = seq;
+    if (!check_frame_values(frame, pattern, seq)) {
       ++out.value_mismatch;
     }
     ++out.decoded;
@@ -327,9 +334,9 @@ void tcp_reader_loop(int listen_fd, const std::string &domain,
     for (const auto &c : frame.channels) {
       out.checksum += c.value;
     }
-    if (wire.frame_seq < send_ns.size()) {
+    if (seq < send_ns.size()) {
       const std::int64_t sent =
-          send_ns[static_cast<std::size_t>(wire.frame_seq)].load(
+          send_ns[static_cast<std::size_t>(seq)].load(
               std::memory_order_relaxed);
       if (sent != 0) {
         out.ages_us.push_back(static_cast<double>(recv - sent) / 1000.0);
@@ -355,13 +362,17 @@ void udp_reader_loop(int fd, const std::string &domain, const Pattern &pattern,
     const std::int64_t recv = now_ns();
     out.bytes += static_cast<std::uint64_t>(n);
     wengine::link::Frame frame;
+    std::uint64_t run_id = 0;
     std::uint64_t seq = 0;
-    if (!wengine::link::decode_udp(buf.data(), static_cast<std::size_t>(n),
-                                   domain, frame, seq)
+    wengine::link::compact::RecordKind kind{};
+    if (!wengine::link::compact::decode_record(buf.data(),
+                                               static_cast<std::size_t>(n),
+                                               domain, frame, run_id, seq, kind)
              .ok()) {
       ++out.bad;
       continue;
     }
+    (void)run_id;
     (void)wengine::link::lag_observe(out.lag, seq);
     out.last_seq = seq > out.last_seq ? seq : out.last_seq;
     if (!check_frame_values(frame, pattern, seq)) {
@@ -389,8 +400,8 @@ void print_header(std::string_view repro) {
 #else
             << " ndebug=0"
 #endif
-            << " tcp_frame_bytes=" << wengine::link::kTcpFrameBytes
-            << " version=" << wengine::link::kVersion << "\n"
+            << " tcp_wire_max=" << wengine::link::kTcpWireBytes
+            << " socket_schema=" << wengine::link::kTcpVersion << "\n"
             << "bench_link_sockets: repro: " << repro << "\n";
 }
 
@@ -584,33 +595,49 @@ int run_tcp(const Pattern &p, std::uint64_t frames, double rate_hz, bool paced,
         result.bytes += static_cast<std::uint64_t>(n);
         bytes.insert(bytes.end(), chunk.begin(), chunk.begin() + n);
       }
-      const std::uint64_t received = bytes.size() / wengine::link::kTcpFrameBytes;
       std::uint64_t prev = 0;
-      for (std::uint64_t k = 0; k < received; ++k) {
-        const unsigned char *q = bytes.data() + k * wengine::link::kTcpFrameBytes;
-        if (wengine::link::socket_detail::get_u32_le(q) !=
-            sizeof(wengine::link::LinkFrame)) {
+      std::uint64_t received = 0;
+      std::size_t cursor = 0;
+      while (cursor + 4 <= bytes.size()) {
+        const std::uint32_t rec_len =
+            wengine::link::socket_detail::get_u32_le(bytes.data() + cursor);
+        if (rec_len < wengine::link::compact::kHeaderSize ||
+            rec_len > wengine::link::compact::kMaxRecordBytes) {
           ++result.bad;
-          continue;
+          break;
         }
-        wengine::link::LinkFrame wire{};
-        std::memcpy(&wire, q + 4, sizeof(wire));
-        if (wire.frame_seq <= prev && k > 0) {
-          ++result.bad;
+        if (cursor + 4 + rec_len > bytes.size()) {
+          break; // trailing partial record: the pending tail, counted below
         }
-        prev = wire.frame_seq;
-        (void)wengine::link::lag_observe(result.lag, wire.frame_seq);
-        result.last_seq = wire.frame_seq;
         wengine::link::Frame f;
-        if (!wengine::link::decode_frame(wire, f).ok()) {
+        std::uint64_t run_id = 0;
+        std::uint64_t seq = 0;
+        wengine::link::compact::RecordKind kind{};
+        if (!wengine::link::compact::decode_record(bytes.data() + cursor + 4,
+                                                   rec_len, "bench", f, run_id,
+                                                   seq, kind)
+                 .ok()) {
           ++result.bad;
-          continue;
+          break;
         }
-        if (!check_frame_values(f, p, wire.frame_seq)) {
+        (void)run_id;
+        if (seq <= prev && received > 0) {
+          ++result.bad;
+        }
+        prev = seq;
+        (void)wengine::link::lag_observe(result.lag, seq);
+        result.last_seq = seq;
+        if (!check_frame_values(f, p, seq)) {
           ++result.value_mismatch;
         }
         ++result.decoded;
+        ++received;
         result.checksum += f.step;
+        cursor += 4 + rec_len;
+      }
+      if ((cursor < bytes.size()) != pending) {
+        std::cout << "bench_link_sockets tcp stalled: pending-tail mismatch\n";
+        rc = 1;
       }
     }
     ::close(peer);

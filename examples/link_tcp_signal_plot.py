@@ -24,10 +24,10 @@ import sys
 import time
 
 from link_socket_protocol import (
+    MAX_COMPACT_RECORD,
     TCP_FRAME_PREFIX_SIZE,
-    TCP_FRAME_SIZE,
     TCP_HELLO_SIZE,
-    decode_tcp_frame,
+    decode_compact_record,
     decode_tcp_hello,
 )
 
@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
         help="max figure redraws per second; received frames between redraws "
         "accumulate in history without drawing (default: 30)",
     )
+
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be in 1..65535")
@@ -90,7 +91,7 @@ def main() -> int:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((args.bind, args.port))
     listener.listen(1)
-    print(f"Listening for WLT1 signal stream on {args.bind}:{args.port}", flush=True)
+    print(f"Listening for WLT2 signal stream on {args.bind}:{args.port}", flush=True)
 
     try:
         connection, address = listener.accept()
@@ -118,6 +119,7 @@ def main() -> int:
             count = 0
             draws = 0
             last_seq = 0
+            last_run = 0
             missed_total = 0
             draw_period = 1.0 / args.draw_hz
             last_draw = 0.0
@@ -140,15 +142,18 @@ def main() -> int:
                 # Drain every complete frame already in the buffer.
                 while len(buf) >= TCP_FRAME_PREFIX_SIZE:
                     (frame_size,) = struct.unpack_from("<I", buf, 0)
-                    if frame_size != TCP_FRAME_SIZE:
+                    if frame_size > MAX_COMPACT_RECORD:
                         raise ValueError(
-                            f"unexpected TCP LinkFrame size {frame_size}, expected {TCP_FRAME_SIZE}"
+                            f"compact record size {frame_size} exceeds {MAX_COMPACT_RECORD}"
                         )
                     if len(buf) < TCP_FRAME_PREFIX_SIZE + frame_size:
                         break  # partial frame: wait for the rest
                     payload = bytes(buf[TCP_FRAME_PREFIX_SIZE : TCP_FRAME_PREFIX_SIZE + frame_size])
                     del buf[: TCP_FRAME_PREFIX_SIZE + frame_size]
-                    seq, _step, sim_time, channels = decode_tcp_frame(payload)
+                    run_id, seq, _step, sim_time, channels = decode_compact_record(payload)
+                    if last_run and run_id != last_run:
+                        last_seq = 0  # new publisher run: reset the cursor
+                    last_run = run_id
                     missed = max(0, seq - last_seq - 1) if last_seq else 0
                     if last_seq and seq <= last_seq:
                         raise ValueError(f"non-increasing TCP frame sequence {seq} after {last_seq}")

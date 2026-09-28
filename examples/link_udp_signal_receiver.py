@@ -7,7 +7,7 @@ import argparse
 import socket
 import sys
 
-from link_socket_protocol import decode_udp_datagram, format_signal_frame
+from link_socket_protocol import decode_compact_record, format_signal_frame
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,10 +38,11 @@ def main() -> int:
     receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     receiver.bind((args.bind, args.port))
     receiver.settimeout(args.idle_timeout or None)
-    print(f"Listening for WLU1 signal datagrams on {args.bind}:{args.port}", flush=True)
+    print(f"Listening for WLV2 signal datagrams on {args.bind}:{args.port}", flush=True)
 
     count = 0
     last_seq = 0
+    last_run = 0
     missed_total = 0
     try:
         while args.frames == 0 or count < args.frames:
@@ -49,7 +50,11 @@ def main() -> int:
                 packet, address = receiver.recvfrom(65535)
             except socket.timeout:
                 break
-            seq, step, sim_time, channels = decode_udp_datagram(packet)
+            run_id, seq, step, sim_time, channels = decode_compact_record(packet)
+            if last_run and run_id != last_run:
+                print(f"new publisher run run_id={run_id} (cursor reset)", flush=True)
+                last_seq = 0
+            last_run = run_id
             if last_seq and seq <= last_seq:
                 print(f"duplicate/out-of-order seq={seq} from {address[0]}", file=sys.stderr)
                 continue

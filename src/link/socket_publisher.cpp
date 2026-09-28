@@ -198,6 +198,23 @@ void tune_send_buffer(int fd) noexcept {
   ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)); // best-effort
 }
 
+// Publisher-run identity for v2 records: process/time mixed via splitmix64.
+// Opaque to the codec (any u64 goes); distinct constructions must differ so
+// receivers can reset cursors on restart (PHYSI-40 session semantics).
+// Best-effort only — collisions degrade to one extra missed-span report,
+// never to corrupt data.
+std::uint64_t make_run_id() noexcept {
+  timespec now{};
+  (void)::clock_gettime(CLOCK_MONOTONIC, &now);
+  std::uint64_t z = static_cast<std::uint64_t>(::getpid()) * 0x9E3779B97F4A7C15ULL +
+                    static_cast<std::uint64_t>(now.tv_sec) * 1000000000ULL +
+                    static_cast<std::uint64_t>(now.tv_nsec);
+  z += 0x9E3779B97F4A7C15ULL;
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  return z ^ (z >> 31);
+}
+
 } // namespace
 
 TcpPublisher::TcpPublisher(std::string_view endpoint, std::string_view domain,
@@ -217,6 +234,8 @@ TcpPublisher::TcpPublisher(std::string_view endpoint, std::string_view domain,
     return;
   }
   endpoint_ = std::string(endpoint);
+  domain_ = std::string(domain);
+  run_id_ = make_run_id();
   int err = 0;
   fd_ = open_connected(ep.value, SOCK_STREAM, kConnectTimeoutMs, err);
   if (fd_ < 0) {
@@ -225,15 +244,16 @@ TcpPublisher::TcpPublisher(std::string_view endpoint, std::string_view domain,
     return;
   }
   tune_send_buffer(fd_);
-  TcpHello hello{};
-  hello.magic = kTcpMagic;
-  hello.version = kTcpVersion;
+  TcpHello hello_msg{};
+  hello_msg.magic = kTcpMagic;
+  hello_msg.version = kTcpVersion;
   for (std::size_t i = 0; i < domain.size(); ++i) {
-    hello.domain[i] = domain[i];
+    hello_msg.domain[i] = domain[i];
   }
+  unsigned char hello[sizeof(hello_msg)]{};
+  std::memcpy(hello, &hello_msg, sizeof(hello_msg));
   std::size_t sent = 0;
-  const SendResult r = send_all(fd_, reinterpret_cast<const unsigned char *>(&hello),
-                                sizeof(hello), sent, err);
+  const SendResult r = send_all(fd_, hello, sizeof(hello), sent, err);
   if (r != SendResult::kComplete) {
     last_errno_ = err;
     status_ = {core::StatusCode::kInternal}; // cannot even shake hands
@@ -245,7 +265,9 @@ TcpPublisher::~TcpPublisher() { cleanup(); }
 
 TcpPublisher::TcpPublisher(TcpPublisher &&other) noexcept
     : endpoint_(std::move(other.endpoint_)),
+      domain_(std::move(other.domain_)),
       adapter_(other.adapter_),
+      run_id_(other.run_id_),
       fd_(other.fd_),
       wire_(other.wire_),
       pending_offset_(other.pending_offset_),
@@ -258,6 +280,7 @@ TcpPublisher::TcpPublisher(TcpPublisher &&other) noexcept
   other.pending_offset_ = 0;
   other.pending_size_ = 0;
   other.frame_seq_ = 0;
+  other.run_id_ = 0;
   other.stats_ = PublisherStats{};
   other.status_ = {core::StatusCode::kInternal}; // moved-from: inert
   other.last_errno_ = 0;
@@ -267,7 +290,9 @@ TcpPublisher &TcpPublisher::operator=(TcpPublisher &&other) noexcept {
   if (this != &other) {
     cleanup();
     endpoint_ = std::move(other.endpoint_);
+    domain_ = std::move(other.domain_);
     adapter_ = other.adapter_;
+    run_id_ = other.run_id_;
     fd_ = other.fd_;
     wire_ = other.wire_;
     pending_offset_ = other.pending_offset_;
@@ -280,6 +305,7 @@ TcpPublisher &TcpPublisher::operator=(TcpPublisher &&other) noexcept {
     other.pending_offset_ = 0;
     other.pending_size_ = 0;
     other.frame_seq_ = 0;
+    other.run_id_ = 0;
     other.stats_ = PublisherStats{};
     other.status_ = {core::StatusCode::kInternal};
     other.last_errno_ = 0;
@@ -320,16 +346,23 @@ void TcpPublisher::on_snapshot(const world::Snapshot &snapshot) {
   // frame_seq counts attempts (not just sends) so readers account publisher
   // drops and transport loss together via LagStats gaps.
   const std::uint64_t seq = ++frame_seq_;
-  if (!encode_frame(frame, staging_, seq).ok()) {
+  // Compact record under the same length prefix as always: used entries
+  // only, explicit portable bytes. The compact bound verdict matches the
+  // SHM LinkFrame bound verdict, so over-bound refusal stays identical
+  // across every transport.
+  std::size_t rec_len = 0;
+  if (!compact::encode_record(frame, domain_, run_id_, seq, wire_.data() + 4,
+                              wire_.size() - 4, rec_len)
+           .ok()) {
     ++stats_.dropped_over_bound;
     status_ = {core::StatusCode::kOutOfRange}; // loud (S7), frame skipped
     return;
   }
-  socket_detail::put_u32_le(wire_.data(), static_cast<std::uint32_t>(sizeof(LinkFrame)));
-  std::memcpy(wire_.data() + 4, &staging_, sizeof(staging_));
+  socket_detail::put_u32_le(wire_.data(), static_cast<std::uint32_t>(rec_len));
+  const std::size_t wire_len = 4 + rec_len;
   int err = 0;
   std::size_t sent = 0;
-  const SendResult r = send_all(fd_, wire_.data(), wire_.size(), sent, err);
+  const SendResult r = send_all(fd_, wire_.data(), wire_len, sent, err);
   if (r == SendResult::kComplete) {
     ++stats_.published;
     return;
@@ -339,7 +372,7 @@ void TcpPublisher::on_snapshot(const world::Snapshot &snapshot) {
       ++stats_.dropped_send; // transient: counted, never sticky
     } else {
       pending_offset_ = sent;
-      pending_size_ = wire_.size();
+      pending_size_ = wire_len;
     }
     return;
   }
@@ -468,6 +501,7 @@ UdpPublisher::UdpPublisher(std::string_view endpoint, std::string_view domain,
   }
   endpoint_ = std::string(endpoint);
   domain_ = std::string(domain);
+  run_id_ = make_run_id();
   int err = 0;
   fd_ = open_connected(ep.value, SOCK_DGRAM, 0, err);
   if (fd_ < 0) {
@@ -484,6 +518,7 @@ UdpPublisher::UdpPublisher(UdpPublisher &&other) noexcept
     : endpoint_(std::move(other.endpoint_)),
       domain_(std::move(other.domain_)),
       adapter_(other.adapter_),
+      run_id_(other.run_id_),
       fd_(other.fd_),
       frame_seq_(other.frame_seq_),
       stats_(other.stats_),
@@ -491,6 +526,7 @@ UdpPublisher::UdpPublisher(UdpPublisher &&other) noexcept
       last_errno_(other.last_errno_) {
   other.fd_ = -1;
   other.frame_seq_ = 0;
+  other.run_id_ = 0;
   other.stats_ = PublisherStats{};
   other.status_ = {core::StatusCode::kInternal}; // moved-from: inert
   other.last_errno_ = 0;
@@ -502,6 +538,7 @@ UdpPublisher &UdpPublisher::operator=(UdpPublisher &&other) noexcept {
     endpoint_ = std::move(other.endpoint_);
     domain_ = std::move(other.domain_);
     adapter_ = other.adapter_;
+    run_id_ = other.run_id_;
     fd_ = other.fd_;
     frame_seq_ = other.frame_seq_;
     stats_ = other.stats_;
@@ -509,6 +546,7 @@ UdpPublisher &UdpPublisher::operator=(UdpPublisher &&other) noexcept {
     last_errno_ = other.last_errno_;
     other.fd_ = -1;
     other.frame_seq_ = 0;
+    other.run_id_ = 0;
     other.stats_ = PublisherStats{};
     other.status_ = {core::StatusCode::kInternal};
     other.last_errno_ = 0;
@@ -529,16 +567,12 @@ void UdpPublisher::on_snapshot(const world::Snapshot &snapshot) {
     return;
   }
   const std::uint64_t seq = ++frame_seq_;
-  // Cross-transport verdict first: a frame that fails the LinkFrame bound
-  // is refused by TCP/SHM too, so UDP refuses it identically (D18).
-  if (!encode_frame(frame, staging_, seq).ok()) {
-    ++stats_.dropped_over_bound;
-    status_ = {core::StatusCode::kOutOfRange}; // loud (S7), frame skipped
-    return;
-  }
+  // One shared verdict for every transport: the compact bound (counts,
+  // names, datagram fit) refuses over-bound frames identically on
+  // TCP/SHM/UDP alike — loud (S7), never silently truncated.
   std::size_t datagram_len = 0;
-  if (!encode_udp(frame, domain_, seq, datagram_.data(), datagram_.size(),
-                  datagram_len)
+  if (!compact::encode_record(frame, domain_, run_id_, seq, datagram_.data(),
+                              datagram_.size(), datagram_len)
            .ok()) {
     ++stats_.dropped_over_bound;
     status_ = {core::StatusCode::kOutOfRange}; // loud (S7), frame skipped

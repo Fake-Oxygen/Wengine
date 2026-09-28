@@ -12,10 +12,10 @@ import struct
 import sys
 
 from link_socket_protocol import (
-    TCP_FRAME_SIZE,
+    MAX_COMPACT_RECORD,
     TCP_FRAME_PREFIX_SIZE,
     TCP_HELLO_SIZE,
-    decode_tcp_frame,
+    decode_compact_record,
     decode_tcp_hello,
     format_signal_frame,
 )
@@ -60,7 +60,7 @@ def main() -> int:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((args.bind, args.port))
     listener.listen(1)
-    print(f"Listening for WLT1 signal stream on {args.bind}:{args.port}", flush=True)
+    print(f"Listening for WLT2 signal stream on {args.bind}:{args.port}", flush=True)
 
     try:
         connection, address = listener.accept()
@@ -74,19 +74,24 @@ def main() -> int:
 
             count = 0
             last_seq = 0
+            last_run = 0
             missed_total = 0
             while args.frames == 0 or count < args.frames:
                 prefix = read_exact(connection, TCP_FRAME_PREFIX_SIZE, allow_clean_eof=True)
                 if prefix is None:
                     break
                 frame_size = struct.unpack("<I", prefix)[0]
-                if frame_size != TCP_FRAME_SIZE:
+                if frame_size > MAX_COMPACT_RECORD:
                     raise ValueError(
-                        f"unexpected TCP LinkFrame size {frame_size}, expected {TCP_FRAME_SIZE}"
+                        f"compact record size {frame_size} exceeds {MAX_COMPACT_RECORD}"
                     )
                 payload = read_exact(connection, frame_size)
                 assert payload is not None
-                seq, step, sim_time, channels = decode_tcp_frame(payload)
+                run_id, seq, step, sim_time, channels = decode_compact_record(payload)
+                if last_run and run_id != last_run:
+                    print(f"new publisher run run_id={run_id} (cursor reset)", flush=True)
+                    last_seq = 0
+                last_run = run_id
                 missed = max(0, seq - last_seq - 1) if last_seq else 0
                 if last_seq and seq <= last_seq:
                     raise ValueError(f"non-increasing TCP frame sequence {seq} after {last_seq}")

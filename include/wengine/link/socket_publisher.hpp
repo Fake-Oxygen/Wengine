@@ -5,23 +5,25 @@
 //
 // Two emit::ISink publishers, built and owned by the caller (CLI/GUI edge)
 // and attached like any sink — same fan-out seam as CsvSink/ShmPublisher,
-// no engine change. Both reuse link::encode_frame bytes and the SHM
-// versioning wording; both are non-blocking copy-and-return with sticky
-// core::Status, so a slow or absent peer never stalls the sim loop.
+// no engine change. Both speak the transport-independent compact v2 codec
+// (compact_codec.hpp: explicit portable bytes, used entries only) and the
+// SHM versioning wording; both are non-blocking copy-and-return with
+// sticky core::Status, so a slow or absent peer never stalls the sim loop.
 //
 // TCP (TcpPublisher): active connect to host:port, then a hello
-// (TcpHello: magic "WLT1", version == link::kVersion, NUL-terminated
-// domain) followed by length-prefixed LinkFrame bytes (u32 LE byte count
-// + frame). The hello IS the attach gate, in SHM wording: the reader
-// validates magic/version/domain with check_tcp_hello and closes on
+// (TcpHello: magic "WLT2", schema version 2, NUL-terminated domain)
+// followed by length-prefixed compact records (u32 LE byte count +
+// record). The hello IS the attach gate, in SHM wording: the reader
+// validates magic/schema/domain with check_tcp_hello and closes on
 // mismatch — loud refusal, never silent mid-stream. Queueing is the kernel
-// send buffer (256 KiB default, ~3-4 full frames — tunable only by rebuild,
-// documented in signals.md); on backpressure the attempted frame is
-// dropped and counted (dropped_send) WITHOUT poisoning the publisher,
-// except a partially accepted frame is completed before any later frame is
-// sent (TCP streams cannot discard a prefix without corrupting framing),
-// while over-bound frames (dropped_over_bound, kOutOfRange) and a dead
-// peer (EPIPE/reset, kInternal) are sticky like SHM.
+// send buffer (256 KiB default — thousands of compact records, tunable
+// only by rebuild, documented in signals.md); on backpressure the
+// attempted frame is dropped and counted (dropped_send) WITHOUT poisoning
+// the publisher, except a partially accepted frame is completed before any
+// later frame is sent (TCP streams cannot discard a prefix without
+// corrupting framing), while over-bound frames (dropped_over_bound,
+// kOutOfRange) and a dead peer (EPIPE/reset, kInternal) are sticky like
+// SHM. run_id identifies the publisher run for receiver session resets.
 //
 // A partially accepted frame is held as pending bytes (at most one frame).
 // on_snapshot retries it first but never blocks; when emission is idle the
@@ -32,16 +34,13 @@
 // reported by the finish caller via pending_bytes()/has_pending_frame().
 //
 // UDP (UdpPublisher): connected datagrams to host:port (no handshake —
-// UDP has none). A full LinkFrame (68,136 B) always exceeds the maximum
-// UDP payload (65,507 B), so full-frame datagrams are unimplementable;
-// UDP instead sends a COMPACT datagram (UdpHeader + used entries only,
-// ~100 B for a few signal channels) that self-describes per datagram
-// (magic "WLU1", version, domain, frame_seq, clock, counts). Readers gate
-// each datagram with decode_udp (magic/version/domain/counts/length all
-// exact, else kInvalidArgument) and account loss with LagStats over
-// frame_seq — same vocabulary as the SHM ring. For cross-transport
-// consistency the UDP path is gated on encode_frame FIRST, so an
-// over-bound frame is refused by every transport identically.
+// UDP has none), carrying the same compact v2 records (each one always
+// fits a maximum-size datagram by codec construction). Datagrams
+// self-describe per packet (magic/schema/run/frame_seq/clock/counts).
+// Readers gate each datagram with compact::decode_record (exact length,
+// else kInvalidArgument) and account loss with LagStats over frame_seq —
+// same vocabulary as the SHM ring. Over-bound frames are refused by the
+// compact bound verdict, identical on every transport.
 //
 // PORTABILITY: POSIX-only TU (src/link/socket_publisher.cpp) — sockets,
 // getaddrinfo, non-blocking I/O; the Windows port replaces that TU, never
@@ -50,12 +49,12 @@
 
 #include "wengine/core/status.hpp"
 #include "wengine/emit/sink.hpp"
+#include "wengine/link/compact_codec.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/link/protocol.hpp"
 #include "wengine/world/state.hpp"
 
 #include <array>
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -65,24 +64,23 @@
 
 namespace wengine::link {
 
-// TCP stream framing: magic "WLT1" (LE bytes 'W','L','T','1").
-inline constexpr std::uint32_t kTcpMagic = 0x31544C57u;
-// UDP datagram framing: magic "WLU1" (LE bytes 'W','L','U','1").
-inline constexpr std::uint32_t kUdpMagic = 0x31554C57u;
-// Wire versions track the protocol version exactly: a link::kVersion bump
-// invalidates both socket framings alongside the SHM gate.
-inline constexpr std::uint32_t kTcpVersion = kVersion;
-inline constexpr std::uint32_t kUdpVersion = kVersion;
-// Kernel send buffer sized at construction (best-effort setsockopt): room
-// for ~3-4 full TCP frames before backpressure drops begin.
+// TCP stream framing: magic "WLT2" (LE bytes 'W','L','T','2'); payloads
+// are compact v2 records (compact_codec.hpp) under one u32 LE length
+// prefix per record.
+inline constexpr std::uint32_t kTcpMagic = 0x32544C57u;
+// Socket-schema version, tracked independently of the SHM layout version
+// (link::kVersion): socket readers gate on this, SHM readers on that.
+inline constexpr std::uint32_t kTcpVersion = compact::kSchemaVersion;
+// Kernel send buffer sized at construction (best-effort setsockopt):
+// thousands of compact records before backpressure drops begin.
 inline constexpr int kSocketSendBuffer = 256 * 1024;
 // Bounded shutdown drain for TcpPublisher::finish (application edge owns
 // the deadline; destructors never wait).
 inline constexpr int kTcpFinishTimeoutMs = 2000;
 // Largest UDP payload per RFC 768 (65535 - 20 IP - 8 UDP).
 inline constexpr std::size_t kMaxUdpPayload = 65507;
-// TCP frame bytes on the wire: length prefix + one full LinkFrame.
-inline constexpr std::size_t kTcpFrameBytes = 4 + sizeof(LinkFrame);
+// TCP wire buffer: length prefix + the largest encodable record.
+inline constexpr std::size_t kTcpWireBytes = 4 + compact::kMaxRecordBytes;
 
 // TCP hello: first bytes of every connection (plain struct, LE on the
 // wire; see hello_bytes/check_tcp_hello below).
@@ -94,23 +92,7 @@ struct TcpHello {
 
 static_assert(sizeof(TcpHello) == 4 + 4 + kDomainSize);
 
-// Compact UDP datagram header (LE multibyte fields, doubles as IEEE-754
-// bits — portable by construction, unlike the same-host LinkFrame).
-// Followed by item_count LinkItems (64 B each) then channel_count
-// LinkChannels (40 B each), using the SAME entry layouts as the wire
-// LinkFrame so readers share field code.
-struct UdpHeader {
-  std::uint32_t magic = kUdpMagic;
-  std::uint32_t version = kUdpVersion;
-  char domain[kDomainSize] = {}; // NUL-terminated solver/domain tag
-  std::uint64_t frame_seq = 0; // monotonic publish id (LagStats loss source)
-  std::uint64_t step_index = 0;
-  double sim_time = 0.0;
-  std::uint64_t item_count = 0;
-  std::uint64_t channel_count = 0;
-};
 
-static_assert(sizeof(UdpHeader) == 80);
 
 namespace socket_detail {
 
@@ -145,8 +127,9 @@ inline std::uint64_t get_u64_le(const unsigned char *src) noexcept {
 } // namespace socket_detail
 
 // Reader-side TCP hello gate (shared with future Zephyr readers): exact
-// magic, exact version, exact domain, NUL-terminated domain. Anything else
-// is kInvalidArgument — the "loud refusal" behind a reader close.
+// magic, exact schema version, exact domain, NUL-terminated domain.
+// Anything else (garbage, foreign magics, future schemas) is
+// kInvalidArgument — the "loud refusal" behind a reader close.
 [[nodiscard]] inline core::Status check_tcp_hello(const TcpHello &hello,
                                                   std::string_view want_domain) noexcept {
   if (hello.magic != kTcpMagic || hello.version != kTcpVersion) {
@@ -165,165 +148,6 @@ inline std::uint64_t get_u64_le(const unsigned char *src) noexcept {
     }
   }
   return {core::StatusCode::kInvalidArgument}; // unterminated: corrupt
-}
-
-// Compact UDP encode (shared with future readers): header + used entries
-// only. Validates everything BEFORE touching `out` (domain shape, counts,
-// name bounds, total ≤ capacity and ≤ kMaxUdpPayload); violations are
-// kOutOfRange/kInvalidArgument with `out`/`out_len` untouched — loud,
-// never silently truncated.
-[[nodiscard]] inline core::Status
-encode_udp(const Frame &in, std::string_view domain, std::uint64_t frame_seq,
-           unsigned char *out, std::size_t capacity, std::size_t &out_len) noexcept {
-  if (domain.empty() || domain.size() >= kDomainSize || out == nullptr) {
-    return {core::StatusCode::kInvalidArgument};
-  }
-  if (in.items.size() > kMaxItems || in.channels.size() > kMaxChannels) {
-    return {core::StatusCode::kOutOfRange};
-  }
-  for (const FrameChannel &c : in.channels) {
-    if (c.name.size() >= kChannelNameSize) {
-      return {core::StatusCode::kOutOfRange};
-    }
-  }
-  const std::size_t need = sizeof(UdpHeader) +
-                           in.items.size() * sizeof(LinkItem) +
-                           in.channels.size() * sizeof(LinkChannel);
-  if (need > capacity || need > kMaxUdpPayload) {
-    return {core::StatusCode::kOutOfRange};
-  }
-  socket_detail::put_u32_le(out + 0, kUdpMagic);
-  socket_detail::put_u32_le(out + 4, kUdpVersion);
-  for (std::size_t i = 0; i < domain.size(); ++i) {
-    out[8 + i] = static_cast<unsigned char>(domain[i]);
-  }
-  out[8 + domain.size()] = '\0';
-  for (std::size_t i = 8 + domain.size() + 1; i < 8 + kDomainSize; ++i) {
-    out[i] = '\0';
-  }
-  socket_detail::put_u64_le(out + 40, frame_seq);
-  socket_detail::put_u64_le(out + 48, in.step);
-  socket_detail::put_u64_le(out + 56, std::bit_cast<std::uint64_t>(in.time));
-  socket_detail::put_u64_le(out + 64, static_cast<std::uint64_t>(in.items.size()));
-  socket_detail::put_u64_le(out + 72, static_cast<std::uint64_t>(in.channels.size()));
-  unsigned char *dst = out + sizeof(UdpHeader);
-  for (const FrameItem &src : in.items) {
-    LinkItem wire{};
-    wire.x = src.x;
-    wire.y = src.y;
-    wire.z = src.z;
-    wire.vx = src.vx;
-    wire.vy = src.vy;
-    wire.vz = src.vz;
-    wire.size = src.size;
-    wire.color = src.color;
-    wire.has_velocity = src.has_velocity ? std::uint8_t{1} : std::uint8_t{0};
-    std::memcpy(dst, &wire, sizeof(wire));
-    dst += sizeof(wire);
-  }
-  for (const FrameChannel &src : in.channels) {
-    LinkChannel wire{};
-    for (std::size_t i = 0; i < src.name.size(); ++i) {
-      wire.name[i] = src.name[i];
-    }
-    wire.name[src.name.size()] = '\0';
-    wire.value = src.value;
-    std::memcpy(dst, &wire, sizeof(wire));
-    dst += sizeof(wire);
-  }
-  out_len = need;
-  return core::Status::success();
-}
-
-// Compact UDP decode (cold reader side: may allocate, NOT noexcept — never
-// call inside the sim loop). Validates magic, version, domain shape (and,
-// when want_domain is non-empty, exact domain match — the per-datagram
-// attach gate), count bounds, exact length match, and NUL-terminated names.
-// Violations are kInvalidArgument with `out`/`out_seq` untouched.
-[[nodiscard]] inline core::Status decode_udp(const unsigned char *bytes, std::size_t len,
-                                            std::string_view want_domain, Frame &out,
-                                            std::uint64_t &out_seq) {
-  if (bytes == nullptr || len < sizeof(UdpHeader)) {
-    return {core::StatusCode::kInvalidArgument};
-  }
-  if (socket_detail::get_u32_le(bytes + 0) != kUdpMagic ||
-      socket_detail::get_u32_le(bytes + 4) != kUdpVersion) {
-    return {core::StatusCode::kInvalidArgument};
-  }
-  std::size_t domain_len = kDomainSize;
-  for (std::size_t i = 0; i < kDomainSize; ++i) {
-    if (bytes[8 + i] == '\0') {
-      domain_len = i;
-      break;
-    }
-  }
-  if (domain_len == 0 || domain_len >= kDomainSize) {
-    return {core::StatusCode::kInvalidArgument};
-  }
-  if (!want_domain.empty() &&
-      (want_domain.size() != domain_len ||
-       std::string_view(reinterpret_cast<const char *>(bytes + 8), domain_len) !=
-           want_domain)) {
-    return {core::StatusCode::kInvalidArgument};
-  }
-  const std::uint64_t seq = socket_detail::get_u64_le(bytes + 40);
-  const std::uint64_t step = socket_detail::get_u64_le(bytes + 48);
-  const double sim_time = std::bit_cast<double>(socket_detail::get_u64_le(bytes + 56));
-  const std::uint64_t n_items = socket_detail::get_u64_le(bytes + 64);
-  const std::uint64_t n_channels = socket_detail::get_u64_le(bytes + 72);
-  if (n_items > static_cast<std::uint64_t>(kMaxItems) ||
-      n_channels > static_cast<std::uint64_t>(kMaxChannels)) {
-    return {core::StatusCode::kInvalidArgument};
-  }
-  const std::size_t want =
-      sizeof(UdpHeader) + static_cast<std::size_t>(n_items) * sizeof(LinkItem) +
-      static_cast<std::size_t>(n_channels) * sizeof(LinkChannel);
-  if (want != len) {
-    return {core::StatusCode::kInvalidArgument};
-  }
-  const unsigned char *src = bytes + sizeof(UdpHeader);
-  for (std::uint64_t k = 0; k < n_channels; ++k) {
-    const unsigned char *name =
-        src + static_cast<std::size_t>(n_items) * sizeof(LinkItem) +
-        k * sizeof(LinkChannel);
-    bool terminated = false;
-    for (std::size_t i = 0; i < kChannelNameSize; ++i) {
-      if (name[i] == '\0') {
-        terminated = true;
-        break;
-      }
-    }
-    if (!terminated) {
-      return {core::StatusCode::kInvalidArgument};
-    }
-  }
-  out.step = step;
-  out.time = sim_time;
-  out.items.resize(static_cast<std::size_t>(n_items));
-  for (std::uint64_t k = 0; k < n_items; ++k) {
-    LinkItem wire{};
-    std::memcpy(&wire, src + k * sizeof(LinkItem), sizeof(wire));
-    FrameItem &dst = out.items[static_cast<std::size_t>(k)];
-    dst.x = wire.x;
-    dst.y = wire.y;
-    dst.z = wire.z;
-    dst.vx = wire.vx;
-    dst.vy = wire.vy;
-    dst.vz = wire.vz;
-    dst.size = wire.size;
-    dst.color = wire.color;
-    dst.has_velocity = wire.has_velocity != std::uint8_t{0};
-  }
-  src += static_cast<std::size_t>(n_items) * sizeof(LinkItem);
-  out.channels.resize(static_cast<std::size_t>(n_channels));
-  for (std::uint64_t k = 0; k < n_channels; ++k) {
-    LinkChannel wire{};
-    std::memcpy(&wire, src + k * sizeof(LinkChannel), sizeof(wire));
-    out.channels[static_cast<std::size_t>(k)].name.assign(wire.name);
-    out.channels[static_cast<std::size_t>(k)].value = wire.value;
-  }
-  out_seq = seq;
-  return core::Status::success();
 }
 
 // host:port endpoint (CLI --emit-tcp/--emit-udp, publisher constructors).
@@ -410,15 +234,17 @@ public:
     return pending_size_ == 0 ? 0 : pending_size_ - pending_offset_;
   }
   [[nodiscard]] const std::string &endpoint() const noexcept { return endpoint_; }
+  [[nodiscard]] std::uint64_t run_id() const noexcept { return run_id_; }
 
 private:
   void cleanup() noexcept;
 
   std::string endpoint_;
+  std::string domain_; // record domain (hello gate + every record)
   FrameAdapter adapter_ = &frame_from_snapshot;
+  std::uint64_t run_id_ = 0; // run identity (opaque, fixed at construction)
   int fd_ = -1;
-  LinkFrame staging_{}; // encode target: no per-emit stack bloat, no alloc
-  std::array<unsigned char, kTcpFrameBytes> wire_{}; // prefix + frame bytes
+  std::array<unsigned char, kTcpWireBytes> wire_; // prefix + record bytes
   std::size_t pending_offset_ = 0;
   std::size_t pending_size_ = 0;
   std::uint64_t frame_seq_ = 0;
@@ -446,6 +272,7 @@ public:
   [[nodiscard]] int last_errno() const noexcept { return last_errno_; }
   [[nodiscard]] const PublisherStats &stats() const noexcept { return stats_; }
   [[nodiscard]] const std::string &endpoint() const noexcept { return endpoint_; }
+  [[nodiscard]] std::uint64_t run_id() const noexcept { return run_id_; }
 
 private:
   void cleanup() noexcept;
@@ -453,9 +280,9 @@ private:
   std::string endpoint_;
   std::string domain_;
   FrameAdapter adapter_ = &frame_from_snapshot;
+  std::uint64_t run_id_ = 0; // run identity (opaque, fixed at construction)
   int fd_ = -1;
-  LinkFrame staging_{}; // over-bound gate target (cross-transport verdict)
-  std::array<unsigned char, kMaxUdpPayload> datagram_{}; // compact encode target
+  std::array<unsigned char, kMaxUdpPayload> datagram_{}; // record encode target
   std::uint64_t frame_seq_ = 0;
   PublisherStats stats_{};
   core::Status status_{};

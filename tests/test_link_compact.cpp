@@ -377,25 +377,22 @@ void test_malformed() {
   }
 }
 
-static_assert(link::compact::kV1UdpMagic == link::kUdpMagic,
-              "v1 refusal magic must match the UDP publisher header");
 static_assert(link::compact::kMaxNameLen == link::kChannelNameSize - 1);
 
 void test_v1_v2_refusal() {
   // Families classify exactly; gates refuse everything foreign loudly.
-  // A genuine v1 UDP datagram (built by the v1 encoder, not hand bytes)
-  // classifies V1 and is refused by the v2 gate.
-  link::Frame f = golden_frame();
-  std::array<unsigned char, link::kMaxUdpPayload> v1{};
-  std::size_t v1_len = 0;
-  assert(link::encode_udp(f, "signal", 7, v1.data(), v1.size(), v1_len).ok());
-  assert(link::compact::classify_record(v1.data(), v1_len) == link::compact::SocketSchema::kV1);
-  assert(!link::compact::check_v2_schema(v1.data(), v1_len).ok());
+  // The retired v1 UDP magic still classifies V1 (refusal vocabulary for
+  // any stale peer) and is refused by the v2 gate and decoder.
+  const unsigned char v1_prefix[8] = {0x57, 0x4C, 0x55, 0x31, 0x01, 0x00, 0x00, 0x00};
+  assert(link::compact::classify_record(v1_prefix, sizeof(v1_prefix)) ==
+         link::compact::SocketSchema::kV1);
+  assert(!link::compact::check_v2_schema(v1_prefix, sizeof(v1_prefix)).ok());
   link::Frame out;
   std::uint64_t run_id = 0;
   std::uint64_t seq = 0;
   link::compact::RecordKind kind{};
-  assert(!link::compact::decode_record(v1.data(), v1_len, "signal", out, run_id, seq, kind)
+  assert(!link::compact::decode_record(v1_prefix, sizeof(v1_prefix), "signal", out,
+                                       run_id, seq, kind)
               .ok());
 
   assert(link::compact::classify_record(kGolden.data(), kGolden.size()) ==
