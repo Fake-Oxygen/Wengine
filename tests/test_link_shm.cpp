@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 using namespace wengine;
 
@@ -501,6 +502,224 @@ void test_stale_reader_parks_on_same_name_republish() {
   assert(latest.frame_seq == 5 && latest.step_index == 5);
 }
 
+void test_ordered_drains_small_burst_lossless() {
+  // Burst smaller than the ring: poll_next walks 1..N in order with zero
+  // loss; read_batch with ample capacity returns the same in one call
+  // with no busy/cap flags.
+  const std::string name = seg_name("ord-small");
+  link::ShmPublisher pub(name, "projectile");
+  assert(pub.ok());
+  world::State unused;
+  std::array<emit::ISink *, 1> sinks{&pub};
+  constexpr std::uint64_t kSteps = 5;
+  static_assert(kSteps < link::kSlotCount);
+  assert(solvers::run_headless(batch_cfg(kSteps, 1), sinks, unused).ok());
+
+  link::ShmReader reader(name);
+  assert(reader.ok());
+
+  // Single-step drain: ascending, skipped == 0 every time, then empty.
+  {
+    std::uint64_t cursor = 0;
+    for (std::uint64_t want = 1; want <= kSteps; ++want) {
+      link::LinkFrame wire{};
+      std::uint64_t skipped = 999;
+      assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kOk);
+      assert(cursor == want && wire.frame_seq == want);
+      assert(wire.step_index == want);
+      assert(skipped == 0);
+    }
+    link::LinkFrame wire{};
+    std::uint64_t skipped = 0;
+    assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kEmpty);
+    assert(cursor == kSteps && skipped == 0);
+    // Empty is stable: cursor parked, no phantom frames.
+    assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kEmpty);
+    assert(cursor == kSteps);
+  }
+
+  // Batch drain with ample capacity: one call, same content, no flags.
+  {
+    std::uint64_t cursor = 0;
+    std::vector<link::LinkFrame> buf(static_cast<std::size_t>(kSteps));
+    const link::ShmReader::OrderedBatch rep = reader.read_batch(cursor, buf.data(), buf.size());
+    assert(!rep.busy && !rep.capped);
+    assert(rep.returned == kSteps && rep.skipped == 0);
+    assert(cursor == kSteps);
+    for (std::size_t i = 0; i < rep.returned; ++i) {
+      assert(buf[i].frame_seq == static_cast<std::uint64_t>(i + 1));
+    }
+  }
+
+  // Batch drain with a tight limit: caller bound respected, capped set,
+  // and a second call resumes where the first stopped (buffer reuse).
+  {
+    std::uint64_t cursor = 0;
+    std::vector<link::LinkFrame> buf(2);
+    const link::ShmReader::OrderedBatch first = reader.read_batch(cursor, buf.data(), buf.size());
+    assert(!first.busy && first.capped);
+    assert(first.returned == 2 && first.skipped == 0 && cursor == 2);
+    assert(buf[0].frame_seq == 1 && buf[1].frame_seq == 2);
+    const link::ShmReader::OrderedBatch second = reader.read_batch(cursor, buf.data(), buf.size());
+    assert(!second.busy && second.capped);
+    assert(second.returned == 2 && second.skipped == 0 && cursor == 4);
+    assert(buf[0].frame_seq == 3 && buf[1].frame_seq == 4);
+    const link::ShmReader::OrderedBatch tail = reader.read_batch(cursor, buf.data(), buf.size());
+    assert(!tail.busy && !tail.capped);
+    assert(tail.returned == 1 && tail.skipped == 0 && cursor == 5);
+    assert(buf[0].frame_seq == 5);
+  }
+
+  // Decoded single-step follows the same order.
+  {
+    std::uint64_t cursor = 0;
+    for (std::uint64_t want = 1; want <= kSteps; ++want) {
+      link::Frame frame;
+      std::uint64_t skipped = 999;
+      assert(reader.poll_next_frame(cursor, frame, skipped) ==
+             link::ShmReader::OrderedOutcome::kOk);
+      assert(cursor == want && frame.step == want && skipped == 0);
+    }
+  }
+}
+
+void test_ordered_reports_overrun_and_resumes() {
+  // Burst larger than the ring: the first poll_next reports the exact
+  // overwritten interval and resumes from the oldest retained frame;
+  // the rest drain in order with skipped == 0.
+  const std::string name = seg_name("ord-over");
+  link::ShmPublisher pub(name, "projectile");
+  assert(pub.ok());
+  world::State unused;
+  std::array<emit::ISink *, 1> sinks{&pub};
+  constexpr std::uint64_t kSteps = link::kSlotCount + 4;
+  assert(solvers::run_headless(batch_cfg(kSteps, 1), sinks, unused).ok());
+
+  const std::uint64_t oldest = kSteps - link::kSlotCount + 1;
+  const std::uint64_t lost = oldest - 1;
+  link::ShmReader reader(name);
+  assert(reader.ok());
+
+  // Single-step: first call jumps to oldest with exact loss, then in order.
+  {
+    std::uint64_t cursor = 0;
+    link::LinkFrame wire{};
+    std::uint64_t skipped = 0;
+    assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kOk);
+    assert(wire.frame_seq == oldest && cursor == oldest);
+    assert(skipped == lost);
+    assert(skipped == link::reader_missed(0, oldest));
+    for (std::uint64_t want = oldest + 1; want <= kSteps; ++want) {
+      assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kOk);
+      assert(cursor == want && wire.frame_seq == want && skipped == 0);
+    }
+    assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kEmpty);
+    assert(cursor == kSteps);
+  }
+
+  // A mid-run cursor that already saw seq 2 loses exactly 3..oldest-1.
+  {
+    std::uint64_t cursor = 2;
+    link::LinkFrame wire{};
+    std::uint64_t skipped = 0;
+    assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kOk);
+    assert(wire.frame_seq == oldest && cursor == oldest);
+    assert(skipped == oldest - 2 - 1);
+  }
+
+  // Batch: one ample call returns exactly the retained window with the
+  // same total loss accounting.
+  {
+    std::uint64_t cursor = 0;
+    std::vector<link::LinkFrame> buf(static_cast<std::size_t>(kSteps));
+    const link::ShmReader::OrderedBatch rep = reader.read_batch(cursor, buf.data(), buf.size());
+    assert(!rep.busy && !rep.capped);
+    assert(rep.returned == link::kSlotCount && rep.skipped == lost);
+    assert(cursor == kSteps);
+    for (std::size_t i = 0; i < rep.returned; ++i) {
+      assert(buf[i].frame_seq == oldest + static_cast<std::uint64_t>(i));
+    }
+  }
+}
+
+void test_ordered_vs_latest_only_accounting() {
+  // Same overrun burst observed two ways: latest-only coalesces to the
+  // newest (intentional skip, display path) while ordered draining
+  // reports only the overwritten prefix (real loss) and keeps the rest.
+  const std::string name = seg_name("ord-acct");
+  link::ShmPublisher pub(name, "projectile");
+  assert(pub.ok());
+  world::State unused;
+  std::array<emit::ISink *, 1> sinks{&pub};
+  constexpr std::uint64_t kSteps = link::kSlotCount + 4;
+  assert(solvers::run_headless(batch_cfg(kSteps, 1), sinks, unused).ok());
+
+  link::ShmReader reader(name);
+  assert(reader.ok());
+  const std::uint64_t oldest = kSteps - link::kSlotCount + 1;
+
+  std::uint64_t latest_cursor = 0;
+  link::LinkFrame latest{};
+  assert(reader.poll_newer(latest_cursor, latest));
+  assert(latest_cursor == kSteps);
+  assert(link::reader_missed(0, latest_cursor) == kSteps - 1); // intentional jump
+
+  std::uint64_t ordered_cursor = 0;
+  link::LinkFrame first{};
+  std::uint64_t skipped = 0;
+  assert(reader.poll_next(ordered_cursor, first, skipped) ==
+         link::ShmReader::OrderedOutcome::kOk);
+  assert(first.frame_seq == oldest && skipped == oldest - 1); // real loss only
+  assert(skipped < link::reader_missed(0, latest_cursor));
+}
+
+void test_ordered_empty_and_post_exit_drain() {
+  // Empty bus: poll_next is kEmpty (never kBusy single-threaded, never a
+  // frame). After publisher exit an attached reader still drains the
+  // retained final frames in order.
+  {
+    const std::string name = seg_name("ord-empty");
+    link::ShmPublisher pub(name, "projectile");
+    assert(pub.ok());
+    link::ShmReader reader(name);
+    assert(reader.ok());
+    std::uint64_t cursor = 0;
+    link::LinkFrame wire{};
+    std::uint64_t skipped = 999;
+    assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kEmpty);
+    assert(cursor == 0 && skipped == 0);
+    std::vector<link::LinkFrame> buf(4);
+    const link::ShmReader::OrderedBatch rep = reader.read_batch(cursor, buf.data(), buf.size());
+    assert(rep.returned == 0 && rep.skipped == 0 && !rep.busy && !rep.capped);
+    // Zero capacity and null storage never crash and move nothing.
+    const link::ShmReader::OrderedBatch zero = reader.read_batch(cursor, buf.data(), 0);
+    assert(zero.returned == 0 && !zero.busy && !zero.capped);
+    const link::ShmReader::OrderedBatch null_rep = reader.read_batch(cursor, nullptr, 2);
+    assert(null_rep.returned == 0 && cursor == 0);
+  }
+  {
+    const std::string name = seg_name("ord-exit");
+    auto pub = std::make_unique<link::ShmPublisher>(name, "projectile");
+    assert(pub->ok());
+    link::ShmReader reader(name);
+    assert(reader.ok());
+    world::State unused;
+    std::array<emit::ISink *, 1> sinks{pub.get()};
+    assert(solvers::run_headless(batch_cfg(5, 1), sinks, unused).ok());
+    pub.reset(); // publisher exit: mapping retained by the attached reader.
+    std::uint64_t cursor = 0;
+    for (std::uint64_t want = 1; want <= 5; ++want) {
+      link::LinkFrame wire{};
+      std::uint64_t skipped = 999;
+      assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kOk);
+      assert(cursor == want && wire.frame_seq == want && skipped == 0);
+    }
+    link::LinkFrame wire{};
+    std::uint64_t skipped = 0;
+    assert(reader.poll_next(cursor, wire, skipped) == link::ShmReader::OrderedOutcome::kEmpty);
+  }
+}
+
 } // namespace
 
 int main() {
@@ -515,6 +734,10 @@ int main() {
   test_reader_move();
   test_attached_reader_survives_publisher_exit();
   test_stale_reader_parks_on_same_name_republish();
+  test_ordered_drains_small_burst_lossless();
+  test_ordered_reports_overrun_and_resumes();
+  test_ordered_vs_latest_only_accounting();
+  test_ordered_empty_and_post_exit_drain();
   std::cout << "test_link_shm: OK\n";
   return 0;
 }

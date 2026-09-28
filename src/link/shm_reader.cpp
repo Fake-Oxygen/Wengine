@@ -10,7 +10,9 @@
 #include "wengine/link/shm_reader.hpp"
 
 #include <cerrno>
+#include <cstdint>
 #include <fcntl.h>
+#include <limits>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -203,6 +205,172 @@ bool ShmReader::poll_newer(std::uint64_t &last_seq, LinkFrame &out) const {
   last_seq = wire.frame_seq;
   out = wire;
   return true;
+}
+
+ShmReader::OrderedOutcome ShmReader::poll_next(std::uint64_t &cursor, LinkFrame &out,
+                                              std::uint64_t &skipped) const {
+  skipped = 0;
+  if (slots_ == nullptr) {
+    return OrderedOutcome::kEmpty;
+  }
+  if (cursor == (std::numeric_limits<std::uint64_t>::max)()) {
+    return OrderedOutcome::kEmpty; // no representable newer sequence
+  }
+  // Peek seq words first (no full-frame copies), then one guarded copy of
+  // the target slot — same race discipline as read_latest: the peek is an
+  // atomic word load verified by unchanged seq across it, the copy is
+  // fully guarded by slot_try_read plus a frame_seq match. A writer
+  // recycling mid-scan just costs a bounded retry, never corrupt data.
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    std::uint64_t seqs[kSlotCount] = {};
+    std::size_t slot_index[kSlotCount] = {};
+    std::size_t found = 0;
+    bool had_race = false;
+    for (std::size_t i = 0; i < kSlotCount; ++i) {
+      const std::uint64_t before = slots_[i].seq.load(std::memory_order_acquire);
+      if (before == std::uint64_t{0}) {
+        continue; // never written
+      }
+      if ((before & std::uint64_t{1}) != std::uint64_t{0}) {
+        had_race = true; // writer active on this slot
+        continue;
+      }
+      const std::uint64_t candidate = slot_peek_seq(slots_[i]);
+      const std::uint64_t after = slots_[i].seq.load(std::memory_order_acquire);
+      if (before != after || candidate == std::uint64_t{0}) {
+        had_race = true; // recycled mid-peek
+        continue;
+      }
+      seqs[found] = candidate;
+      slot_index[found] = i;
+      ++found;
+    }
+    if (found == 0) {
+      if (had_race) {
+        continue; // transient: retry, caller sees kBusy only after budget
+      }
+      return OrderedOutcome::kEmpty;
+    }
+    std::uint64_t oldest = seqs[0];
+    std::uint64_t newest = seqs[0];
+    for (std::size_t k = 1; k < found; ++k) {
+      if (seqs[k] < oldest) {
+        oldest = seqs[k];
+      }
+      if (seqs[k] > newest) {
+        newest = seqs[k];
+      }
+    }
+    if (cursor >= newest) {
+      if (had_race) {
+        continue; // a newer frame may be mid-publish; retry, else kBusy
+      }
+      return OrderedOutcome::kEmpty;
+    }
+    std::uint64_t target = 0;
+    std::uint64_t skip_now = 0;
+    if (cursor + 1 < oldest) {
+      // Overrun: the next expected sequence was overwritten. Resume from
+      // the oldest retained frame and report the exact lost interval.
+      target = oldest;
+      skip_now = oldest - cursor - 1;
+    } else {
+      // In-order next: cursor + 1 is within [oldest, newest], so it must
+      // still be retained. A missing peek means it tore mid-scan.
+      target = cursor + 1;
+      bool present = false;
+      for (std::size_t k = 0; k < found; ++k) {
+        if (seqs[k] == target) {
+          present = true;
+          break;
+        }
+      }
+      if (!present) {
+        continue; // interior hole from a torn peek: retry, else kBusy
+      }
+    }
+    std::size_t want = slot_index[0];
+    for (std::size_t k = 0; k < found; ++k) {
+      if (seqs[k] == target) {
+        want = slot_index[k];
+        break;
+      }
+    }
+    LinkFrame got{};
+    if (slot_try_read(slots_[want], got) != SlotRead::kOk) {
+      continue; // writer recycled the target mid-copy: retry
+    }
+    if (got.frame_seq != target) {
+      continue; // slot recycled between peek and copy: retry
+    }
+    out = got;
+    cursor = target;
+    skipped = skip_now;
+    return OrderedOutcome::kOk;
+  }
+  return OrderedOutcome::kBusy;
+}
+
+ShmReader::OrderedOutcome ShmReader::poll_next_frame(std::uint64_t &cursor, Frame &out,
+                                                    std::uint64_t &skipped) const {
+  skipped = 0;
+  std::uint64_t probe = cursor;
+  LinkFrame wire{};
+  std::uint64_t skip_now = 0;
+  const OrderedOutcome outcome = poll_next(probe, wire, skip_now);
+  if (outcome != OrderedOutcome::kOk) {
+    return outcome;
+  }
+  if (!decode_frame(wire, out).ok()) {
+    return OrderedOutcome::kBusy; // unreachable: keep the sequence unconsumed
+  }
+  cursor = probe;
+  skipped = skip_now;
+  return OrderedOutcome::kOk;
+}
+
+ShmReader::OrderedBatch ShmReader::read_batch(std::uint64_t &cursor, LinkFrame *out,
+                                             std::size_t capacity) const {
+  OrderedBatch report{};
+  if (capacity == 0) {
+    return report;
+  }
+  if (out == nullptr) {
+    report.busy = false;
+    return report;
+  }
+  for (std::size_t i = 0; i < capacity; ++i) {
+    std::uint64_t skip_now = 0;
+    const OrderedOutcome outcome = poll_next(cursor, out[i], skip_now);
+    if (outcome != OrderedOutcome::kOk) {
+      if (outcome == OrderedOutcome::kBusy) {
+        report.busy = true;
+      }
+      break;
+    }
+    ++report.returned;
+    report.skipped += skip_now;
+  }
+  if (report.returned == capacity && !report.busy) {
+    // Peek-only probe (no full copy) for "more retained": one clean seq
+    // beyond the cursor means the caller hit its limit with data left.
+    for (std::size_t i = 0; i < kSlotCount; ++i) {
+      const std::uint64_t before = slots_[i].seq.load(std::memory_order_acquire);
+      if (before == std::uint64_t{0} || (before & std::uint64_t{1}) != std::uint64_t{0}) {
+        continue;
+      }
+      const std::uint64_t candidate = slot_peek_seq(slots_[i]);
+      const std::uint64_t after = slots_[i].seq.load(std::memory_order_acquire);
+      if (before != after || candidate == std::uint64_t{0}) {
+        continue;
+      }
+      if (candidate > cursor) {
+        report.capped = true;
+        break;
+      }
+    }
+  }
+  return report;
 }
 
 void ShmReader::cleanup() noexcept {

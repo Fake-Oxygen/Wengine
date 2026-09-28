@@ -17,10 +17,19 @@ No single transport provides all three at once.
 Mechanism: SHM seqlock ring (`link/protocol.hpp`, `ShmPublisher`),
 GUI `FrameHistory` (`apps/gui/views/frame_source.hpp`).
 
-- Writer drops oldest on full (ring overwrite); readers take latest
-  only and never drain a backlog.
-- Intentional coalescing (a reader skipping to newest) is normal
-  operation, not loss to fix.
+- Writer drops oldest on full (ring overwrite). Latest-only readers
+  take the newest frame and never drain a backlog; ordered readers
+  (`ShmReader::poll_next` / `read_batch`) may instead drain the
+  retained window (up to `kSlotCount` frames) in ascending order with a
+  caller work limit. Bursts within the ring drain losslessly; larger
+  bursts report the exact overwritten prefix (`skipped`) and resume
+  from the oldest retained frame.
+- Intentional coalescing (a latest-only reader skipping to newest) is
+  normal operation, not loss to fix. Ordered-drain skips are ring
+  overruns (real loss), reported loudly with the same `frame_seq`-gap
+  vocabulary and a different interpretation. Both absorb bounded
+  jitter only and cannot guarantee complete capture when the reader is
+  persistently slower.
 - Overflow accounting: per-frame `frame_seq` gaps via
   `reader_missed()` / `LagStats` (`received`, `missed`, `max_gap`).
   First observation counts pre-attach frames as `missed`.

@@ -158,14 +158,23 @@
 //   messages.
 //
 // DROP-OLDEST + LAG ACCOUNTING (policy decision, recorded):
-//   Writer drops oldest on full (ring overwrite); readers take latest only
-//   and never drain a backlog — there is no queue to catch up with, only a
-//   window onto the newest frame. A slow reader's slot may be recycled —
-//   that IS the policy, matching FrameHistory's bounded drop-oldest ring.
-//   No backlog, no blocking. publish_count (header, monotonic) and
-//   frame_seq (per frame, monotonic) let readers compute exact loss:
-//   missed = cur_seq - prev_seq - 1 (reader_missed(), LagStats below).
-//   Receiver-lag never alters sim state or timing.
+//   Writer drops oldest on full (ring overwrite). Latest-only readers take
+//   the newest frame and never drain a backlog — no queue to catch up
+//   with, only a window onto the newest frame. Ordered readers
+//   (ShmReader::poll_next/read_batch) may instead drain the retained
+//   window in ascending order: bursts within the ring arrive losslessly,
+//   larger bursts report the exact overwritten prefix and resume from the
+//   oldest retained frame. Either way a slow reader's slot may be
+//   recycled — that IS the policy, matching FrameHistory's bounded
+//   drop-oldest ring. No backlog beyond the ring, no blocking.
+//   publish_count (header, monotonic) and frame_seq (per frame, monotonic)
+//   let readers compute exact loss: missed = cur_seq - prev_seq - 1
+//   (reader_missed(), LagStats below). Latest-only skips are intentional
+//   coalescing; ordered-drain skips are ring overruns — same counters,
+//   different interpretation (see delivery.md). Receiver-lag never alters
+//   sim state or timing. Bounded jitter cover only: kSlotCount retained
+//   frames (~130 ms at 60 Hz emit); a persistently slower reader still
+//   overruns, loudly.
 //
 // PUBLISHER CONTRACT (S7 — the blocking-sink hazard):
 //   Runner fans out synchronously: a blocking on_snapshot stalls the sim
