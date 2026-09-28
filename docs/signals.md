@@ -301,19 +301,83 @@ here) and is refused loudly: over-bound counter, sticky `kOutOfRange`
  numeric sample arrays, owned blocks); splitting one tick across several
  budgeted datagrams remains the packetizer's extension point.
 
-## 6. Control plane (SIG-10, v1 scope)
+## 6. Control plane (SIG-10, shipped 2026-09-28)
 
-Generic text-line protocol, Zephyr first client, CLI/GUI same verbs:
-`hello/version`, `list`, `add`, `set-param`, `start`, `stop`, `drop`,
-`ping`. Step-boundary apply: commands queue, drained between steps in slot
-order (deterministic; logged to replay). Stream and control are separate
-sockets (D4a-A); UART interleaves COBS-escaped control frames (D4b-A).
+Generic text-line protocol, Zephyr first client, CLI/GUI same verbs.
+Three layers, each tested separately:
+
+- `signal/control.hpp` (engine leaf, no state, no I/O): verb/param
+  vocabulary, strict line parsing (`parse_line`), response builders.
+- `solvers/signal_control.hpp` (driver side): `ControlBus` — fixed-order
+  per-channel queues drained at the step boundary, per-channel response
+  outboxes, and the replay log — plus `apply_command` (the verbs).
+- `link/control_server.hpp` + `src/link/control_server.cpp` (POSIX TU in
+  `wengine_link_net`): domain-free TCP line server. It moves bytes only;
+  the driver glues it to the bus (see `sig run --control-tcp` in
+  `src/cli/commands/sig.cpp`).
+
+Wire format (v1): one command per line, space-separated, uppercase
+verbs, `\n`-terminated (trailing `\r` stripped). SI doubles on the wire;
+unit suffixes stay a frontend concern. Blank lines are ignored.
+
+```text
+HELLO <version> <client-name...>   exact version match (want 1) + run provenance
+PING                               -> OK pong
+LIST                               -> OK list <n> + <n> SRC lines (slot order)
+ADD <kind> <quantity> [KEY VALUE]... [OPS s0,s1] [EXPR <program...>]
+                                   -> OK added <serial> (stable, never reused)
+SET <serial> <PARAM> <value>       -> OK set <serial> <PARAM>
+START <serial> / STOP <serial>     idempotent resume (phase-exact) / freeze
+DROP <serial>                      detach (serial retired, "source gone" after)
+SELECT <serial> <index>            reserved: ERR not_implemented until mux lands
+```
+
+PARAM/KEY names: `FREQ AMP OFFSET PHASE DUTY SEED QUANTITY` (QUANTITY is
+SET-only: `U|I`). ADD defaults match `SignalParams` (kind required,
+quantity defaults `U`); `OPS` is required for `kind=sum` (operand serials,
+validated live + non-sum, flattened); `EXPR` must be last (rest of the
+line is the program). `ADD table/lua` is `ERR not_implemented` — bulk
+payloads ride batch runs, never a text line.
+
+Responses: `OK hello 1 run=<id>`, `OK pong`, `OK list <n>` plus
+`SRC <serial> <kind> <quantity> <freq> <amp> <offset> <phase> <duty>
+<seed> <running>` (`%.17g`, round-trip exact), `OK added/set/started/
+stopped/dropped`, and `ERR <code> <message>` with codes mirroring
+`core::Status` (`invalid_argument`, `out_of_range`, `not_implemented`,
+`internal`). Malformed lines never touch the pool.
+
+Step-boundary apply: the driver polls (non-blocking) and drains before
+every step at `state.step_index`, in fixed channel registration order
+(channel 0 = local CLI, then TCP slots, then UART slots), each FIFO.
+Last-writer-wins per (source, param) falls out of the sequential apply;
+idempotent verbs commute; START-vs-STOP conflicts resolve by channel
+order, never arrival timing. Only mutating successes (ADD/SET/START/
+STOP/DROP) append `(step, channel, verb line)` to the replay log, so a
+multi-endpoint session replays exactly (proven by test: two-channel
+script, fresh state, same per-step lines → bit-identical `State`).
+
+STOP/START are pause/resume exact: STOP shifts the time base
+(`t0 -= sim_time`, value + noise RNG frozen by the solver skip); START
+re-bases (`t0 += sim_time`) and continues — including across a
+save/load round-trip in between. `SET SEED` restarts the noise sequence
+(seed + live RNG). `DROP` detaches the pool slot (entity handle stays;
+serials never recycle).
+
+Transports: stream and control are separate sockets (D4a-A). `sig run
+--control-tcp <host:port>` listens (up to 8 clients; beyond that the
+socket is closed immediately and counted). The server never blocks the
+sim loop (non-blocking accept/recv/send, sticky Status); overlong lines
+(> 4096 B) are refused per-client; per-client send buffers are bounded
+(past the cap the client is closed and counted — applied commands stay
+applied, clients reconcile with LIST). UART control (SIG-8) speaks the
+same lines over COBS-escaped frames; the framing lives there, the verbs
+live here.
 
 Concurrent endpoints (LOCKED 2026-09-23, user): any number of control
 endpoints may be attached at once (e.g. Zephyr via UART + PC via TCP) and
 any of them can force state changes such as pause. Arbitration is
 deterministic: each step drains per-channel queues in fixed registration
-order (documented at attach; default TCP-control, UART-control, CLI-local),
+order (documented at attach; default local CLI, TCP slots, UART slots),
 last-writer-wins per (source, param) within the step. Idempotent verbs
 (pause + pause) commute naturally; conflicting verbs (start vs stop same
 step) resolve to the fixed order, never to arrival timing. Every applied

@@ -260,6 +260,12 @@ exact round-trip); `--emit-shm` publishes signal channels
 `--forever` ignores `--steps` and keeps one continuous fixed-step run alive
 until Ctrl-C; interruption is handled at a step boundary and then sinks are
 flushed and closed normally.
+`--control-tcp <host:port>` (SIG-10) listens for text-line commands
+(`HELLO/PING/LIST/ADD/SET/START/STOP/DROP`; `SELECT` reserved for the
+future mux) from any number of TCP clients: commands apply at exact step
+boundaries in fixed channel order with last-writer-wins per
+(source, param) and log for replay, e.g. `SET 0 FREQ 50` retunes a live
+sine without restarting the run.
 See `docs/signals.md` for the full design (routing, control plane, Lua,
 Zephyr transports).
 
@@ -284,11 +290,11 @@ tests/  benchmarks/  examples/
 | Module | Path | Role |
 |---|---|---|
 | `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
-| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `signal.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step`, `SignalSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry) |
-| `signal` | `wengine/signal/types.hpp`, `expr.hpp`, `table.hpp`, `lua.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial), closed expression programs (RPN, from_chars parsing, div-by-zero/out-of-domain to Status), table CSV replay (linear interp, clamped, bit-exact hits), Lua scripting source (sandboxed 5.4 runtime in an isolated TU — this header is Lua-free) — no I/O; pool lives in `world` |
+| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `projectile.hpp`, `signal.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp`, `signal_control.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `ProjectileSolver::step`, `SignalSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry); `ControlBus` step-boundary command drain with fixed channel order, last-writer-wins, and replay log (SIG-10) |
+| `signal` | `wengine/signal/types.hpp`, `expr.hpp`, `table.hpp`, `lua.hpp`, `control.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial), closed expression programs (RPN, from_chars parsing, div-by-zero/out-of-domain to Status), table CSV replay (linear interp, clamped, bit-exact hits), Lua scripting source (sandboxed 5.4 runtime in an isolated TU — this header is Lua-free), control-plane line protocol vocabulary (strict verb parsing + response builders, no state, no I/O) — no I/O; pool lives in `world` |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp`, `run_config.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
 | `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, expression programs, append-only table/script stores, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ serial-carrying signal arrays, `select_signals` subset filter), versioned binary save/load (v5; v4 loads with empty script ranges, v3 with zeroed custom columns, v2 with synthesized serials, v1 with empty signals) |
-| `link` | `wengine/link/frame.hpp`, `protocol.hpp`, `socket_publisher.hpp`, `shm_publisher.hpp` | Solver-agnostic `Frame` adapters + versioned wire codec; app-edge SHM publisher and POSIX TCP/UDP stream publishers (`wengine_link_net`), exact version/domain gates, compact UDP frames, and lag/loss accounting |
+| `link` | `wengine/link/frame.hpp`, `protocol.hpp`, `socket_publisher.hpp`, `shm_publisher.hpp`, `control_server.hpp` | Solver-agnostic `Frame` adapters + versioned wire codec; app-edge SHM publisher and POSIX TCP/UDP stream publishers (`wengine_link_net`), exact version/domain gates, compact UDP frames, and lag/loss accounting; domain-free TCP line server for the control plane (same package) |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions, `StrideSink` step-aligned decimation, drop counters) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion |
@@ -350,9 +356,10 @@ CMake targets mirror this: `wengine_glm` (third-party import), `wengine_units`,
 `wengine_solvers`, `wengine_world`, `wengine_emit`, `wengine_link` (link wire
 protocol, header-only, OS-free) (all `INTERFACE`) combine
  into `wengine_core` (`wengine::core` alias). `wengine_link_shm` (`STATIC`:
- `src/link/shm_publisher.cpp`, the POSIX endpoint TU) and `wengine_link_net`
- (`STATIC`: `src/link/socket_publisher.cpp`, POSIX TCP/UDP endpoints) link
- `wengine_core`.
+  `src/link/shm_publisher.cpp`, the POSIX endpoint TU) and `wengine_link_net`
+  (`STATIC`: `src/link/socket_publisher.cpp`, POSIX TCP/UDP endpoints, plus
+  `src/link/control_server.cpp`, the POSIX TCP control-plane line server) link
+  `wengine_core`.
  `wengine_signal_lua` (`STATIC`: `src/signal/lua_solver.cpp`, the Lua
  runtime TU) links `wengine_core` + `wengine_lua` (vendored interpreter).
  `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
@@ -398,8 +405,18 @@ version gate, lag accounting), `test_link_shm` (segment create/publish/
    TCP/UDP endpoint syntax, per-output strides/selects (global+per-output
    intersection, full-rate CSV + decimated live output, capacity refusal),
    UDP budget wiring/diagnostics +
-  `sig run` expression/table/lua goldens and usage errors (incl. sandbox
-  failure surfacing),
+   `sig run` expression/table/lua goldens and usage errors (incl. sandbox
+   failure surfacing), `--control-tcp` flag/completion/shape errors,
+   step-synchronous control drive + summary,
+`test_signal_control` (control-plane verb parsing, add/set/start/stop/
+  drop/list/hello/ping/select + table/lua refusals, idempotent
+  start/stop, phase-exact pause/resume incl. stopped save/load/resume,
+  pool-untouched refusals, sum add + dangling-operand step failure,
+  fixed channel order with last-writer-wins, two-channel replay-log
+  exactness), `test_control_server` (loopback handshake/version gate,
+  mid-run set/start/stop over TCP, malformed + overlong rejection,
+  two-client conflict order, LIST census, disconnect survival, `sig run
+  --control-tcp` CLI smoke),
 `test_determinism` (fixed-dt goldens, exact repeat, CSV replay),
 `test_gui_sim_control` (GUI controller bit-parity with headless + goldens),
 `test_signal_panel` (signal panel model validation/config + controller

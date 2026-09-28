@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <thread>
+#include <utility>
 
 namespace wengine::solvers::paced {
 
@@ -81,10 +82,16 @@ struct SteadyClock {
 // deadline (epoch + steps_done * period). A stop request ends the run with
 // success (partial prefix, like Runner::run_until); solver failures abort
 // loudly with the solver Status. Stats report the finished prefix.
-template <typename Clock, typename StopFn, typename IdleFn>
+//
+// before_chunk(done) runs on the driver thread before every run.run(n)
+// chunk (SIG-10: the control-plane drain lives there, so commands apply at
+// exact step boundaries even in paced mode). It cannot fail the run;
+// per-line verdicts stay in the control outbox.
+template <typename Clock, typename StopFn, typename IdleFn, typename StepFn>
 core::Status run_paced(ConfiguredRun &run, std::uint64_t total_steps, double rate_hz,
                        std::uint64_t chunk_steps, typename Clock::time_point epoch,
-                       StopFn &&stop_requested, IdleFn &&idle, Stats &stats) {
+                       StopFn &&stop_requested, IdleFn &&idle, Stats &stats,
+                       StepFn &&before_chunk) {
   stats = Stats{};
   if (!validate(rate_hz, chunk_steps).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -103,6 +110,7 @@ core::Status run_paced(ConfiguredRun &run, std::uint64_t total_steps, double rat
     if (n > total_steps - done) {
       n = total_steps - done;
     }
+    before_chunk(done);
     // One fixed chunk: step-boundary stop granularity stays one chunk
     // (the CLI uses chunk 1, so every step stays interruptible).
     const core::Status st = run.run(n);
@@ -153,6 +161,18 @@ core::Status run_paced(ConfiguredRun &run, std::uint64_t total_steps, double rat
     }
   }
   return core::Status::success();
+}
+
+// Eight-argument form: no pre-chunk work (existing callers behave exactly
+// as before — the hook defaults to a no-op).
+template <typename Clock, typename StopFn, typename IdleFn>
+core::Status run_paced(ConfiguredRun &run, std::uint64_t total_steps, double rate_hz,
+                       std::uint64_t chunk_steps, typename Clock::time_point epoch,
+                       StopFn &&stop_requested, IdleFn &&idle, Stats &stats) {
+  auto noop = [](std::uint64_t) {};
+  return run_paced<Clock, StopFn, IdleFn, decltype(noop)>(
+      run, total_steps, rate_hz, chunk_steps, epoch, std::forward<StopFn>(stop_requested),
+      std::forward<IdleFn>(idle), stats, std::move(noop));
 }
 
 } // namespace wengine::solvers::paced

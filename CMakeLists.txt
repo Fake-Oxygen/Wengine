@@ -103,6 +103,7 @@ target_compile_options(wengine_link_shm PRIVATE
 # stay platform-free (a Windows port replaces the TU, never the header).
 add_library(wengine_link_net STATIC
     src/link/socket_publisher.cpp
+    src/link/control_server.cpp
 )
 target_include_directories(wengine_link_net PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -330,6 +331,15 @@ if(BUILD_TESTS)
     add_executable(test_routing tests/test_routing.cpp)
     target_link_libraries(test_routing PRIVATE wengine_core)
     add_test(NAME routing COMMAND test_routing)
+
+    # SIG-10 generic control plane: engine verbs/bus/replay + TCP server.
+    add_executable(test_signal_control tests/test_signal_control.cpp)
+    target_link_libraries(test_signal_control PRIVATE wengine_core)
+    add_test(NAME signal_control COMMAND test_signal_control)
+
+    add_executable(test_control_server tests/test_control_server.cpp)
+    target_link_libraries(test_control_server PRIVATE wengine_cli)
+    add_test(NAME control_server COMMAND test_control_server)
 
     add_executable(test_runner tests/test_runner.cpp)
     target_link_libraries(test_runner PRIVATE wengine_core)

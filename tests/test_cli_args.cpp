@@ -290,6 +290,7 @@ void test_completion() {
            has(c, "--emit-every") && has(c, "--emit-csv-stride") &&
            has(c, "--emit-shm-select") && has(c, "--emit-udp-budget") &&
            has(c, "--emit-health") && has(c, "--forever") &&
+           has(c, "--control-tcp") &&
            has(c, "--paced") && has(c, "--rate") && has(c, "--sig-kind") &&
            has(c, "--sig-freq") && has(c, "--sig-quantity") && has(c, "--sig-count") &&
            has(c, "--sig-expr") && has(c, "--sig-table") && has(c, "--sig-lua"));

@@ -4,6 +4,7 @@
 #include "wengine/core/run_config.hpp"
 #include "wengine/emit/routing.hpp"
 #include "wengine/emit/signal_sink.hpp"
+#include "wengine/link/control_server.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/link/output_report.hpp"
 #include "wengine/link/protocol.hpp"
@@ -15,6 +16,7 @@
 #include "wengine/solvers/configured_run.hpp"
 #include "wengine/solvers/paced_run.hpp"
 #include "wengine/solvers/run.hpp"
+#include "wengine/solvers/signal_control.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <array>
@@ -61,14 +63,14 @@ void request_sigint(int) noexcept { g_sigint_requested = 1; }
 
 bool sigint_requested() noexcept { return g_sigint_requested != 0; }
 
-constexpr std::array<std::string_view, 35> kSigOptions{{
+constexpr std::array<std::string_view, 36> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
     "--sig-expr", "--sig-table", "--sig-lua", "--emit-csv", "--emit-shm", "--emit-tcp",
     "--emit-udp", "--emit-every", "--emit-csv-stride", "--emit-shm-stride",
     "--emit-tcp-stride", "--emit-udp-stride", "--emit-udp-budget", "--emit-csv-select",
     "--emit-shm-select", "--emit-tcp-select", "--emit-udp-select", "--emit-health",
-    "--forever", "--paced", "--rate", "--help", "-h",
+    "--control-tcp", "--forever", "--paced", "--rate", "--help", "-h",
 }};
 
 // Chunked live-output health (PHYSI-39): shared with sim run. Fast batches
@@ -140,6 +142,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   std::optional<std::string_view> shm_name;
   std::optional<std::string_view> tcp_endpoint;
   std::optional<std::string_view> udp_endpoint;
+  std::optional<std::string_view> control_endpoint;
   long long udp_budget = static_cast<long long>(link::kDefaultUdpPayloadBudget);
   bool udp_budget_given = false;
 
@@ -176,6 +179,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   shm_name = args.take_option({"--emit-shm"});
   tcp_endpoint = args.take_option({"--emit-tcp"});
   udp_endpoint = args.take_option({"--emit-udp"});
+  control_endpoint = args.take_option({"--control-tcp"});
   cli::EmitOutputSampling csv_sampling;
   cli::EmitOutputSampling shm_sampling;
   cli::EmitOutputSampling tcp_sampling;
@@ -719,6 +723,61 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
   for (std::size_t k = 0; k < n_sinks; ++k) {
     run.add_sink(*sink_arr[k]);
   }
+  // SIG-10 control plane (step-synchronous): when --control-tcp is set,
+  // every step is driven singly with a non-blocking poll + bus drain
+  // before it, so commands apply at exact steps and log for replay.
+  // Without the flag the original chunked paths run unchanged.
+  std::optional<link::ControlServer> ctl;
+  if (control_endpoint) {
+    if (!link::parse_endpoint(*control_endpoint).ok()) {
+      return usage_error(out, "invalid control endpoint (want host:port)");
+    }
+    ctl.emplace(*control_endpoint);
+    if (!ctl->ok()) {
+      out << "Error: cannot listen control '" << *control_endpoint << "'\n";
+      return core::kExitRuntime;
+    }
+  }
+  solvers::ControlBus ctl_bus(ctl ? ctl->run_id() : 0);
+  ctl_bus.add_channel(); // channel 0: local CLI (reserved, first in drain order)
+  if (ctl) {
+    for (std::uint32_t i = 0; i < ctl->max_clients(); ++i) {
+      ctl_bus.add_channel(); // channel 1+i: TCP slot i (fixed order)
+    }
+  }
+  std::vector<link::ControlSlotLines> ctl_polled;
+  auto ctl_service = [&] {
+    if (!ctl) {
+      return;
+    }
+    ctl->poll(ctl_polled);
+    for (auto &sl : ctl_polled) {
+      for (auto &ln : sl.lines) {
+        ctl_bus.enqueue(1 + sl.slot, std::move(ln));
+      }
+    }
+    ctl_bus.drain(run.state(), run.state().step_index);
+    for (std::uint32_t c = 1; c < ctl_bus.channel_count(); ++c) {
+      for (auto &r : ctl_bus.take_responses(c)) {
+        ctl->push_response(c - 1, r);
+      }
+    }
+    ctl->flush();
+  };
+  // Paced waits only buffer arrivals (poll) and flush answers; the drain
+  // stays in before_chunk so commands still apply at exact step starts.
+  auto ctl_on_idle = [&] {
+    if (!ctl) {
+      return;
+    }
+    ctl->poll(ctl_polled);
+    for (auto &sl : ctl_polled) {
+      for (auto &ln : sl.lines) {
+        ctl_bus.enqueue(1 + sl.slot, std::move(ln));
+      }
+    }
+    ctl->flush();
+  };
   using SignalHandler = void (*)(int);
   SignalHandler previous_sigint = nullptr;
   const bool handles_sigint = forever || paced;
@@ -748,6 +807,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     const auto epoch = solvers::paced::SteadyClock::now();
     auto last_report = std::chrono::steady_clock::now();
     auto idle = [&] {
+      ctl_on_idle();
       if (tcp) {
         (void)tcp->service_pending();
       }
@@ -760,8 +820,32 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
         }
       }
     };
+    auto before_chunk = [&](std::uint64_t) { ctl_service(); };
     st = solvers::paced::run_paced<solvers::paced::SteadyClock>(
-        run, total_steps, rate_hz, 1, epoch, sigint_requested, idle, paced_stats);
+        run, total_steps, rate_hz, 1, epoch, sigint_requested, idle, paced_stats,
+        before_chunk);
+  } else if (ctl) {
+    // Step-synchronous control: poll + drain before every single step
+    // (finite and --forever alike); health stays chunked as usual.
+    std::uint64_t done = 0;
+    while (done < total_steps) {
+      if (forever && sigint_requested()) {
+        break;
+      }
+      ctl_service();
+      st = run.run(1);
+      if (!st.ok()) {
+        break;
+      }
+      ++done;
+      if (emit_health && has_live && done % kHealthChunkSteps == 0) {
+        print_live_health(done, shm, tcp, udp, wall_elapsed_s(),
+                          sample_rate_hz);
+      }
+    }
+    if (st.ok()) {
+      st = core::Status::success();
+    }
   } else if (forever) {
     // --forever: bounded chunks until Ctrl-C; each chunk boundary is a
     // periodic health point with --emit-health (step-boundary stop
@@ -960,6 +1044,12 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
           << " dropped=" << udp_stride->dropped();
     }
     out << ")\n";
+  }
+  if (ctl) {
+    ctl->flush();
+    out << "control: " << ctl->endpoint() << " (applied=" << ctl_bus.applied()
+        << " readonly=" << ctl_bus.readonly() << " rejected=" << ctl_bus.rejected()
+        << " clients=" << ctl->stats().accepted << ")\n";
   }
   return core::kExitOk;
 }
