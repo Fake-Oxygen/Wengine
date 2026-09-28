@@ -10,12 +10,15 @@
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/core/runner.hpp"
+#include "wengine/link/control_client.hpp"
 #include "wengine/link/control_server.hpp"
 #include "wengine/solvers/signal.hpp"
 #include "wengine/solvers/signal_control.hpp"
 
 #include <arpa/inet.h>
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -25,6 +28,7 @@
 #include <string>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -304,6 +308,143 @@ void test_cli_smoke() {
   }
 }
 
+void test_control_client_transport() {
+  // SIG-6 client transport: blocking send/recv against a live server,
+  // endpoint-shape vs. connect-failure classes (CLI exit 2 vs. 1).
+  const std::uint16_t port = pick_port();
+  Harness h(port);
+  const std::string ep = "127.0.0.1:" + std::to_string(port);
+  link::ControlClient ctl(ep);
+  assert(ctl.ok());
+  assert(ctl.send_line("ADD sine U FREQ 1 AMP 2"));
+  h.poll_until(1);
+  h.drain();
+  std::string verdict;
+  assert(ctl.recv_line(verdict));
+  assert(verdict == "OK added 0");
+  // Overlong lines are refused locally (nothing sent, usage class).
+  assert(!ctl.send_line(std::string(5000, 'x')));
+  assert(ctl.status().code == core::StatusCode::kInvalidArgument);
+  // Bad endpoint shape never connects (usage class, like every --emit-tcp).
+  link::ControlClient bad("nope");
+  assert(!bad.ok());
+  assert(bad.status().code == core::StatusCode::kInvalidArgument);
+  // Refused connection is a runtime failure, never a usage error.
+  const std::uint16_t dead_port = pick_port();
+  link::ControlClient dead("127.0.0.1:" + std::to_string(dead_port));
+  assert(!dead.ok());
+  assert(dead.status().code == core::StatusCode::kInternal);
+}
+
+void test_sig_family_live() {
+  // SIG-6 per-source family end to end: every `sig <mode>` CLI command
+  // against a live step-draining server (same glue as sig run
+  // --control-tcp), asserting wire verdicts and LIST census text.
+  const std::uint16_t port = pick_port();
+  Harness h(port);
+  const std::string ep = "127.0.0.1:" + std::to_string(port);
+  // Seed serial 0 through the local channel (channel 0 = local CLI).
+  assert(h.bus.enqueue(0, "ADD sine U FREQ 1 AMP 2"));
+  h.bus.drain(h.runner.state(), h.runner.state().step_index);
+  std::atomic<bool> stop{false};
+  std::thread driver([&] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      h.server.poll(h.polled);
+      for (auto &sl : h.polled) {
+        for (auto &ln : sl.lines) {
+          (void)h.bus.enqueue(1 + sl.slot, std::move(ln));
+        }
+      }
+      h.drain();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  });
+  auto run = [&](std::vector<std::string> words) {
+    std::vector<std::string_view> views(words.begin(), words.end());
+    std::span<const std::string_view> args{views.data(), views.size()};
+    cli::ArgCursor cur{args};
+    std::ostringstream out;
+    const int rc = cli::commands::SigSpec::run(cur, out);
+    return std::pair<int, std::string>{rc, out.str()};
+  };
+  {
+    auto [rc, s] = run({"list", "--control-tcp", ep});
+    assert(rc == 0);
+    assert(s == "OK list 1\nSRC 0 sine U 1 2 0 0 0.5 1 1\n");
+  }
+  {
+    // Quantity-aware frontend: 5V + 50Hz parse to SI doubles on the wire.
+    auto [rc, s] = run({"add", "--control-tcp", ep, "--sig-kind", "square",
+                        "--sig-freq", "50Hz", "--sig-amp", "5V"});
+    assert(rc == 0);
+    assert(s == "OK added 1\n");
+  }
+  {
+    auto [rc, s] =
+        run({"set", "1", "--control-tcp", ep, "--sig-freq", "60Hz",
+             "--sig-amp", "2.5V", "--sig-offset", "1V"});
+    assert(rc == 0);
+    assert(s == "OK set 1 FREQ\nOK set 1 AMP\nOK set 1 OFFSET\n");
+  }
+  {
+    // Census proves the SET values landed (%.17g SI doubles on the wire).
+    auto [rc, s] = run({"list", "--control-tcp", ep});
+    assert(rc == 0);
+    assert(s.find("SRC 0 sine U 1 2 0 0 0.5 1 1\n") != std::string::npos);
+    assert(s.find("SRC 1 square U 60 2.5 1 0 0.5 1 1\n") != std::string::npos);
+  }
+  {
+    // Sums configure through the family (batch runs reject them).
+    auto [rc, s] = run({"add", "--control-tcp", ep, "--sig-kind", "sum",
+                        "--sig-operands", "0,1"});
+    assert(rc == 0);
+    assert(s == "OK added 2\n");
+  }
+  {
+    // Expressions ride the one-line ADD with EXPR last.
+    auto [rc, s] = run({"add", "--control-tcp", ep, "--sig-kind", "expression",
+                        "--sig-expr", "sin(2*pi*t)*0.5"});
+    assert(rc == 0);
+    assert(s == "OK added 3\n");
+  }
+  {
+    auto [rc, s] = run({"stop", "1", "--control-tcp", ep});
+    assert(rc == 0);
+    assert(s == "OK stopped 1\n");
+  }
+  {
+    auto [rc, s] = run({"start", "1", "--control-tcp", ep});
+    assert(rc == 0);
+    assert(s == "OK started 1\n");
+  }
+  {
+    auto [rc, s] = run({"drop", "3", "--control-tcp", ep});
+    assert(rc == 0);
+    assert(s == "OK dropped 3\n");
+  }
+  {
+    // Unknown serials fail loudly on the server (exit 1, never silent).
+    auto [rc, s] = run({"drop", "99", "--control-tcp", ep});
+    assert(rc == 1);
+    assert(s.substr(0, 3) == "ERR");
+  }
+  {
+    auto [rc, s] = run({"list", "--control-tcp", ep});
+    assert(rc == 0);
+    assert(s.find("OK list 3\n") != std::string::npos);
+    assert(s.find("SRC 3 ") == std::string::npos); // dropped serial stays gone
+  }
+  {
+    // Refused control connection is a runtime error (exit 1).
+    const std::uint16_t dead_port = pick_port();
+    auto [rc, s] =
+        run({"list", "--control-tcp", "127.0.0.1:" + std::to_string(dead_port)});
+    assert(rc == 1);
+  }
+  stop.store(true, std::memory_order_relaxed);
+  driver.join();
+}
+
 } // namespace
 
 int main() {
@@ -311,6 +452,8 @@ int main() {
   test_malformed_overlong_and_stop_start();
   test_two_client_conflict_and_list();
   test_cli_smoke();
+  test_control_client_transport();
+  test_sig_family_live();
   std::cout << "test_control_server: OK\n";
   return 0;
 }

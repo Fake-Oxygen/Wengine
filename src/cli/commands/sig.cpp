@@ -4,6 +4,7 @@
 #include "wengine/core/run_config.hpp"
 #include "wengine/emit/routing.hpp"
 #include "wengine/emit/signal_sink.hpp"
+#include "wengine/link/control_client.hpp"
 #include "wengine/link/control_server.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/link/output_report.hpp"
@@ -21,9 +22,11 @@
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -40,7 +43,8 @@ namespace wengine::cli::commands {
 namespace {
 
 [[nodiscard]] constexpr bool is_sig_mode(std::string_view s) noexcept {
-  return s == "run";
+  return s == "run" || s == "list" || s == "add" || s == "set" || s == "start" ||
+         s == "stop" || s == "drop";
 }
 
 int usage_error(std::ostream &out, std::string_view msg) {
@@ -56,7 +60,8 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
   }
 }
 
-constexpr std::array<std::string_view, 1> kSigModes{{"run"}};
+constexpr std::array<std::string_view, 7> kSigModes{
+    {"run", "list", "add", "set", "start", "stop", "drop"}};
 
 volatile std::sig_atomic_t g_sigint_requested = 0;
 
@@ -64,10 +69,10 @@ void request_sigint(int) noexcept { g_sigint_requested = 1; }
 
 bool sigint_requested() noexcept { return g_sigint_requested != 0; }
 
-constexpr std::array<std::string_view, 41> kSigOptions{{
+constexpr std::array<std::string_view, 42> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
-    "--sig-expr", "--sig-table", "--sig-lua", "--emit-csv", "--emit-shm", "--emit-tcp",
+    "--sig-expr", "--sig-table", "--sig-lua", "--sig-operands", "--emit-csv", "--emit-shm", "--emit-tcp",
     "--emit-udp", "--emit-every", "--emit-csv-stride", "--emit-shm-stride",
     "--emit-tcp-stride", "--emit-udp-stride", "--emit-udp-budget", "--emit-csv-select",
     "--emit-shm-select", "--emit-tcp-select", "--emit-udp-select", "--emit-health",
@@ -138,37 +143,135 @@ void print_live_health(std::uint64_t done_steps,
 
 } // namespace
 
-int SigSpec::run(ArgCursor &args, std::ostream &out) {
-  if (args.take_flag({"--help", "-h"})) {
-    out << kName << " - " << kDescription << "\nUsage:\n" << kUsage << '\n';
-    return core::kExitOk;
-  }
+// Options taken once before mode dispatch (see SigSpec::run): every
+// value-taking --opt is consumed here so bare values (dc, 5V, 1kHz, 100,
+// file paths) are never mistaken for positional modes/serials. Flags take
+// no values and stay with their mode. Views borrow the ArgCursor tokens.
+// Each mode rejects the fields it does not own (stray options are usage
+// errors, never silently ignored).
+struct SigCliOptions {
+  // Shared signal vocabulary (batch run + per-source family).
+  std::optional<std::string_view> sig_kind;
+  std::optional<std::string_view> sig_freq;
+  std::optional<std::string_view> sig_amp;
+  std::optional<std::string_view> sig_offset;
+  std::optional<std::string_view> sig_phase;
+  std::optional<std::string_view> sig_duty;
+  std::optional<std::string_view> sig_seed;
+  std::optional<std::string_view> sig_quantity;
+  std::optional<std::string_view> sig_count;
+  std::optional<std::string_view> sig_expr;
+  std::optional<std::string_view> sig_table;
+  std::optional<std::string_view> sig_lua;
+  std::optional<std::string_view> sig_operands;
+  // Control endpoint (run: server bind address; list/add/...: connect target).
+  std::optional<std::string_view> control_tcp;
+  // Batch/transport values (interpreted by the run mode only).
+  std::optional<std::string_view> steps;
+  std::optional<std::string_view> dt;
+  std::optional<std::string_view> emit_every;
+  std::optional<std::string_view> rate;
+  std::optional<std::string_view> emit_csv;
+  std::optional<std::string_view> emit_shm;
+  std::optional<std::string_view> emit_tcp;
+  std::optional<std::string_view> emit_udp;
+  std::optional<std::string_view> emit_uart;
+  std::optional<std::string_view> emit_uart_mode;
+  std::optional<std::string_view> emit_udp_budget;
+  std::optional<std::string_view> emit_csv_stride;
+  std::optional<std::string_view> emit_shm_stride;
+  std::optional<std::string_view> emit_tcp_stride;
+  std::optional<std::string_view> emit_udp_stride;
+  std::optional<std::string_view> emit_uart_stride;
+  std::optional<std::string_view> emit_csv_select;
+  std::optional<std::string_view> emit_shm_select;
+  std::optional<std::string_view> emit_tcp_select;
+  std::optional<std::string_view> emit_udp_select;
+  std::optional<std::string_view> emit_uart_select;
+};
 
+void take_sig_options(ArgCursor &args, SigCliOptions &o) {
+  o.sig_kind = args.take_option({"--sig-kind"});
+  o.sig_freq = args.take_option({"--sig-freq"});
+  o.sig_amp = args.take_option({"--sig-amp"});
+  o.sig_offset = args.take_option({"--sig-offset"});
+  o.sig_phase = args.take_option({"--sig-phase"});
+  o.sig_duty = args.take_option({"--sig-duty"});
+  o.sig_seed = args.take_option({"--sig-seed"});
+  o.sig_quantity = args.take_option({"--sig-quantity"});
+  o.sig_count = args.take_option({"--sig-count"});
+  o.sig_expr = args.take_option({"--sig-expr"});
+  o.sig_table = args.take_option({"--sig-table"});
+  o.sig_lua = args.take_option({"--sig-lua"});
+  o.sig_operands = args.take_option({"--sig-operands"});
+  o.control_tcp = args.take_option({"--control-tcp"});
+  o.steps = args.take_option({"--steps", "-n"});
+  o.dt = args.take_option({"--dt"});
+  o.emit_every = args.take_option({"--emit-every"});
+  o.rate = args.take_option({"--rate"});
+  o.emit_csv = args.take_option({"--emit-csv"});
+  o.emit_shm = args.take_option({"--emit-shm"});
+  o.emit_tcp = args.take_option({"--emit-tcp"});
+  o.emit_udp = args.take_option({"--emit-udp"});
+  o.emit_uart = args.take_option({"--emit-uart"});
+  o.emit_uart_mode = args.take_option({"--emit-uart-mode"});
+  o.emit_udp_budget = args.take_option({"--emit-udp-budget"});
+  o.emit_csv_stride = args.take_option({"--emit-csv-stride"});
+  o.emit_shm_stride = args.take_option({"--emit-shm-stride"});
+  o.emit_tcp_stride = args.take_option({"--emit-tcp-stride"});
+  o.emit_udp_stride = args.take_option({"--emit-udp-stride"});
+  o.emit_uart_stride = args.take_option({"--emit-uart-stride"});
+  o.emit_csv_select = args.take_option({"--emit-csv-select"});
+  o.emit_shm_select = args.take_option({"--emit-shm-select"});
+  o.emit_tcp_select = args.take_option({"--emit-tcp-select"});
+  o.emit_udp_select = args.take_option({"--emit-udp-select"});
+  o.emit_uart_select = args.take_option({"--emit-uart-select"});
+}
+
+// True when any batch/transport value option was given: the per-source
+// family (list/add/set/start/stop/drop) rejects them all.
+[[nodiscard]] bool has_batch_options(const SigCliOptions &o) noexcept {
+  return o.steps || o.dt || o.emit_every || o.rate || o.emit_csv || o.emit_shm ||
+         o.emit_tcp || o.emit_udp || o.emit_uart || o.emit_uart_mode ||
+         o.emit_udp_budget || o.emit_csv_stride || o.emit_shm_stride ||
+         o.emit_tcp_stride || o.emit_udp_stride || o.emit_uart_stride ||
+         o.emit_csv_select || o.emit_shm_select || o.emit_tcp_select ||
+         o.emit_udp_select || o.emit_uart_select;
+}
+
+int run_batch(ArgCursor &args, std::ostream &out,
+              std::span<const std::string_view> extra_pos, const SigCliOptions &o) {
+  // (--help is served by the SigSpec::run dispatcher before dispatch.)
+  // Sums configure through the per-source family (distinct per-source
+  // operands cannot come from identical batch sources).
+  if (o.sig_operands) {
+    return usage_error(out, "--sig-operands needs sig add --sig-kind sum");
+  }
   long long steps = 100;
   double dt = 0.01;
   long long emit_every = 1;
   const bool forever = args.take_flag({"--forever"});
   const bool paced = args.take_flag({"--paced"});
   const bool emit_health = args.take_flag({"--emit-health"});
-  const auto o_rate = args.take_option({"--rate"});
-  std::optional<std::string_view> csv_path;
-  std::optional<std::string_view> shm_name;
-  std::optional<std::string_view> tcp_endpoint;
-  std::optional<std::string_view> udp_endpoint;
-  std::optional<std::string_view> control_endpoint;
-  std::optional<std::string_view> uart_device;
-  std::optional<std::string_view> uart_mode_text;
+  const auto o_rate = o.rate;
+  std::optional<std::string_view> csv_path = o.emit_csv;
+  std::optional<std::string_view> shm_name = o.emit_shm;
+  std::optional<std::string_view> tcp_endpoint = o.emit_tcp;
+  std::optional<std::string_view> udp_endpoint = o.emit_udp;
+  std::optional<std::string_view> control_endpoint = o.control_tcp;
+  std::optional<std::string_view> uart_device = o.emit_uart;
+  std::optional<std::string_view> uart_mode_text = o.emit_uart_mode;
   const bool control_uart = args.take_flag({"--control-uart"});
   long long udp_budget = static_cast<long long>(link::kDefaultUdpPayloadBudget);
   bool udp_budget_given = false;
 
-  auto take_i64 = [&](std::initializer_list<std::string_view> names, const char *what,
+  auto take_i64 = [&](std::optional<std::string_view> v, const char *what,
                       long long &slot) -> bool {
-    if (auto o = args.take_option(names)) {
-      auto p = parse_i64(*o);
+    if (v) {
+      const auto p = parse_i64(*v);
       if (!p.ok()) {
-        out << "Error: invalid " << what << " '" << *o << "'\n";
-        out << kUsage << '\n';
+        out << "Error: invalid " << what << " '" << *v << "'\n";
+        out << SigSpec::kUsage << '\n';
         return false;
       }
       slot = p.value;
@@ -176,40 +279,33 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     return true;
   };
 
-  if (!take_i64({"--steps", "-n"}, "step count", steps)) {
+  if (!take_i64(o.steps, "step count", steps)) {
     return core::kExitUsage;
   }
-  if (auto o = args.take_option({"--dt"})) {
-    const auto p = parse_time(*o);
+  if (o.dt) {
+    const auto p = parse_time(*o.dt);
     if (!p.ok()) {
-      out << "Error: invalid time step '" << *o << "'\n";
-      out << kUsage << '\n';
+      out << "Error: invalid time step '" << *o.dt << "'\n";
+      out << SigSpec::kUsage << '\n';
       return core::kExitUsage;
     }
     dt = p.value;
   }
-  if (!take_i64({"--emit-every"}, "emit stride", emit_every)) {
+  if (!take_i64(o.emit_every, "emit stride", emit_every)) {
     return core::kExitUsage;
   }
-  csv_path = args.take_option({"--emit-csv"});
-  shm_name = args.take_option({"--emit-shm"});
-  tcp_endpoint = args.take_option({"--emit-tcp"});
-  udp_endpoint = args.take_option({"--emit-udp"});
-  control_endpoint = args.take_option({"--control-tcp"});
-  uart_device = args.take_option({"--emit-uart"});
-  uart_mode_text = args.take_option({"--emit-uart-mode"});
   cli::EmitOutputSampling csv_sampling;
   cli::EmitOutputSampling shm_sampling;
   cli::EmitOutputSampling tcp_sampling;
   cli::EmitOutputSampling udp_sampling;
   cli::EmitOutputSampling uart_sampling;
-  auto take_stride = [&](std::initializer_list<std::string_view> names, const char *what,
+  auto take_stride = [&](std::optional<std::string_view> v, const char *what,
                          cli::EmitOutputSampling &slot) -> bool {
-    if (auto o = args.take_option(names)) {
-      const auto p = cli::parse_emit_stride(*o);
+    if (v) {
+      const auto p = cli::parse_emit_stride(*v);
       if (!p.ok()) {
-        out << "Error: invalid " << what << " '" << *o << "' (want >= 0, 0 = muted)\n";
-        out << kUsage << '\n';
+        out << "Error: invalid " << what << " '" << *v << "' (want >= 0, 0 = muted)\n";
+        out << SigSpec::kUsage << '\n';
         return false;
       }
       slot.stride = p.value;
@@ -217,13 +313,13 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     }
     return true;
   };
-  auto take_select = [&](std::initializer_list<std::string_view> names, const char *what,
+  auto take_select = [&](std::optional<std::string_view> v, const char *what,
                          cli::EmitOutputSampling &slot) -> bool {
-    if (auto o = args.take_option(names)) {
-      const auto p = cli::parse_emit_select(*o);
+    if (v) {
+      const auto p = cli::parse_emit_select(*v);
       if (!p.ok()) {
-        out << "Error: invalid " << what << " '" << *o << "' (want e.g. 0,2,5)\n";
-        out << kUsage << '\n';
+        out << "Error: invalid " << what << " '" << *v << "' (want e.g. 0,2,5)\n";
+        out << SigSpec::kUsage << '\n';
         return false;
       }
       slot.serials = p.value;
@@ -231,47 +327,48 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     }
     return true;
   };
-  if (!take_stride({"--emit-csv-stride"}, "csv stride", csv_sampling) ||
-      !take_stride({"--emit-shm-stride"}, "shm stride", shm_sampling) ||
-      !take_stride({"--emit-tcp-stride"}, "tcp stride", tcp_sampling) ||
-      !take_stride({"--emit-udp-stride"}, "udp stride", udp_sampling) ||
-      !take_stride({"--emit-uart-stride"}, "uart stride", uart_sampling)) {
+  if (!take_stride(o.emit_csv_stride, "csv stride", csv_sampling) ||
+      !take_stride(o.emit_shm_stride, "shm stride", shm_sampling) ||
+      !take_stride(o.emit_tcp_stride, "tcp stride", tcp_sampling) ||
+      !take_stride(o.emit_udp_stride, "udp stride", udp_sampling) ||
+      !take_stride(o.emit_uart_stride, "uart stride", uart_sampling)) {
     return core::kExitUsage;
   }
-  if (auto o = args.take_option({"--emit-udp-budget"})) {
-    const auto p = parse_i64(*o);
+  if (o.emit_udp_budget) {
+    const auto p = parse_i64(*o.emit_udp_budget);
     if (!p.ok() || p.value < 1 ||
         static_cast<std::uint64_t>(p.value) > link::kMaxUdpPayload) {
-      out << "Error: invalid udp budget '" << *o << "' (want 1.."
+      out << "Error: invalid udp budget '" << *o.emit_udp_budget << "' (want 1.."
           << link::kMaxUdpPayload << ")\n";
-      out << kUsage << '\n';
+      out << SigSpec::kUsage << '\n';
       return core::kExitUsage;
     }
     udp_budget = p.value;
     udp_budget_given = true;
   }
-  if (!take_select({"--emit-csv-select"}, "csv selection", csv_sampling) ||
-      !take_select({"--emit-shm-select"}, "shm selection", shm_sampling) ||
-      !take_select({"--emit-tcp-select"}, "tcp selection", tcp_sampling) ||
-      !take_select({"--emit-udp-select"}, "udp selection", udp_sampling) ||
-      !take_select({"--emit-uart-select"}, "uart selection", uart_sampling)) {
+  if (!take_select(o.emit_csv_select, "csv selection", csv_sampling) ||
+      !take_select(o.emit_shm_select, "shm selection", shm_sampling) ||
+      !take_select(o.emit_tcp_select, "tcp selection", tcp_sampling) ||
+      !take_select(o.emit_udp_select, "udp selection", udp_sampling) ||
+      !take_select(o.emit_uart_select, "uart selection", uart_sampling)) {
     return core::kExitUsage;
   }
 
   // Signal vocabulary lives here (never in sim run): raw views first,
-  // amp/offset parse against --sig-quantity.
-  const auto o_sig_kind = args.take_option({"--sig-kind"});
-  const auto o_sig_freq = args.take_option({"--sig-freq"});
-  const auto o_sig_amp = args.take_option({"--sig-amp"});
-  const auto o_sig_offset = args.take_option({"--sig-offset"});
-  const auto o_sig_phase = args.take_option({"--sig-phase"});
-  const auto o_sig_duty = args.take_option({"--sig-duty"});
-  const auto o_sig_seed = args.take_option({"--sig-seed"});
-  const auto o_sig_quantity = args.take_option({"--sig-quantity"});
-  const auto o_sig_count = args.take_option({"--sig-count"});
-  const auto o_sig_expr = args.take_option({"--sig-expr"});
-  const auto o_sig_table = args.take_option({"--sig-table"});
-  const auto o_sig_lua = args.take_option({"--sig-lua"});
+  // amp/offset parse against --sig-quantity. Values arrive pre-taken (see
+  // take_sig_options) so bare words never read as positional modes.
+  const auto o_sig_kind = o.sig_kind;
+  const auto o_sig_freq = o.sig_freq;
+  const auto o_sig_amp = o.sig_amp;
+  const auto o_sig_offset = o.sig_offset;
+  const auto o_sig_phase = o.sig_phase;
+  const auto o_sig_duty = o.sig_duty;
+  const auto o_sig_seed = o.sig_seed;
+  const auto o_sig_quantity = o.sig_quantity;
+  const auto o_sig_count = o.sig_count;
+  const auto o_sig_expr = o.sig_expr;
+  const auto o_sig_table = o.sig_table;
+  const auto o_sig_lua = o.sig_lua;
 
   signal::SignalParams params;
   if (o_sig_kind) {
@@ -289,15 +386,15 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     }
     params.quantity = qty.value;
   }
-  auto take_qty = [&](std::optional<std::string_view> o, const char *what,
+  auto take_qty = [&](std::optional<std::string_view> v, const char *what,
                       double &slot) -> bool {
-    if (o) {
+    if (v) {
       // Quantity-aware parse through the units-owned tables (no ad-hoc
       // voltage/current switch here — see signal::kQuantities).
-      const auto p = parse_quantity_value(params.quantity, *o);
+      const auto p = parse_quantity_value(params.quantity, *v);
       if (!p.ok()) {
-        out << "Error: invalid " << what << " '" << *o << "'\n";
-        out << kUsage << '\n';
+        out << "Error: invalid " << what << " '" << *v << "'\n";
+        out << SigSpec::kUsage << '\n';
         return false;
       }
       slot = p.value;
@@ -308,7 +405,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     const auto p = parse_frequency(*o_sig_freq);
     if (!p.ok()) {
       out << "Error: invalid signal frequency '" << *o_sig_freq << "'\n";
-      out << kUsage << '\n';
+      out << SigSpec::kUsage << '\n';
       return core::kExitUsage;
     }
     params.freq_hz = p.value;
@@ -321,7 +418,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     const auto p = parse_double(*o_sig_phase);
     if (!p.ok()) {
       out << "Error: invalid signal phase '" << *o_sig_phase << "'\n";
-      out << kUsage << '\n';
+      out << SigSpec::kUsage << '\n';
       return core::kExitUsage;
     }
     params.phase_rad = p.value;
@@ -330,7 +427,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     const auto p = parse_double(*o_sig_duty);
     if (!p.ok()) {
       out << "Error: invalid signal duty '" << *o_sig_duty << "'\n";
-      out << kUsage << '\n';
+      out << SigSpec::kUsage << '\n';
       return core::kExitUsage;
     }
     params.duty = p.value;
@@ -341,7 +438,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     const auto p = parse_i64(*o_sig_seed);
     if (!p.ok()) {
       out << "Error: invalid signal seed '" << *o_sig_seed << "'\n";
-      out << kUsage << '\n';
+      out << SigSpec::kUsage << '\n';
       return core::kExitUsage;
     }
     sig_seed = p.value;
@@ -350,7 +447,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     const auto p = parse_i64(*o_sig_count);
     if (!p.ok()) {
       out << "Error: invalid signal count '" << *o_sig_count << "'\n";
-      out << kUsage << '\n';
+      out << SigSpec::kUsage << '\n';
       return core::kExitUsage;
     }
     sig_count = p.value;
@@ -377,7 +474,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     const auto prog = signal::parse_expression(*o_sig_expr);
     if (!prog.ok()) {
       out << "Error: invalid expression '" << *o_sig_expr << "' (" << prog.error << ")\n";
-      out << kUsage << '\n';
+      out << SigSpec::kUsage << '\n';
       return core::kExitUsage;
     }
     params.expr = prog.value;
@@ -413,20 +510,12 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
 
-  // Mode subcommand: exactly one `run` positional; all params are named.
-  std::array<std::string_view, 2> pos{};
-  std::size_t n_pos = 0;
-  while (auto p = args.next_positional()) {
-    if (n_pos >= pos.size()) {
-      return usage_error(out, "too many positional arguments");
-    }
-    pos[n_pos++] = *p;
+  // The `run` mode takes no extra positionals; all params are named.
+  if (!extra_pos.empty()) {
+    return usage_error(out, "too many positional arguments");
   }
   if (args.has_remaining()) {
-    return cli::unexpected_error(out, *args.first_remaining(), kUsage);
-  }
-  if (n_pos != 1 || !is_sig_mode(pos[0])) {
-    return usage_error(out, "missing mode (run)");
+    return cli::unexpected_error(out, *args.first_remaining(), SigSpec::kUsage);
   }
 
   if (!forever && steps < 1) {
@@ -449,7 +538,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       const auto p = parse_frequency(*o_rate);
       if (!p.ok()) {
         out << "Error: invalid wall-clock rate '" << *o_rate << "'\n";
-        out << kUsage << '\n';
+        out << SigSpec::kUsage << '\n';
         return core::kExitUsage;
       }
       rate_hz = p.value;
@@ -495,7 +584,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
     lua_script = lua_buf.str();
     if (!lua::check_script(std::string_view(lua_script.data(), lua_script.size())).ok()) {
       out << "Error: invalid Lua script '" << *o_sig_lua << "' (syntax check failed)\n";
-      out << kUsage << '\n';
+      out << SigSpec::kUsage << '\n';
       return core::kExitUsage;
     }
   }
@@ -570,7 +659,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
           out << "Error: --emit-" << names[k] << "-select serial " << id
               << " out of range (count=" << n_live << ", serials 0.." << (n_live == 0 ? 0 : n_live - 1)
               << ")\n";
-          out << kUsage << '\n';
+          out << SigSpec::kUsage << '\n';
           return core::kExitUsage;
         }
       }
@@ -578,7 +667,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
         out << "Error: --emit-" << names[k] << "-select needs "
             << (outs[k]->serials.size() + 1) << " channels, transport holds "
             << link::kMaxChannels << '\n';
-        out << kUsage << '\n';
+        out << SigSpec::kUsage << '\n';
         return core::kExitUsage;
       }
     }
@@ -593,7 +682,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
         out << "Error: --emit-" << names[k] << " needs " << (n_live + 1)
             << " channels, transport holds " << link::kMaxChannels
             << " (subscribe with --emit-" << names[k] << "-select)\n";
-        out << kUsage << '\n';
+        out << SigSpec::kUsage << '\n';
         return core::kExitUsage;
       }
     }
@@ -604,7 +693,7 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
       if (id >= n_live) {
         out << "Error: --emit-uart-select serial " << id << " out of range (count=" << n_live
             << ", serials 0.." << (n_live == 0 ? 0 : n_live - 1) << ")\n";
-        out << kUsage << '\n';
+        out << SigSpec::kUsage << '\n';
         return core::kExitUsage;
       }
     }
@@ -1233,6 +1322,433 @@ int SigSpec::run(ArgCursor &args, std::ostream &out) {
         << " dropped=" << uctl->responses_dropped() << ")\n";
   }
   return core::kExitOk;
+}
+
+// SIG-6 per-source family: thin TCP clients of the SIG-10 control plane
+// (same verbs the server drains: LIST/ADD/SET/START/STOP/DROP). Each mode
+// connects to a live `sig run --control-tcp <host:port>`, sends its lines,
+// and prints the server verdicts. Unit-suffixed values (3.3V, 1kHz) parse
+// at this frontend edge — the wire carries SI doubles only.
+
+[[nodiscard]] std::string fmt_wire_f64(double v) {
+  char buf[32];
+  // %.17g round-trips IEEE doubles exactly (same guarantee as the CSV log
+  // and the control LIST lines); the engine parses them back with from_chars.
+  const int n = std::snprintf(buf, sizeof(buf), "%.17g", v);
+  if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(buf)) {
+    return "0";
+  }
+  return std::string(buf, static_cast<std::size_t>(n));
+}
+
+[[nodiscard]] bool is_ok_verdict(std::string_view line) noexcept {
+  return line.size() >= 2 && line.substr(0, 2) == "OK" &&
+         (line.size() == 2 || line[2] == ' ');
+}
+
+// One command line against the server: send, read the single-line verdict,
+// print it. False on transport failure (sticky client status) — the caller
+// reports the connection error.
+bool control_transact(link::ControlClient &ctl, const std::string &line, std::ostream &out,
+                      bool &ok_out) {
+  if (!ctl.send_line(line)) {
+    return false;
+  }
+  std::string verdict;
+  if (!ctl.recv_line(verdict)) {
+    return false;
+  }
+  out << verdict << '\n';
+  ok_out = is_ok_verdict(verdict);
+  return true;
+}
+
+int run_control(ArgCursor &args, std::ostream &out, std::string_view mode,
+                std::span<const std::string_view> pos, const SigCliOptions &o) {
+  // Batch/transport values belong to sig run (taken before dispatch so bare
+  // words never read as positionals — rejected here, never ignored).
+  if (has_batch_options(o)) {
+    return usage_error(out, "batch/transport options need sig run");
+  }
+  const auto o_ctl = o.control_tcp;
+  if (!o_ctl) {
+    return usage_error(out, "control mode needs --control-tcp <host:port>");
+  }
+  if (!link::parse_endpoint(*o_ctl).ok()) {
+    return usage_error(out, "invalid control endpoint (want host:port)");
+  }
+
+  // Serial-addressed modes take exactly one positional (the stable source
+  // serial); list/add take none.
+  const bool wants_serial = mode == "set" || mode == "start" || mode == "stop" || mode == "drop";
+  long long serial = -1;
+  if (wants_serial) {
+    if (pos.size() != 1) {
+      return usage_error(out, "want one source serial");
+    }
+    const auto p = parse_i64(pos[0]);
+    if (!p.ok() || p.value < 0) {
+      return usage_error(out, "invalid source serial");
+    }
+    serial = p.value;
+  } else if (!pos.empty()) {
+    return usage_error(out, "too many positional arguments");
+  }
+
+  // Signal vocabulary (same --sig-* options as the batch run, but each
+  // source is configured individually — including sums, which batch runs
+  // reject for lack of distinct per-source operands). Values arrive
+  // pre-taken (see take_sig_options).
+  const auto o_sig_kind = o.sig_kind;
+  const auto o_sig_freq = o.sig_freq;
+  const auto o_sig_amp = o.sig_amp;
+  const auto o_sig_offset = o.sig_offset;
+  const auto o_sig_phase = o.sig_phase;
+  const auto o_sig_duty = o.sig_duty;
+  const auto o_sig_seed = o.sig_seed;
+  const auto o_sig_quantity = o.sig_quantity;
+  const auto o_sig_operands = o.sig_operands;
+  const auto o_sig_expr = o.sig_expr;
+  const auto o_sig_table = o.sig_table;
+  const auto o_sig_lua = o.sig_lua;
+  const auto o_sig_count = o.sig_count;
+
+  // Batch-only payloads never belong to one-line control verbs.
+  if (o_sig_table) {
+    return usage_error(out, "--sig-table needs a batch run (sig run --sig-kind table)");
+  }
+  if (o_sig_lua) {
+    return usage_error(out, "--sig-lua needs a batch run (sig run --sig-kind lua)");
+  }
+  if (o_sig_count) {
+    return usage_error(out, "--sig-count is batch-only (sig add creates one source)");
+  }
+
+  signal::SignalKind kind = signal::SignalKind::kSine;
+  if (o_sig_kind) {
+    const auto k = signal::parse_kind(*o_sig_kind);
+    if (!k.ok()) {
+      return usage_error(out, "unknown signal kind (want sine|square|triangle|saw|dc|"
+                              "pulse|noise|sum|expression|table|lua)");
+    }
+    kind = k.value;
+  }
+  signal::QuantityId quantity = signal::QuantityId::kVoltage;
+  if (o_sig_quantity) {
+    const auto q = signal::parse_quantity(*o_sig_quantity);
+    if (!q.ok()) {
+      return usage_error(out, "unknown signal quantity (want U|I)");
+    }
+    quantity = q.value;
+  }
+  if (kind == signal::SignalKind::kTable || kind == signal::SignalKind::kLua) {
+    return usage_error(out, "table/lua need bulk payloads (use a batch run)");
+  }
+
+  // Quantity-aware value parsing through the units-owned tables (the same
+  // dimensional firewall as the batch run: "2mA" as volts fails here).
+  auto take_qty = [&](std::optional<std::string_view> v, const char *what,
+                      double &slot) -> bool {
+    if (v) {
+      const auto p = parse_quantity_value(quantity, *v);
+      if (!p.ok()) {
+        out << "Error: invalid " << what << " '" << *v << "'\n";
+        out << SigSpec::kUsage << '\n';
+        return false;
+      }
+      slot = p.value;
+    }
+    return true;
+  };
+  auto take_num = [&](std::optional<std::string_view> v, const char *what,
+                      core::Result<double> (*parse)(std::string_view),
+                      double &slot) -> bool {
+    if (v) {
+      const auto p = parse(*v);
+      if (!p.ok()) {
+        out << "Error: invalid " << what << " '" << *v << "'\n";
+        out << SigSpec::kUsage << '\n';
+        return false;
+      }
+      slot = p.value;
+    }
+    return true;
+  };
+
+  std::vector<std::string> lines; // control lines to send, in order
+  if (mode == "add") {
+    signal::SignalParams params;
+    params.kind = kind;
+    params.quantity = quantity;
+    double freq = params.freq_hz;
+    double amp = params.amp;
+    double offset = params.offset;
+    double phase = params.phase_rad;
+    double duty = params.duty;
+    if (!take_num(o_sig_freq, "signal frequency", parse_frequency, freq) ||
+        !take_qty(o_sig_amp, "signal amplitude", amp) ||
+        !take_qty(o_sig_offset, "signal offset", offset) ||
+        !take_num(o_sig_phase, "signal phase", parse_double, phase) ||
+        !take_num(o_sig_duty, "signal duty", parse_double, duty)) {
+      return core::kExitUsage;
+    }
+    std::uint64_t seed = params.seed;
+    if (o_sig_seed) {
+      const auto p = parse_i64(*o_sig_seed);
+      if (!p.ok() || p.value < 0) {
+        return usage_error(out, "invalid signal seed");
+      }
+      seed = static_cast<std::uint64_t>(p.value);
+    }
+    params.freq_hz = freq;
+    params.amp = amp;
+    params.offset = offset;
+    params.phase_rad = phase;
+    params.duty = duty;
+    params.seed = seed;
+    // Cross-kind leftovers are usage errors, never silently ignored (same
+    // rule as the batch run).
+    const bool is_expr = kind == signal::SignalKind::kExpression;
+    const bool is_sum = kind == signal::SignalKind::kSum;
+    if (is_expr && !o_sig_expr) {
+      return usage_error(out, "expression kind needs --sig-expr '<math>'");
+    }
+    if (!is_expr && o_sig_expr) {
+      return usage_error(out, "--sig-expr needs --sig-kind expression");
+    }
+    std::vector<std::uint64_t> operands;
+    if (o_sig_operands) {
+      if (!is_sum) {
+        return usage_error(out, "--sig-operands needs --sig-kind sum");
+      }
+      std::string_view tail = *o_sig_operands;
+      while (!tail.empty()) {
+        const std::size_t comma = tail.find(',');
+        const std::string_view item =
+            (comma == std::string_view::npos) ? tail : tail.substr(0, comma);
+        const auto p = parse_i64(item);
+        if (!p.ok() || p.value < 0) {
+          return usage_error(out, "invalid operands (want e.g. 0,2,5)");
+        }
+        operands.push_back(static_cast<std::uint64_t>(p.value));
+        tail = (comma == std::string_view::npos) ? std::string_view{} : tail.substr(comma + 1);
+      }
+      if (operands.empty() || operands.size() > signal::SignalParams::kMaxOps) {
+        return usage_error(out, "invalid operands (want 1..8 serials)");
+      }
+    } else if (is_sum) {
+      return usage_error(out, "sum needs --sig-operands <s0,s1>");
+    }
+    // Operand serials ride in params for validation (existence/kind is the
+    // engine's check at apply time — serials may legitimately reference
+    // sources the CLI cannot see).
+    params.op_count = static_cast<std::uint8_t>(operands.size());
+    for (std::size_t k = 0; k < operands.size(); ++k) {
+      params.ops[k] = operands[k];
+    }
+    if (is_expr) {
+      const auto prog = signal::parse_expression(*o_sig_expr);
+      if (!prog.ok()) {
+        out << "Error: invalid expression '" << *o_sig_expr << "' (" << prog.error << ")\n";
+        out << SigSpec::kUsage << '\n';
+        return core::kExitUsage;
+      }
+      params.expr = prog.value;
+      if (!signal::eval_expression(params.expr, 0.0).ok()) {
+        return usage_error(out, "expression fails at t=0");
+      }
+    }
+    if (!signal::validate_params(params).ok()) {
+      return usage_error(out, "invalid signal params (freq > 0, duty in 0..1)");
+    }
+    // One ADD line (EXPR last: the rest of the line is program text).
+    std::string line =
+        "ADD " + std::string(signal::kKindNames[static_cast<std::size_t>(kind)]) + " " +
+        std::string(signal::quantity_suffix(quantity));
+    if (o_sig_freq) {
+      line += " FREQ " + fmt_wire_f64(freq);
+    }
+    if (o_sig_amp) {
+      line += " AMP " + fmt_wire_f64(amp);
+    }
+    if (o_sig_offset) {
+      line += " OFFSET " + fmt_wire_f64(offset);
+    }
+    if (o_sig_phase) {
+      line += " PHASE " + fmt_wire_f64(phase);
+    }
+    if (o_sig_duty) {
+      line += " DUTY " + fmt_wire_f64(duty);
+    }
+    if (o_sig_seed) {
+      line += " SEED " + std::to_string(seed);
+    }
+    if (is_sum) {
+      line += " OPS ";
+      for (std::size_t k = 0; k < operands.size(); ++k) {
+        line += (k == 0 ? "" : ",") + std::to_string(operands[k]);
+      }
+    }
+    if (is_expr) {
+      line += " EXPR ";
+      line += *o_sig_expr;
+    }
+    lines.push_back(std::move(line));
+  } else if (mode == "set") {
+    if (!o_sig_freq && !o_sig_amp && !o_sig_offset && !o_sig_phase && !o_sig_duty &&
+        !o_sig_seed && !o_sig_quantity) {
+      return usage_error(out, "set needs at least one --sig-* parameter");
+    }
+    if (o_sig_kind || o_sig_operands || o_sig_expr) {
+      return usage_error(out, "set takes values only (--sig-freq/amp/offset/phase/"
+                              "duty/seed/quantity)");
+    }
+    double freq = 0.0;
+    double amp = 0.0;
+    double offset = 0.0;
+    double phase = 0.0;
+    double duty = 0.0;
+    if (!take_num(o_sig_freq, "signal frequency", parse_frequency, freq) ||
+        !take_qty(o_sig_amp, "signal amplitude", amp) ||
+        !take_qty(o_sig_offset, "signal offset", offset) ||
+        !take_num(o_sig_phase, "signal phase", parse_double, phase) ||
+        !take_num(o_sig_duty, "signal duty", parse_double, duty)) {
+      return core::kExitUsage;
+    }
+    const std::string id = std::to_string(serial);
+    if (o_sig_freq) {
+      lines.push_back("SET " + id + " FREQ " + fmt_wire_f64(freq));
+    }
+    if (o_sig_amp) {
+      lines.push_back("SET " + id + " AMP " + fmt_wire_f64(amp));
+    }
+    if (o_sig_offset) {
+      lines.push_back("SET " + id + " OFFSET " + fmt_wire_f64(offset));
+    }
+    if (o_sig_phase) {
+      lines.push_back("SET " + id + " PHASE " + fmt_wire_f64(phase));
+    }
+    if (o_sig_duty) {
+      lines.push_back("SET " + id + " DUTY " + fmt_wire_f64(duty));
+    }
+    if (o_sig_seed) {
+      const auto p = parse_i64(*o_sig_seed);
+      if (!p.ok() || p.value < 0) {
+        return usage_error(out, "invalid signal seed");
+      }
+      lines.push_back("SET " + id + " SEED " + std::to_string(p.value));
+    }
+    if (o_sig_quantity) {
+      lines.push_back("SET " + id + " QUANTITY " +
+                      std::string(signal::quantity_suffix(quantity)));
+    }
+  } else if (mode == "list") {
+    if (o_sig_kind || o_sig_freq || o_sig_amp || o_sig_offset || o_sig_phase || o_sig_duty ||
+        o_sig_seed || o_sig_quantity || o_sig_operands || o_sig_expr) {
+      return usage_error(out, "list takes no signal options");
+    }
+    lines.emplace_back("LIST");
+  } else {
+    // start/stop/drop: single verb line over the stable serial.
+    if (o_sig_kind || o_sig_freq || o_sig_amp || o_sig_offset || o_sig_phase || o_sig_duty ||
+        o_sig_seed || o_sig_quantity || o_sig_operands || o_sig_expr) {
+      return usage_error(out, "start/stop/drop take no signal options");
+    }
+    const std::string verb = mode == "start" ? "START" : (mode == "stop" ? "STOP" : "DROP");
+    lines.push_back(verb + " " + std::to_string(serial));
+  }
+
+  if (args.has_remaining()) {
+    return cli::unexpected_error(out, *args.first_remaining(), SigSpec::kUsage);
+  }
+
+  link::ControlClient ctl(*o_ctl);
+  if (!ctl.ok()) {
+    if (ctl.status().code == core::StatusCode::kInvalidArgument) {
+      return usage_error(out, "invalid control endpoint (want host:port)");
+    }
+    out << "Error: cannot connect control '" << *o_ctl << "'\n";
+    return core::kExitRuntime;
+  }
+  if (mode == "list") {
+    // LIST answers with 1 + n lines: the verdict carries the SRC count, so
+    // the read length is known up front (never read-until-quiet: that would
+    // block on the recv timeout waiting for bytes that never come).
+    if (!ctl.send_line(lines.front())) {
+      out << "Error: control connection failed on '" << ctl.endpoint() << "'\n";
+      return core::kExitRuntime;
+    }
+    std::string verdict;
+    if (!ctl.recv_line(verdict)) {
+      out << "Error: control connection failed on '" << ctl.endpoint() << "'\n";
+      return core::kExitRuntime;
+    }
+    out << verdict << '\n';
+    constexpr std::string_view kPrefix = "OK list ";
+    if (verdict.substr(0, kPrefix.size()) != kPrefix) {
+      return core::kExitRuntime; // ERR verdict (e.g. rejected) already printed
+    }
+    const auto count =
+        parse_i64(std::string_view(verdict.data() + kPrefix.size(),
+                                   verdict.size() - kPrefix.size()));
+    if (!count.ok() || count.value < 0) {
+      out << "Error: bad LIST response on '" << ctl.endpoint() << "'\n";
+      return core::kExitRuntime;
+    }
+    for (long long k = 0; k < count.value; ++k) {
+      std::string src;
+      if (!ctl.recv_line(src)) {
+        out << "Error: control connection failed on '" << ctl.endpoint() << "'\n";
+        return core::kExitRuntime;
+      }
+      out << src << '\n';
+    }
+    return core::kExitOk;
+  }
+  bool all_ok = true;
+  for (const std::string &line : lines) {
+    bool ok_line = false;
+    if (!control_transact(ctl, line, out, ok_line)) {
+      out << "Error: control connection failed on '" << ctl.endpoint() << "'\n";
+      return core::kExitRuntime;
+    }
+    all_ok = all_ok && ok_line;
+  }
+  return all_ok ? core::kExitOk : core::kExitRuntime;
+}
+
+int SigSpec::run(ArgCursor &args, std::ostream &out) {
+  if (args.take_flag({"--help", "-h"})) {
+    out << kName << " - " << kDescription << "\nUsage:\n" << kUsage << '\n';
+    return core::kExitOk;
+  }
+  // Every value-taking --opt is consumed before positional scanning, so
+  // bare values (dc, 5V, 1kHz, 100, file paths) never read as the mode or
+  // a serial. Flags take no values and stay with their mode.
+  SigCliOptions opt;
+  take_sig_options(args, opt);
+  // Mode is the first positional (options may precede it: `sig --sig-kind
+  // sine add ...` works like the batch run's free option order).
+  std::array<std::string_view, 3> pos{};
+  std::size_t n_pos = 0;
+  while (auto p = args.next_positional()) {
+    if (n_pos >= pos.size()) {
+      return usage_error(out, "too many positional arguments");
+    }
+    pos[n_pos++] = *p;
+  }
+  if (n_pos < 1) {
+    return usage_error(out, "missing mode (run|list|add|set|start|stop|drop)");
+  }
+  const std::string_view mode = pos[0];
+  if (!is_sig_mode(mode)) {
+    return usage_error(out, "unknown mode (run|list|add|set|start|stop|drop)");
+  }
+  const std::span<const std::string_view> rest{pos.data() + 1, n_pos - 1};
+  if (mode == "run") {
+    return run_batch(args, out, rest, opt);
+  }
+  return run_control(args, out, mode, rest, opt);
 }
 
 void SigSpec::complete(std::span<const std::string_view> prior_args, std::string_view partial,

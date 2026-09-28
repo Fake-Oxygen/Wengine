@@ -269,7 +269,21 @@ flushed and closed normally.
 future mux) from any number of TCP clients: commands apply at exact step
 boundaries in fixed channel order with last-writer-wins per
 (source, param) and log for replay, e.g. `SET 0 FREQ 50` retunes a live
-sine without restarting the run.
+sine without restarting the run. The per-source family (SIG-6) speaks
+those same verbs as ready-made clients against a running
+`sig run --control-tcp` (sources address by stable serial, values parse
+like the batch run — the wire carries SI doubles):
+
+```text
+> sig list --control-tcp 127.0.0.1:9002
+> sig add --control-tcp 127.0.0.1:9002 --sig-kind square --sig-freq 50Hz --sig-amp 5V
+> sig add --control-tcp 127.0.0.1:9002 --sig-kind sum --sig-operands 0,1
+> sig set 1 --control-tcp 127.0.0.1:9002 --sig-freq 60Hz --sig-amp 2.5V
+> sig stop 1 --control-tcp 127.0.0.1:9002
+> sig start 1 --control-tcp 127.0.0.1:9002
+> sig drop 1 --control-tcp 127.0.0.1:9002
+```
+
 See `docs/signals.md` for the full design (routing, control plane, Lua,
 Zephyr transports).
 
@@ -422,7 +436,10 @@ version gate, lag accounting), `test_link_shm` (segment create/publish/
   exactness), `test_control_server` (loopback handshake/version gate,
   mid-run set/start/stop over TCP, malformed + overlong rejection,
   two-client conflict order, LIST census, disconnect survival, `sig run
-  --control-tcp` CLI smoke), `test_uart_codec` (COBS vectors, endpoint/
+  --control-tcp` CLI smoke, control-client transport classes, full
+  `sig list/add/set/start/stop/drop` family live incl. sum + expression
+  adds, census proof of SET values, unknown-serial and refused-connection
+  exits), `test_uart_codec` (COBS vectors, endpoint/
   mode parsing, stream line goldens, ascii/cobs demux + resync, Zephyr C
   parser parity incl. compact v2 decode of real encoder bytes),
   `test_uart_pub` (pty-loopback ASCII/COBS exactness, UART control

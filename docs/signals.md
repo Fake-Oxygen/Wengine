@@ -391,6 +391,21 @@ step) resolve to the fixed order, never to arrival timing. Every applied
 command is appended to the replay log as (step, channel, verb, args), so a
 multi-endpoint session replays exactly.
 
+CLI clients (SIG-6 per-source family, shipped): `sig list/add/set/start/
+stop/drop --control-tcp <host:port>` are thin blocking clients of these
+same verbs (`link::ControlClient`, CLI edge only — never the sim thread),
+so a second terminal or the REPL drives a running `sig run
+--control-tcp` without a custom socket script. Unit-suffixed values
+(`3.3V`, `1kHz`) parse at this frontend edge through the same
+quantity-aware tables as the batch run; the wire carries SI doubles
+(`%.17g`, round-trip exact). `sig add` configures one source per call —
+including `sum` with `--sig-operands` (rejected in batch runs) and
+`expression` with `--sig-expr`; `table`/`lua` need bulk payloads and stay
+batch-only. Every server verdict prints (`OK ...` → exit 0, `ERR ...` →
+exit 1); bad flags/endpoints are usage errors (exit 2), a refused
+connection is a runtime error (exit 1). `LIST` reads exactly the `1 + n`
+lines its verdict promises (never read-until-quiet).
+
 ## 7. Lua source (SIG-4b, shipped 2026-09-24)
 
 Dependency (third after glm/imgui, decision recorded before code per

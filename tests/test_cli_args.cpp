@@ -168,6 +168,96 @@ void test_ohm_handler() {
   }
 }
 
+void test_sig_control_usage() {
+  // SIG-6 per-source family: argument validation only (no server here —
+  // live exchanges live in test_control_server.cpp).
+  auto run = [](std::string line) {
+    std::array<std::string_view, kMaxArgs> buf{};
+    std::size_t n = tokenize_into(line, buf);
+    std::span<const std::string_view> args{buf.data(), n};
+    ArgCursor cur{args};
+    std::ostringstream out;
+    int rc = commands::SigSpec::run(cur, out);
+    return std::pair<int, std::string>{rc, out.str()};
+  };
+  {
+    auto [rc, s] = run("");
+    assert(rc == 2); // missing mode
+  }
+  {
+    auto [rc, s] = run("bogus");
+    assert(rc == 2); // unknown mode
+  }
+  {
+    auto [rc, s] = run("list");
+    assert(rc == 2); // control endpoint required
+  }
+  {
+    auto [rc, s] = run("list --control-tcp nope");
+    assert(rc == 2); // bad endpoint shape
+  }
+  {
+    auto [rc, s] = run("list --control-tcp 127.0.0.1:1 extra");
+    assert(rc == 2); // no extra positionals
+  }
+  {
+    auto [rc, s] = run("list --control-tcp 127.0.0.1:1 --steps 3");
+    assert(rc == 2); // batch options do not leak into control modes
+  }
+  {
+    auto [rc, s] = run("set --control-tcp 127.0.0.1:1 --sig-freq 1Hz");
+    assert(rc == 2); // serial required
+  }
+  {
+    auto [rc, s] = run("set x --control-tcp 127.0.0.1:1 --sig-freq 1Hz");
+    assert(rc == 2); // bad serial
+  }
+  {
+    auto [rc, s] = run("set 0 --control-tcp 127.0.0.1:1");
+    assert(rc == 2); // at least one parameter required
+  }
+  {
+    auto [rc, s] = run("set 0 --control-tcp 127.0.0.1:1 --sig-kind sine");
+    assert(rc == 2); // kind is add-only
+  }
+  {
+    auto [rc, s] = run("start 0 --control-tcp 127.0.0.1:1 --sig-freq 1Hz");
+    assert(rc == 2); // start/stop/drop take no options
+  }
+  {
+    auto [rc, s] = run("add --control-tcp 127.0.0.1:1 --sig-kind sum");
+    assert(rc == 2); // sum needs operands
+  }
+  {
+    auto [rc, s] = run("add --control-tcp 127.0.0.1:1 --sig-operands 0");
+    assert(rc == 2); // operands need sum
+  }
+  {
+    auto [rc, s] = run("add --control-tcp 127.0.0.1:1 --sig-kind table");
+    assert(rc == 2); // bulk payloads stay batch-only
+  }
+  {
+    auto [rc, s] = run("add --control-tcp 127.0.0.1:1 --sig-kind expression");
+    assert(rc == 2); // expression text required
+  }
+  {
+    auto [rc, s] = run("add --control-tcp 127.0.0.1:1 --sig-expr 't*2'");
+    assert(rc == 2); // expression text needs its kind
+  }
+  {
+    auto [rc, s] = run("add --control-tcp 127.0.0.1:1 --sig-kind square --sig-duty 7");
+    assert(rc == 2); // engine re-validates; CLI reports usage errors
+  }
+  {
+    auto [rc, s] = run("add --control-tcp 127.0.0.1:1 --sig-kind sine --sig-amp 2mA");
+    assert(rc == 2); // dimensional firewall: mA as volts fails
+  }
+  {
+    auto [rc, s] = run("--help");
+    assert(rc == 0 && s.find("sig add") != std::string::npos);
+  }
+}
+
 void test_shell_integration() {
   Shell sh;
   sh.set_history_file(""); // no file I/O in tests
@@ -282,7 +372,16 @@ void test_completion() {
   assert(complete_line("sim run --solver=s", 18, all) ==
          std::vector<std::string>{"--solver=signal"});
   // Sig modes, options, and kind/quantity vocabularies.
-  assert(complete_line("sig ", 4, all) == std::vector<std::string>{"run"});
+  {
+    const auto c = complete_line("sig ", 4, all);
+    assert(c.size() == 7 && has(c, "run") && has(c, "list") && has(c, "add") &&
+           has(c, "set") && has(c, "start") && has(c, "stop") && has(c, "drop"));
+  }
+  assert(complete_line("sig l", 5, all) == std::vector<std::string>{"list"});
+  {
+    const auto c = complete_line("sig s", 5, all);
+    assert(c.size() == 3 && has(c, "set") && has(c, "start") && has(c, "stop"));
+  }
   {
     const auto c = complete_line("sig --", 6, all);
     assert(has(c, "--steps") && has(c, "--dt") && has(c, "--emit-csv") &&
@@ -295,7 +394,8 @@ void test_completion() {
            has(c, "--emit-uart-stride") && has(c, "--emit-uart-select") &&
            has(c, "--paced") && has(c, "--rate") && has(c, "--sig-kind") &&
            has(c, "--sig-freq") && has(c, "--sig-quantity") && has(c, "--sig-count") &&
-           has(c, "--sig-expr") && has(c, "--sig-table") && has(c, "--sig-lua"));
+           has(c, "--sig-expr") && has(c, "--sig-table") && has(c, "--sig-lua") &&
+           has(c, "--sig-operands"));
   }
   {
     const std::vector<std::string> want{"sine",     "square",   "triangle", "saw",
@@ -450,6 +550,7 @@ int main() {
   test_cursor_positional();
   test_registry_compile_time();
   test_ohm_handler();
+  test_sig_control_usage();
   test_completion();
   test_shell_integration();
   test_shell_run_fallback();

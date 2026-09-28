@@ -104,6 +104,7 @@ target_compile_options(wengine_link_shm PRIVATE
 add_library(wengine_link_net STATIC
     src/link/socket_publisher.cpp
     src/link/control_server.cpp
+    src/link/control_client.cpp
     src/link/uart_publisher.cpp
 )
 target_include_directories(wengine_link_net PUBLIC
