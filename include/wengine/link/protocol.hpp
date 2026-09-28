@@ -282,7 +282,11 @@ enum class SlotRead : std::uint8_t { kOk, kEmpty, kBusy, kTorn };
   if (domain.empty() || domain.size() >= kDomainSize) {
     return {core::StatusCode::kInvalidArgument};
   }
-  h.version = kVersion;
+  // Keep the commit word unready (version 0) throughout initialization so a
+  // concurrent attacher observes only unready or a complete valid header,
+  // never a ready version with incomplete fields. Exactly one release-store
+  // below publishes kVersion after all immutable fields are valid.
+  h.version.store(0, std::memory_order_relaxed);
   for (std::size_t i = 0; i < domain.size(); ++i) {
     h.domain[i] = domain[i];
   }

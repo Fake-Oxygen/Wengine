@@ -1,7 +1,9 @@
 #include "wengine/link/protocol.hpp"
 
 #include <array>
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -337,6 +339,109 @@ void test_header_counters() {
   assert(link::header_published(h) == 3);
 }
 
+// PHYSI-30: the header version is the commit word, published last with
+// release semantics. A concurrent attacher must observe only unready
+// (version 0) or a complete valid header, never a ready version with
+// incomplete fields (false incompatibility).
+void test_header_init_staged_unready() {
+  link::SegmentHeader h;
+  // Fresh header is unready: version 0 is never a verdict.
+  assert(h.version.load(std::memory_order_acquire) == 0);
+  link::HeaderReport fresh = link::inspect_header(h);
+  assert(!fresh.status.ok());
+  assert(fresh.issue == link::HeaderIssue::kVersionMismatch);
+  assert(fresh.found_version == 0);
+
+  // Stage the init_header field writes in order, leaving version untouched.
+  // After every stage the header must still report unready, never a
+  // capacity/domain refusal under a ready version.
+  const char *domain = "projectile";
+  std::size_t len = std::string(domain).size();
+  for (std::size_t i = 0; i < len; ++i) {
+    h.domain[i] = domain[i];
+    assert(h.version.load(std::memory_order_acquire) == 0);
+    const link::HeaderReport rep = link::inspect_header(h);
+    assert(!rep.status.ok());
+    assert(rep.issue == link::HeaderIssue::kVersionMismatch);
+    assert(rep.found_version == 0);
+  }
+  h.domain[len] = '\0';
+  h.max_items = static_cast<std::uint64_t>(link::kMaxItems);
+  {
+    const link::HeaderReport rep = link::inspect_header(h);
+    assert(!rep.status.ok() && rep.issue == link::HeaderIssue::kVersionMismatch);
+    assert(rep.found_version == 0);
+  }
+  h.max_channels = static_cast<std::uint64_t>(link::kMaxChannels);
+  h.slot_count = static_cast<std::uint64_t>(link::kSlotCount);
+  h.publish_count.store(0, std::memory_order_relaxed);
+  {
+    const link::HeaderReport rep = link::inspect_header(h);
+    assert(!rep.status.ok() && rep.issue == link::HeaderIssue::kVersionMismatch);
+    assert(rep.found_version == 0);
+  }
+
+  // Exactly one final release-store publishes kVersion; the acquire gate
+  // then observes the complete valid header.
+  h.version.store(link::kVersion, std::memory_order_release);
+  const link::HeaderReport done = link::inspect_header(h);
+  assert(done.status.ok() && done.issue == link::HeaderIssue::kNone);
+  assert(done.found_version == link::kVersion);
+  assert(link::check_header(h).ok());
+}
+
+void test_header_init_concurrent_attach() {
+  // Staged writer with delays so the reader provably overlaps
+  // initialization; the reader classifies every observation. Race-free by
+  // construction: inspect_header returns on version != kVersion before
+  // touching plain fields, and plain writes are sequenced before the final
+  // release-store the reader acquires.
+  link::SegmentHeader h;
+  std::atomic<bool> writer_done{false};
+  std::atomic<bool> saw_unready{false};
+
+  std::thread writer([&]() {
+    h.version.store(0, std::memory_order_relaxed);
+    const char *domain = "projectile";
+    const std::size_t len = std::string(domain).size();
+    for (std::size_t i = 0; i < len; ++i) {
+      h.domain[i] = domain[i];
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    h.domain[len] = '\0';
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    h.max_items = static_cast<std::uint64_t>(link::kMaxItems);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    h.max_channels = static_cast<std::uint64_t>(link::kMaxChannels);
+    h.slot_count = static_cast<std::uint64_t>(link::kSlotCount);
+    h.publish_count.store(0, std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    h.version.store(link::kVersion, std::memory_order_release);
+    writer_done.store(true, std::memory_order_release);
+  });
+
+  while (!writer_done.load(std::memory_order_acquire)) {
+    const link::HeaderReport rep = link::inspect_header(h);
+    if (rep.found_version == 0) {
+      // Mid-construction: unready, never a verdict.
+      assert(!rep.status.ok());
+      assert(rep.issue == link::HeaderIssue::kVersionMismatch);
+      saw_unready.store(true, std::memory_order_relaxed);
+    } else {
+      // A ready version must mean a complete valid header, never a false
+      // capacity/domain refusal from torn init fields.
+      assert(rep.found_version == link::kVersion);
+      assert(rep.status.ok());
+      assert(rep.issue == link::HeaderIssue::kNone);
+    }
+  }
+  writer.join();
+  assert(saw_unready.load(std::memory_order_relaxed));
+  const link::HeaderReport done = link::inspect_header(h);
+  assert(done.status.ok() && done.issue == link::HeaderIssue::kNone);
+  assert(link::check_header(h).ok());
+}
+
 // Hammers one ring from a writer thread while the main thread reads every
 // slot: only kOk frames are inspected, and each must be self-consistent
 // (step == seq, payload matches the writer's function of seq). Any torn
@@ -411,6 +516,8 @@ int main() {
   test_ring_and_lag();
   test_lag_stats();
   test_header_counters();
+  test_header_init_staged_unready();
+  test_header_init_concurrent_attach();
   test_seqlock_concurrent();
   std::cout << "test_link_protocol: OK\n";
   return 0;
