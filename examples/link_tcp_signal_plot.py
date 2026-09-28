@@ -23,6 +23,7 @@ import struct
 import sys
 import time
 
+from link_receiver_accounting import SessionReceiver
 from link_socket_protocol import (
     MAX_COMPACT_RECORD,
     TCP_FRAME_PREFIX_SIZE,
@@ -118,9 +119,12 @@ def main() -> int:
             legend_names: set[str] | None = None
             count = 0
             draws = 0
-            last_seq = 0
-            last_run = 0
-            missed_total = 0
+            # TCP is ordered: non-increasing seq stays fatal. The session
+            # separates pre-attach history per publisher run (see
+            # link_receiver_accounting, mirroring link/receiver.hpp).
+            session = SessionReceiver()
+            pre_attach_total = 0
+            gaps_total = 0
             draw_period = 1.0 / args.draw_hz
             last_draw = 0.0
             dirty = False
@@ -151,14 +155,17 @@ def main() -> int:
                     payload = bytes(buf[TCP_FRAME_PREFIX_SIZE : TCP_FRAME_PREFIX_SIZE + frame_size])
                     del buf[: TCP_FRAME_PREFIX_SIZE + frame_size]
                     run_id, seq, _step, sim_time, channels = decode_compact_record(payload)
-                    if last_run and run_id != last_run:
-                        last_seq = 0  # new publisher run: reset the cursor
-                    last_run = run_id
-                    missed = max(0, seq - last_seq - 1) if last_seq else 0
-                    if last_seq and seq <= last_seq:
-                        raise ValueError(f"non-increasing TCP frame sequence {seq} after {last_seq}")
-                    missed_total += missed
-                    last_seq = seq
+                    was_attached = session.track.attached
+                    prev_highest = session.track.highest if was_attached else 0
+                    session_reset, _outcome = session.observe(run_id, seq)
+                    if session_reset and was_attached:
+                        print(f"new publisher run run_id={run_id} (cursor reset)", flush=True)
+                    if session_reset:
+                        pre_attach_total += session.track.pre_attach
+                    missed = seq - prev_highest - 1 if was_attached and not session_reset else 0
+                    if was_attached and not session_reset and seq <= prev_highest:
+                        raise ValueError(f"non-increasing TCP frame sequence {seq} after {prev_highest}")
+                    gaps_total += missed
                     count += 1
 
                     signal_values = {name: value for name, value in channels if name.startswith("sig.")}
@@ -200,10 +207,12 @@ def main() -> int:
             wall = time.monotonic() - t_start
             plt.close(figure)
             print(
-                f"Received {count} frames; sequence gaps observed={missed_total}; "
+                f"Received {count} frames; pre_attach={pre_attach_total} gaps={gaps_total}; "
+                f"trailing=unknown (no authoritative final sequence); "
                 f"drew {draws} times in {wall:.2f}s "
                 f"({draws / wall:.1f} draws/s)" if wall > 0 else
-                f"Received {count} frames; sequence gaps observed={missed_total}; drew {draws} times"
+                f"Received {count} frames; pre_attach={pre_attach_total} gaps={gaps_total}; "
+                f"trailing=unknown (no authoritative final sequence); drew {draws} times"
             )
     finally:
         listener.close()

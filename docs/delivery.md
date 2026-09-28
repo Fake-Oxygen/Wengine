@@ -166,7 +166,15 @@ across threads without external sync.
 - Received/observed: `LagStats::received`, `missed`, `max_gap`
   (from `frame_seq` gaps; pre-attach history counts as `missed`;
   latest-only skips and ring overruns use the same counters with
-  different interpretation per class A/B).
+  different interpretation per class A/B). UDP/sample receivers that
+  must tolerate reorder use `link/receiver.hpp` instead
+  (`SequenceTracker`/`SessionReceiver`, bounded 64-seq window):
+  gaps stay `pending` until they fill (`reordered`) or age out
+  (`confirmed` loss); `duplicates`/`stale`, per-session `run_id`
+  cursors (one tracker per sender, keyed by source address),
+  separated `pre_attach` history vs intentional `skipped` jumps
+  (`observe_latest`), and trailing loss only with an authoritative
+  expected final sequence (`receiver_trailing`, else unknown).
 - Recorded: `CsvSink::rows_written()` /
   `SignalsCsvSink::rows_written()` plus sticky `status()`; success +
   footer count is the completeness proof.

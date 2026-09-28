@@ -375,7 +375,10 @@ adapter, encode/decode exactness, seqlock states incl. threaded hammer,
 version gate, lag accounting), `test_link_shm` (segment create/publish/
  read-back, headless fan-out exactness, drop-oldest, failure paths, reader
  attach/poll), `test_link_bridge` (CSV parse fidelity + rejection, inverse
-   adapter, CSV->bus->CSV byte-identity), `test_link_sockets` (TCP hello/version
+    adapter, CSV->bus->CSV byte-identity),
+    `test_link_receiver` (reorder window + duplicates, session resets,
+    pre-attach/skipped/confirmed separation, trailing-loss gating),
+    `test_link_sockets` (TCP hello/version
    gate, length-prefixed loopback exactness, UDP compact codec/datagrams,
    transient backpressure, partial-TCP-frame preservation, sub-Hz/100-kHz soaks
     and lag accounting), `test_output_health` (per-cause live-output
@@ -528,10 +531,11 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   + link_fastread.cpp (minimum-loss subscriber: no per-frame print, reused
   buffers, lag/loss summary; built with CLI)
   + link_tcp_signal_receiver.py + link_udp_signal_receiver.py (TCP/UDP
-  signal receivers; link_socket_protocol.py has the shared decoder)
+  signal receivers; link_socket_protocol.py has the shared decoder,
+  link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,output_health,link_compact,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,output_health,link_compact,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

@@ -22,6 +22,7 @@ import socket
 import sys
 import time
 
+from link_receiver_accounting import DUPLICATE, IGNORED, STALE, session_for, summarize
 from link_socket_protocol import decode_compact_record
 
 
@@ -90,9 +91,10 @@ def main() -> int:
         legend_names: set[str] | None = None
         count = 0
         draws = 0
-        last_seq = 0
-        last_run = 0
-        missed_total = 0
+        # One session per UDP sender (see link_receiver_accounting,
+        # mirroring link/receiver.hpp); run_id changes reset that
+        # sender's cursor.
+        sessions: dict = {}
         draw_period = 1.0 / args.draw_hz
         last_draw = 0.0
         last_rx = time.monotonic()
@@ -108,16 +110,20 @@ def main() -> int:
                     packet, address = receiver.recvfrom(65535)
                 except BlockingIOError:
                     break
-            run_id, seq, _step, sim_time, channels = decode_compact_record(packet)
-            if last_run and run_id != last_run:
-                last_seq = 0  # new publisher run: reset the cursor
-            last_run = run_id
-            if last_seq and seq <= last_seq:
-                print(f"duplicate/out-of-order seq={seq} from {address[0]}", file=sys.stderr)
-                continue
-                missed = max(0, seq - last_seq - 1) if last_seq else 0
-                missed_total += missed
-                last_seq = seq
+                run_id, seq, _step, sim_time, channels = decode_compact_record(packet)
+                session = session_for(sessions, address[0])
+                session_reset, outcome = session.observe(run_id, seq)
+                if session_reset and session.sessions > 1:
+                    print(
+                        f"new publisher run run_id={run_id} from {address[0]} (cursor reset)",
+                        flush=True,
+                    )
+                if outcome in (DUPLICATE, STALE, IGNORED):
+                    print(
+                        f"duplicate/out-of-order seq={seq} from {address[0]} ({outcome})",
+                        file=sys.stderr,
+                    )
+                    continue
                 count += 1
                 last_rx = time.monotonic()
 
@@ -170,11 +176,11 @@ def main() -> int:
 
     if wall > 0:
         print(
-            f"Received {count} datagrams; sequence gaps observed={missed_total}; "
+            f"Received {count} datagrams; {summarize(sessions)}; "
             f"drew {draws} times in {wall:.2f}s ({draws / wall:.1f} draws/s)"
         )
     else:
-        print(f"Received {count} datagrams; sequence gaps observed={missed_total}; drew {draws} times")
+        print(f"Received {count} datagrams; {summarize(sessions)}; drew {draws} times")
     if count == 0:
         print("No signal datagrams received before idle timeout", file=sys.stderr)
         return 1

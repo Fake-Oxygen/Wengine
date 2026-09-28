@@ -7,6 +7,14 @@ import argparse
 import socket
 import sys
 
+from link_receiver_accounting import (
+    ADVANCED_WITH_GAP,
+    DUPLICATE,
+    IGNORED,
+    STALE,
+    session_for,
+    summarize,
+)
 from link_socket_protocol import decode_compact_record, format_signal_frame
 
 
@@ -41,9 +49,10 @@ def main() -> int:
     print(f"Listening for WLV2 signal datagrams on {args.bind}:{args.port}", flush=True)
 
     count = 0
-    last_seq = 0
-    last_run = 0
-    missed_total = 0
+    # One session per UDP sender: unrelated senders never share a counter,
+    # and a run_id change resets that sender's cursor (see
+    # link_receiver_accounting, mirroring link/receiver.hpp).
+    sessions: dict = {}
     try:
         while args.frames == 0 or count < args.frames:
             try:
@@ -51,22 +60,23 @@ def main() -> int:
             except socket.timeout:
                 break
             run_id, seq, step, sim_time, channels = decode_compact_record(packet)
-            if last_run and run_id != last_run:
-                print(f"new publisher run run_id={run_id} (cursor reset)", flush=True)
-                last_seq = 0
-            last_run = run_id
-            if last_seq and seq <= last_seq:
-                print(f"duplicate/out-of-order seq={seq} from {address[0]}", file=sys.stderr)
+            session = session_for(sessions, address[0])
+            prev_highest = session.track.highest if session.track.attached else 0
+            session_reset, outcome = session.observe(run_id, seq)
+            if session_reset:
+                print(f"new publisher run run_id={run_id} from {address[0]} (cursor reset)", flush=True)
+            if outcome in (DUPLICATE, STALE, IGNORED):
+                print(f"duplicate/out-of-order seq={seq} from {address[0]} ({outcome})", file=sys.stderr)
                 continue
-            missed = max(0, seq - last_seq - 1) if last_seq else 0
-            missed_total += missed
-            last_seq = seq
             count += 1
-            print(format_signal_frame(seq, step, sim_time, channels, missed), flush=True)
+            # Per-frame gap that opened with this datagram (pending until it
+            # fills or ages out; see the final summary for confirmed loss).
+            gap = seq - prev_highest - 1 if outcome == ADVANCED_WITH_GAP else 0
+            print(format_signal_frame(seq, step, sim_time, channels, gap), flush=True)
     finally:
         receiver.close()
 
-    print(f"Received {count} datagrams; sequence gaps observed={missed_total}")
+    print(f"Received {count} datagrams; {summarize(sessions)}")
     if count == 0:
         print("No signal datagrams received before idle timeout", file=sys.stderr)
         return 1

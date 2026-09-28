@@ -11,6 +11,7 @@ import socket
 import struct
 import sys
 
+from link_receiver_accounting import SessionReceiver
 from link_socket_protocol import (
     MAX_COMPACT_RECORD,
     TCP_FRAME_PREFIX_SIZE,
@@ -73,9 +74,13 @@ def main() -> int:
             print(f"Attached {address[0]}:{address[1]} domain={domain}", flush=True)
 
             count = 0
-            last_seq = 0
-            last_run = 0
-            missed_total = 0
+            # TCP is ordered: any reordered/duplicate seq is a framing
+            # violation, so it stays fatal. The session still separates
+            # pre-attach history per publisher run (see
+            # link_receiver_accounting, mirroring link/receiver.hpp).
+            session = SessionReceiver()
+            pre_attach_total = 0
+            gaps_total = 0
             while args.frames == 0 or count < args.frames:
                 prefix = read_exact(connection, TCP_FRAME_PREFIX_SIZE, allow_clean_eof=True)
                 if prefix is None:
@@ -88,19 +93,24 @@ def main() -> int:
                 payload = read_exact(connection, frame_size)
                 assert payload is not None
                 run_id, seq, step, sim_time, channels = decode_compact_record(payload)
-                if last_run and run_id != last_run:
-                    print(f"new publisher run run_id={run_id} (cursor reset)", flush=True)
-                    last_seq = 0
-                last_run = run_id
-                missed = max(0, seq - last_seq - 1) if last_seq else 0
-                if last_seq and seq <= last_seq:
-                    raise ValueError(f"non-increasing TCP frame sequence {seq} after {last_seq}")
-                missed_total += missed
-                last_seq = seq
+                was_attached = session.track.attached
+                prev_highest = session.track.highest if was_attached else 0
+                session_reset, _outcome = session.observe(run_id, seq)
+                if session_reset:
+                    if was_attached:
+                        print(f"new publisher run run_id={run_id} (cursor reset)", flush=True)
+                    pre_attach_total += session.track.pre_attach
+                if was_attached and not session_reset and seq <= prev_highest:
+                    raise ValueError(f"non-increasing TCP frame sequence {seq} after {prev_highest}")
+                missed = seq - prev_highest - 1 if was_attached and not session_reset else 0
+                gaps_total += missed
                 count += 1
                 print(format_signal_frame(seq, step, sim_time, channels, missed), flush=True)
 
-            print(f"Received {count} frames; sequence gaps observed={missed_total}")
+            print(
+                f"Received {count} frames; pre_attach={pre_attach_total} gaps={gaps_total}; "
+                f"trailing=unknown (no authoritative final sequence)"
+            )
     finally:
         listener.close()
     return 0
