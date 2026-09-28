@@ -54,9 +54,10 @@
 // sticky kOutOfRange, last_over_bound_bytes() records the needed size,
 // 0 when over the codec maximum) exactly like a codec over-bound frame.
 // Shrink records with --emit-udp-select (fewer channels) or
-// --emit-udp-stride/--emit-every (fewer datagrams, same size); the
-// PHYSI-44 sample-batch packetizer is the extension point for splitting
-// one tick across several budgeted datagrams.
+// --emit-udp-stride/--emit-every (fewer datagrams, same size); consecutive
+// ticks batch without decimation via link/sample_block.hpp (PHYSI-44
+// builder/codec, schema once per block). Splitting one tick across several
+// budgeted datagrams is the packetizer's remaining extension point.
 //
 // PORTABILITY: POSIX-only TU (src/link/socket_publisher.cpp) — sockets,
 // getaddrinfo, non-blocking I/O; the Windows port replaces that TU, never

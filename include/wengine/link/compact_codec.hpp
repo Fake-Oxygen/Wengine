@@ -47,10 +47,10 @@
 // treats it as opaque; GENERATION belongs to the publisher edge (PHYSI-38:
 // e.g. random + pid + time). No value is reserved.
 //
-// RECORD KIND: kind reserves framing for later record types (PHYSI-44
-// sample batches, end summaries) without a new magic. decode_record only
-// understands kFrame today and reports any other kind loudly; future kinds
-// get their own decode entry, never a silent reinterpretation.
+// RECORD KIND: kind distinguishes framing for later record types without a
+// new magic. decode_record only understands kFrame and reports any other
+// kind loudly; sample batches (PHYSI-44, kind kSampleBlock) get their own
+// decode entry in link/sample_block.hpp, never a silent reinterpretation.
 //
 // BOUNDS (shared with v1 vocabulary, never silently truncated):
 //   items <= kMaxItems, channels <= kMaxChannels, names <= 31 chars,
@@ -87,11 +87,17 @@ inline constexpr std::uint32_t kV1UdpMagic = 0x31554C57u;
 // Socket-schema version carried in every record (NOT link::kVersion: the
 // SHM segment gate and socket readers evolve independently).
 inline constexpr std::uint32_t kSchemaVersion = 2;
-// Record kinds. Only kFrame decodes today; the rest are refused loudly
-// until their decode entry exists (see header comment).
-enum class RecordKind : std::uint8_t { kFrame = 1 };
-// Fixed header size: 4+4+1+3+8+8+8+8+32+4+4.
+// Record kinds. kFrame decodes via decode_record below; kSampleBlock
+// (PHYSI-44 batched signal samples) decodes via link/sample_block.hpp;
+// any other value is refused loudly until its decode entry exists.
+enum class RecordKind : std::uint8_t { kFrame = 1, kSampleBlock = 2 };
+// Fixed frame-header size: 4+4+1+3+8+8+8+8+32+4+4.
 inline constexpr std::size_t kHeaderSize = 84;
+// Smallest v2 header across kinds: the sample-block header
+// (link/sample_block.hpp, 68 bytes) is smaller than the frame header above.
+// check_v2_schema gates on this minimum; each decoder re-checks its own
+// exact header anyway.
+inline constexpr std::size_t kMinV2HeaderSize = 68;
 // Explicit item size: 7x8 + 4 + 1 (no padding, ever).
 inline constexpr std::size_t kItemSize = 61;
 // Channel name bound mirrors v1 (kChannelNameSize - 1 usable chars);
@@ -165,12 +171,13 @@ enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
 }
 
 // Cheap pre-gate for v2 dispatch (PHYSI-38 calls this before decode):
-// exact magic + exact schema + at least a header. Anything else is
-// kInvalidArgument — v1 bytes, truncated prefixes and future schemas all
-// refuse identically here; decode_record re-checks everything anyway.
+// exact magic + exact schema + at least the smallest header. Anything else
+// is kInvalidArgument — v1 bytes, truncated prefixes and future schemas all
+// refuse identically here; each decode_record/decode_block re-checks
+// everything anyway.
 [[nodiscard]] inline core::Status check_v2_schema(const unsigned char *bytes,
                                                   std::size_t len) noexcept {
-  if (classify_record(bytes, len) != SocketSchema::kV2 || len < kHeaderSize) {
+  if (classify_record(bytes, len) != SocketSchema::kV2 || len < kMinV2HeaderSize) {
     return {core::StatusCode::kInvalidArgument};
   }
   return core::Status::success();

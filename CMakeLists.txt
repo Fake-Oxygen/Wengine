@@ -363,6 +363,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_link_compact PRIVATE wengine_core)
     add_test(NAME link_compact COMMAND test_link_compact)
 
+    add_executable(test_link_sample_block tests/test_link_sample_block.cpp)
+    target_link_libraries(test_link_sample_block PRIVATE wengine_core)
+    add_test(NAME link_sample_block COMMAND test_link_sample_block)
+
     add_executable(test_link_receiver tests/test_link_receiver.cpp)
     target_link_libraries(test_link_receiver PRIVATE wengine_core)
     add_test(NAME link_receiver COMMAND test_link_receiver)
@@ -464,4 +468,7 @@ if(BUILD_BENCHMARKS)
 
     add_executable(bench_link_sockets benchmarks/bench_link_sockets.cpp)
     target_link_libraries(bench_link_sockets PRIVATE wengine_core wengine_link_net)
+
+    add_executable(bench_sample_block benchmarks/bench_sample_block.cpp)
+    target_link_libraries(bench_sample_block PRIVATE wengine_core)
 endif()

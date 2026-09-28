@@ -293,12 +293,13 @@ paths — loss of one fragment loses the whole datagram, so the 65,507-byte
 protocol maximum is never a safe operating point. A record that does not
 fit its budget is indivisible (UDP has no fragmentation or batch-splitting
 here) and is refused loudly: over-bound counter, sticky `kOutOfRange`
-status, and the required bytes reported as `need=` in CLI summaries
-(compare against `budget=`), never silently truncated. Shrink records with
-`--emit-udp-select` (fewer channels); `--emit-udp-stride`/`--emit-every`
-lower the datagram rate but never the size. Splitting one tick across
-several budgeted datagrams is the sample-batch packetizer's extension
-point (PHYSI-44).
+ status, and the required bytes reported as `need=` in CLI summaries
+ (compare against `budget=`), never silently truncated. Shrink records with
+ `--emit-udp-select` (fewer channels); `--emit-udp-stride`/`--emit-every`
+ lower the datagram rate but never the size. Consecutive ticks batch without
+ decimation via `link/sample_block.hpp` (PHYSI-44: schema once per block +
+ numeric sample arrays, owned blocks); splitting one tick across several
+ budgeted datagrams remains the packetizer's extension point.
 
 ## 6. Control plane (SIG-10, v1 scope)
 
