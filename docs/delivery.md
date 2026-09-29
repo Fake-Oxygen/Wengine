@@ -155,8 +155,9 @@ across threads without external sync.
   `PublisherStats::dropped_send` (TCP zero-byte EAGAIN + UDP datagram
   refusal); TCP frames dropped while the depth-1 pending tail is still
   blocked count separately as `dropped_pending_blocked` (previously
-  folded into `dropped_send`). `dropped_queue_full` is reserved 0 until
-  the bounded owning queue lands.
+   folded into `dropped_send`). `dropped_queue_full` counts bounded-queue
+   refusals once a `link/output_queue.hpp` stage fronts the publisher
+   (0 with no queue stage).
 - Attempted/disabled/bytes: `attempted` counts every `on_snapshot` call;
   `disabled_after_error` counts snapshots ignored once sticky (including
   the frame that triggered the sticky failure); `bytes_accepted` counts

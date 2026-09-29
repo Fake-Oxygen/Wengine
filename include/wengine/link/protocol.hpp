@@ -343,9 +343,9 @@ struct SegmentHeader {
 // - dropped_pending_blocked: TCP only — a new frame dropped because the
 //   depth-1 pending tail was still blocked (stream framing forbids
 //   discarding a partial prefix). Previously folded into dropped_send.
-// - dropped_queue_full: reserved 0 for the PHYSI-45 bounded owning queue;
-//   no queue exists yet, so this stays 0 (kept so the report vocabulary
-//   is complete today).
+ // - dropped_queue_full: bounded-queue refusal counted by the PHYSI-45
+ //   owning queue (link/output_queue.hpp); transports with no queue stage
+ //   leave this 0.
 // - disabled_after_error: snapshots ignored after the publisher went
 //   sticky (including the frame that triggered a sticky local failure
 //   such as an adapter throw or a dead peer).

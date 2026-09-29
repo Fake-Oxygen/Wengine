@@ -13,7 +13,8 @@
 // - intentional stride/subset skips: routing wrappers (emit/routing.hpp),
 //   passed in by the caller — never folded into PublisherStats.
 // - over-bound: shared encode-bound refusal (sticky kOutOfRange).
-// - queue-full: reserved 0 until the PHYSI-45 bounded owning queue lands.
+ // - queue-full: bounded-queue refusal (link/output_queue.hpp);
+ //   transports with no queue stage report 0.
 // - socket-backpressure: transient kernel/peer refusal (dropped_send).
 // - pending-blocked: TCP new frame dropped while the depth-1 pending tail
 //   is still blocked (dropped_pending_blocked).

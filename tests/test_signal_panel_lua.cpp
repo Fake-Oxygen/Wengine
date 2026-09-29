@@ -7,6 +7,7 @@
 
 #include "controllers/sim_controller.hpp"
 #include "models/signal_model.hpp"
+#include "views/frame_source.hpp"
 #include "wengine/signal/lua.hpp"
 #include "wengine/solvers/run.hpp"
 
@@ -149,6 +150,40 @@ void test_lua_rejection_matrix() {
   assert(sim.state().step_index == 0); // every rejection keeps the live run
 }
 
+void test_reset_reattaches_sinks_with_runtime() {
+  // Rebuild reuses the caller-owned extras and reattaches caller-owned
+  // sinks: a recorder attached once keeps receiving signal frames across
+  // reset() with the Lua runtime active (caller keeps ownership of both).
+  const core::RunConfig cfg = lua_batch_cfg("return t * 2");
+  auto lua = lua::create_lua_solver();
+  std::array<core::ISolver *, 1> extra{lua.get()};
+
+  gui::SimController sim;
+  assert(sim
+             .set_config(cfg,
+                         std::span<core::ISolver *>(extra.data(), extra.size()),
+                         /*has_lua_runtime=*/true)
+             .ok());
+  gui::FrameHistory history;
+  gui::FrameRecorder recorder(history);
+  recorder.set_solver("signal");
+  sim.add_sink(recorder);
+  assert(sim.run_exact(cfg.steps).ok());
+  assert(history.size() == cfg.steps); // emit_every defaults to 1
+  assert(history.frames().back().channels[1].name == "sig.0.U");
+
+  sim.reset(); // rebuild: extras re-used, observers re-attached
+  assert(sim.has_lua_runtime());
+  assert(sim.run_exact(2).ok());
+  // Fresh run regresses steps (fresh series after the step drop)...
+  assert(history.size() == 2);
+  // ...and the frames are live Lua evaluations, not stale copies
+  // (step 2 at dt=0.1 stamps value(0.2) = 2t = 0.4).
+  assert(near(history.frames().back().channels[1].value, 0.4, 1e-9));
+  assert(history.frames().back() ==
+         link::frame_from_signal_snapshot(sim.snapshot()));
+}
+
 } // namespace
 
 int main() {
@@ -156,6 +191,7 @@ int main() {
   test_lua_batch_parity();
   test_lua_failure_surfaces_text();
   test_lua_rejection_matrix();
+  test_reset_reattaches_sinks_with_runtime();
   std::printf("test_signal_panel_lua: OK\n");
   return 0;
 }

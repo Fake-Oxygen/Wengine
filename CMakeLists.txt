@@ -398,6 +398,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_link_sample_block PRIVATE wengine_core)
     add_test(NAME link_sample_block COMMAND test_link_sample_block)
 
+    add_executable(test_output_queue tests/test_output_queue.cpp)
+    target_link_libraries(test_output_queue PRIVATE wengine_core)
+    add_test(NAME output_queue COMMAND test_output_queue)
+
     add_executable(test_link_receiver tests/test_link_receiver.cpp)
     target_link_libraries(test_link_receiver PRIVATE wengine_core)
     add_test(NAME link_receiver COMMAND test_link_receiver)
