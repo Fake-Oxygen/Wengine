@@ -201,6 +201,7 @@ if(BUILD_CLI)
         src/cli/commands/sim.cpp
         src/cli/commands/sig.cpp
         src/cli/commands/ic.cpp
+        src/cli/commands/ic/ap63205.cpp
     )
     target_include_directories(wengine_cli PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -319,6 +320,10 @@ if(BUILD_TESTS)
     add_executable(test_ic tests/test_ic.cpp)
     target_link_libraries(test_ic PRIVATE wengine_cli)
     add_test(NAME ic COMMAND test_ic)
+
+    add_executable(test_ap63205 tests/test_ap63205.cpp)
+    target_link_libraries(test_ap63205 PRIVATE wengine_cli)
+    add_test(NAME ap63205 COMMAND test_ap63205)
 
     add_executable(test_sim tests/test_sim.cpp)
     target_link_libraries(test_sim PRIVATE wengine_cli)

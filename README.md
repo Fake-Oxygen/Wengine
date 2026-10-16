@@ -135,8 +135,13 @@ IC-specific calculators (datasheet formulas, one chip per solver under
 the top level):
 
 ```text
-> ic --help            # lists registered chips (none ship yet — scaffolding only)
-> ic <chip> --help     # per-chip subcommands, e.g. ic ne555 astable --r1 10kOhm ...
+> ic --help                                   # lists registered chips
+> ic ap63205 spec                             # fixed 5V / 1.1MHz part constants
+> ic ap63205 inductor --vin 12V               # L, IL(peak) vs 2.5A limit, tON
+> ic ap63205 cout --vin 12V --esr 5mOhm       # ripple + transient COUT(min)
+> ic ap63205 uvlo --von 8V --voff 7V          # EN divider R5/R6
+> ic ap63205 delay --ts 10ms                  # EN sequencing capacitance
+> ic ap63205 thermal --vin 12V --ta 85        # TJ vs +125C design target
 ```
 
 Each chip dispatches its own subcommands (`ic <chip> <op> [options]`);
@@ -403,7 +408,8 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
  and `wengine_signal_lua` (for `sig run --sig-lua`);
 `PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
 (link core), `test_cli_args`, `test_s0`, `test_i2c`, `test_ic` (two-level
-`ic` dispatch incl. empty-registry edges), `test_sim` (link cli),
+`ic` dispatch incl. chip completion), `test_ap63205` (AP63205 datasheet
+goldens + CLI run/usage/stray/completion), `test_sim` (link cli),
 `test_solver_registry`, `test_runner`, `test_signal` (waveform goldens,
 seeded-noise sequence, solver end-of-step convention, headless signal
 config + rejections, signal Frame adapter + wire round-trip, signals CSV
@@ -629,7 +635,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,ic,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,ic,ap63205,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

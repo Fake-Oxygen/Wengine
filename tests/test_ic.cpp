@@ -236,7 +236,8 @@ void test_dispatch_complete() {
 }
 
 void test_production_empty_registry() {
-  static_assert(IcRegistry::all().empty());
+  static_assert(IcRegistry::all().size() == 1);
+  static_assert(IcRegistry::find("ap63205") != nullptr);
   static_assert(IcRegistry::find("demo") == nullptr);
   static_assert(CliRegistry::find("ic") != nullptr);
   static_assert(CliRegistry::find("ic")->complete != nullptr);
@@ -248,25 +249,28 @@ void test_production_empty_registry() {
   {
     auto [rc, s] = run_production("--help");
     assert(rc == 0 && s.find("Available ICs") != std::string::npos);
-    assert(s.find("(none registered yet)") != std::string::npos);
+    assert(s.find("ap63205") != std::string::npos);
   }
   {
     auto [rc, s] = run_production("ne555");
     assert(rc == 2 && s.find("unknown IC") != std::string::npos);
   }
   {
-    // Empty registry completes to nothing (options still complete).
+    // One registered chip completes by name (options still complete).
     std::vector<std::string> out;
     commands::IcSpec::complete({}, "", out);
-    assert(out.empty());
-    commands::IcSpec::complete({}, "--", out);
-    const std::vector<std::string> want{"--help"};
+    const std::vector<std::string> want{"ap63205"};
     assert(out == want);
+    out.clear();
+    commands::IcSpec::complete({}, "--", out);
+    const std::vector<std::string> want_help{"--help"};
+    assert(out == want_help);
   }
   {
     // End-to-end through the generic completion engine + shell.
     const auto all = CliRegistry::all();
-    assert(complete_line("ic ", 3, all).empty());
+    const std::vector<std::string> want{"ap63205"};
+    assert(complete_line("ic ", 3, all) == want);
     Shell sh;
     sh.set_history_file("");
     std::ostringstream out;
