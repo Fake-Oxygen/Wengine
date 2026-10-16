@@ -25,6 +25,7 @@
 
 #include "wengine/cli/line_reader.hpp"
 #include "wengine/tui/exec.hpp"
+#include "wengine/tui/forms.hpp"
 #include "wengine/tui/palette.hpp"
 #include "wengine/tui/popup.hpp"
 
@@ -53,10 +54,10 @@ constexpr std::size_t kMaxOutputLines = 500;
 
 constexpr std::string_view kTitle =
     "WEngine TUI  |  Enter: run  Tab: complete  F1: help  F2: commands  "
-    "PgUp/PgDn: scroll  F10/Ctrl-Q: quit";
+    "F3: forms  PgUp/PgDn: scroll  F10/Ctrl-Q: quit";
 constexpr std::string_view kPrompt = "> ";
 
-enum class Overlay { kNone, kPalette, kHelp };
+enum class Overlay { kNone, kPalette, kHelp, kForms, kForm };
 
 // Split `text` into lines, keeping at most `max_lines`; `dropped` counts
 // the remainder so the caller can say so loudly instead of silently cutting.
@@ -152,7 +153,7 @@ int run_tui() {
   std::vector<std::string> scrollback;
   push_text(scrollback,
             "WEngine TUI -- same commands as the CLI. Type `help`, press F1 for "
-            "context help, F2 for the command palette, `exit` to quit.",
+            "context help, F2 for the command palette, F3 for guided forms, `exit` to quit.",
             kMaxScrollback);
 
   WINDOW *scr = initscr();
@@ -178,7 +179,7 @@ int run_tui() {
   int hist_pos = -1; // -1: editing fresh line, else index into history
   int scroll = 0;
   int last_rc = 0;
-  std::string status_msg = "ready -- F2 for commands";
+  std::string status_msg = "ready -- F2 for commands, F3 for forms";
   Overlay overlay = Overlay::kNone;
   std::string pal_filter;
   std::size_t pal_sel = 0;
@@ -187,6 +188,54 @@ int run_tui() {
   std::size_t help_first = 0; // first visible help line (docs read top-down)
   std::vector<std::string> complete_names; // transient Tab popup (non-Tab clears)
   bool quit = false;
+
+  // Guided forms (TUI-3): one argv-composing editor per closed-form family.
+  // Values persist per form while the TUI runs; submission goes through the
+  // executor so validation/output stay CLI-identical.
+  const std::vector<forms::FormDef> form_defs = forms::form_defs();
+  std::vector<std::vector<std::string>> form_vals;
+  form_vals.reserve(form_defs.size());
+  for (const auto &d : form_defs) {
+    form_vals.emplace_back(d.fields.size());
+  }
+  auto form_set = [&](std::string_view cmd, std::string_view key_or_label, std::string_view value) {
+    for (std::size_t fi = 0; fi < form_defs.size(); ++fi) {
+      if (form_defs[fi].command != cmd) {
+        continue;
+      }
+      for (std::size_t i = 0; i < form_defs[fi].fields.size(); ++i) {
+        const auto &f = form_defs[fi].fields[i];
+        if (f.key == key_or_label || f.label == key_or_label) {
+          form_vals[fi][i] = std::string(value);
+        }
+      }
+    }
+  };
+  form_set("ohm", "--u", "12.4V");
+  form_set("ohm", "--i", "0.54A");
+  form_set("s0", "mode", "rate");
+  form_set("s0", "--power", "2kW");
+  form_set("s0", "--const", "1000imp/kWh");
+  form_set("i2c", "mode", "pullup");
+  form_set("i2c", "--vdd", "3.3V");
+  form_set("i2c", "--cb", "200pF");
+  form_set("ldo", "--vin", "5V");
+  form_set("ldo", "--vout", "3.3V");
+  form_set("ldo", "--iout", "500mA");
+  form_set("led", "--vs", "5V");
+  form_set("led", "--vf", "2V");
+  form_set("led", "--if", "20mA");
+  form_set("ic", "chip", "ap63205");
+  form_set("ic", "op", "inductor");
+  form_set("ic", "--vin", "12V");
+  std::size_t forms_sel = 0;
+  int open_form = -1; // index into form_defs while Overlay::kForm is active
+  std::size_t form_field = 0; // 0..fields.size() (last row = Submit)
+  std::size_t form_col = 0; // cursor within the active field value
+  std::vector<ExecResult> form_res(form_defs.size());
+  std::vector<bool> form_has(form_defs.size(), false);
+  std::vector<std::string> form_argv(form_defs.size());
+  std::vector<std::size_t> form_res_first(form_defs.size(), 0);
 
   // Shared submit: runs the input line through the executor.
   auto submit_line = [&]() {
@@ -210,6 +259,42 @@ int run_tui() {
       last_rc = res.rc;
       push_text(scrollback, res.text, kMaxOutputLines);
       status_msg = res.text.empty() ? "ok (no output)" : "exit " + std::to_string(res.rc);
+    }
+  };
+
+  // Form submit: compose the open form's argv string and run it through the
+  // same executor (never a form-side reimplementation). The composed line
+  // also lands in the scrollback + shared history like a typed line, while
+  // the form pane keeps the identical result beside the fields.
+  auto submit_form = [&]() {
+    if (open_form < 0 ||
+        static_cast<std::size_t>(open_form) >= form_defs.size()) {
+      return;
+    }
+    const std::size_t fi = static_cast<std::size_t>(open_form);
+    const std::string line = forms::compose_line(form_defs[fi], form_vals[fi]);
+    form_argv[fi] = line;
+    push_text(scrollback, std::string(kPrompt) + line, kMaxScrollback);
+    if (!line.empty()) {
+      if (history.add(line) && !hist_path.empty()) {
+        (void)history.append_to_file(hist_path, line);
+      }
+    }
+    hist_pos = -1;
+    draft.clear();
+    ExecResult res = exec.execute_line(line);
+    scroll = 0;
+    form_res_first[fi] = 0;
+    if (res.rc == -1) {
+      quit = true;
+      last_rc = 0;
+      status_msg = "bye";
+    } else {
+      last_rc = res.rc;
+      form_res[fi] = res;
+      form_has[fi] = true;
+      push_text(scrollback, res.text, kMaxOutputLines);
+      status_msg = "form `" + line + "` -> exit " + std::to_string(res.rc);
     }
   };
 
@@ -402,6 +487,102 @@ int run_tui() {
           (void)attroff(A_REVERSE);
         }
       }
+    } else if (overlay == Overlay::kForms) {
+      (void)mvaddnstr(1, 0, "Forms -- closed-form calculators | Enter: open | F1: help | Esc: close", cols - 1);
+      (void)wclrtoeol(stdscr);
+      const std::size_t page = out_rows > 1 ? static_cast<std::size_t>(out_rows - 1) : std::size_t{1};
+      std::size_t first = 0;
+      if (!form_defs.empty() && forms_sel >= page) {
+        first = forms_sel - page + 1;
+      }
+      for (std::size_t i = 0; i < page; ++i) {
+        const std::size_t idx = first + i;
+        if (idx >= form_defs.size()) {
+          break;
+        }
+        const std::string row = "  " + std::string(form_defs[idx].command) + " - " + std::string(form_defs[idx].description);
+        if (idx == forms_sel) {
+          (void)attron(A_REVERSE);
+        }
+        (void)mvaddnstr(static_cast<int>(2 + i), 0, row.c_str(), cols - 1);
+        if (idx == forms_sel) {
+          (void)attroff(A_REVERSE);
+        }
+      }
+    } else if (overlay == Overlay::kForm) {
+      const std::size_t fi = (open_form >= 0) ? static_cast<std::size_t>(open_form) : 0;
+      const std::size_t sfi = fi < form_defs.size() ? fi : 0;
+      const forms::FormDef &def = form_defs[sfi];
+      const std::vector<std::string> &vals = form_vals[sfi];
+      const std::string head = std::string(def.command) + " form  (Up/Down/Tab: field, Enter: run, PgUp/PgDn: result, Esc: back)";
+      (void)mvaddnstr(1, 0, head.c_str(), cols - 1);
+      (void)wclrtoeol(stdscr);
+      const std::string argv = forms::compose_line(def, vals);
+      const std::string argv_row = "argv: " + argv;
+      (void)mvaddnstr(2, 0, argv_row.c_str(), cols - 1);
+      (void)wclrtoeol(stdscr);
+      int row = 3;
+      for (std::size_t i = 0; i < def.fields.size() && row < 1 + out_rows; ++i) {
+        const auto &f = def.fields[i];
+        const std::string key_disp = f.key.empty() ? "(pos)" : std::string(f.key);
+        const std::string val = i < vals.size() ? vals[i] : std::string{};
+        const std::string frow = "  " + std::string(f.label) + " " + key_disp + ": " + val + "  # " + std::string(f.hint);
+        if (i == form_field) {
+          (void)attron(A_REVERSE);
+        }
+        (void)mvaddnstr(row, 0, frow.c_str(), cols - 1);
+        if (i == form_field) {
+          (void)attroff(A_REVERSE);
+        }
+        (void)wclrtoeol(stdscr);
+        ++row;
+      }
+      if (row < 1 + out_rows) {
+        const std::string srow = "  [ Submit ]";
+        if (form_field == def.fields.size()) {
+          (void)attron(A_REVERSE);
+        }
+        (void)mvaddnstr(row, 0, srow.c_str(), cols - 1);
+        if (form_field == def.fields.size()) {
+          (void)attroff(A_REVERSE);
+        }
+        (void)wclrtoeol(stdscr);
+        ++row;
+      }
+      if (row < 1 + out_rows) {
+        const std::string sep = form_has[sfi] ? ("--- result rc=" + std::to_string(form_res[sfi].rc) + " ---") : "--- result (Enter to run) ---";
+        (void)mvaddnstr(row, 0, sep.c_str(), cols - 1);
+        (void)wclrtoeol(stdscr);
+        ++row;
+      }
+      std::vector<std::string> res_lines;
+      if (!form_has[sfi]) {
+        res_lines.push_back("Fill fields, Enter to run. Empty fields are omitted;");
+        res_lines.push_back("the CLI reports all errors (no form-side validation).");
+      } else {
+        std::size_t dropped = 0;
+        split_capped(res_lines, form_res[sfi].text, kMaxOutputLines, dropped);
+        if (dropped > 0) {
+          res_lines.push_back("[... " + std::to_string(dropped) + " lines truncated -- rerun with --emit-csv for the full log]");
+        }
+        if (res_lines.empty()) {
+          res_lines.push_back("(no output)");
+        }
+      }
+      std::size_t first_res = form_res_first[sfi];
+      if (!res_lines.empty() && first_res >= res_lines.size()) {
+        first_res = res_lines.size() - 1;
+        form_res_first[sfi] = first_res;
+      }
+      for (std::size_t i = first_res; i < res_lines.size() && row < 1 + out_rows; ++i) {
+        (void)mvaddnstr(row, 0, res_lines[i].c_str(), cols - 1);
+        (void)wclrtoeol(stdscr);
+        ++row;
+      }
+      for (; row < 1 + out_rows; ++row) {
+        (void)move(row, 0);
+        (void)wclrtoeol(stdscr);
+      }
     } else {
       const std::size_t page = static_cast<std::size_t>(out_rows);
       const std::size_t total = scrollback.size();
@@ -474,8 +655,39 @@ int run_tui() {
     (void)mvaddstr(rows - 1, 0, kPrompt.data());
     (void)addnstr(visible.c_str(), static_cast<int>(avail));
     (void)wclrtoeol(stdscr);
-    (void)wmove(stdscr, rows - 1,
-                static_cast<int>(kPrompt.size() + (cursor - offset)));
+    if (overlay == Overlay::kForm && open_form >= 0 && static_cast<std::size_t>(open_form) < form_defs.size()) {
+      // Focus stays in the active form field (bottom line keeps its draft).
+      const std::size_t sfi = static_cast<std::size_t>(open_form);
+      const forms::FormDef &cdef = form_defs[sfi];
+      if (form_field < cdef.fields.size()) {
+        const auto &ff = cdef.fields[form_field];
+        const std::string key_disp = ff.key.empty() ? "(pos)" : std::string(ff.key);
+        const std::string prefix = "  " + std::string(ff.label) + " " + key_disp + ": ";
+        const std::string &fval = form_vals[sfi][form_field];
+        if (form_col > fval.size()) {
+          form_col = fval.size();
+        }
+        const std::size_t favail = static_cast<std::size_t>(cols) > prefix.size() + 1 ? static_cast<std::size_t>(cols) - prefix.size() - 1 : std::size_t{1};
+        std::size_t foff = 0;
+        if (fval.size() > favail) {
+          foff = fval.size() - favail;
+        }
+        if (form_col < foff) {
+          foff = form_col;
+        }
+        const int frow = 3 + static_cast<int>(form_field);
+        const int fcol = static_cast<int>(prefix.size() + (form_col - foff));
+        if (frow >= 1 && frow < rows - 2) {
+          (void)wmove(stdscr, frow, fcol < cols - 1 ? fcol : cols - 1);
+        } else {
+          (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (cursor - offset)));
+        }
+      } else {
+        (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (cursor - offset)));
+      }
+    } else {
+      (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (cursor - offset)));
+    }
     (void)wrefresh(stdscr);
 
     // --- input ---
@@ -513,9 +725,12 @@ int run_tui() {
           help_title = "help " + e.name;
           help_first = 0;
           overlay = Overlay::kHelp;
-          status_msg =
-              help_title + " (exit " + std::to_string(help_rc) + ", Esc to close)";
+          status_msg = help_title + " (exit " + std::to_string(help_rc) + ", Esc to close)";
         }
+      } else if (ch == KEY_F(3)) {
+        forms_sel = 0;
+        overlay = Overlay::kForms;
+        status_msg = "forms -- " + std::to_string(form_defs.size()) + " calculators";
       } else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
         if (!view.empty()) {
           const PaletteEntry &e = pal_entries[view[sel]];
@@ -545,6 +760,10 @@ int run_tui() {
         pal_sel = 0;
         overlay = Overlay::kPalette;
         status_msg = "palette -- " + std::to_string(pal_entries.size()) + " commands";
+      } else if (ch == KEY_F(3)) {
+        forms_sel = 0;
+        overlay = Overlay::kForms;
+        status_msg = "forms -- " + std::to_string(form_defs.size()) + " calculators";
       } else if (ch == KEY_PPAGE) {
         help_first = help_first >= help_page ? help_first - help_page : 0;
       } else if (ch == KEY_NPAGE) {
@@ -556,11 +775,150 @@ int run_tui() {
       } else {
         edit_key(ch);
       }
+    } else if (overlay == Overlay::kForms) {
+      if (ch == kEsc || ch == KEY_F(3) || ch == kCtrlC) {
+        overlay = Overlay::kNone;
+        status_msg = "ready";
+      } else if (ch == KEY_F(2)) {
+        pal_filter.clear();
+        pal_sel = 0;
+        overlay = Overlay::kPalette;
+        status_msg = "palette -- " + std::to_string(pal_entries.size()) + " commands";
+      } else if (ch == KEY_UP) {
+        if (forms_sel > 0) {
+          --forms_sel;
+        }
+      } else if (ch == KEY_DOWN) {
+        if (!form_defs.empty() && forms_sel + 1 < form_defs.size()) {
+          ++forms_sel;
+        }
+      } else if (ch == KEY_F(1)) {
+        if (!form_defs.empty() && forms_sel < form_defs.size()) {
+          const std::string cmd(form_defs[forms_sel].command);
+          int help_rc = 0;
+          help_lines = fetch_help(exec, cmd, help_rc);
+          help_title = "help " + cmd;
+          help_first = 0;
+          overlay = Overlay::kHelp;
+          status_msg = help_title + " (exit " + std::to_string(help_rc) + ", Esc to close)";
+        }
+      } else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
+        if (!form_defs.empty() && forms_sel < form_defs.size()) {
+          open_form = static_cast<int>(forms_sel);
+          form_field = 0;
+          form_col = form_vals[forms_sel].empty() ? 0 : form_vals[forms_sel][0].size();
+          overlay = Overlay::kForm;
+          status_msg = std::string(form_defs[forms_sel].command) + " form -- Enter runs, Esc lists";
+        }
+      } else {
+        edit_key(ch);
+      }
+    } else if (overlay == Overlay::kForm) {
+      const std::size_t sfi = (open_form >= 0) ? static_cast<std::size_t>(open_form) : 0;
+      const std::size_t nfields = sfi < form_defs.size() ? form_defs[sfi].fields.size() : 0;
+      const std::size_t page = out_rows > 1 ? static_cast<std::size_t>(out_rows - 1) : std::size_t{1};
+      if (ch == kEsc) {
+        overlay = Overlay::kForms;
+        status_msg = "forms -- " + std::to_string(form_defs.size()) + " calculators";
+      } else if (ch == KEY_F(3)) {
+        overlay = Overlay::kNone;
+        status_msg = "ready";
+      } else if (ch == KEY_F(2)) {
+        pal_filter.clear();
+        pal_sel = 0;
+        overlay = Overlay::kPalette;
+        status_msg = "palette -- " + std::to_string(pal_entries.size()) + " commands";
+      } else if (ch == KEY_F(1)) {
+        if (sfi < form_defs.size()) {
+          const std::string cmd(form_defs[sfi].command);
+          int help_rc = 0;
+          help_lines = fetch_help(exec, cmd, help_rc);
+          help_title = "help " + cmd;
+          help_first = 0;
+          overlay = Overlay::kHelp;
+          status_msg = help_title + " (exit " + std::to_string(help_rc) + ", Esc to close)";
+        }
+      } else if (ch == KEY_PPAGE) {
+        if (sfi < form_res_first.size()) {
+          form_res_first[sfi] = form_res_first[sfi] >= page ? form_res_first[sfi] - page : 0;
+        }
+      } else if (ch == KEY_NPAGE) {
+        if (sfi < form_res_first.size()) {
+          form_res_first[sfi] += page; // clamped at draw time
+        }
+      } else if (ch == KEY_UP) {
+        if (form_field > 0) {
+          --form_field;
+          if (form_field < nfields && sfi < form_vals.size() && form_field < form_vals[sfi].size()) {
+            form_col = form_vals[sfi][form_field].size();
+          } else {
+            form_col = 0;
+          }
+        }
+      } else if (ch == KEY_DOWN || ch == '\t') {
+        if (form_field <= nfields) {
+          ++form_field;
+          if (form_field > nfields) {
+            form_field = nfields;
+          }
+          if (form_field < nfields && sfi < form_vals.size() && form_field < form_vals[sfi].size()) {
+            form_col = form_vals[sfi][form_field].size();
+          } else {
+            form_col = 0;
+          }
+        }
+      } else if (ch == KEY_LEFT) {
+        if (form_field < nfields && form_col > 0) {
+          --form_col;
+        }
+      } else if (ch == KEY_RIGHT) {
+        if (form_field < nfields && sfi < form_vals.size() && form_field < form_vals[sfi].size() && form_col < form_vals[sfi][form_field].size()) {
+          ++form_col;
+        }
+      } else if (ch == KEY_HOME) {
+        form_col = 0;
+      } else if (ch == KEY_END) {
+        if (form_field < nfields && sfi < form_vals.size() && form_field < form_vals[sfi].size()) {
+          form_col = form_vals[sfi][form_field].size();
+        }
+      } else if (ch == KEY_BACKSPACE || ch == kBackspaceAscii || ch == 8) {
+        if (form_field < nfields && sfi < form_vals.size() && form_field < form_vals[sfi].size() && form_col > 0 &&
+            form_col <= form_vals[sfi][form_field].size()) {
+          form_vals[sfi][form_field].erase(form_col - 1, 1);
+          --form_col;
+        }
+      } else if (ch == KEY_DC) {
+        if (form_field < nfields && sfi < form_vals.size() && form_field < form_vals[sfi].size() && form_col < form_vals[sfi][form_field].size()) {
+          form_vals[sfi][form_field].erase(form_col, 1);
+        }
+      } else if (ch == kCtrlU || ch == kCtrlC) {
+        if (form_field < nfields && sfi < form_vals.size() && form_field < form_vals[sfi].size()) {
+          form_vals[sfi][form_field].clear();
+          form_col = 0;
+        }
+      } else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
+        submit_form();
+        // Stay in the form so the CLI-identical result sits beside the
+        // fields; Esc lists, F3 closes.
+      } else if (ch >= 32 && ch < 127) {
+        if (form_field < nfields && sfi < form_vals.size() && form_field < form_vals[sfi].size()) {
+          std::string &val = form_vals[sfi][form_field];
+          if (form_col > val.size()) {
+            form_col = val.size();
+          }
+          val.insert(form_col, 1, static_cast<char>(ch));
+          ++form_col;
+        }
+      }
     } else if (ch == KEY_F(2)) {
       pal_filter.clear();
       pal_sel = 0;
       overlay = Overlay::kPalette;
       status_msg = "palette -- " + std::to_string(pal_entries.size()) + " commands";
+    } else if (ch == KEY_F(3)) {
+      forms_sel = 0;
+      overlay = Overlay::kForms;
+      status_msg = "forms -- " + std::to_string(form_defs.size()) + " calculators";
     } else if (ch == KEY_F(1)) {
       const std::string_view tok = first_token(input);
       int help_rc = 0;

@@ -1,8 +1,9 @@
 # TUI (ncurses) — design + decision log
 
 `PhysicsSimApp --tui` opens a terminal UI with the full CLI command set.
-Status: scaffolding (executor seam + minimal loop); pretty per-command
-forms and async runs are roadmap tasks in Plane (parent: TUI epic).
+Status: scaffolding + palette/help browser + closed-form guided forms
+(TUI-1..3); async runs and output views are roadmap tasks in Plane
+(parent: TUI epic).
 
 ## 1. Reuse decision (D-TUI-1)
 
@@ -66,13 +67,31 @@ minimal editing, Up/Down shared-history recall, Tab completion mirroring
 the REPL, F10/Ctrl-Q quit, `KEY_RESIZE`-safe redraw, non-TTY refusal
 (exit 1), `--tui` with extra args is a usage error (exit 2).
 
+Closed-form forms (TUI-3): `include/wengine/tui/forms.hpp`
+(ncurses-free composition model + registry-derived `ic` chips/ops,
+unit-tested). F3 opens the form browser (all six closed-form families),
+Enter opens the highlighted form, Enter inside the form composes one argv
+string and submits it through `TuiExecutor` -- the result pane shows the
+CLI-identical text beside the fields (also mirrored into the scrollback +
+shared history). Field hints come from each spec's `kUsage`/completion
+vocabulary; `ic` chips/ops enumerate `IcRegistry` (plus each chip's
+`complete`), so new parts appear with no form-side change. Forms never
+validate: empty fields are omitted and the CLI owns every error, so
+invalid input shows the CLI usage-error text verbatim.
+`tests/test_tui_forms.cpp` pins the composition + executor-vs-`Shell`
+parity matrix (every option, every `ic` op, plus usage-error shapes).
+Verified on a real PTY (F3 browser, ohm prefill submit `R = 22.963`,
+Esc back, scrollback mirror).
+
 ## 4. Known limits (roadmap, not bugs)
 
 - One command's displayed output is capped at 500 lines (loud truncation
   note). Full logs belong in `--emit-csv` files.
 - Long batch runs block input while computing (same as the REPL); async
   runs with progress + step-boundary cancel are a roadmap task.
-- No mouse, no per-command forms yet, no scrollback search/save yet.
+- No mouse, no scrollback search/save yet. Forms cover the closed-form
+  families only (`ohm`/`s0`/`i2c`/`ldo`/`led`/`ic`); `sim`/`sig` builders
+  are a roadmap task.
 
 ## 5. Manual verification
 

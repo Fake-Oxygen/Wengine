@@ -353,6 +353,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_tui_exec PRIVATE wengine_cli)
     add_test(NAME tui_exec COMMAND test_tui_exec)
 
+    # TUI closed-form guided forms: compose-only parity matrix.
+    add_executable(test_tui_forms tests/test_tui_forms.cpp)
+    target_link_libraries(test_tui_forms PRIVATE wengine_cli)
+    add_test(NAME tui_forms COMMAND test_tui_forms)
+
     add_executable(test_s0 tests/test_s0.cpp)
     target_link_libraries(test_s0 PRIVATE wengine_cli)
     add_test(NAME s0 COMMAND test_s0)
