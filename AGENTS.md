@@ -541,10 +541,45 @@ Whenever adding a command, check all existing registry-size assertions.
 
 ### New CLI command (solver domains)
 
-One command per solver domain (`sig` owns all signal vocabulary).
+One command per solver domain (`sig` owns all signal vocabulary, `ic`
+owns all IC-specific vocabulary).
 Never add solver-scoped options to a generic command: `sim run` takes
 no solver options beyond the grandfathered `--gravity`, and runs any
 registered solver with defaults otherwise.
+
+### New IC-specific solver (datasheet formulas)
+
+Part-specific calculators (one real chip per solver, formulas quoted
+from its datasheet) live apart from the generic solvers and share one
+top-level command, so hundreds of parts never become hundreds of
+commands:
+
+1. Solver: add `include/wengine/solvers/ic/<chip>.hpp` — same rules as a
+   closed-form solver (pure, header-only, `constexpr`/`noexcept` where
+   actually appropriate, SI quantities across boundaries), plus a
+   datasheet reference block (title, revision, section/equation numbers)
+   and reference-anchored tests. Start from
+   `include/wengine/solvers/ic/template.hpp`. Never include CLI types
+   here (`cli -> solvers`, never the reverse).
+2. CLI glue: add `include/wengine/cli/ic/<chip>.hpp` declaring one spec
+   (`kName` = lowercase part number, e.g. `ne555`; `kDescription`;
+   `kUsage`; `run`; optional `complete`) and implement it in
+   `src/cli/commands/ic/<chip>.cpp` (parse via `ArgCursor` + `parse_*`
+   helpers, errors via `cli/status.hpp`, exit codes 0/1/2, stray
+   positionals are errors). One chip may expose several subcommands
+   (`ic <chip> <op>`, dispatched on its first positional like the
+   `s0`/`i2c` modes); the top level never gains per-chip options.
+3. Register the spec in `include/wengine/cli/ic_registry.hpp` (append to
+   `IcRegistry`; names stay unique via the compile-time validation) and
+   add the `.cpp` to `wengine_cli` sources in `CMakeLists.txt`.
+4. Never add a new top-level command per chip. Shared two-level plumbing
+   lives in `include/wengine/cli/ic_dispatch.hpp`
+   (`ic::dispatch`/`ic::complete` over any chip registry — `IcSpec` is a
+   thin call with `IcRegistry`); do not duplicate it per chip.
+5. Add `tests/test_<chip>.cpp` (solver goldens + CLI run/usage/stray +
+   completion) or extend `tests/test_ic.cpp`, with an
+   `add_executable`/`add_test` entry. Update `tests/test_cli_args.cpp`
+   only if top-level completion changes.
 
 ### New unit
 

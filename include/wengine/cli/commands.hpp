@@ -276,4 +276,20 @@ struct SigSpec {
                        std::vector<std::string> &out);
 };
 
+struct IcSpec {
+  static constexpr std::string_view kName = "ic";
+  static constexpr std::string_view kDescription = "IC-specific calculators (datasheet formulas)";
+  static constexpr std::string_view kUsage =
+      "ic <chip> <op> [options]   (one command for all parts — chips never\n"
+      "        become top-level commands; see `ic --help` for the list)\n"
+      "  ic --help\n"
+      "  ic <chip> --help     (per-chip subcommands, e.g. ic ne555 astable ...)\n"
+      "Solvers live in solvers/ic/ (one part per header, formulas quoted\n"
+      "  from the datasheet); each chip dispatches its own subcommands.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                       std::vector<std::string> &out);
+};
+
 } // namespace wengine::cli::commands

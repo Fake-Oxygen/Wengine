@@ -104,19 +104,22 @@ void test_registry_compile_time() {
   static_assert(CliRegistry::find("i2c") != nullptr);
   static_assert(CliRegistry::find("sim") != nullptr);
   static_assert(CliRegistry::find("sig") != nullptr);
+  static_assert(CliRegistry::find("ic") != nullptr);
   static_assert(CliRegistry::find("nope") == nullptr);
-  static_assert(CliRegistry::all().size() == 5);
+  static_assert(CliRegistry::all().size() == 6);
   static_assert(!CliRegistry::all()[0].usage.empty());
   static_assert(CliRegistry::find("ohm")->complete != nullptr);
   static_assert(CliRegistry::find("s0")->complete != nullptr);
   static_assert(CliRegistry::find("i2c")->complete != nullptr);
   static_assert(CliRegistry::find("sim")->complete != nullptr);
   static_assert(CliRegistry::find("sig")->complete != nullptr);
+  static_assert(CliRegistry::find("ic")->complete != nullptr);
   assert(CliRegistry::find("ohm")->run != nullptr);
   assert(CliRegistry::find("s0")->run != nullptr);
   assert(CliRegistry::find("i2c")->run != nullptr);
   assert(CliRegistry::find("sim")->run != nullptr);
   assert(CliRegistry::find("sig")->run != nullptr);
+  assert(CliRegistry::find("ic")->run != nullptr);
 }
 
 void test_ohm_handler() {
@@ -274,6 +277,8 @@ void test_shell_integration() {
   assert(out.str().find("solver=projectile") != std::string::npos);
   assert(sh.execute("sig run --sig-kind dc --steps 2", out) == 0);
   assert(out.str().find("sig run: kind=dc") != std::string::npos);
+  assert(sh.execute("ic --help", out) == 0);
+  assert(out.str().find("Available ICs") != std::string::npos);
   assert(sh.execute("exit", out) == -1);
 }
 
@@ -292,7 +297,8 @@ void test_completion() {
   {
     const auto c = complete_line("", 0, all);
     assert(has(c, "ohm") && has(c, "s0") && has(c, "i2c") && has(c, "sim") &&
-           has(c, "sig") && has(c, "help") && has(c, "exit") && has(c, "quit"));
+           has(c, "sig") && has(c, "ic") && has(c, "help") && has(c, "exit") &&
+           has(c, "quit"));
   }
   assert(complete_line("o", 1, all) == std::vector<std::string>{"ohm"});
   {
@@ -304,7 +310,11 @@ void test_completion() {
     const auto c = complete_line("si", 2, all);
     assert(c.size() == 2 && c[0] == "sim" && c[1] == "sig");
   }
-  assert(complete_line("i", 1, all) == std::vector<std::string>{"i2c"});
+  {
+    // Registry order defines candidate order: i2c before ic.
+    const std::vector<std::string> want{"i2c", "ic"};
+    assert(complete_line("i", 1, all) == want);
+  }
   assert(complete_line("h", 1, all) == std::vector<std::string>{"help"});
   assert(complete_line("zzz", 3, all).empty());
   // Only text before the cursor counts.
@@ -425,6 +435,10 @@ void test_completion() {
   assert(complete_line("help ", 5, all).size() == complete_line("", 0, all).size());
   assert(complete_line("help o", 6, all) == std::vector<std::string>{"ohm"});
   assert(complete_line("nope ", 5, all).empty());
+
+  // Ic dispatch: no chips registered yet, so only options complete.
+  assert(complete_line("ic ", 3, all).empty());
+  assert(complete_line("ic --", 5, all) == std::vector<std::string>{"--help"});
 
   // Common prefix.
   {

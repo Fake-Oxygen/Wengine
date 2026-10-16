@@ -10,6 +10,6 @@ namespace wengine::cli {
 
 using CliRegistry =
     Registry<commands::OhmSpec, commands::S0Spec, commands::I2cSpec, commands::SimSpec,
-             commands::SigSpec>;
+             commands::SigSpec, commands::IcSpec>;
 
 } // namespace wengine::cli
