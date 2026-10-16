@@ -39,20 +39,34 @@ move. `BUILD_TUI` defaults `ON`; when Curses is missing the CLI still
 builds and `--tui` prints a rebuild hint (exit 1). No engine headers
 change for TUI work; `wengine/tui/exec.hpp` is ncurses-free.
 
-## 3. Scaffolding scope (done)
+## 3. Shipped scope
 
-- `include/wengine/tui/exec.hpp` — header-only executor seam (Shell +
-  completion delegation), no ncurses.
-- `include/wengine/tui/run.hpp` + `src/tui/run.cpp` — `wengine_tui`
-  STATIC TU: header bar, scrollback pane (cap 2000 lines), input line
-  (arrows/Home/End/Backspace/Ctrl-U), Up/Down history, Tab completion
-  (single/prefix/list, mirroring the REPL), F1 help, F10/Ctrl-Q quit,
-  status bar with last exit code, color when available with a no-color
-  fallback, `KEY_RESIZE`-safe redraw.
-- Non-TTY `--tui` is refused loudly (exit 1); `--tui` with extra args is a
-  usage error (exit 2), matching the stray-positional rule.
+Scaffolding (TUI-1): `include/wengine/tui/exec.hpp` (executor seam),
+`include/wengine/tui/run.hpp` + `src/tui/run.cpp` (`wengine_tui` STATIC TU),
+`--tui` flag, `BUILD_TUI` option, `tests/test_tui_exec.cpp`, README updates.
 
-## 4. Known scaffolding limits (roadmap, not bugs)
+Palette + help browser (TUI-2): `include/wengine/tui/palette.hpp`
+(registry-derived entries + prefix filter + F1 context token, all
+ncurses-free and unit-tested). F2 opens the palette (type to filter,
+Enter inserts `<name> ` into the input line, F1 opens help for the
+highlighted entry, Esc closes). F1 anywhere opens a scrollable help pane
+whose content is `help <cmd>` (or bare `help`) run through the executor --
+byte-identical to the CLI, including error shapes. The pane stays pinned
+while composing: typing, editing, history recall, and Tab all work with
+syntax visible; Enter runs the command and closes the pane onto the output.
+F2 from the pane switches back to the palette. Tab multi-candidates render
+as a transient reverse-video popup just above the input line (wrapped,
+capped with a loud `+N more`, never into the scrollback); any non-Tab key
+dismisses it, single/prefix completion behaves as in the REPL.
+Viewing help never clobbers the status bar's last-command exit code. TUI chrome strings stay
+ASCII-only (C-locale safety: plain ncurses renders non-ASCII bytes as
+control notations and miscounts their width -- found via PTY in TUI-2;
+CLI output is ASCII-only so panes stay exact). Shared loop notes:
+minimal editing, Up/Down shared-history recall, Tab completion mirroring
+the REPL, F10/Ctrl-Q quit, `KEY_RESIZE`-safe redraw, non-TTY refusal
+(exit 1), `--tui` with extra args is a usage error (exit 2).
+
+## 4. Known limits (roadmap, not bugs)
 
 - One command's displayed output is capped at 500 lines (loud truncation
   note). Full logs belong in `--emit-csv` files.
