@@ -103,6 +103,7 @@ target_compile_options(wengine_link_shm PRIVATE
 # stay platform-free (a Windows port replaces the TU, never the header).
 add_library(wengine_link_net STATIC
     src/link/socket_publisher.cpp
+    src/link/tcp_worker.cpp
     src/link/control_server.cpp
     src/link/control_client.cpp
     src/link/uart_publisher.cpp
@@ -386,6 +387,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_link_sockets PRIVATE wengine_core wengine_link_net)
     add_test(NAME link_sockets COMMAND test_link_sockets)
 
+    add_executable(test_tcp_worker tests/test_tcp_worker.cpp)
+    target_link_libraries(test_tcp_worker PRIVATE wengine_core wengine_link_net)
+    add_test(NAME tcp_worker COMMAND test_tcp_worker)
+
     add_executable(test_output_health tests/test_output_health.cpp)
     target_link_libraries(test_output_health PRIVATE wengine_core wengine_link_shm wengine_link_net)
     add_test(NAME output_health COMMAND test_output_health)
@@ -514,4 +519,7 @@ if(BUILD_BENCHMARKS)
 
     add_executable(bench_sample_block benchmarks/bench_sample_block.cpp)
     target_link_libraries(bench_sample_block PRIVATE wengine_core)
+
+    add_executable(bench_tcp_worker benchmarks/bench_tcp_worker.cpp)
+    target_link_libraries(bench_tcp_worker PRIVATE wengine_core wengine_link_net)
 endif()

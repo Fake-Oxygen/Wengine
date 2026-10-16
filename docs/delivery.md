@@ -54,6 +54,15 @@ Mechanism: `TcpPublisher` / `UdpPublisher`
   vocabulary as SHM. UDP datagrams self-describe
   (`magic/version/domain/frame_seq/clock/counts`); TCP gates once at
   hello (`magic/version/domain`) then length-prefixed frames.
+- Optional worker-backed TCP (`link/tcp_worker.hpp`, `TcpBlockWorker`):
+  the sim callback only seals `SampleBlock`s into a bounded owning queue
+  (`link/output_queue.hpp`); one explicit worker thread encodes and serves
+  the socket, so slow endpoints cost the sim loop sub-microsecond callback
+  time instead of send syscalls. Ordered mode preserves every sealed block
+  (a full queue reports `dropped_queue_full` to the driver); latest mode
+  coalesces the backlog to the newest (counted, never silent). Shutdown is
+  deadline-bounded with exact abandoned-block accounting. The synchronous
+  publishers above are unchanged; callers opt into the worker per output.
 - This class absorbs bounded jitter only. It does not promise every
   sample to an arbitrarily slow consumer.
 

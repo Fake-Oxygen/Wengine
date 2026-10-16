@@ -28,6 +28,17 @@ COMPACT_HEADER_SIZE = 84
 COMPACT_ITEM_SIZE = 61
 COMPACT_MAX_NAME = CHANNEL_NAME_SIZE - 1
 
+# Sample-block (kind 2) layout, see include/wengine/link/sample_block.hpp:
+# header 68 B (magic/schema/kind/reserved/run_id/block_seq/domain/
+# channel_count/sample_count), then 12 B per channel (serial u64,
+# quantity u8, 3 reserved bytes), then per sample (step u64, time f64,
+# one f64 value per channel, row-major).
+SAMPLE_BLOCK_HEADER_SIZE = 68
+SAMPLE_CHANNEL_ENTRY_SIZE = 12
+SAMPLE_OVERHEAD = 16
+MAX_BLOCK_CHANNELS = 1024
+MAX_BLOCK_SAMPLES = 1024
+
 
 def _decode_domain(raw: bytes) -> str:
     end = raw.find(b"\0")
@@ -100,6 +111,84 @@ def decode_compact_record(data: bytes) -> tuple[int, int, int, float, list[tuple
     if offset != len(data):
         raise ValueError("compact record has trailing garbage")
     return run_id, frame_seq, step_index, sim_time, channels
+
+
+def decode_sample_block(
+    data: bytes,
+) -> tuple[int, int, list[int], list[int], list[int], list[float], list[float]]:
+    """Decode one kind-2 sample-block record (batched consecutive ticks).
+
+    Returns (run_id, block_seq, serials, quantities, steps, times, values)
+    with values row-major (values[s * channels + c], SI doubles). Domain
+    shape is validated like frame records; anything else raises, mirroring
+    the C++ codec's loud refusal (see sample_block.hpp for the full layout).
+    """
+    if len(data) < SAMPLE_BLOCK_HEADER_SIZE:
+        raise ValueError(f"sample block shorter than {SAMPLE_BLOCK_HEADER_SIZE}-byte header")
+    magic, schema = struct.unpack_from("<II", data, 0)
+    if magic != int.from_bytes(b"WLV2", "little"):
+        raise ValueError("bad sample block magic (expected WLV2)")
+    if schema != SOCKET_SCHEMA:
+        raise ValueError(f"unsupported socket schema {schema}, expected {SOCKET_SCHEMA}")
+    kind = data[8]
+    if kind != 2:
+        raise ValueError(f"unsupported sample block kind {kind}")
+    if bytes(data[9:12]) != b"\0\0\0":
+        raise ValueError("sample block reserved bytes must be zero")
+    run_id, block_seq = struct.unpack_from("<QQ", data, 12)
+    _decode_domain(data[28:60])
+    channel_count, sample_count = struct.unpack_from("<II", data, 60)
+    if channel_count > MAX_BLOCK_CHANNELS or sample_count > MAX_BLOCK_SAMPLES:
+        raise ValueError("sample block entry count exceeds protocol bounds")
+    want = (
+        SAMPLE_BLOCK_HEADER_SIZE
+        + channel_count * SAMPLE_CHANNEL_ENTRY_SIZE
+        + sample_count * (SAMPLE_OVERHEAD + channel_count * 8)
+    )
+    if want != len(data):
+        raise ValueError("sample block length does not match its counts")
+    serials: list[int] = []
+    quantities: list[int] = []
+    offset = SAMPLE_BLOCK_HEADER_SIZE
+    for index in range(channel_count):
+        (serial,) = struct.unpack_from("<Q", data, offset)
+        quantity = data[offset + 8]
+        if bytes(data[offset + 9 : offset + 12]) != b"\0\0\0":
+            raise ValueError(f"sample block channel {index} reserved bytes must be zero")
+        serials.append(serial)
+        quantities.append(quantity)
+        offset += SAMPLE_CHANNEL_ENTRY_SIZE
+    steps: list[int] = []
+    times: list[float] = []
+    values: list[float] = []
+    for sample in range(sample_count):
+        (step,) = struct.unpack_from("<Q", data, offset)
+        (when,) = struct.unpack_from("<d", data, offset + 8)
+        steps.append(step)
+        times.append(when)
+        offset += SAMPLE_OVERHEAD
+        for _ in range(channel_count):
+            (value,) = struct.unpack_from("<d", data, offset)
+            values.append(value)
+            offset += 8
+    return run_id, block_seq, serials, quantities, steps, times, values
+
+
+def decode_v2_record(data: bytes) -> tuple[str, tuple]:
+    """Decode one v2 record of either kind (TCP length-prefix stripped).
+
+    Returns ("frame", decode_compact_record(...)) for kind 1 or ("block",
+    decode_sample_block(...)) for kind 2; anything else raises. Mirrors the
+    C++ record_stream.hpp kind dispatch behind the TCP framing.
+    """
+    if len(data) < 9:
+        raise ValueError("v2 record shorter than kind tag")
+    kind = data[8]
+    if kind == 1:
+        return "frame", decode_compact_record(data)
+    if kind == 2:
+        return "block", decode_sample_block(data)
+    raise ValueError(f"unsupported v2 record kind {kind}")
 
 
 def format_signal_frame(
