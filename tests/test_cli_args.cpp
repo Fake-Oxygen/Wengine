@@ -102,21 +102,24 @@ void test_registry_compile_time() {
   static_assert(CliRegistry::find("ohm") != nullptr);
   static_assert(CliRegistry::find("s0") != nullptr);
   static_assert(CliRegistry::find("i2c") != nullptr);
+  static_assert(CliRegistry::find("ldo") != nullptr);
   static_assert(CliRegistry::find("sim") != nullptr);
   static_assert(CliRegistry::find("sig") != nullptr);
   static_assert(CliRegistry::find("ic") != nullptr);
   static_assert(CliRegistry::find("nope") == nullptr);
-  static_assert(CliRegistry::all().size() == 6);
+  static_assert(CliRegistry::all().size() == 7);
   static_assert(!CliRegistry::all()[0].usage.empty());
   static_assert(CliRegistry::find("ohm")->complete != nullptr);
   static_assert(CliRegistry::find("s0")->complete != nullptr);
   static_assert(CliRegistry::find("i2c")->complete != nullptr);
+  static_assert(CliRegistry::find("ldo")->complete != nullptr);
   static_assert(CliRegistry::find("sim")->complete != nullptr);
   static_assert(CliRegistry::find("sig")->complete != nullptr);
   static_assert(CliRegistry::find("ic")->complete != nullptr);
   assert(CliRegistry::find("ohm")->run != nullptr);
   assert(CliRegistry::find("s0")->run != nullptr);
   assert(CliRegistry::find("i2c")->run != nullptr);
+  assert(CliRegistry::find("ldo")->run != nullptr);
   assert(CliRegistry::find("sim")->run != nullptr);
   assert(CliRegistry::find("sig")->run != nullptr);
   assert(CliRegistry::find("ic")->run != nullptr);
@@ -273,6 +276,9 @@ void test_shell_integration() {
   assert(sh.execute("ohm --help", out) == 0);
   assert(sh.execute("s0 convert --const 1000imp/kWh", out) == 0);
   assert(sh.execute("s0 --help", out) == 0);
+  assert(sh.execute("ldo --vin 5V --vout 3.3V --iout 500mA", out) == 0);
+  assert(out.str().find("summary: PASS") != std::string::npos);
+  assert(sh.execute("ldo --help", out) == 0);
   assert(sh.execute("sim run --steps 2 --particles 1", out) == 0);
   assert(out.str().find("solver=projectile") != std::string::npos);
   assert(sh.execute("sig run --sig-kind dc --steps 2", out) == 0);
@@ -296,11 +302,12 @@ void test_completion() {
   // Command names (registry + builtins).
   {
     const auto c = complete_line("", 0, all);
-    assert(has(c, "ohm") && has(c, "s0") && has(c, "i2c") && has(c, "sim") &&
-           has(c, "sig") && has(c, "ic") && has(c, "help") && has(c, "exit") &&
-           has(c, "quit"));
+    assert(has(c, "ohm") && has(c, "s0") && has(c, "i2c") && has(c, "ldo") &&
+           has(c, "sim") && has(c, "sig") && has(c, "ic") && has(c, "help") &&
+           has(c, "exit") && has(c, "quit"));
   }
   assert(complete_line("o", 1, all) == std::vector<std::string>{"ohm"});
+  assert(complete_line("l", 1, all) == std::vector<std::string>{"ldo"});
   {
     // "s" now prefixes three commands: definition order (s0, sim, sig).
     const auto c = complete_line("s", 1, all);
@@ -352,6 +359,19 @@ void test_completion() {
     assert(c.size() == 3 && has(c, "pullup") && has(c, "series") && has(c, "full"));
   }
   assert(complete_line("i2c p", 5, all) == std::vector<std::string>{"pullup"});
+
+  // LDO options (named-options only: values are numeric, nothing to complete).
+  {
+    const auto c = complete_line("ldo --", 6, all);
+    assert(has(c, "--vin") && has(c, "--vout") && has(c, "--iout") &&
+           has(c, "--iq") && has(c, "--vdo") && has(c, "--ta") && has(c, "--rth") &&
+           has(c, "--tjmax"));
+  }
+  {
+    const auto c = complete_line("ldo --v", 7, all);
+    assert(c.size() == 3 && has(c, "--vin") && has(c, "--vout") && has(c, "--vdo"));
+  }
+  assert(complete_line("ldo --vin 5V", 12, all).empty()); // numeric value
   {
     const auto c = complete_line("i2c --", 6, all);
     assert(has(c, "--vdd") && has(c, "--cb") && has(c, "--speed") && has(c, "--rp"));

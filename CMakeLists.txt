@@ -198,6 +198,7 @@ if(BUILD_CLI)
         src/cli/commands/ohm.cpp
         src/cli/commands/s0.cpp
         src/cli/commands/i2c.cpp
+        src/cli/commands/ldo.cpp
         src/cli/commands/sim.cpp
         src/cli/commands/sig.cpp
         src/cli/commands/ic.cpp
@@ -316,6 +317,10 @@ if(BUILD_TESTS)
     add_executable(test_i2c tests/test_i2c.cpp)
     target_link_libraries(test_i2c PRIVATE wengine_cli)
     add_test(NAME i2c COMMAND test_i2c)
+
+    add_executable(test_ldo tests/test_ldo.cpp)
+    target_link_libraries(test_ldo PRIVATE wengine_cli)
+    add_test(NAME ldo COMMAND test_ldo)
 
     add_executable(test_ic tests/test_ic.cpp)
     target_link_libraries(test_ic PRIVATE wengine_cli)

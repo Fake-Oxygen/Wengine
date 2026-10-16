@@ -276,6 +276,30 @@ struct SigSpec {
                        std::vector<std::string> &out);
 };
 
+struct LdoSpec {
+  static constexpr std::string_view kName = "ldo";
+  static constexpr std::string_view kDescription = "LDO linear regulator operating point";
+  static constexpr std::string_view kUsage =
+      "ldo --vin <V> --vout <V> --iout <A> [options]   (generic linear regulator)\n"
+      "  ldo --vin 5V --vout 3.3V --iout 500mA\n"
+      "  ldo --vin 5V --vout 3.3V --iout 500mA --iq 50uA --vdo 0.3V\n"
+      "  ldo --vin 5V --vout 3.3V --iout 500mA --ta 85 --rth 100 --tjmax 125\n"
+      "Options: --iq <A> (quiescent/ground current, default 0),\n"
+      "  --vdo <V> (dropout voltage at load, default 0 = no dropout check),\n"
+      "  --ta <C> (ambient temperature, default 25),\n"
+      "  --rth <C/W> (junction-to-ambient thermal resistance, default 0 =\n"
+      "  no thermal rise), --tjmax <C> (thermal limit for PASS/FAIL;\n"
+      "  default none). Units: V/mV/kV, A/mA/uA; --ta/--rth/--tjmax are\n"
+      "  plain numbers (C, C/W, C).\n"
+      "Core identities: headroom = VIN - VOUT (>= Vdo), IIN = IOUT + Iq,\n"
+      "  Ppass = (VIN - VOUT) * IOUT, Pq = VIN * Iq, Ptot = Ppass + Pq,\n"
+      "  eff = VOUT*IOUT / (VIN*IIN), TJ = TA + Ptot * RthJA.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                       std::vector<std::string> &out);
+};
+
 struct IcSpec {
   static constexpr std::string_view kName = "ic";
   static constexpr std::string_view kDescription = "IC-specific calculators (datasheet formulas)";

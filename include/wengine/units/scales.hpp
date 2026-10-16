@@ -40,9 +40,10 @@ struct scales_for<ElectricPotential> {
 
 template <>
 struct scales_for<ElectricCurrent> {
-  static constexpr std::array<SuffixScale, 4> value{{
+  static constexpr std::array<SuffixScale, 5> value{{
       {"A", 1.0},
       {"mA", 1e-3},
+      {"uA", 1e-6},
       {"kA", 1e3},
       {"MA", 1e6},
   }};

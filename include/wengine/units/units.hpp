@@ -116,6 +116,10 @@ constexpr Value<ElectricCurrent> operator""_mA(long double val) {
   return Value<ElectricCurrent>(static_cast<double>(val) * 1e-3);
 }
 
+constexpr Value<ElectricCurrent> operator""_uA(long double val) {
+  return Value<ElectricCurrent>(static_cast<double>(val) * 1e-6);
+}
+
 constexpr Value<ElectricResistance> operator""_Ohm(long double val) {
   return Value<ElectricResistance>(static_cast<double>(val));
 }
