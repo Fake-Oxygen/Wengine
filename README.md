@@ -12,6 +12,9 @@ CLI adapter on top.
 - GLM via the `external/glm` submodule (pinned 1.0.1) — clone with
   `git clone --recursive` or run `git submodule update --init` after cloning.
   Otherwise dependency-free (tests use plain `assert`, no gtest fetch)
+- TUI (`-DBUILD_TUI=ON`, default `ON`): system `libncurses-dev`
+  (never vendored — same category as SDL2/the Vulkan loader; without it
+  the CLI still builds and `--tui` prints a rebuild hint).
 - GUI only (`-DBUILD_GUI=ON`): Dear ImGui via the `external/imgui`
   submodule (pinned v1.91.9b) plus system `libsdl2-dev` and
   `libvulkan-dev` (SDL2 windowing + Vulkan rendering, see policy below).
@@ -56,6 +59,7 @@ solvers cannot be constant-folded away; each prints `ns/iter` (or
 ./build/PhysicsSimApp ohm 12V 3A       # headless: run once and exit
 ./build/PhysicsSimApp s0 rate --power 2kW --const 1000imp/kWh
 ./build/PhysicsSimApp --help
+./build/PhysicsSimApp --tui                 # ncurses TUI: same commands, form-guided display
 ```
 
 Headless mode passes `argv` straight to the command — no shell startup, no
@@ -64,7 +68,7 @@ is the command result (`0` ok, `1` runtime/check failure, `2` usage error;
 `exit`/`quit` map to `0`). With no arguments the interactive REPL starts.
 
 REPL commands: `help [cmd]`, `exit`/`quit`, plus registered commands
-(`ohm`, `s0`, `i2c`, `ldo`, `sim`, `sig`, `ic`).
+(`ohm`, `s0`, `i2c`, `ldo`, `led`, `sim`, `sig`, `ic`).
 `--help`/`-h` also print help. Return codes: `0` ok, `1`
 runtime/unknown-command error, `2` argument/usage error, `-1` internal exit
 signal (REPL loop only).
@@ -145,6 +149,22 @@ Core identities: `headroom = VIN − VOUT` (must stay ≥ `Vdo`),
 Exit `0` on `PASS`, `1` on dropout/thermal `FAIL`, `2` on usage error.
 Current units: `A`/`mA`/`uA`; `--ta`/`--rth`/`--tjmax` are plain
 numbers (`C`, `C/W`, `C`).
+
+LED series resistor (generic — user supplies `Vf`/`If`, so no part lives
+under `ic`):
+
+```text
+> led --vs 5V --vf 2V --if 20mA                  # Rs exact + E12 pick, P, eff
+> led --vs 5V --vf 3.2V --if 20mA --rs 100Ohm    # evaluate the Rs at hand
+> led --vs 5V --vf 2V --if 20mA --prating 0.25W  # resistor power check
+```
+
+Core identities: `headroom = VS − VF` (> 0 required),
+`Rs = headroom / IF`, `IF' = headroom / Rs_used`,
+`Pres = headroom · IF'`, `eff = VF / VS`.
+Default pick is the nearest E12 (same snap as `i2c`, next-decade rule
+included); `--prating` adds a dissipation `PASS`/`FAIL`.
+Exit `0` on `PASS`, `1` on infeasible headroom/rating `FAIL`.
 
 IC-specific calculators (datasheet formulas, one chip per solver under
 `solvers/ic/`, all behind the single `ic` command so parts never bloat
@@ -341,7 +361,7 @@ tests/  benchmarks/  examples/
 | Module | Path | Role |
 |---|---|---|
 | `units` | `wengine/units/units.hpp`, `scales.hpp` | `Dimension<...>`, `Value<Dim>` with dimensional `*`/`/` operators, exact comparisons, `ostream<<` (SI base), `_V`/`_A`/`_mA`/`_uA`/`_Ohm`/`_kOhm`/`_F`/`_pF`/`_nF`/`_uF`/`_s`/`_ms`/`_us`/`_ns`/`_W`/`_J`/`_Wh`/`_kWh`/`_Hz` literals, `scales_for<Dim>` suffix tables (single source of truth for CLI parsing) |
-| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `ldo.hpp`, `projectile.hpp`, `signal.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp`, `signal_control.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `LdoSolver::solve` (headroom/dropout, pass+quiescent power, efficiency, TJ), `ProjectileSolver::step`, `SignalSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry); `ControlBus` step-boundary command drain with fixed channel order, last-writer-wins, and replay log (SIG-10). Part-specific datasheet calculators live apart in `wengine/solvers/ic/` (starter: `template.hpp`), all served through the single `ic` command |
+| `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `ldo.hpp`, `led.hpp`, `projectile.hpp`, `signal.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp`, `signal_control.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `LdoSolver::solve` (headroom/dropout, pass+quiescent power, efficiency, TJ), `LedSolver::solve` (series Rs, E12 pick, actual current, power-rating check), `ProjectileSolver::step`, `SignalSolver::step` — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry); `ControlBus` step-boundary command drain with fixed channel order, last-writer-wins, and replay log (SIG-10). Part-specific datasheet calculators live apart in `wengine/solvers/ic/` (starter: `template.hpp`), all served through the single `ic` command |
 | `signal` | `wengine/signal/types.hpp`, `expr.hpp`, `table.hpp`, `lua.hpp`, `control.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial), closed expression programs (RPN, from_chars parsing, div-by-zero/out-of-domain to Status), table CSV replay (linear interp, clamped, bit-exact hits), Lua scripting source (sandboxed 5.4 runtime in an isolated TU — this header is Lua-free), control-plane line protocol vocabulary (strict verb parsing + response builders, no state, no I/O) — no I/O; pool lives in `world` |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp`, `run_config.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
 | `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, expression programs, append-only table/script stores, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ serial-carrying signal arrays, `select_signals` subset filter), versioned binary save/load (v5; v4 loads with empty script ranges, v3 with zeroed custom columns, v2 with synthesized serials, v1 with empty signals) |
@@ -349,6 +369,7 @@ tests/  benchmarks/  examples/
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions, `StrideSink` step-aligned decimation, drop counters) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion. Two-level `ic` dispatch (`ic_dispatch.hpp` + `ic_registry.hpp`) keeps part-specific chips off the top level |
+| `tui` | `wengine/tui/exec.hpp`, `wengine/tui/run.hpp`, `src/tui/run.cpp` | Ncurses front end (`PhysicsSimApp --tui`, `BUILD_TUI`): terminal handling only — every line runs through `cli::Shell::execute` with captured output, so TUI text stays byte-identical to the CLI by construction |
 
 Dependency direction (never reversed):
 
@@ -417,14 +438,18 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
  runtime TU) links `wengine_core` + `wengine_lua` (vendored interpreter).
  `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
  `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
- `src/cli/commands/i2c.cpp`, `src/cli/commands/ldo.cpp`, `src/cli/commands/sim.cpp`,
+ `src/cli/commands/i2c.cpp`, `src/cli/commands/ldo.cpp`, `src/cli/commands/led.cpp`,
+ `src/cli/commands/sim.cpp`,
   `src/cli/commands/sig.cpp`, `src/cli/commands/ic.cpp`
  (+ `src/cli/commands/ic/<chip>.cpp` per IC part)) links `wengine_core`, `wengine_link_shm`,
   `wengine_link_net`,
  and `wengine_signal_lua` (for `sig run --sig-lua`);
-`PhysicsSimApp` links `wengine_cli`. Tests: `test_ohm_law`, `test_math_units`
+`PhysicsSimApp` links `wengine_cli` (+ `wengine_tui` when `BUILD_TUI` finds
+ ncurses: `src/tui/run.cpp` under strict warnings + header-only
+ `wengine/tui/exec.hpp`; no engine changes). Tests: `test_ohm_law`, `test_math_units`
 (link core), `test_cli_args`, `test_s0`, `test_i2c`, `test_ldo` (LDO operating
-point goldens + CLI run/usage/stray/completion), `test_ic` (two-level
+point goldens + CLI run/usage/stray/completion), `test_led` (LED resistor
+goldens incl. E12 recompute + CLI run/usage/stray/completion), `test_ic` (two-level
 `ic` dispatch incl. chip completion), `test_ap63205` (AP63205 datasheet
 goldens + CLI run/usage/stray/completion), `test_sim` (link cli),
 `test_solver_registry`, `test_runner`, `test_signal` (waveform goldens,
@@ -652,7 +677,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,ic,ap63205,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

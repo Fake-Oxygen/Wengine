@@ -103,16 +103,18 @@ void test_registry_compile_time() {
   static_assert(CliRegistry::find("s0") != nullptr);
   static_assert(CliRegistry::find("i2c") != nullptr);
   static_assert(CliRegistry::find("ldo") != nullptr);
+  static_assert(CliRegistry::find("led") != nullptr);
   static_assert(CliRegistry::find("sim") != nullptr);
   static_assert(CliRegistry::find("sig") != nullptr);
   static_assert(CliRegistry::find("ic") != nullptr);
   static_assert(CliRegistry::find("nope") == nullptr);
-  static_assert(CliRegistry::all().size() == 7);
+  static_assert(CliRegistry::all().size() == 8);
   static_assert(!CliRegistry::all()[0].usage.empty());
   static_assert(CliRegistry::find("ohm")->complete != nullptr);
   static_assert(CliRegistry::find("s0")->complete != nullptr);
   static_assert(CliRegistry::find("i2c")->complete != nullptr);
   static_assert(CliRegistry::find("ldo")->complete != nullptr);
+  static_assert(CliRegistry::find("led")->complete != nullptr);
   static_assert(CliRegistry::find("sim")->complete != nullptr);
   static_assert(CliRegistry::find("sig")->complete != nullptr);
   static_assert(CliRegistry::find("ic")->complete != nullptr);
@@ -120,6 +122,7 @@ void test_registry_compile_time() {
   assert(CliRegistry::find("s0")->run != nullptr);
   assert(CliRegistry::find("i2c")->run != nullptr);
   assert(CliRegistry::find("ldo")->run != nullptr);
+  assert(CliRegistry::find("led")->run != nullptr);
   assert(CliRegistry::find("sim")->run != nullptr);
   assert(CliRegistry::find("sig")->run != nullptr);
   assert(CliRegistry::find("ic")->run != nullptr);
@@ -278,6 +281,8 @@ void test_shell_integration() {
   assert(sh.execute("s0 --help", out) == 0);
   assert(sh.execute("ldo --vin 5V --vout 3.3V --iout 500mA", out) == 0);
   assert(out.str().find("summary: PASS") != std::string::npos);
+  assert(sh.execute("led --vs 5V --vf 2V --if 20mA", out) == 0);
+  assert(out.str().find("Rs exact = 150") != std::string::npos);
   assert(sh.execute("ldo --help", out) == 0);
   assert(sh.execute("sim run --steps 2 --particles 1", out) == 0);
   assert(out.str().find("solver=projectile") != std::string::npos);
@@ -303,11 +308,17 @@ void test_completion() {
   {
     const auto c = complete_line("", 0, all);
     assert(has(c, "ohm") && has(c, "s0") && has(c, "i2c") && has(c, "ldo") &&
-           has(c, "sim") && has(c, "sig") && has(c, "ic") && has(c, "help") &&
-           has(c, "exit") && has(c, "quit"));
+           has(c, "led") && has(c, "sim") && has(c, "sig") && has(c, "ic") &&
+           has(c, "help") && has(c, "exit") && has(c, "quit"));
   }
   assert(complete_line("o", 1, all) == std::vector<std::string>{"ohm"});
-  assert(complete_line("l", 1, all) == std::vector<std::string>{"ldo"});
+  {
+    // Registry order defines candidate order: ldo before led.
+    const std::vector<std::string> want{"ldo", "led"};
+    assert(complete_line("l", 1, all) == want);
+  }
+  assert(complete_line("ld", 2, all) == std::vector<std::string>{"ldo"});
+  assert(complete_line("le", 2, all) == std::vector<std::string>{"led"});
   {
     // "s" now prefixes three commands: definition order (s0, sim, sig).
     const auto c = complete_line("s", 1, all);
@@ -372,6 +383,18 @@ void test_completion() {
     assert(c.size() == 3 && has(c, "--vin") && has(c, "--vout") && has(c, "--vdo"));
   }
   assert(complete_line("ldo --vin 5V", 12, all).empty()); // numeric value
+
+  // LED options (named-options only: values are numeric, nothing to complete).
+  {
+    const auto c = complete_line("led --", 6, all);
+    assert(has(c, "--vs") && has(c, "--vf") && has(c, "--if") && has(c, "--rs") &&
+           has(c, "--prating"));
+  }
+  {
+    const auto c = complete_line("led --v", 7, all);
+    assert(c.size() == 2 && has(c, "--vs") && has(c, "--vf"));
+  }
+  assert(complete_line("led --vs 5V", 11, all).empty()); // numeric value
   {
     const auto c = complete_line("i2c --", 6, all);
     assert(has(c, "--vdd") && has(c, "--cb") && has(c, "--speed") && has(c, "--rp"));

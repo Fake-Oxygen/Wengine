@@ -17,6 +17,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BUILD_CLI "Build CLI app" ON)
 option(BUILD_GUI "Build GUI app (scaffold, backend TBD per PHYSI-13)" OFF)
+option(BUILD_TUI "Build ncurses TUI for PhysicsSimApp (--tui flag, system libncurses)" ON)
 option(BUILD_TESTS "Build lightweight tests (no external deps)" ON)
 option(BUILD_BENCHMARKS "Build micro-benchmarks" ON)
 
@@ -199,6 +200,7 @@ if(BUILD_CLI)
         src/cli/commands/s0.cpp
         src/cli/commands/i2c.cpp
         src/cli/commands/ldo.cpp
+        src/cli/commands/led.cpp
         src/cli/commands/sim.cpp
         src/cli/commands/sig.cpp
         src/cli/commands/ic.cpp
@@ -246,6 +248,42 @@ if(BUILD_CLI)
         $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
             -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
     )
+
+    # TUI (system libncurses, like SDL2/Vulkan for the GUI: never vendored).
+    # `wengine_tui` owns terminal handling only; command execution reuses
+    # `wengine_cli` verbatim via `wengine/tui/exec.hpp`, so TUI output stays
+    # byte-identical to the CLI by construction. Graceful fallback: without
+    # Curses the CLI still builds and `--tui` prints a rebuild hint.
+    if(BUILD_TUI)
+        set(CURSES_NEED_NCURSES TRUE)
+        find_package(Curses)
+        if(CURSES_FOUND)
+            add_library(wengine_tui STATIC
+                src/tui/run.cpp
+            )
+            target_include_directories(wengine_tui PUBLIC
+                $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+                $<INSTALL_INTERFACE:include>
+            )
+            target_link_libraries(wengine_tui PUBLIC wengine_cli)
+            if(TARGET Curses::Curses)
+                target_link_libraries(wengine_tui PRIVATE Curses::Curses)
+            else()
+                target_include_directories(wengine_tui PRIVATE ${CURSES_INCLUDE_DIR})
+                target_link_libraries(wengine_tui PRIVATE ${CURSES_LIBRARIES})
+            endif()
+            target_compile_options(wengine_tui PRIVATE
+                $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+                $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+                    -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+            )
+            target_link_libraries(PhysicsSimApp PRIVATE wengine_tui)
+            target_compile_definitions(PhysicsSimApp PRIVATE WENGINE_HAVE_TUI=1)
+            message(STATUS "WEngine TUI enabled (ncurses --tui)")
+        else()
+            message(WARNING "Curses not found: PhysicsSimApp builds without --tui support")
+        endif()
+    endif()
 endif()
 
 # ------------------------------------------------------------------
@@ -310,6 +348,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_cli_args PRIVATE wengine_cli)
     add_test(NAME cli_args COMMAND test_cli_args)
 
+    # TUI executor parity: links wengine_cli only (no terminal needed).
+    add_executable(test_tui_exec tests/test_tui_exec.cpp)
+    target_link_libraries(test_tui_exec PRIVATE wengine_cli)
+    add_test(NAME tui_exec COMMAND test_tui_exec)
+
     add_executable(test_s0 tests/test_s0.cpp)
     target_link_libraries(test_s0 PRIVATE wengine_cli)
     add_test(NAME s0 COMMAND test_s0)
@@ -321,6 +364,10 @@ if(BUILD_TESTS)
     add_executable(test_ldo tests/test_ldo.cpp)
     target_link_libraries(test_ldo PRIVATE wengine_cli)
     add_test(NAME ldo COMMAND test_ldo)
+
+    add_executable(test_led tests/test_led.cpp)
+    target_link_libraries(test_led PRIVATE wengine_cli)
+    add_test(NAME led COMMAND test_led)
 
     add_executable(test_ic tests/test_ic.cpp)
     target_link_libraries(test_ic PRIVATE wengine_cli)

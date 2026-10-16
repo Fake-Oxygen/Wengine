@@ -300,6 +300,26 @@ struct LdoSpec {
                        std::vector<std::string> &out);
 };
 
+struct LedSpec {
+  static constexpr std::string_view kName = "led";
+  static constexpr std::string_view kDescription = "LED series resistor (supply Vf/If)";
+  static constexpr std::string_view kUsage =
+      "led --vs <V> --vf <V> --if <A> [options]   (generic LED resistor)\n"
+      "  led --vs 5V --vf 2V --if 20mA\n"
+      "  led --vs 5V --vf 3.2V --if 20mA --rs 100Ohm   (evaluate Rs at hand)\n"
+      "  led --vs 5V --vf 2V --if 20mA --prating 0.25W (resistor power check)\n"
+      "Options: --rs <Ohm> (explicit resistor, default: nearest E12 pick),\n"
+      "  --prating <W> (resistor power rating for PASS/FAIL; default none).\n"
+      "  Units: V/mV/kV, A/mA/uA, Ohm/kOhm, W/mW.\n"
+      "Core identities: headroom = VS - VF (> 0 required),\n"
+      "  Rs = headroom / IF, IF' = headroom / Rs_used,\n"
+      "  Pres = headroom * IF', Pled = VF * IF', eff = VF / VS.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
+                       std::vector<std::string> &out);
+};
+
 struct IcSpec {
   static constexpr std::string_view kName = "ic";
   static constexpr std::string_view kDescription = "IC-specific calculators (datasheet formulas)";

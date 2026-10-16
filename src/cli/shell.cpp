@@ -103,6 +103,7 @@ void Shell::print_help(std::ostream &out) const {
   }
   out << "\n help [cmd] - Show help\n";
   out << " exit - Exit shell\n";
+  out << "\nTip: `PhysicsSimApp --tui` opens the ncurses interface (same commands).\n";
 }
 
 } // namespace wengine::cli
