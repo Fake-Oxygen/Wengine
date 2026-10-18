@@ -481,7 +481,7 @@ void test_completion() {
 
   // Ic dispatch: registered chips complete by name, options still complete.
   {
-    const std::vector<std::string> want{"ap63205"};
+    const std::vector<std::string> want{"ap63205", "ina219"};
     assert(complete_line("ic ", 3, all) == want);
   }
   assert(complete_line("ic --", 5, all) == std::vector<std::string>{"--help"});

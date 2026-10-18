@@ -178,6 +178,9 @@ the top level):
 > ic ap63205 uvlo --von 8V --voff 7V          # EN divider R5/R6
 > ic ap63205 delay --ts 10ms                  # EN sequencing capacitance
 > ic ap63205 thermal --vin 12V --ta 85        # TJ vs +125C design target
+> ic ina219 cal --imax 15A --rshunt 2mOhm     # Cal/PGA/BRNG design (SBOS448G)
+> ic ina219 decode --shunt 0x07D0 --bus 0x5D98 --cal 20480 --lsb 1mA
+> ic ina219 config --brng 16 --pga 40 --avg 128 --mode bus
 ```
 
 Each chip dispatches its own subcommands (`ic <chip> <op> [options]`);
@@ -451,7 +454,8 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
 point goldens + CLI run/usage/stray/completion), `test_led` (LED resistor
 goldens incl. E12 recompute + CLI run/usage/stray/completion), `test_ic` (two-level
 `ic` dispatch incl. chip completion), `test_ap63205` (AP63205 datasheet
-goldens + CLI run/usage/stray/completion), `test_sim` (link cli),
+goldens + CLI run/usage/stray/completion), `test_ina219` (INA219 calibration
+goldens Sec. 9.2.2 + CLI run/usage/stray/completion), `test_sim` (link cli),
 `test_solver_registry`, `test_runner`, `test_signal` (waveform goldens,
 seeded-noise sequence, solver end-of-step convention, headless signal
 config + rejections, signal Frame adapter + wire round-trip, signals CSV
@@ -677,7 +681,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms}.cpp
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

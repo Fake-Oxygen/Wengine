@@ -133,6 +133,42 @@ core::RunConfig signal_cfg(double dt, std::uint64_t steps) {
   return cfg;
 }
 
+// Deterministic stalled-peer flood for the PHYSI-32 backpressure tests.
+// Empty snapshots (~102 B wire) never fill autotuned loopback buffers
+// (256 KiB send side + autotuned receive side, MBs combined), so flood
+// with 200-particle snapshots (~12 KB wire, same shape as the passing
+// test_tcp_stall_pending_finish): a few hundred frames exceed any
+// plausible kernel buffering, and each frame is wide enough that a
+// whole-drop-only exact fill is negligible. The peer RCVBUF is shrunk
+// best-effort to cap the receiver side; the frame bound carries total
+// bytes far past wmem_max + rmem_max while the loop breaks early once a
+// partial frame is held. Never reads from the peer, so drain-verifying
+// tests keep an intact byte stream.
+void make_backpressure_snapshot(world::Snapshot &snap) {
+  snap.pos_x.resize(200);
+  snap.pos_y.resize(200);
+  snap.vel_x.resize(200);
+  snap.vel_y.resize(200);
+  for (std::size_t k = 0; k < 200; ++k) {
+    snap.pos_x[k] = static_cast<double>(k);
+  }
+}
+
+bool flood_until_pending(link::TcpPublisher &pub, int peer, world::Snapshot &snap,
+                         std::uint64_t max_frames) {
+  int small = 4096;
+  (void)::setsockopt(peer, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+  for (std::uint64_t k = 1; k <= max_frames; ++k) {
+    snap.step_index = k;
+    snap.sim_time = 0.01 * static_cast<double>(k);
+    pub.on_snapshot(snap);
+    if (pub.has_pending_frame()) {
+      return true;
+    }
+  }
+  return pub.has_pending_frame();
+}
+
 void test_parse_endpoint() {
   {
     const auto r = link::parse_endpoint("127.0.0.1:8080");
@@ -650,17 +686,8 @@ void test_service_pending_idle_no_dummy_snapshot() {
     assert(peer >= 0); // held open, never read: backpressure is forced
 
     world::Snapshot snap;
-    bool got_pending = false;
-    for (std::uint64_t k = 1; k <= 5000; ++k) {
-      snap.step_index = k;
-      snap.sim_time = 0.01 * static_cast<double>(k);
-      pub.on_snapshot(snap);
-      if (pub.has_pending_frame()) {
-        got_pending = true;
-        break;
-      }
-    }
-    assert(got_pending);
+    make_backpressure_snapshot(snap);
+    assert(flood_until_pending(pub, peer, snap, 2000));
     assert(pub.ok());
     assert(pub.pending_bytes() > 0);
     const std::uint64_t published_before = pub.stats().published;
@@ -730,17 +757,8 @@ void test_finish_completes_after_reader_resumes() {
     ::setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     world::Snapshot snap;
-    bool got_pending = false;
-    for (std::uint64_t k = 1; k <= 5000; ++k) {
-      snap.step_index = k;
-      snap.sim_time = 0.01 * static_cast<double>(k);
-      pub.on_snapshot(snap);
-      if (pub.has_pending_frame()) {
-        got_pending = true;
-        break;
-      }
-    }
-    assert(got_pending);
+    make_backpressure_snapshot(snap);
+    assert(flood_until_pending(pub, peer, snap, 2000));
     assert(pub.pending_bytes() > 0);
 
     drain.peer = peer;
@@ -798,17 +816,8 @@ void test_finish_timeout_reports_pending() {
   assert(peer >= 0); // never read
 
   world::Snapshot snap;
-  bool got_pending = false;
-  for (std::uint64_t k = 1; k <= 5000; ++k) {
-    snap.step_index = k;
-    snap.sim_time = 0.01 * static_cast<double>(k);
-    pub.on_snapshot(snap);
-    if (pub.has_pending_frame()) {
-      got_pending = true;
-      break;
-    }
-  }
-  assert(got_pending);
+  make_backpressure_snapshot(snap);
+  assert(flood_until_pending(pub, peer, snap, 2000));
   assert(!pub.finish(50).ok()); // deadline expires: explicit failure
   assert(pub.has_pending_frame());
   assert(pub.pending_bytes() > 0);

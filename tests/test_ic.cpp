@@ -236,8 +236,9 @@ void test_dispatch_complete() {
 }
 
 void test_production_empty_registry() {
-  static_assert(IcRegistry::all().size() == 1);
+  static_assert(IcRegistry::all().size() == 2);
   static_assert(IcRegistry::find("ap63205") != nullptr);
+  static_assert(IcRegistry::find("ina219") != nullptr);
   static_assert(IcRegistry::find("demo") == nullptr);
   static_assert(CliRegistry::find("ic") != nullptr);
   static_assert(CliRegistry::find("ic")->complete != nullptr);
@@ -259,7 +260,7 @@ void test_production_empty_registry() {
     // One registered chip completes by name (options still complete).
     std::vector<std::string> out;
     commands::IcSpec::complete({}, "", out);
-    const std::vector<std::string> want{"ap63205"};
+    const std::vector<std::string> want{"ap63205", "ina219"};
     assert(out == want);
     out.clear();
     commands::IcSpec::complete({}, "--", out);
@@ -269,7 +270,7 @@ void test_production_empty_registry() {
   {
     // End-to-end through the generic completion engine + shell.
     const auto all = CliRegistry::all();
-    const std::vector<std::string> want{"ap63205"};
+    const std::vector<std::string> want{"ap63205", "ina219"};
     assert(complete_line("ic ", 3, all) == want);
     Shell sh;
     sh.set_history_file("");
