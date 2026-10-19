@@ -158,6 +158,52 @@ void test_gravity_config() {
   assert(near(snap.pos_x[0], 10.0, 1e-9));
 }
 
+void test_step_failure_stops_play() {
+  // A solver failure stops play and reports the partial step state (not a
+  // completed tick); reset() rebuilds and the successful prefix replays.
+  // The expression passes its spawn-time sample (sqrt(0.5)) but fails once
+  // the source time passes 0.5 s.
+  wengine::core::RunConfig cfg;
+  cfg.loop.dt = 0.01;
+  cfg.loop.emit_every = 1;
+  cfg.steps = 100;
+  cfg.solver = "signal";
+  cfg.particles = 0;
+  cfg.signal.set = true;
+  cfg.signal.count = 1;
+  cfg.signal.params.kind = wengine::signal::SignalKind::kExpression;
+  const auto parsed = wengine::signal::parse_expression("sqrt(0.5-t)");
+  assert(parsed.ok());
+  cfg.signal.params.expr = parsed.value;
+  wengine::gui::SimController sim;
+  assert(sim.set_config(cfg).ok());
+
+  sim.set_playing(true);
+  const wengine::core::Status st = sim.run_exact(100);
+  assert(!st.ok());
+  assert(!sim.playing()); // play stopped
+  assert(sim.error().find("partial step") != std::string::npos);
+  const std::uint64_t failed_at = sim.state().step_index + 1;
+  assert(failed_at > 1);
+
+  // Retries through the same run keep failing (Runner latch).
+  sim.set_playing(true);
+  assert(!sim.run_exact(1).ok());
+  assert(!sim.playing());
+
+  // reset() rebuilds (latch cleared): the prefix replays, then fails at
+  // the same deterministic point.
+  sim.reset();
+  assert(sim.ok());
+  assert(sim.state().step_index == 0);
+  assert(sim.run_exact(failed_at - 1).ok());
+  assert(sim.state().step_index == failed_at - 1);
+  sim.set_playing(true);
+  assert(!sim.run_exact(1).ok());
+  assert(!sim.playing());
+  assert(sim.state().step_index == failed_at - 1);
+}
+
 } // namespace
 
 int main() {
@@ -166,6 +212,7 @@ int main() {
   test_advance_modes();
   test_config_validation();
   test_gravity_config();
+  test_step_failure_stops_play();
   std::printf("test_gui_sim_control: OK\n");
   return 0;
 }

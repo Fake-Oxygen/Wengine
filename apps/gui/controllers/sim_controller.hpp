@@ -167,12 +167,16 @@ class SimController {
   // drains before every step, so verbs apply at exact steps and log for
   // replay (an empty bus drains as a no-op: Runner::run(n) is already a
   // step_once loop, so verb-free parity with headless is exact).
+  // A solver failure stops play: the Runner latches the failure and its
+  // live state holds a partial step, not a completed tick (see
+  // core/runner.hpp) — reset() rebuilds before stepping again.
   core::Status run_exact(std::uint64_t steps) {
     for (std::uint64_t k = 0; k < steps; ++k) {
       (void)drain_commands();
       last_status_ = run_.run(1);
       if (!last_status_.ok()) {
-        error_ = "simulation step failed";
+        playing_ = false;
+        error_ = "simulation step failed: partial step state is not a completed tick — reset to rebuild";
         return last_status_;
       }
     }
@@ -184,6 +188,8 @@ class SimController {
   // frame is additionally clamped to the remaining step budget, so play
   // parks exactly at `steps` and Reset + Play reproduces a headless batch
   // bit-for-bit regardless of frame rate. Reaching the budget auto-pauses.
+  // A solver failure also auto-pauses with the same partial-step error as
+  // run_exact (the Runner latches; reset() rebuilds).
   // Verbs drain once per call (frame boundaries, not substep boundaries:
   // exact verb timing in play mode is wall-driven by construction).
   core::Status advance_frame(double frame_dt_seconds) {
@@ -201,7 +207,8 @@ class SimController {
     }
     last_status_ = run_.runner().advance(frame_dt_seconds);
     if (!last_status_.ok()) {
-      error_ = "simulation step failed";
+      playing_ = false;
+      error_ = "simulation step failed: partial step state is not a completed tick — reset to rebuild";
       return last_status_;
     }
     if (run_.state().step_index >= config_.steps) {

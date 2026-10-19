@@ -811,7 +811,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     tcp_finish = tcp->finish(link::kTcpFinishTimeoutMs);
   }
   if (!st.ok()) {
-    out << "Error: simulation step failed\n";
+    out << "Error: simulation step failed (partial step state is not a completed tick)\n";
     return core::kExitRuntime;
   }
 

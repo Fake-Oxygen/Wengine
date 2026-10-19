@@ -589,9 +589,12 @@ with an accumulator for real-time loops. Each step calls registered
 `ISolver::step(state, dt)` implementations in order, then refills one
 reused `Snapshot` buffer (`fill_snapshot`, allocation-free after warmup)
 and hands the immutable reference to attached `emit::ISink` observers
-(decimated via `emit_every`). Sinks observe synchronously and copy before
-returning; async stages enqueue owned blocks, never references.
-Engine code never knows its consumers.
+(decimated via `emit_every`). A failed solver step freezes time/index but
+keeps earlier solvers' partial mutations — the state is not a completed
+tick — and latches the `Runner`: later calls return the same failure
+without stepping until the run is rebuilt. Sinks observe synchronously
+and copy before returning; async stages enqueue owned blocks, never
+references. Engine code never knows its consumers.
 Headless runs go through the `core::RunConfig` seam: frontends (CLI today,
 GUI tomorrow) build the plain-data config and call
 `solvers::run_headless()` with caller-owned sinks — the engine never sees

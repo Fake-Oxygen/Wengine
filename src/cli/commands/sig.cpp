@@ -1140,7 +1140,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     tcp_finish = tcp->finish(link::kTcpFinishTimeoutMs);
   }
   if (!st.ok()) {
-    out << "Error: simulation step failed\n";
+    out << "Error: simulation step failed (partial step state is not a completed tick)\n";
     if (lua_solver && !lua_solver->last_error().empty()) {
       out << "lua: " << lua_solver->last_error() << '\n';
     }

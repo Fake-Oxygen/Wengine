@@ -16,7 +16,20 @@
 //                         into fixed-dt chunks, capped per call (spiral-of-
 //                         death guard); leftover fraction is kept.
 // A failed solver step aborts the call and propagates its Status; the
-// failed step advances neither time nor index and emits nothing.
+// failed step advances neither time nor index and emits nothing. The
+// failure is latched: every later run()/advance() returns the stored
+// Status immediately (even run(0)) without invoking solvers or emitting.
+// Only replacing the Runner (rebuilding/restoring the configured run)
+// clears it — there is deliberately no rollback and no resume.
+// PARTIAL STATE: freezing time/index does not undo solver work. Solvers
+// before the failing one in registration order have already mutated the
+// pools for the failed step (particle positions, noise RNG, ...), so the
+// live State is not a completed simulation tick and must never be read as
+// one. Retrying the same Runner cannot complete the tick; rebuild from a
+// restored state instead. Strong transactional stepping (atomic
+// accept/reject per step) is a separate design for domains that need
+// recoverable rejection — this latch only prevents compounding a partial
+// step with more steps.
 // Sinks are best-effort observers: they must not throw.
 
 #include "wengine/core/solver.hpp"
@@ -53,8 +66,11 @@ public:
   // Run until `steps` are complete or the optional callback requests a stop.
   // The callback is checked at fixed-step boundaries, before the next solver
   // invocation, so interruption never leaves a partially advanced step.
-  Status run_until(std::uint64_t steps,
-                   bool (*stop_requested)() noexcept) {
+  // A latched solver failure (see header comment) returns immediately.
+  Status run_until(std::uint64_t steps, bool (*stop_requested)() noexcept) {
+    if (!failure_.ok()) {
+      return failure_;
+    }
     if (!(config_.dt > 0.0)) {
       return {StatusCode::kInvalidArgument};
     }
@@ -72,8 +88,12 @@ public:
 
   // Fold `frame_dt_seconds` of wall time into fixed steps. Keeps the
   // fractional remainder for the next call; drops backlog beyond
-  // max_substeps worth after stalls.
+  // max_substeps worth after stalls. A latched solver failure (see header
+  // comment) returns immediately without consuming wall time.
   Status advance(double frame_dt_seconds) {
+    if (!failure_.ok()) {
+      return failure_;
+    }
     if (!(config_.dt > 0.0)) {
       return {StatusCode::kInvalidArgument};
     }
@@ -101,6 +121,7 @@ private:
     for (ISolver *s : solvers_) {
       const Status st = s->step(state_, config_.dt);
       if (!st.ok()) {
+        failure_ = st; // latch: no retry, no rollback (see header comment)
         return st;
       }
     }
@@ -117,6 +138,7 @@ private:
 
   RunnerConfig config_{};
   world::State state_{};
+  Status failure_{}; // latched solver-step failure (kOk until the first one)
   world::Snapshot emit_snap_; // reused emission buffer (see header comment)
   std::vector<ISolver *> solvers_;
   std::vector<emit::ISink *> sinks_;

@@ -1,7 +1,10 @@
 #include "wengine/core/runner.hpp"
+#include "wengine/signal/types.hpp"
+#include "wengine/solvers/signal.hpp"
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -53,6 +56,46 @@ struct FailingSolver : core::ISolver {
 struct RecSink : emit::ISink {
   std::vector<world::Snapshot> snaps;
   void on_snapshot(const world::Snapshot &s) override { snaps.push_back(s); }
+};
+
+// Mutates live state by an exact delta and counts invocations, so partial
+// application of a failed step is observable without FP subtlety.
+struct Mutator : core::ISolver {
+  int calls{0};
+  std::uint32_t slot{0};
+
+  [[nodiscard]] std::string_view name() const noexcept override { return "mut"; }
+
+  core::Status step(world::State &s, double) noexcept override {
+    ++calls;
+    s.particles.pos_x[slot] += 1.0;
+    return core::Status::success();
+  }
+};
+
+// Fails every step call (registered after the mutator: a later solver).
+struct FailNow : core::ISolver {
+  int calls{0};
+
+  [[nodiscard]] std::string_view name() const noexcept override { return "failnow"; }
+
+  core::Status step(world::State &, double) noexcept override {
+    ++calls;
+    return {core::StatusCode::kInternal};
+  }
+};
+
+// Counts invocations without touching state (proves the latch invokes
+// nothing on retries).
+struct Counter : core::ISolver {
+  int calls{0};
+
+  [[nodiscard]] std::string_view name() const noexcept override { return "counter"; }
+
+  core::Status step(world::State &, double) noexcept override {
+    ++calls;
+    return core::Status::success();
+  }
 };
 
 bool stop_after_three() noexcept {
@@ -128,6 +171,142 @@ void test_emit_decimation() {
   assert(every.run(3).ok() && all.snaps.size() == 3);
 }
 
+void test_failure_latch() {
+  // A later solver fails: the failed step freezes time/index but keeps the
+  // earlier solver's mutation (partial state, not a completed tick).
+  // Retries return the same failure without invoking solvers or emitting;
+  // only a rebuilt Runner steps again.
+  core::Runner runner{{.dt = 0.01}};
+  Mutator mut;
+  FailNow fail;
+  RecSink sink;
+  runner.add_solver(mut);
+  runner.add_solver(fail);
+  runner.add_sink(sink);
+  const world::Entity e = runner.state().spawn_entity();
+  runner.state().particles.attach(e.index);
+  mut.slot = e.index;
+
+  const core::Status first = runner.run(1);
+  assert(!first.ok() && first.code == core::StatusCode::kInternal);
+  assert(runner.state().step_index == 0 && runner.state().sim_time == 0.0);
+  assert(mut.calls == 1 && fail.calls == 1);
+  assert(runner.state().particles.pos_x[e.index] == 1.0); // partial kept
+  assert(sink.snaps.empty()); // failed step emits nothing
+
+  for (int k = 0; k < 3; ++k) {
+    const core::Status retry = runner.run(1);
+    assert(!retry.ok() && retry.code == first.code);
+  }
+  assert(mut.calls == 1 && fail.calls == 1); // nothing invoked again
+  assert(runner.state().particles.pos_x[e.index] == 1.0); // frozen
+  assert(sink.snaps.empty());
+  assert(!runner.run(0).ok()); // latch covers even no-op calls
+  const core::Status adv = runner.advance(1.0);
+  assert(!adv.ok() && adv.code == first.code);
+  assert(mut.calls == 1 && fail.calls == 1);
+
+  // Recovery is a rebuild: a fresh identical runner replays the failure
+  // deterministically (latch is per-Runner, cleared by replacement).
+  core::Runner fresh{{.dt = 0.01}};
+  Mutator mut2;
+  FailNow fail2;
+  fresh.add_solver(mut2);
+  fresh.add_solver(fail2);
+  const world::Entity e2 = fresh.state().spawn_entity();
+  fresh.state().particles.attach(e2.index);
+  mut2.slot = e2.index;
+  const core::Status fresh_first = fresh.run(1);
+  assert(!fresh_first.ok() && fresh_first.code == first.code);
+  assert(mut2.calls == 1); // solvers run again after rebuild
+  assert(fresh.state() == runner.state());
+}
+
+void test_latch_noise_then_failing_expression() {
+  // Noise (slot 0) advances before the later expression (slot 1) fails, so
+  // the failed step advances the noise RNG exactly once while the clock,
+  // the expression value, solvers, and emission stay frozen past it.
+  core::Runner runner{{.dt = 0.01}};
+  Counter counter;
+  solvers::SignalSolver signal;
+  runner.add_solver(counter);
+  runner.add_solver(signal);
+  signal::SignalParams noise;
+  noise.kind = signal::SignalKind::kNoise;
+  const world::Entity n = runner.state().spawn_entity();
+  assert(world::configure_source(n, runner.state().signals, noise, 0.0).ok());
+  const auto parsed = signal::parse_expression("sqrt(0.5-t)");
+  assert(parsed.ok());
+  signal::SignalParams expr;
+  expr.kind = signal::SignalKind::kExpression;
+  expr.expr = parsed.value;
+  const world::Entity x = runner.state().spawn_entity();
+  assert(world::configure_source(x, runner.state().signals, expr, 0.0).ok());
+  RecSink sink;
+  runner.add_sink(sink);
+
+  // Drive one exact step at a time to the deterministic failure point.
+  core::Status st = core::Status::success();
+  std::uint64_t prev_rng = 0;
+  double prev_expr = 0.0;
+  for (int k = 0; k < 100 && st.ok(); ++k) {
+    prev_rng = runner.state().signals.rng[n.index];
+    prev_expr = runner.state().signals.value[x.index];
+    st = runner.run(1);
+  }
+  assert(!st.ok() && st.code == core::StatusCode::kInvalidArgument);
+  const std::uint64_t failed_step = runner.state().step_index + 1;
+  assert(failed_step > 1);
+  assert(sink.snaps.size() == runner.state().step_index); // nothing emitted
+  assert(runner.state().signals.rng[n.index] == signal::rng_next(prev_rng));
+  assert(runner.state().signals.value[x.index] == prev_expr);
+  const std::uint64_t rng_at_failure = runner.state().signals.rng[n.index];
+  const int calls_at_failure = counter.calls;
+
+  for (int k = 0; k < 3; ++k) {
+    const core::Status retry = runner.run(1);
+    assert(!retry.ok() && retry.code == st.code);
+  }
+  assert(runner.state().signals.rng[n.index] == rng_at_failure); // frozen
+  assert(counter.calls == calls_at_failure);
+  assert(sink.snaps.size() == runner.state().step_index);
+
+  // Rebuild replays the successful prefix bit-identically, then fails at
+  // the same step with the same partial mutation.
+  core::Runner replay{{.dt = 0.01}};
+  Counter counter2;
+  solvers::SignalSolver signal2;
+  replay.add_solver(counter2);
+  replay.add_solver(signal2);
+  const world::Entity n2 = replay.state().spawn_entity();
+  assert(world::configure_source(n2, replay.state().signals, noise, 0.0).ok());
+  const world::Entity x2 = replay.state().spawn_entity();
+  assert(world::configure_source(x2, replay.state().signals, expr, 0.0).ok());
+  RecSink sink2;
+  replay.add_sink(sink2);
+  assert(replay.run(failed_step - 1).ok());
+  assert(sink2.snaps == sink.snaps); // bit-identical successful prefix
+  const core::Status st2 = replay.run(1);
+  assert(!st2.ok() && st2.code == st.code);
+  assert(replay.state().signals.rng[n2.index] == rng_at_failure);
+
+  // A rebuilt run with a non-failing expression completes past the point.
+  core::Runner fixed{{.dt = 0.01}};
+  solvers::SignalSolver signal3;
+  fixed.add_solver(signal3);
+  const world::Entity n3 = fixed.state().spawn_entity();
+  assert(world::configure_source(n3, fixed.state().signals, noise, 0.0).ok());
+  const auto parsed_ok = signal::parse_expression("t+1");
+  assert(parsed_ok.ok());
+  signal::SignalParams expr_ok;
+  expr_ok.kind = signal::SignalKind::kExpression;
+  expr_ok.expr = parsed_ok.value;
+  const world::Entity x3 = fixed.state().spawn_entity();
+  assert(world::configure_source(x3, fixed.state().signals, expr_ok, 0.0).ok());
+  assert(fixed.run(failed_step).ok());
+  assert(fixed.state().step_index == failed_step);
+}
+
 void test_stop_callback() {
   core::Runner runner{{.dt = 0.01}};
   CountingSolver solver;
@@ -189,6 +368,8 @@ int main() {
   test_exact_stepping();
   test_determinism();
   test_emit_decimation();
+  test_failure_latch();
+  test_latch_noise_then_failing_expression();
   test_stop_callback();
   test_error_propagation();
   test_accumulator();
