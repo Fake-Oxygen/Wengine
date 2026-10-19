@@ -1,4 +1,5 @@
 #include "wengine/core/runner.hpp"
+#include "wengine/emit/routing.hpp"
 #include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/link/protocol.hpp"
@@ -923,6 +924,129 @@ void test_dimension_scaling() {  using scaling_proof::TestTemp;
   assert(t + t == scaling_proof::operator""_tC(4.0));
 }
 
+struct SnapshotCapture : emit::ISink {
+  std::vector<world::Snapshot> snaps;
+  void on_snapshot(const world::Snapshot &s) override { snaps.push_back(s); }
+};
+
+void test_signals_csv_slot_recycle_round_trip() {
+  // Review repro: serials 0,1 -> despawn slot 0 -> respawn parks serial 2
+  // in the recycled slot, so the valid snapshot holds serials [2,1] in
+  // slot order. The writer emits slot order; the parser must accept it
+  // (uniqueness per step) and preserve it exactly.
+  auto dc = [](double offset) {
+    signal::SignalParams p;
+    p.kind = signal::SignalKind::kDc;
+    p.offset = offset;
+    return p;
+  };
+  const std::string path = "/tmp/wengine_test_signal_recycle.csv";
+  std::remove(path.c_str());
+  core::Runner runner{{.dt = 0.01}};
+  solvers::SignalSolver solver;
+  runner.add_solver(solver);
+  const world::Entity e0 = spawn(runner, dc(1.0)); // serial 0
+  const world::Entity e1 = spawn(runner, dc(2.0)); // serial 1
+  assert(runner.state().signals.serial[e0.index] == 0);
+  assert(runner.state().signals.serial[e1.index] == 1);
+  assert(runner.state().despawn_entity(e0));
+  const world::Entity e2 = spawn(runner, dc(3.0)); // serial 2, recycled slot
+  assert(e2.index == e0.index);
+  assert(runner.state().signals.serial[e2.index] == 2);
+  {
+    const world::Snapshot live = world::take_snapshot(runner.state());
+    assert(live.signal_count() == 2);
+    assert(live.sig_serial[0] == 2 && live.sig_serial[1] == 1); // slot order
+  }
+  SnapshotCapture live_caps;
+  emit::SignalsCsvSink sink(path);
+  assert(sink.ok());
+  runner.add_sink(live_caps);
+  runner.add_sink(sink);
+  assert(runner.run(2).ok());
+  // Second recycle mid-log: drop serial 1, respawn as serial 3.
+  assert(runner.state().despawn_entity(e1));
+  const world::Entity e3 = spawn(runner, dc(5.0)); // serial 3
+  assert(e3.index == e1.index);
+  assert(runner.state().signals.serial[e3.index] == 3);
+  assert(runner.run(2).ok());
+  assert(sink.flush().ok());
+  assert(live_caps.snaps.size() == 4);
+  assert(live_caps.snaps[0].sig_serial[0] == 2 && live_caps.snaps[0].sig_serial[1] == 1);
+  assert(live_caps.snaps[3].sig_serial[0] == 2 && live_caps.snaps[3].sig_serial[1] == 3);
+  assert(live_caps.snaps[0].sig_value[0] == 3.0 && live_caps.snaps[0].sig_value[1] == 2.0);
+  assert(live_caps.snaps[3].sig_value[0] == 3.0 && live_caps.snaps[3].sig_value[1] == 5.0);
+
+  std::vector<world::Snapshot> snaps;
+  std::string error;
+  {
+    std::ifstream in(path);
+    assert(emit::parse_signals_log(in, snaps, error).ok());
+  }
+  assert(snaps.size() == 4);
+  for (std::size_t k = 0; k < snaps.size(); ++k) {
+    assert(snaps[k] == live_caps.snaps[k]); // exact, order-preserving
+  }
+  std::remove(path.c_str());
+
+  // Same recycled order through subset routing: the wrapper preserves slot
+  // order, so its CSV output round-trips identically.
+  const std::string sub_path = "/tmp/wengine_test_signal_recycle_sub.csv";
+  std::remove(sub_path.c_str());
+  core::Runner runner2{{.dt = 0.01}};
+  solvers::SignalSolver solver2;
+  runner2.add_solver(solver2);
+  const world::Entity f0 = spawn(runner2, dc(1.0)); // serial 0
+  const world::Entity f1 = spawn(runner2, dc(2.0)); // serial 1
+  assert(runner2.state().despawn_entity(f0));
+  const world::Entity f2 = spawn(runner2, dc(3.0)); // serial 2
+  const std::uint64_t s1 = runner2.state().signals.serial[f1.index];
+  const std::uint64_t s2 = runner2.state().signals.serial[f2.index];
+  SnapshotCapture full_caps;
+  emit::SignalsCsvSink sub_csv(sub_path);
+  assert(sub_csv.ok());
+  emit::SignalSubsetSink sub(sub_csv);
+  sub.set_subscription({s2, s1}); // recycled pair, slot order [2,1] regardless
+  runner2.add_sink(full_caps);
+  runner2.add_sink(sub);
+  assert(runner2.run(2).ok());
+  sub.set_subscription({s1}); // narrow to one source mid-run
+  assert(runner2.run(1).ok());
+  assert(sub_csv.flush().ok());
+  {
+    std::ifstream in(sub_path);
+    assert(emit::parse_signals_log(in, snaps, error).ok());
+  }
+  assert(snaps.size() == 3);
+  assert(snaps[0] == full_caps.snaps[0]);
+  assert(snaps[1] == full_caps.snaps[1]);
+  assert(snaps[2].signal_count() == 1);
+  assert(snaps[2].sig_serial[0] == s1 && snaps[2].sig_value[0] == 2.0);
+  std::remove(sub_path.c_str());
+
+  // Non-ascending but unique rows are valid and keep file order.
+  {
+    std::istringstream in("step,time,sig_id,value,quantity\n"
+                          "1,0.01,2,3,U\n"
+                          "1,0.01,1,2,U\n");
+    assert(emit::parse_signals_log(in, snaps, error).ok());
+    assert(snaps.size() == 1);
+    assert(snaps[0].sig_serial[0] == 2 && snaps[0].sig_serial[1] == 1);
+    assert(snaps[0].sig_value[0] == 3.0 && snaps[0].sig_value[1] == 2.0);
+  }
+  // Duplicates (adjacent or not), inconsistent times, and non-increasing
+  // steps still fail loudly with the output cleared.
+  for (const std::string &bad :
+       {"step,time,sig_id,value,quantity\n1,0.01,2,3,U\n1,0.01,2,4,U\n",
+        "step,time,sig_id,value,quantity\n1,0.01,2,3,U\n1,0.01,1,2,U\n1,0.01,2,5,U\n",
+        "step,time,sig_id,value,quantity\n1,0.01,2,3,U\n1,0.02,1,2,U\n",
+        "step,time,sig_id,value,quantity\n2,0.02,2,3,U\n1,0.01,1,2,U\n"}) {
+    std::istringstream bin(bad);
+    assert(!emit::parse_signals_log(bin, snaps, error).ok());
+    assert(!error.empty() && snaps.empty());
+  }
+}
+
 } // namespace
 
 int main() {
@@ -935,6 +1059,7 @@ int main() {
   test_run_headless_signal();
   test_frame_adapter();
   test_signals_csv_round_trip();
+  test_signals_csv_slot_recycle_round_trip();
   test_serialize_signals();
   test_registry();
   test_quantity_table();

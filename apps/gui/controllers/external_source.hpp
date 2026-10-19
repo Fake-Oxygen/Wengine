@@ -24,9 +24,9 @@
 // the signal adapter (explicit set_adapter after load still overrides).
 // Playback is paced by the log's own time deltas x rate, parks at the end
 // like SimController parks at its step budget, and Reset + Play replays
-// deterministically for identical wall-tick sequences. Known parser limit
-// (dedicated task): slot-recycled serial orders are rejected by
-// parse_signals_log — replay covers fresh-serial logs.
+// deterministically for identical wall-tick sequences. The signal parser
+// preserves file (slot) order with per-step uniqueness, so slot-recycled
+// serial orders replay exactly like fresh-serial logs.
 
 #include "wengine/core/status.hpp"
 #include "wengine/emit/csv_sink.hpp"

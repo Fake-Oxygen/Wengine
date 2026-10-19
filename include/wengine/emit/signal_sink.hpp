@@ -7,8 +7,9 @@
 // round-trip format instead of one widened schema that breaks both.
 //
 // Doubles use max_digits10 precision (exact round-trip, `==` on re-read);
-// `sig_id` is the entity slot (ascending per step, holes allowed —
-// validation requires ascending order, matching Snapshot slot order).
+// `sig_id` is the stable source serial in Snapshot slot order (serials are
+// NOT ascending after slot recycling — validation requires uniqueness
+// within a step, preserving writer order).
 // Best-effort observer like CsvSink: sticky status, never throws.
 
 #include "wengine/core/status.hpp"
@@ -87,7 +88,8 @@ private:
 // Replay: parse a SignalsCsvSink log back into snapshots, one per step in
 // file order. Co-located with the writer so format and parser never drift.
 // Contract mirrors parse_csv_log: header byte-exact, steps strictly
-// increasing, sig ids ascending per step, time identical across a step's
+// increasing, sig ids unique per step (file/slot order preserved — serials
+// need not ascend after slot recycling), time identical across a step's
 // rows (exact ==). Violations are kInvalidArgument with a line-numbered
 // message; `out` is cleared on failure.
 [[nodiscard]] inline core::Status
@@ -110,7 +112,6 @@ parse_signals_log(std::istream &in, std::vector<world::Snapshot> &out,
   std::uint64_t line_no = 1;
   bool have_step = false;
   std::uint64_t cur_step = 0;
-  std::uint64_t prev_id = 0;
   world::Snapshot cur;
   while (std::getline(in, line)) {
     ++line_no;
@@ -163,11 +164,15 @@ parse_signals_log(std::istream &in, std::vector<world::Snapshot> &out,
       if (time != cur.sim_time) {
         return invalid("time differs within step on line " + std::to_string(line_no));
       }
-      if (!cur.sig_serial.empty() && id <= prev_id) {
-        return invalid("sig id not ascending on line " + std::to_string(line_no));
+      // Slot order, not sorted order: serials need not ascend after slot
+      // recycling (e.g. [2,1]), so validate uniqueness within the step and
+      // preserve file order. Signal counts are small (linear scan).
+      for (std::uint64_t seen : cur.sig_serial) {
+        if (seen == id) {
+          return invalid("duplicate sig id on line " + std::to_string(line_no));
+        }
       }
     }
-    prev_id = id;
     cur.sig_serial.push_back(id);
     cur.sig_value.push_back(value);
     cur.sig_quantity.push_back(static_cast<std::uint8_t>(qty.value));
