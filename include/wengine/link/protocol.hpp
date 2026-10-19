@@ -9,19 +9,20 @@
 // (SHM segment open/attach, TCP framing) are separate tasks and reuse
 // everything defined here — no endpoint code lives in this header.
 //
-// SOLVER-AGNOSTIC BY DESIGN (no particle coupling):
-//   The wire carries no particle model: a frame is clock (step/time) plus
-//   generic spatial items (position, velocity, glyph hints) plus named
-//   scalar channels. This mirrors the engine -> GUI transport exactly —
-//   views consume link::Frame (link/frame.hpp) and never see solver
-//   internals, and each solver plugs in through one adapter entry, with
-//   frame_from_snapshot() as the particle adapter (the only one today).
-//   Future solvers (circuits, EM, FEA, rigid bodies, ...) add one adapter
-//   each. A circuit run publishes probe items (possibly none) plus
-//   node-voltage channels; an EM run publishes sample-point items plus
-//   sample-point items plus energy/peak channels — zero protocol change,
-//   zero reader change, zero view change. Versions bump only when the
-//   generic structs themselves need new field kinds. The shared model
+// Frame is ONE view projection for points-plus-scalars displays (see
+// docs/domain-outputs.md), not the engine's data limit: each domain owns
+// typed numeric blocks first. The wire carries the generic projection:
+// a frame is clock (step/time) plus generic spatial items (position,
+// velocity, glyph hints) plus named scalar channels. This mirrors one
+// engine -> GUI projection exactly — views consume link::Frame
+// (link/frame.hpp) and never see solver internals, and each solver plugs
+// in through one adapter entry, with frame_from_snapshot() as the
+// particle adapter (the only one today). New domains add typed blocks
+// first and reuse Frame only when the projection is faithful; mesh
+// topology, orientation/constraints, and bulk tensor fields require typed
+// blocks and, where sec. 5 of that doc holds, new views — zero protocol
+// change, zero reader change, zero view change otherwise. Versions bump
+// only when the generic structs themselves need new field kinds. The shared model
 //   lives in link/frame.hpp: link::Frame is consumed directly by GUI
 //   views AND the encoder below — one source of truth, not twins.
 //

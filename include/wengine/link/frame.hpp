@@ -1,12 +1,11 @@
 #pragma once
 
-// Shared simulation view-model: the single source of truth for "one frame
-// of simulation output" consumed by GUI views AND the wengine-link wire
-// encoder. Solver-agnostic by design: clock (step/time) plus generic
-// spatial items (position, velocity, glyph hints) plus named scalar
-// channels. Particles, circuits, EM fields, FEA meshes, rigid bodies —
-// every domain describes itself in these terms, so views and readers never
-// learn solver internals.
+// Shared simulation view-model: ONE lossy projection for points-plus-scalars
+// displays and the fixed-capacity SHM/socket Frame path (see
+// docs/domain-outputs.md). It does not represent mesh topology, rigid-body
+// orientation/constraints, or bulk tensor fields, and must not define the
+// engine's scientific data limits: each domain owns typed numeric output
+// blocks first and reuses Frame only when the projection is faithful.
 //
 // LAYERING (one source of truth, two consumers):
 //   * GUI views/panels/history take `const link::Frame &` (never Snapshot

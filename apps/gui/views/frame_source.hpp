@@ -2,12 +2,15 @@
 
 // View-model seam between engine snapshots and GUI views.
 //
-// Views (2D canvas, 3D viewport, graphs) consume ONLY link::Frame — the
-// shared simulation view-model (link/frame.hpp), also the wengine-link
-// encode input. One source of truth, not twins: views never see Snapshot
-// internals and never see wire structs, so new solvers (fields, circuits,
-// rigid bodies, ...) feed the same views unchanged — only a new adapter
-// function plus one registry entry below are required.
+// Views (2D canvas, 3D viewport, graphs) consume ONLY link::Frame — one
+// lossy projection for points-plus-scalars displays (see
+// docs/domain-outputs.md), also a wengine-link encode input. One source
+// of truth for that projection, not twins: views never see Snapshot
+// internals and never see wire structs. Domains needing topology,
+// orientation, or bulk tensors own typed blocks first and reuse Frame
+// only when the projection is faithful — otherwise they add a new view
+// per that doc's sec. 5. Only a new adapter function plus one registry
+// entry below are required when Frame suffices.
 //
 // Plumbing:
 // - FrameItem: one drawable entity (position, optional velocity stub,
