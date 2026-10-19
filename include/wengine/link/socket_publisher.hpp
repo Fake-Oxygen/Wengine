@@ -11,7 +11,7 @@
 // sticky core::Status, so a slow or absent peer never stalls the sim loop.
 //
 // TCP (TcpPublisher): active connect to host:port, then a hello
-// (TcpHello: magic "WLT2", schema version 2, NUL-terminated domain)
+// (TcpHello: magic "WLT2", schema version 3, NUL-terminated domain)
 // followed by length-prefixed compact records (u32 LE byte count +
 // record). The hello IS the attach gate, in SHM wording: the reader
 // validates magic/schema/domain with check_tcp_hello and closes on

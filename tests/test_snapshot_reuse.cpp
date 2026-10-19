@@ -141,8 +141,8 @@ void test_growth_bounded_then_free() {
   world::fill_snapshot(s, buf); // first fill: at most one alloc per vector
   const std::size_t growth = stop_counting();
   assert(buf == world::take_snapshot(s));
-  std::cout << "  cold fill growth: " << growth << " allocs (bound: 7)\n";
-  assert(growth <= 7);
+  std::cout << "  cold fill growth: " << growth << " allocs (bound: 9)\n";
+  assert(growth <= 9);
 
   start_counting();
   for (int k = 0; k < 500; ++k) {

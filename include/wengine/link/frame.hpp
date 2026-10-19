@@ -40,6 +40,15 @@ struct FrameItem {
   bool has_velocity = true;
   double size = 1.0; // glyph scale hint (rigid bodies render bigger)
   std::uint32_t color = 0; // 0 = palette by index (future: heat/color data)
+  // Stable particle identity (entity slot index + generation, see
+  // world/entity.hpp). Set by frame_from_snapshot when the source Snapshot
+  // carries identity; legacy Snapshots/frames leave has_identity false
+  // (UNAVAILABLE) — dense position never substitutes for a stable ID.
+  // GUI rendering ignores these fields (glyphs by dense order); trajectory
+  // use of the IDs is a separate follow-up.
+  std::uint32_t entity_index = 0;
+  std::uint32_t entity_generation = 0;
+  bool has_identity = false;
 
   bool operator==(const FrameItem &) const noexcept = default;
 };
@@ -66,20 +75,27 @@ struct Frame {
 using FrameAdapter = Frame (*)(const world::Snapshot &);
 
 // Particle adapter: the only domain adapter today. Preserves dense slot
-// order; channels describe the primary item (slot 0, the CLI p0
-// convention) plus the live count. Future adapters (node voltages, field
-// probes, ...) expose their scalars the same way. Allocates in the same
-// cost class as take_snapshot().
+// order plus stable identity; channels describe the primary item (slot 0,
+// the CLI p0 convention) plus the live count. Future adapters (node
+// voltages, field probes, ...) expose their scalars the same way.
+// Allocates in the same cost class as take_snapshot(). Snapshots without
+// identity (legacy/manual) yield items with has_identity false.
 [[nodiscard]] inline Frame frame_from_snapshot(const world::Snapshot &s) {
   Frame f;
   f.step = s.step_index;
   f.time = s.sim_time;
+  const bool have_id = s.has_particle_identity();
   for (std::size_t k = 0; k < s.particle_count(); ++k) {
     FrameItem it;
     it.x = s.pos_x[k];
     it.y = s.pos_y[k];
     it.vx = s.vel_x[k];
     it.vy = s.vel_y[k];
+    if (have_id) {
+      it.entity_index = s.particle_index[k];
+      it.entity_generation = s.particle_generation[k];
+      it.has_identity = true;
+    }
     f.items.push_back(it);
   }
   f.channels.push_back({"count", static_cast<double>(s.particle_count())});
@@ -95,7 +111,9 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
 }
 
 // Inverse particle adapter for the record path (bus -> CSV): Frame items
-// become dense Snapshot slots in order, step/time carried over. Lossy by
+// become dense Snapshot slots in order, step/time carried over, identity
+// carried when every item has it (else UNAVAILABLE: Snapshot identity
+// vectors stay empty, never fabricated from dense positions). Lossy by
 // format necessity, documented: item z/vz have no CSV column and are
 // dropped, channels are ignored (CSV is particle-shaped). Within those
 // bounds it is exact — snapshot_from_frame(frame_from_snapshot(s)) == s —
@@ -108,11 +126,26 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
   s.pos_y.reserve(f.items.size());
   s.vel_x.reserve(f.items.size());
   s.vel_y.reserve(f.items.size());
+  bool all_have_id = true;
+  for (const FrameItem &it : f.items) {
+    if (!it.has_identity) {
+      all_have_id = false;
+      break;
+    }
+  }
+  if (all_have_id && !f.items.empty()) {
+    s.particle_index.reserve(f.items.size());
+    s.particle_generation.reserve(f.items.size());
+  }
   for (const FrameItem &it : f.items) {
     s.pos_x.push_back(it.x);
     s.pos_y.push_back(it.y);
     s.vel_x.push_back(it.vx);
     s.vel_y.push_back(it.vy);
+    if (all_have_id && !f.items.empty()) {
+      s.particle_index.push_back(it.entity_index);
+      s.particle_generation.push_back(it.entity_generation);
+    }
   }
   return s;
 }

@@ -338,8 +338,16 @@ void test_csv_parity_exact() {
   assert(static_cast<bool>(std::getline(text, header)));
   std::string row;
   assert(static_cast<bool>(std::getline(text, row)));
-  const std::size_t c3 = row.find(',', row.find(',', row.find(',') + 1) + 1);
-  const double file_x = std::stod(row.substr(c3 + 1, row.find(',', c3 + 1) - c3 - 1));
+  std::vector<std::string> cells;
+  {
+    std::istringstream rs(row);
+    std::string cell;
+    while (std::getline(rs, cell, ',')) {
+      cells.push_back(cell);
+    }
+  }
+  assert(cells.size() == 9);
+  const double file_x = std::stod(cells[5]);
   assert(file_x == replay.frame().items[0].x);
   std::remove(path.c_str());
 }

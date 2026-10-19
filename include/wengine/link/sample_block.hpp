@@ -17,7 +17,7 @@
 //
 //   block         = header schema sample*
 //   header        = magic u32 "WLV2" (0x32564C57, == compact::kMagic)
-//                   schema u32 (= 2, == compact::kSchemaVersion)
+//                   schema u32 (= 3, == compact::kSchemaVersion)
 //                   kind u8 (= 2 sample block)
 //                   reserved u8[3] (must be zero on decode)
 //                   run_id u64 (publisher-run identity, opaque)

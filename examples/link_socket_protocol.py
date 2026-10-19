@@ -1,8 +1,8 @@
 """Small Python decoder for the WEngine signal TCP/UDP socket examples.
 
 Wire constants follow include/wengine/link/socket_publisher.hpp and
-include/wengine/link/compact_codec.hpp. Both transports carry compact v2
-records (magic "WLV2", schema 2, explicit little-endian fields, used
+include/wengine/link/compact_codec.hpp. Both transports carry compact v3
+records (magic "WLV2", schema 3, explicit little-endian fields, used
 entries only); TCP adds a u32 length prefix per record plus a "WLT2" hello,
 UDP sends bare datagrams (no handshake).
 """
@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import struct
 
-SOCKET_SCHEMA = 2
+SOCKET_SCHEMA = 3
 DOMAIN_SIZE = 32
 CHANNEL_NAME_SIZE = 32
 MAX_ITEMS = 1024
 MAX_CHANNELS = 64
 MAX_UDP_PAYLOAD = 65507
-MAX_COMPACT_RECORD = 65507  # == MAX_UDP_PAYLOAD: every v2 record fits a datagram
+MAX_COMPACT_RECORD = 65507  # == MAX_UDP_PAYLOAD: every encodable v3 record fits a datagram
 
 TCP_MAGIC = b"WLT2"
 
@@ -25,7 +25,7 @@ TCP_FRAME_PREFIX_SIZE = 4
 TCP_HELLO_SIZE = 8 + DOMAIN_SIZE
 
 COMPACT_HEADER_SIZE = 84
-COMPACT_ITEM_SIZE = 61
+COMPACT_ITEM_SIZE = 70
 COMPACT_MAX_NAME = CHANNEL_NAME_SIZE - 1
 
 # Sample-block (kind 2) layout, see include/wengine/link/sample_block.hpp:
@@ -62,7 +62,7 @@ def decode_tcp_hello(data: bytes) -> str:
 
 
 def decode_compact_record(data: bytes) -> tuple[int, int, int, float, list[tuple[str, float]]]:
-    """Decode one compact v2 record (variable length, explicit LE fields).
+    """Decode one compact v3 record (variable length, explicit LE fields).
 
     Returns (run_id, frame_seq, step_index, sim_time, channels). Only kind 1
     (frame) records decode; anything else raises, mirroring the C++ codec's
@@ -175,7 +175,7 @@ def decode_sample_block(
 
 
 def decode_v2_record(data: bytes) -> tuple[str, tuple]:
-    """Decode one v2 record of either kind (TCP length-prefix stripped).
+    """Decode one v3 record of either kind (TCP length-prefix stripped).
 
     Returns ("frame", decode_compact_record(...)) for kind 1 or ("block",
     decode_sample_block(...)) for kind 2; anything else raises. Mirrors the

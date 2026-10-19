@@ -86,15 +86,17 @@ void test_csv_content() {
 
   const auto lines = read_lines(path);
   assert(lines.size() == 3);
-  assert(lines[0] == "step,time,slot,x,y,vx,vy");
+  assert(lines[0] == "step,time,slot,entity_index,entity_generation,x,y,vx,vy");
   const auto r0 = split_csv(lines[1]);
   const auto r1 = split_csv(lines[2]);
-  assert(r0.size() == 7 && r1.size() == 7);
+  assert(r0.size() == 9 && r1.size() == 9);
   assert(std::stoull(r0[0]) == 7 && std::stoull(r0[2]) == 0);
+  assert(std::stoull(r0[3]) == 0 && std::stoull(r0[4]) == 0); // stable identity
   assert(std::stod(r0[1]) == 0.07); // exact round-trip via max_digits10
-  assert(std::stod(r0[3]) == 0.1 + 0.2);
-  assert(std::stod(r0[6]) == 1.5);
-  assert(std::stoull(r1[2]) == 1 && std::stod(r1[3]) == -4.0);
+  assert(std::stod(r0[5]) == 0.1 + 0.2);
+  assert(std::stod(r0[8]) == 1.5);
+  assert(std::stoull(r1[2]) == 1 && std::stod(r1[5]) == -4.0);
+  assert(std::stoull(r1[3]) == 1 && std::stoull(r1[4]) == 0);
   std::remove(path.c_str());
 }
 
@@ -108,7 +110,7 @@ void test_csv_empty_and_failure() {
     assert(sink.rows_written() == 0);
   }
   const auto lines = read_lines(path);
-  assert(lines.size() == 1 && lines[0] == "step,time,slot,x,y,vx,vy");
+  assert(lines.size() == 1 && lines[0] == "step,time,slot,entity_index,entity_generation,x,y,vx,vy");
   std::remove(path.c_str());
 
   // Unwritable path: sticky failure, never throws.
@@ -150,17 +152,18 @@ void test_end_to_end_through_runner() {
 
   // File: header + 10 rows; step k carries k particles in slot order.
   const auto lines = read_lines(path);
-  assert(lines.size() == 11 && lines[0] == "step,time,slot,x,y,vx,vy");
+  assert(lines.size() == 11 && lines[0] == "step,time,slot,entity_index,entity_generation,x,y,vx,vy");
   std::size_t row = 1;
   for (std::uint64_t step = 1; step <= 4; ++step) {
     for (std::uint64_t slot = 0; slot < step; ++slot, ++row) {
       const auto f = split_csv(lines[row]);
-      assert(f.size() == 7);
+      assert(f.size() == 9);
       assert(std::stoull(f[0]) == step);
       assert(near(std::stod(f[1]), 0.01 * step));
       assert(std::stoull(f[2]) == slot);
-      assert(near(std::stod(f[3]), static_cast<double>(slot)));
-      assert(near(std::stod(f[4]), -static_cast<double>(slot)));
+      assert(near(std::stod(f[5]), static_cast<double>(slot)));
+      assert(near(std::stod(f[6]), -static_cast<double>(slot)));
+      assert(std::stoull(f[3]) == slot && std::stoull(f[4]) == 0); // identity = slot, gen 0
     }
   }
   std::remove(path.c_str());

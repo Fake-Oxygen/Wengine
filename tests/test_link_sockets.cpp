@@ -870,7 +870,9 @@ link::Frame empty_frame_adapter(const world::Snapshot &) { return link::Frame{};
 
 void test_tcp_empty_and_max_records() {
   // Wire extremes over loopback: an empty Frame is exactly a header
-  // (84-byte record); a 1024-particle snapshot is the maximum-shape record.
+  // (84-byte record); a 900-particle snapshot is the largest budgeted
+  // shape that still fits the datagram bound (v3 items are 70 B, so
+  // full 1024-item frames are SHM/TCP-only and refuse loudly elsewhere).
   // Both decode exactly, proving variable framing at both ends.
   {
     std::uint16_t port = 0;
@@ -920,15 +922,19 @@ void test_tcp_empty_and_max_records() {
     world::Snapshot snap;
     snap.step_index = 7;
     snap.sim_time = 0.07;
-    snap.pos_x.resize(1024);
-    snap.pos_y.resize(1024);
-    snap.vel_x.resize(1024);
-    snap.vel_y.resize(1024);
-    for (std::size_t k = 0; k < 1024; ++k) {
+    snap.pos_x.resize(900);
+    snap.pos_y.resize(900);
+    snap.vel_x.resize(900);
+    snap.vel_y.resize(900);
+    snap.particle_index.resize(900);
+    snap.particle_generation.resize(900);
+    for (std::size_t k = 0; k < 900; ++k) {
       snap.pos_x[k] = 0.125 * static_cast<double>(k);
       snap.pos_y[k] = -0.25 * static_cast<double>(k);
       snap.vel_x[k] = 1.0;
       snap.vel_y[k] = 2.0;
+      snap.particle_index[k] = static_cast<std::uint32_t>(k);
+      snap.particle_generation[k] = static_cast<std::uint32_t>(k & 1u);
     }
     pub.on_snapshot(snap);
     assert(pub.ok() && pub.stats().published == 1);

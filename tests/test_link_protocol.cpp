@@ -105,9 +105,10 @@ void test_header_init_and_check() {
 }
 
 void test_compat_matrix() {
-  // v1 matrix: same version + capacities + valid domain interops; every
+  // v3 matrix: same version + capacities + valid domain interops; every
   // other combination refuses loudly with the actionable cause reported.
-  // When v2 lands, its row is added here — these rows keep passing.
+  // v1/v2 rows keep refusing (different sizes/sync/identity) — detection
+  // only gets stricter.
   link::SegmentHeader good;
   assert(link::init_header(good, "projectile").ok());
   const link::HeaderReport ok_rep = link::inspect_header(good);
@@ -132,8 +133,8 @@ void test_compat_matrix() {
     assert(!link::check_header(foreign).ok());
   }
 
-  // v1 plain-payload segments refuse loudly under v2 (same size, different
-  // synchronization — never interoperable).
+  // v1 plain-payload and v2 no-identity segments refuse loudly under v3
+  // (different sizes/synchronization/identity — never interoperable).
   {
     link::SegmentHeader v1;
     assert(link::init_header(v1, "projectile").ok());
@@ -143,6 +144,16 @@ void test_compat_matrix() {
     assert(rep.issue == link::HeaderIssue::kVersionMismatch);
     assert(rep.found_version == link::kVersionV1);
     assert(!link::check_header(v1).ok());
+  }
+  {
+    link::SegmentHeader v2;
+    assert(link::init_header(v2, "projectile").ok());
+    v2.version.store(link::kVersionV2, std::memory_order_release);
+    const link::HeaderReport rep = link::inspect_header(v2);
+    assert(!rep.status.ok());
+    assert(rep.issue == link::HeaderIssue::kVersionMismatch);
+    assert(rep.found_version == link::kVersionV2);
+    assert(!link::check_header(v2).ok());
   }
 
   // Capacity drift under a matching version: capacity cause, not version.

@@ -73,6 +73,16 @@ struct Snapshot {
   std::vector<double> pos_y;
   std::vector<double> vel_x;
   std::vector<double> vel_y;
+  // Stable particle identity in the same dense slot order: entity slot
+  // index + generation per live particle (see world/entity.hpp). A
+  // surviving particle keeps its (index, generation) when earlier slots
+  // disappear; a recycled slot carries a bumped generation, so the pair
+  // never aliases a distinct object. fill_snapshot always populates both
+  // vectors (sizes == particle_count); manually built or legacy-decoded
+  // snapshots may leave them empty, which means UNAVAILABLE — never treat
+  // dense positions as stable IDs (see link/frame.hpp, emit/csv_sink.hpp).
+  std::vector<std::uint32_t> particle_index;
+  std::vector<std::uint32_t> particle_generation;
   // Dense copy of live signal sources in slot order (deterministic):
   // stable serial, SI value, and QuantityId tag per source.
   std::vector<std::uint64_t> sig_serial;
@@ -81,13 +91,19 @@ struct Snapshot {
 
   [[nodiscard]] std::size_t particle_count() const noexcept { return pos_x.size(); }
   [[nodiscard]] std::size_t signal_count() const noexcept { return sig_value.size(); }
+  // True when particle identity is present (fill_snapshot output, or an
+  // empty snapshot vacuously). False means legacy/unavailable: dense order
+  // only, no stable IDs.
+  [[nodiscard]] bool has_particle_identity() const noexcept {
+    return particle_index.size() == particle_count() && particle_generation.size() == particle_count();
+  }
 
   bool operator==(const Snapshot &) const noexcept = default;
 };
 
 // Fill `out` from `s` (clocks + dense live arrays in slot order),
 // reusing `out`'s capacities: allocation-free once `out` has warmed to the
-// live population; growth allocates at most once per vector per fill (seven
+// live population; growth allocates at most once per vector per fill (nine
 // vectors total). `clear()` retains capacity, so shrinking (despawn, zero
 // live sources) never allocates either. Value-identical to take_snapshot.
 inline void fill_snapshot(const State &s, Snapshot &out) {
@@ -97,6 +113,8 @@ inline void fill_snapshot(const State &s, Snapshot &out) {
   out.pos_y.clear();
   out.vel_x.clear();
   out.vel_y.clear();
+  out.particle_index.clear();
+  out.particle_generation.clear();
   if (out.pos_x.capacity() < s.particles.live_count) {
     out.pos_x.reserve(s.particles.live_count);
   }
@@ -109,12 +127,21 @@ inline void fill_snapshot(const State &s, Snapshot &out) {
   if (out.vel_y.capacity() < s.particles.live_count) {
     out.vel_y.reserve(s.particles.live_count);
   }
+  if (out.particle_index.capacity() < s.particles.live_count) {
+    out.particle_index.reserve(s.particles.live_count);
+  }
+  if (out.particle_generation.capacity() < s.particles.live_count) {
+    out.particle_generation.reserve(s.particles.live_count);
+  }
+  const auto &gens = s.entities.generations();
   for (std::uint32_t i = 0; i < s.particles.capacity(); ++i) {
     if (s.particles.has(i)) {
       out.pos_x.push_back(s.particles.pos_x[i]);
       out.pos_y.push_back(s.particles.pos_y[i]);
       out.vel_x.push_back(s.particles.vel_x[i]);
       out.vel_y.push_back(s.particles.vel_y[i]);
+      out.particle_index.push_back(i);
+      out.particle_generation.push_back(i < gens.size() ? gens[i] : 0);
     }
   }
   out.sig_serial.clear();
@@ -159,6 +186,8 @@ inline void select_signals_into(const Snapshot &s, std::span<const std::uint64_t
   out.pos_y = s.pos_y;
   out.vel_x = s.vel_x;
   out.vel_y = s.vel_y;
+  out.particle_index = s.particle_index;
+  out.particle_generation = s.particle_generation;
   out.sig_serial.clear();
   out.sig_value.clear();
   out.sig_quantity.clear();

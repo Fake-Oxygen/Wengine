@@ -79,14 +79,15 @@
 //       adapters, not structs. LinkFrame is frozen except via the
 //       versioning task's compat matrix.
 //
-// WIRE LAYOUT (v2, same-host — see portability note):
+// WIRE LAYOUT (v3, same-host — see portability note):
 //
 //   segment  = SegmentHeader + Slot[kSlotCount]
 //   Slot     = seq (u64 seqlock) + words[kFrameWords] (atomic u64 payload)
 //   LinkFrame = frame_seq, step_index, sim_time,
 //               item_count, items[kMaxItems],
 //               channel_count, channels[kMaxChannels]
-//   LinkItem  = x,y,z, vx,vy,vz, size, color, has_velocity (+ pad to 64 B)
+//   LinkItem  = x,y,z, vx,vy,vz, size, color, has_velocity, has_identity,
+//               entity_index, entity_generation (+ pad to 72 B)
 //   LinkChannel = name[kChannelNameSize] (NUL-terminated), value
 //
 //   LinkFrame is the local POD codec type only: encode/decode targets and
@@ -96,13 +97,16 @@
 //   kFrameWords == sizeof(LinkFrame) / 8; word 0 carries frame_seq
 //   (offset-asserted), so the latest-scan peek needs no plain access.
 //
-//   Frame ~= 40 B + 64 KiB items + 2.5 KiB channels (~= 67 KiB);
-//   8 slots ~= 540 KiB per segment. Bounds are compile-time constants so
+//   Frame ~= 40 B + 72 KiB items + 2.5 KiB channels (~= 75 KiB);
+//   8 slots ~= 600 KiB per segment. Bounds are compile-time constants so
 //   every peer agrees without negotiation; over-bound frames (too many
 //   items/channels, over-long names) are dropped loudly (S7).
 //   v2 keeps the v1 byte size (atomic u64 == u64 in size) but changes the
 //   synchronization semantics, hence the version bump: v1 peers refuse v2
 //   segments loudly at attach instead of racing them.
+//   v3 grows LinkItem 64 -> 72 B for stable particle identity
+//   (entity_index + entity_generation + has_identity): v1/v2 peers refuse
+//   v3 segments loudly at attach (version gate + size gate).
 //
 // SEQLOCK PROTOCOL (single writer, many readers — v2 atomic slot protocol):
 //   Writer: seq -> odd (relaxed) | atomic word stores (relaxed) |
@@ -140,23 +144,26 @@
 //   version verdict — a partially initialized header can never be mistaken
 //   for an incompatible writer.
 //
-// COMPAT MATRIX (v2 current; v1 refused loudly):
+// COMPAT MATRIX (v3 current; v1/v2 refused loudly):
 //   same version + capacities + valid domain -> attach, full interop.
 //   anything else -> loud refusal with found-version report. v1 segments
-//   (plain-payload layout) are refused by v2 readers with a version
-//   verdict, and v2 segments are refused by v1 readers the same way —
-//   same size, different synchronization, never interoperable. When v3
+//   (plain-payload layout) are refused by v2/v3 readers with a version
+//   verdict, v2 segments (64 B items, no identity) are refused by v3
+//   readers the same way, and v3 segments are refused by v1/v2 readers —
+//   different sizes and synchronization, never interoperable. When v4
 //   lands, its matrix row is added beside these rows, not instead of them.
 //
-// MIGRATION POLICY (for v2 authors):
+// MIGRATION POLICY (for v3 authors):
 //   Bump kVersion; never reuse a version number. Version 0 is reserved as
 //   the unready marker and will never be assigned to a real writer. Keep
-//   every v1 rejection test passing (detection only gets stricter). New
-//   fields go in new structs — v1 readers must keep refusing v2 segments
+//   every v1/v2 rejection test passing (detection only gets stricter). New
+//   fields go in new structs — old readers must keep refusing new segments
 //   loudly, which the crafted-segment tests guard. Multi-version readers
 //   (accept ranges) are deferred until a second version actually exists;
 //   until then readers support exactly one version and say so in refusal
-//   messages.
+//   messages. v3 identity fields: items without identity (legacy frames,
+//   has_identity 0) decode to Frames with has_identity false — unavailable,
+//   never fabricated from dense order.
 //
 // DROP-OLDEST + LAG ACCOUNTING (policy decision, recorded):
 //   Writer drops oldest on full (ring overwrite). Latest-only readers take
@@ -212,11 +219,14 @@
 namespace wengine::link {
 
 // Protocol version peers must match exactly (see check_header).
+// v3: stable particle identity per item (PHYSI particle-identity task).
 // v2: atomic slot payload (PHYSI-31). Socket-schema versions evolve
 // independently (compact_codec.hpp) and never see this word.
-inline constexpr std::uint32_t kVersion = 2;
-// v1 segment version, refused loudly by v2 readers (and vice versa).
+inline constexpr std::uint32_t kVersion = 3;
+// v1 segment version, refused loudly by v2/v3 readers (and vice versa).
 inline constexpr std::uint32_t kVersionV1 = 1;
+// v2 segment version (64 B items, no identity), refused loudly by v3.
+inline constexpr std::uint32_t kVersionV2 = 2;
 // Fixed frame bounds: every peer agrees without negotiation (see S1/S7).
 inline constexpr std::size_t kMaxItems = 1024;
 inline constexpr std::size_t kMaxChannels = 64;
@@ -239,12 +249,15 @@ struct LinkItem {
   double size = 1.0;
   std::uint32_t color = 0;
   std::uint8_t has_velocity = 1;
-  std::uint8_t reserved[3] = {}; // explicit pad: stable 64 B layout
+  std::uint8_t has_identity = 0; // 0/1 only (checked on decode)
+  std::uint8_t reserved[2] = {}; // explicit pad: stable 72 B layout
+  std::uint32_t entity_index = 0; // valid iff has_identity != 0
+  std::uint32_t entity_generation = 0; // valid iff has_identity != 0
 };
 
 static_assert(std::is_standard_layout_v<LinkItem>);
 static_assert(std::is_trivially_copyable_v<LinkItem>);
-static_assert(sizeof(LinkItem) == 64);
+static_assert(sizeof(LinkItem) == 72);
 
 struct LinkChannel {
   char name[kChannelNameSize] = {}; // NUL-terminated (checked on decode)
@@ -520,6 +533,11 @@ struct HeaderReport {
     dst.size = src.size;
     dst.color = src.color;
     dst.has_velocity = src.has_velocity ? std::uint8_t{1} : std::uint8_t{0};
+    dst.has_identity = src.has_identity ? std::uint8_t{1} : std::uint8_t{0};
+    dst.reserved[0] = 0;
+    dst.reserved[1] = 0;
+    dst.entity_index = src.entity_index;
+    dst.entity_generation = src.entity_generation;
   }
   out.channel_count = static_cast<std::uint64_t>(in.channels.size());
   for (std::size_t k = 0; k < in.channels.size(); ++k) {
@@ -535,8 +553,11 @@ struct HeaderReport {
 }
 
 // Wire -> Frame (S3/S4). Cold reader side: may allocate (vectors/strings),
-// so NOT noexcept — never call inside the sim loop. Corrupt counts or an
-// unterminated channel name is kInvalidArgument, never an OOB read.
+// so NOT noexcept — never call inside the sim loop. Corrupt counts, an
+// unterminated channel name, or a non-0/1 identity flag is
+// kInvalidArgument, never an OOB read. Items without identity
+// (has_identity 0, e.g. legacy publishers) yield Frames with
+// has_identity false — unavailable, never fabricated.
 [[nodiscard]] inline core::Status decode_frame(const LinkFrame &frame, Frame &out) {
   if (frame.item_count > static_cast<std::uint64_t>(kMaxItems) ||
       frame.channel_count > static_cast<std::uint64_t>(kMaxChannels)) {
@@ -556,6 +577,11 @@ struct HeaderReport {
       return {core::StatusCode::kInvalidArgument};
     }
   }
+  for (std::size_t k = 0; k < n_items; ++k) {
+    if (frame.items[k].has_identity != std::uint8_t{0} && frame.items[k].has_identity != std::uint8_t{1}) {
+      return {core::StatusCode::kInvalidArgument};
+    }
+  }
   out.step = frame.step_index;
   out.time = frame.sim_time;
   out.items.resize(n_items);
@@ -571,6 +597,9 @@ struct HeaderReport {
     dst.size = src.size;
     dst.color = src.color;
     dst.has_velocity = src.has_velocity != std::uint8_t{0};
+    dst.has_identity = src.has_identity != std::uint8_t{0};
+    dst.entity_index = src.entity_index;
+    dst.entity_generation = src.entity_generation;
   }
   out.channels.resize(n_channels);
   for (std::size_t k = 0; k < n_channels; ++k) {

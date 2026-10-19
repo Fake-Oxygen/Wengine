@@ -334,11 +334,10 @@ struct CraftedSegment {
 };
 
 void test_version_negotiation() {
-  // New-reader / old-writer row: a v1 header (capacities intact, plain
-  // payload) refuses fast with the found version reported — the clear
-  // error. Same verdict on every attempt (deterministic negotiation,
-  // nothing to retry). v1 and v2 share the byte size but never interop:
-  // different synchronization.
+  // New-reader / old-writer rows: v1 (plain payload) and v2 (no identity)
+  // refuse fast with the found version reported — the clear error. Same
+  // verdict on every attempt (deterministic negotiation, nothing to
+  // retry). v1/v2/v3 never interop: different sizes/synchronization.
   {
     CraftedSegment seg(seg_name("v1"));
     const char *domain = "projectile";
@@ -359,9 +358,28 @@ void test_version_negotiation() {
     link::ShmReader retry(seg.name);
     assert(retry.state() == link::AttachState::kRefused);
   }
-  // Old-reader / new-writer row: a future v3 header refuses the same way.
   {
-    CraftedSegment seg(seg_name("v3"));
+    CraftedSegment seg(seg_name("v2"));
+    const char *domain = "projectile";
+    for (std::size_t i = 0; domain[i] != '\0'; ++i) {
+      seg.header->domain[i] = domain[i];
+    }
+    seg.header->max_items = static_cast<std::uint64_t>(link::kMaxItems);
+    seg.header->max_channels = static_cast<std::uint64_t>(link::kMaxChannels);
+    seg.header->slot_count = static_cast<std::uint64_t>(link::kSlotCount);
+    seg.header->version.store(link::kVersionV2, std::memory_order_release);
+    link::ShmReader reader(seg.name);
+    assert(!reader.ok());
+    assert(reader.state() == link::AttachState::kRefused);
+    assert(reader.report().issue == link::HeaderIssue::kVersionMismatch);
+    assert(reader.report().found_version == link::kVersionV2);
+    assert(reader.header() == nullptr);
+    link::ShmReader retry(seg.name);
+    assert(retry.state() == link::AttachState::kRefused);
+  }
+  // Old-reader / new-writer row: a future v4 header refuses the same way.
+  {
+    CraftedSegment seg(seg_name("v4"));
     const char *domain = "projectile";
     for (std::size_t i = 0; domain[i] != '\0'; ++i) {
       seg.header->domain[i] = domain[i];

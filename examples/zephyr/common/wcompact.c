@@ -1,4 +1,4 @@
-/* WEngine compact v2 decoder implementation. See wcompact.h. */
+/* WEngine compact v3 decoder implementation. See wcompact.h. */
 
 #include "wcompact.h"
 
@@ -41,7 +41,7 @@ int wcompact_decode(const uint8_t *buf, size_t len, wcompact_frame_t *out) {
   if (len < (size_t)WCOMPACT_HEADER) {
     return -1;
   }
-  if (rd_u32(buf) != 0x32564C57u || rd_u32(buf + 4) != 2u || buf[8] != 1u) {
+  if (rd_u32(buf) != 0x32564C57u || rd_u32(buf + 4) != 3u || buf[8] != 1u) {
     return -2;
   }
   if (buf[9] != 0 || buf[10] != 0 || buf[11] != 0) {

@@ -1,8 +1,8 @@
-/* WEngine compact v2 record decoder (Zephyr socket sample, SIG-8).
+/* WEngine compact v3 record decoder (Zephyr socket sample, SIG-8).
  *
  * C99, no libc beyond <stdint.h>/<stddef.h>. Decodes exactly what
- * link/compact_codec.hpp documents (magic "WLV2", schema 2, kind 1,
- * 84 B header, 61 B items skipped by count, name_len+name+f64 channels)
+ * link/compact_codec.hpp documents (magic "WLV2", schema 3, kind 1,
+ * 84 B header, 70 B items skipped by count, name_len+name+f64 channels)
  * and refuses everything else loudly: -1 truncated, -2 wrong
  * magic/schema/kind, -3 bad reserved/counts/domain, -4 corrupt name
  * length or trailing bytes. Shared with the host unit test, which feeds
@@ -21,7 +21,7 @@ extern "C" {
 #define WCOMPACT_MAX_CHANNELS 64u
 #define WCOMPACT_NAME_MAX 31u
 #define WCOMPACT_HEADER 84u
-#define WCOMPACT_ITEM 61u
+#define WCOMPACT_ITEM 70u
 
 typedef struct {
   char name[WCOMPACT_NAME_MAX + 1u];

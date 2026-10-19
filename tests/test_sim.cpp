@@ -134,7 +134,7 @@ void test_cli_csv() {
   std::string header;
   std::string tail;
   assert(static_cast<bool>(std::getline(in, header)));
-  assert(header == "step,time,slot,x,y,vx,vy");
+  assert(header == "step,time,slot,entity_index,entity_generation,x,y,vx,vy");
   // Steps 5 and 10, two particles each, slots 0 and 1 in order.
   for (int step : {5, 10}) {
     for (int slot = 0; slot < 2; ++slot) {

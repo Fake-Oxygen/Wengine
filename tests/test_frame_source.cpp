@@ -148,7 +148,7 @@ void test_csv_exactness() {
   std::ifstream in(path);
   std::string header;
   assert(static_cast<bool>(std::getline(in, header)));
-  assert(header == "step,time,slot,x,y,vx,vy");
+  assert(header == "step,time,slot,entity_index,entity_generation,x,y,vx,vy");
   std::size_t row = 0;
   std::string line;
   while (std::getline(in, line)) {
@@ -158,9 +158,10 @@ void test_csv_exactness() {
     char *end = nullptr;
     const auto step = std::strtoull(p, &end, 10);
     assert(end != p && *end == ',');
-    // Parse all six trailing doubles in order: time,slot,x,y,vx,vy.
-    double got[6] = {};
-    for (int k = 0; k < 6; ++k) {
+    // Parse all eight trailing fields in order:
+    // time,slot,entity_index,entity_generation,x,y,vx,vy (slot/ids as doubles).
+    double got[8] = {};
+    for (int k = 0; k < 8; ++k) {
       assert(*end == ',');
       p = end + 1;
       got[k] = std::strtod(p, &end);
@@ -170,11 +171,14 @@ void test_csv_exactness() {
     assert(step == f.step);
     assert(got[0] == f.time);
     assert(got[1] == 0.0); // single particle: slot 0
+    assert(got[2] == 0.0 && got[3] == 0.0); // identity: index 0, gen 0
     assert(!f.items.empty());
-    assert(got[2] == f.items[0].x);
-    assert(got[3] == f.items[0].y);
-    assert(got[4] == f.items[0].vx);
-    assert(got[5] == f.items[0].vy);
+    assert(f.items[0].has_identity);
+    assert(f.items[0].entity_index == 0 && f.items[0].entity_generation == 0);
+    assert(got[4] == f.items[0].x);
+    assert(got[5] == f.items[0].y);
+    assert(got[6] == f.items[0].vx);
+    assert(got[7] == f.items[0].vy);
     ++row;
   }
   assert(row == 5);

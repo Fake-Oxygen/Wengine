@@ -1,6 +1,6 @@
 #pragma once
 
-// Compact socket codec (PHYSI-37): transport-independent v2 record
+// Compact socket codec (PHYSI-37): transport-independent v3 record
 // encode/decode for the wengine-link socket transports.
 //
 // WHY A SECOND SOCKET SCHEMA: v1 sockets have two defects this replaces
@@ -13,12 +13,18 @@
 // v2 specifies EVERY byte: all integers little-endian, all doubles
 // IEEE-754 binary64 bit patterns, no padding anywhere, only populated
 // entries encoded. One signal source is ~120 bytes, not 68 KB.
+// v3 adds stable particle identity per item (entity_index +
+// entity_generation + has_identity): items grow 61 -> 70 B, so
+// full-capacity 1024-item v3 frames exceed the maximum-size UDP payload
+// and are SHM/TCP-only — UDP publishers keep frames within their explicit
+// payload budget loudly (kOutOfRange), same policy as before.
 //
-// WIRE LAYOUT (v2, portable by construction):
+// WIRE LAYOUT (v3, portable by construction; v2 layout identical except
+// items are 61 B with no identity tail):
 //
 //   record        = header item* channel*
 //   header        = magic u32 "WLV2" (0x32564C57)
-//                   schema u32 (= 2, socket-schema versions, see below)
+//                   schema u32 (= 3, socket-schema versions, see below)
 //                   kind u8 (= 1 frame; 0 and 2..255 reserved)
 //                   reserved u8[3] (must be zero on decode)
 //                   run_id u64 (publisher-run identity, opaque)
@@ -28,8 +34,13 @@
 //                   domain u8[32] (NUL-terminated tag, non-empty; v1 rule)
 //                   item_count u32
 //                   channel_count u32                              [= 84 B]
-//   item          = x,y,z,vx,vy,vz,size f64 x7, color u32,
-//                   has_velocity u8 (0/1 only)                     [= 61 B]
+//   item (v3)     = x,y,z,vx,vy,vz,size f64 x7, color u32,
+//                   has_velocity u8 (0/1 only),
+//                   has_identity u8 (0/1 only),
+//                   entity_index u32, entity_generation u32       [= 70 B]
+//                   (valid iff has_identity != 0; legacy v2 items have no
+//                   tail and decode to has_identity false — unavailable,
+//                   never fabricated from dense order)
 //   channel       = name_len u8 (0..31), name u8[name_len] (raw bytes),
 //                   value f64                        [= 9..40 B]
 //
@@ -40,6 +51,8 @@
 // datagram / "WLV2" record); a raw v1-TCP frame has no magic at all and
 // classifies as unknown (see classify_record). Readers support exactly
 // one schema and refuse everything else loudly — same policy as v1.
+// v3 is current (particle identity); v2 records (61 B items, no identity
+// tail) are refused loudly by the schema gate.
 //
 // RUN IDENTITY: run_id distinguishes publisher restarts under one address
 // (PHYSI-40 session semantics): a receiver seeing run_id change resets its
@@ -55,9 +68,12 @@
 // BOUNDS (shared with v1 vocabulary, never silently truncated):
 //   items <= kMaxItems, channels <= kMaxChannels, names <= 31 chars,
 //   total <= kCompactMaxBytes (65507: every v2 record fits a maximum-size
-//   UDP payload, so one codec serves both socket transports).
-// A maximum-shape record (1024 items + 64 longest-name channels) is 65,108
-// bytes and always fits; anything over is kOutOfRange with `out` untouched.
+//   UDP payload, so one codec serves both socket transports; v3 items are
+//   larger, so full-capacity 1024-item v3 frames exceed the datagram budget
+//   and are refused loudly — SHM/TCP-only, UDP keeps budgeted frames).
+// A maximum-shape v2 record (1024 items + 64 longest-name channels) is
+// 65,108 bytes and always fits; the same shape in v3 is 74,324 bytes and
+// never encodes (over datagram: kOutOfRange with `out` untouched).
 //
 // LAYERING: pure helpers over link::Frame (frame.hpp), no sockets, no SHM,
 // no publishers — PHYSI-38 wires these into TcpPublisher/UdpPublisher and
@@ -86,7 +102,9 @@ inline constexpr std::uint32_t kMagic = 0x32564C57u;
 inline constexpr std::uint32_t kV1UdpMagic = 0x31554C57u;
 // Socket-schema version carried in every record (NOT link::kVersion: the
 // SHM segment gate and socket readers evolve independently).
-inline constexpr std::uint32_t kSchemaVersion = 2;
+inline constexpr std::uint32_t kSchemaVersion = 3;
+// v2 socket-schema version (61 B items, no identity), refused loudly by v3.
+inline constexpr std::uint32_t kSchemaVersionV2 = 2;
 // Record kinds. kFrame decodes via decode_record below; kSampleBlock
 // (PHYSI-44 batched signal samples) decodes via link/sample_block.hpp;
 // any other value is refused loudly until its decode entry exists.
@@ -98,8 +116,10 @@ inline constexpr std::size_t kHeaderSize = 84;
 // check_v2_schema gates on this minimum; each decoder re-checks its own
 // exact header anyway.
 inline constexpr std::size_t kMinV2HeaderSize = 68;
-// Explicit item size: 7x8 + 4 + 1 (no padding, ever).
-inline constexpr std::size_t kItemSize = 61;
+// Explicit item size: 7x8 + 4 + 1 + 1 + 4 + 4 (no padding, ever).
+// v2 items were 61 B (no identity tail); v3 adds has_identity + index +
+// generation.
+inline constexpr std::size_t kItemSize = 70;
 // Channel name bound mirrors v1 (kChannelNameSize - 1 usable chars);
 // the u8 length prefix carries 0..31 (empty names round-trip exactly,
 // matching v1 acceptance).
@@ -150,7 +170,7 @@ inline double get_f64_le(const unsigned char *src) noexcept {
 } // namespace detail
 
 // Socket-schema family of a byte prefix (v1/v2 refusal vocabulary for
-// PHYSI-38 dispatch): "WLU1" datagrams are v1, "WLV2"+schema 2 records are
+// PHYSI-38 dispatch): "WLU1" datagrams are v1, "WLV2"+schema 3 records are
 // v2, everything else (raw v1-TCP frames have no magic, hellos, garbage,
 // future schemas) is unknown — refused loudly, never guessed.
 enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
@@ -251,6 +271,9 @@ enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
     detail::put_f64_le(dst + 48, src.size);
     detail::put_u32_le(dst + 56, src.color);
     dst[60] = src.has_velocity ? static_cast<unsigned char>(1) : static_cast<unsigned char>(0);
+    dst[61] = src.has_identity ? static_cast<unsigned char>(1) : static_cast<unsigned char>(0);
+    detail::put_u32_le(dst + 62, src.entity_index);
+    detail::put_u32_le(dst + 66, src.entity_generation);
     dst += kItemSize;
   }
   for (const FrameChannel &src : in.channels) {
@@ -265,15 +288,17 @@ enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
   return core::Status::success();
 }
 
-// v2 record bytes -> Frame. Cold reader side: may allocate (vectors/
+// v3 record bytes -> Frame. Cold reader side: may allocate (vectors/
 // strings), so NOT noexcept — never call inside the sim loop. Validates
 // the full record BEFORE touching `out` (magic, schema, kind, zero
 // reserved, domain shape + optional exact match, count bounds, name
-// lengths, has_velocity 0/1, EXACT total length); violations are
-// kInvalidArgument with `out`/outs untouched. Non-kFrame kinds report
+// lengths, has_velocity/has_identity 0/1, EXACT total length); violations
+// are kInvalidArgument with `out`/outs untouched. Non-kFrame kinds report
 // through out_kind but decode nothing (their decode entry is future work).
 // Round-trip is exactly equal (==), including empty records (0 items +
 // 0 channels is valid) and non-finite doubles (bit-exact carrier).
+// v2 records (schema 2, 61 B items) are refused by the schema gate —
+// legacy identity is unavailable, never guessed.
 [[nodiscard]] inline core::Status decode_record(const unsigned char *bytes, std::size_t len,
                                                 std::string_view want_domain, Frame &out,
                                                 std::uint64_t &out_run_id,
@@ -340,10 +365,14 @@ enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
   if (cursor != len) {
     return {core::StatusCode::kInvalidArgument}; // trailing garbage or short
   }
-  // has_velocity discipline: only 0/1 cross the wire.
+  // has_velocity/has_identity discipline: only 0/1 cross the wire.
   for (std::size_t k = 0; k < n_items; ++k) {
     const unsigned char hv = bytes[kHeaderSize + k * kItemSize + 60];
     if (hv != 0 && hv != 1) {
+      return {core::StatusCode::kInvalidArgument};
+    }
+    const unsigned char hi = bytes[kHeaderSize + k * kItemSize + 61];
+    if (hi != 0 && hi != 1) {
       return {core::StatusCode::kInvalidArgument};
     }
   }
@@ -362,6 +391,9 @@ enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
     dst.size = detail::get_f64_le(src + 48);
     dst.color = detail::get_u32_le(src + 56);
     dst.has_velocity = src[60] != 0;
+    dst.has_identity = src[61] != 0;
+    dst.entity_index = detail::get_u32_le(src + 62);
+    dst.entity_generation = detail::get_u32_le(src + 66);
   }
   out.channels.resize(n_channels);
   {

@@ -134,7 +134,7 @@ void test_csv_replay_exact() {
   std::ifstream in(p1);
   std::string header;
   assert(static_cast<bool>(std::getline(in, header)));
-  assert(header == "step,time,slot,x,y,vx,vy");
+  assert(header == "step,time,slot,entity_index,entity_generation,x,y,vx,vy");
   for (std::size_t k = 0; k < snaps.size(); ++k) {
     std::string line;
     assert(static_cast<bool>(std::getline(in, line)));
@@ -144,14 +144,16 @@ void test_csv_replay_exact() {
     while (std::getline(row, cell, ',')) {
       f.push_back(cell);
     }
-    assert(f.size() == 7);
+    assert(f.size() == 9);
     assert(std::stoull(f[0]) == snaps[k].step_index); // exact
     assert(std::stod(f[1]) == snaps[k].sim_time);     // exact round-trip
     assert(std::stoull(f[2]) == 0);
-    assert(std::stod(f[3]) == snaps[k].pos_x[0]);
-    assert(std::stod(f[4]) == snaps[k].pos_y[0]);
-    assert(std::stod(f[5]) == snaps[k].vel_x[0]);
-    assert(std::stod(f[6]) == snaps[k].vel_y[0]);
+    assert(std::stoull(f[3]) == snaps[k].particle_index[0]);
+    assert(std::stoull(f[4]) == snaps[k].particle_generation[0]);
+    assert(std::stod(f[5]) == snaps[k].pos_x[0]);
+    assert(std::stod(f[6]) == snaps[k].pos_y[0]);
+    assert(std::stod(f[7]) == snaps[k].vel_x[0]);
+    assert(std::stod(f[8]) == snaps[k].vel_y[0]);
   }
   std::string tail;
   assert(!static_cast<bool>(std::getline(in, tail))); // exactly 10 rows

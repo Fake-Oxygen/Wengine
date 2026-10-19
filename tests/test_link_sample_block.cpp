@@ -42,7 +42,7 @@ world::Snapshot make_snapshot(std::uint64_t step, double time,
 // Total: 68 header + 2x12 schema + 2x(16+16) values = 156 bytes.
 constexpr std::array<unsigned char, 156> kGolden{{
     0x57, 0x4C, 0x56, 0x32, // magic "WLV2"
-    0x02, 0x00, 0x00, 0x00, // schema 2
+    0x03, 0x00, 0x00, 0x00, // schema 3
     0x02, // kind = sample block
     0x00, 0x00, 0x00, // reserved
     0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // run_id
@@ -480,7 +480,7 @@ void test_malformed() {
   }
   {
     auto b = good;
-    b[4] = 0x03;
+    b[4] = 0x04;
     refuses(b);
   }
   for (std::uint8_t k : {0x00, 0x01, 0x03, 0xFF}) {

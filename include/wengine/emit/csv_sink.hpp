@@ -1,9 +1,16 @@
 #pragma once
 
 // Machine-readable snapshot log: tidy CSV, one row per particle per
-// snapshot (`step,time,slot,x,y,vx,vy`), header written once on open.
-// Doubles use max_digits10 precision, so a log round-trips exactly and
-// doubles as the deterministic replay format (see the future link bridge).
+// snapshot (`step,time,slot,entity_index,entity_generation,x,y,vx,vy`),
+// header written once on open. v3 identity columns (PHYSI particle
+// identity): fill_snapshot snapshots always carry index+generation and
+// round-trip exactly; snapshots without identity (legacy/manual) write the
+// kMissingIdentity sentinel (0xFFFFFFFF) for both columns, which parses
+// back to unavailable (empty identity vectors) — never a fabricated
+// stable ID. Legacy 7-column logs (`step,time,slot,x,y,vx,vy`) still parse
+// as unavailable identity. Doubles use max_digits10 precision, so a log
+// round-trips exactly and doubles as the deterministic replay format (see
+// the future link bridge).
 //
 // Best-effort observer for the runner loop: I/O errors are sticky
 // (status flips to kInternal, further snapshots are skipped, nothing
@@ -31,6 +38,10 @@ namespace wengine::emit {
 
 class CsvSink : public ISink {
 public:
+  // Sentinel for unavailable particle identity in the CSV columns.
+  // Matches world::Entity::kInvalidIndex: never a live slot.
+  static constexpr std::uint32_t kMissingIdentity = 0xFFFFFFFFu;
+
   explicit CsvSink(std::string path, bool truncate = true) : path_(std::move(path)) {
     out_.open(path_, truncate ? std::ios::trunc : std::ios::app);
     if (!out_) {
@@ -39,7 +50,7 @@ public:
     }
     out_ << std::setprecision(std::numeric_limits<double>::max_digits10);
     if (truncate || out_.tellp() == std::streampos(0)) {
-      out_ << "step,time,slot,x,y,vx,vy\n";
+      out_ << "step,time,slot,entity_index,entity_generation,x,y,vx,vy\n";
     }
     if (!out_) {
       status_ = {core::StatusCode::kInternal};
@@ -50,9 +61,12 @@ public:
     if (!status_.ok()) {
       return;
     }
+    const bool have_id = s.has_particle_identity();
     for (std::size_t k = 0; k < s.particle_count(); ++k) {
-      out_ << s.step_index << ',' << s.sim_time << ',' << k << ',' << s.pos_x[k] << ','
-           << s.pos_y[k] << ',' << s.vel_x[k] << ',' << s.vel_y[k] << '\n';
+      const std::uint32_t idx = have_id ? s.particle_index[k] : kMissingIdentity;
+      const std::uint32_t gen = have_id ? s.particle_generation[k] : kMissingIdentity;
+      out_ << s.step_index << ',' << s.sim_time << ',' << k << ',' << idx << ',' << gen
+           << ',' << s.pos_x[k] << ',' << s.pos_y[k] << ',' << s.vel_x[k] << ',' << s.vel_y[k] << '\n';
       if (!out_) {
         status_ = {core::StatusCode::kInternal};
         return;
@@ -89,10 +103,10 @@ public:
 // Replay: parse a CsvSink log back into snapshots, one per step in file
 // order (see examples/link_bridge.cpp, which plays these onto the
 // wengine-link bus). Co-located with the writer so format and parser can
-// never drift apart: header, column order, and dense slot layout below
-// mirror on_snapshot exactly.
+// never drift apart: v3 identity header plus legacy support, column order
+// and dense slot layout below mirror on_snapshot exactly.
 //
-// Contract: header must match byte-for-byte; steps strictly increasing;
+// Contract: header is v3 or legacy (see below); steps strictly increasing;
 // slots dense 0..n-1 in row order per step; time identical across a step's
 // rows (exact ==: same text parses to the same double). Empty snapshots
 // have no rows in this format and therefore do not survive a CSV round
@@ -136,31 +150,32 @@ namespace csv_detail {
   return true;
 }
 
-// Split exactly 7 comma fields; false on any other shape (views share no
-// tolerance here: loud beats lossy).
-[[nodiscard]] inline bool split_row(const std::string &line,
-                                    std::string fields[7]) {
+// Split a row into fields; returns field count (7 legacy or 9 v3) or 0 on
+// any other shape (views share no tolerance here: loud beats lossy).
+[[nodiscard]] inline std::size_t split_row(const std::string &line, std::string fields[9]) {
   std::size_t begin = 0;
-  for (int k = 0; k < 6; ++k) {
+  std::size_t n = 0;
+  while (n < 9) {
     const std::size_t comma = line.find(',', begin);
     if (comma == std::string::npos) {
-      return false;
+      break;
     }
-    fields[k] = line.substr(begin, comma - begin);
+    fields[n++] = line.substr(begin, comma - begin);
     begin = comma + 1;
   }
-  if (line.find(',', begin) != std::string::npos) {
-    return false;
+  if (n > 8) {
+    return 0;
   }
-  fields[6] = line.substr(begin);
-  return true;
+  fields[n++] = line.substr(begin);
+  if (n != 7 && n != 9) {
+    return 0;
+  }
+  return n;
 }
 
 } // namespace csv_detail
 
-[[nodiscard]] inline core::Status
-parse_csv_log(std::istream &in, std::vector<world::Snapshot> &out,
-              std::string &error) {
+[[nodiscard]] inline core::Status parse_csv_log(std::istream &in, std::vector<world::Snapshot> &out, std::string &error) {
   out.clear();
   error.clear();
   const auto invalid = [&](const std::string &msg) {
@@ -172,31 +187,54 @@ parse_csv_log(std::istream &in, std::vector<world::Snapshot> &out,
   if (!std::getline(in, line)) {
     return invalid("empty log: missing header");
   }
-  if (line != "step,time,slot,x,y,vx,vy") {
+  const bool is_v3 = (line == "step,time,slot,entity_index,entity_generation,x,y,vx,vy");
+  const bool is_legacy = (line == "step,time,slot,x,y,vx,vy");
+  if (!is_v3 && !is_legacy) {
     return invalid("bad header on line 1: '" + line + "'");
   }
   std::uint64_t line_no = 1;
   bool have_step = false;
   std::uint64_t cur_step = 0;
   world::Snapshot cur;
+  bool cur_has_id = true;
+  auto flush_step = [&]() {
+    if (!cur_has_id) {
+      cur.particle_index.clear();
+      cur.particle_generation.clear();
+    }
+  };
   while (std::getline(in, line)) {
     ++line_no;
-    std::string fields[7];
+    std::string fields[9];
+    const std::size_t nfields = csv_detail::split_row(line, fields);
+    if (nfields == 0) {
+      return invalid("malformed row on line " + std::to_string(line_no));
+    }
+    if ((is_v3 && nfields != 9) || (is_legacy && nfields != 7)) {
+      return invalid("malformed row on line " + std::to_string(line_no));
+    }
     std::uint64_t step = 0;
     std::uint64_t slot = 0;
+    std::uint64_t eidx = 0;
+    std::uint64_t egen = 0;
     double time = 0.0;
     double x = 0.0;
     double y = 0.0;
     double vx = 0.0;
     double vy = 0.0;
-    if (!csv_detail::split_row(line, fields) ||
-        !csv_detail::parse_u64_field(fields[0], step) ||
-        !csv_detail::parse_f64_field(fields[1], time) ||
-        !csv_detail::parse_u64_field(fields[2], slot) ||
-        !csv_detail::parse_f64_field(fields[3], x) ||
-        !csv_detail::parse_f64_field(fields[4], y) ||
-        !csv_detail::parse_f64_field(fields[5], vx) ||
-        !csv_detail::parse_f64_field(fields[6], vy)) {
+    bool ok = csv_detail::parse_u64_field(fields[0], step) && csv_detail::parse_f64_field(fields[1], time) && csv_detail::parse_u64_field(fields[2], slot);
+    std::size_t vbase = 3;
+    if (ok && is_v3) {
+      ok = csv_detail::parse_u64_field(fields[3], eidx) && csv_detail::parse_u64_field(fields[4], egen) && eidx <= 0xFFFFFFFFull && egen <= 0xFFFFFFFFull;
+      vbase = 5;
+    }
+    if (ok) {
+      ok = csv_detail::parse_f64_field(fields[vbase + 0], x) &&
+           csv_detail::parse_f64_field(fields[vbase + 1], y) &&
+           csv_detail::parse_f64_field(fields[vbase + 2], vx) &&
+           csv_detail::parse_f64_field(fields[vbase + 3], vy);
+    }
+    if (!ok) {
       return invalid("malformed row on line " + std::to_string(line_no));
     }
     if (!have_step || step != cur_step) {
@@ -204,6 +242,7 @@ parse_csv_log(std::istream &in, std::vector<world::Snapshot> &out,
         if (step <= cur_step) {
           return invalid("step not increasing on line " + std::to_string(line_no));
         }
+        flush_step();
         out.push_back(cur);
         cur = world::Snapshot{};
       }
@@ -211,6 +250,7 @@ parse_csv_log(std::istream &in, std::vector<world::Snapshot> &out,
       have_step = true;
       cur.step_index = step;
       cur.sim_time = time;
+      cur_has_id = is_v3;
     } else if (time != cur.sim_time) {
       return invalid("time differs within step on line " + std::to_string(line_no));
     }
@@ -221,8 +261,18 @@ parse_csv_log(std::istream &in, std::vector<world::Snapshot> &out,
     cur.pos_y.push_back(y);
     cur.vel_x.push_back(vx);
     cur.vel_y.push_back(vy);
+    if (is_v3) {
+      constexpr std::uint64_t kMissing = 0xFFFFFFFFull;
+      if (eidx == kMissing || egen == kMissing) {
+        cur_has_id = false;
+      } else if (cur_has_id) {
+        cur.particle_index.push_back(static_cast<std::uint32_t>(eidx));
+        cur.particle_generation.push_back(static_cast<std::uint32_t>(egen));
+      }
+    }
   }
   if (have_step) {
+    flush_step();
     out.push_back(cur);
   }
   return core::Status::success();

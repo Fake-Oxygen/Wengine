@@ -211,7 +211,7 @@ is unknown unless a receiver reports it via its own `LagStats`.
 
 ## 6. CSV is output replay, not a restart checkpoint
 
-- Snapshot CSV logs (`step,time,slot,...` /
+- Snapshot CSV logs (`step,time,slot,entity_index,entity_generation,x,y,vx,vy` v3 with stable particle IDs; legacy 7-col `step,time,slot,x,y,vx,vy` still parses as unavailable identity, never fabricated /
   `step,time,sig_id,value,quantity`, `max_digits10`, exact round-trip)
   record emitted output for replay (`link_bridge play/record`,
   byte-identical round-trips). Empty snapshots leave no rows, so they

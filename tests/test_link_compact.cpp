@@ -29,7 +29,7 @@ namespace {
 // 84 header + (1+9+8) + (1+7+8).
 constexpr std::array<unsigned char, 118> kGolden{{
     0x57, 0x4C, 0x56, 0x32, // magic "WLV2"
-    0x02, 0x00, 0x00, 0x00, // schema 2
+    0x03, 0x00, 0x00, 0x00, // schema 3
     0x01, // kind = frame
     0x00, 0x00, 0x00, // reserved
     0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // run_id
@@ -110,7 +110,7 @@ void test_one_signal_size() {
   // not 68 KB. Golden shape above is 118 bytes (577x smaller than a TCP
   // full frame); bound the general one-source shape well below a KiB.
   assert(kGolden.size() == 118);
-  static_assert(sizeof(link::LinkFrame) == 68136);
+  static_assert(sizeof(link::LinkFrame) == 76328);
   assert(kGolden.size() * 500 < sizeof(link::LinkFrame));
   link::Frame f;
   f.channels.push_back({"sig.count", 1.0});
@@ -135,6 +135,9 @@ void test_round_trip_sweep() {
   a.vy = 0.5;
   a.vz = -2.5;
   a.has_velocity = false;
+  a.has_identity = true;
+  a.entity_index = 3;
+  a.entity_generation = 1;
   a.size = 2.0;
   a.color = 7;
   f.items.push_back(a);
@@ -174,8 +177,8 @@ void test_round_trip_sweep() {
 }
 
 void test_max_shape() {
-  // Maximum-shape record still fits a maximum-size datagram and
-  // round-trips exactly: 84 + 1024x61 + 64x(1+31+8) = 65,108 bytes.
+  // v3 items are 70 B (identity tail), so a maximum-shape frame is
+  // 84 + 1024x70 + 64x(1+31+8) = 74,324 bytes: over the maximum-size UDP
   link::Frame f;
   for (std::uint64_t k = 0; k < link::kMaxItems; ++k) {
     link::FrameItem it;
@@ -188,20 +191,38 @@ void test_max_shape() {
     f.channels.push_back({std::string(31, static_cast<char>('a' + (k % 26))),
                           static_cast<double>(k)});
   }
-  assert(link::compact::encoded_size(f) == 65108);
-  assert(link::compact::encoded_size(f) <= link::compact::kMaxRecordBytes);
+  assert(link::compact::encoded_size(f) == 0); // over datagram: not encodable
   std::vector<unsigned char> buf(link::compact::kMaxRecordBytes);
-  std::size_t len = 0;
-  assert(link::compact::encode_record(f, "signal", 9, 10, buf.data(), buf.size(), len)
+  std::size_t len = 0xDEADBEEF;
+  assert(!link::compact::encode_record(f, "signal", 9, 10, buf.data(), buf.size(), len)
              .ok());
-  assert(len == 65108);
+  assert(len == 0xDEADBEEF);
+  link::Frame g;
+  for (std::uint64_t k = 0; k < 890; ++k) {
+    link::FrameItem it;
+    it.x = static_cast<double>(k) * 0.125;
+    it.has_identity = true;
+    it.entity_index = static_cast<std::uint32_t>(k);
+    it.entity_generation = static_cast<std::uint32_t>(k & 1u);
+    g.items.push_back(it);
+  }
+  for (std::uint64_t k = 0; k < link::kMaxChannels; ++k) {
+    g.channels.push_back({std::string(31, static_cast<char>('a' + (k % 26))),
+                          static_cast<double>(k)});
+  }
+  const std::size_t need = link::compact::encoded_size(g);
+  assert(need != 0 && need <= link::compact::kMaxRecordBytes);
+  std::size_t glen = 0;
+  assert(link::compact::encode_record(g, "signal", 9, 10, buf.data(), buf.size(), glen)
+             .ok());
+  assert(glen == need);
   link::Frame out;
   std::uint64_t run_id = 0;
   std::uint64_t seq = 0;
   link::compact::RecordKind kind{};
-  assert(link::compact::decode_record(buf.data(), len, "signal", out, run_id, seq, kind)
+  assert(link::compact::decode_record(buf.data(), glen, "signal", out, run_id, seq, kind)
              .ok());
-  assert(out == f && run_id == 9 && seq == 10);
+  assert(out == g && run_id == 9 && seq == 10);
 }
 
 void test_over_bound() {
@@ -299,8 +320,8 @@ void test_malformed() {
     refuses(b);
   }
   {
-    auto b = good; // schema 3 (future): refused, not guessed
-    b[4] = 0x03;
+    auto b = good; // schema 4 (future): refused, not guessed
+    b[4] = 0x04;
     refuses(b);
   }
   for (std::uint8_t k : {0x00, 0x02, 0xFF}) { // non-frame kinds
@@ -362,6 +383,29 @@ void test_malformed() {
     bad[link::compact::kHeaderSize + 60] = 7;
     refuses(bad);
   }
+  {
+    // has_identity = 7: wire discipline is 0/1 only (stable IDs, never guessed).
+    std::array<unsigned char, 512> buf{};
+    std::size_t len = 0;
+    link::Frame f;
+    link::FrameItem it;
+    it.has_identity = true;
+    it.entity_index = 5;
+    it.entity_generation = 2;
+    f.items.push_back(it);
+    assert(link::compact::encode_record(f, "signal", 0, 0, buf.data(), buf.size(), len)
+               .ok());
+    std::vector<unsigned char> bad(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(len));
+    bad[link::compact::kHeaderSize + 61] = 7;
+    refuses(bad);
+  }
+  {
+    // v2 record (schema 2, 61 B items, no identity tail) refuses loudly:
+    // legacy identity is unavailable, never guessed.
+    auto b = good;
+    b[4] = 0x02;
+    refuses(b);
+  }
   // Reserved kind reports through out_kind while decoding nothing.
   {
     auto b = good;
@@ -382,7 +426,8 @@ static_assert(link::compact::kMaxNameLen == link::kChannelNameSize - 1);
 void test_v1_v2_refusal() {
   // Families classify exactly; gates refuse everything foreign loudly.
   // The retired v1 UDP magic still classifies V1 (refusal vocabulary for
-  // any stale peer) and is refused by the v2 gate and decoder.
+  // any stale peer) and is refused by the v3 gate and decoder. v2 records
+  // (schema 2) are refused the same way: legacy identity unavailable.
   const unsigned char v1_prefix[8] = {0x57, 0x4C, 0x55, 0x31, 0x01, 0x00, 0x00, 0x00};
   assert(link::compact::classify_record(v1_prefix, sizeof(v1_prefix)) ==
          link::compact::SocketSchema::kV1);
@@ -413,7 +458,7 @@ void test_v1_v2_refusal() {
     b[1] = 0x4C;
     b[2] = 0x56;
     b[3] = 0x32;
-    b[4] = 0x03;
+    b[4] = 0x04;
     assert(link::compact::classify_record(b.data(), b.size()) ==
            link::compact::SocketSchema::kUnknown);
     assert(!link::compact::check_v2_schema(b.data(), b.size()).ok());

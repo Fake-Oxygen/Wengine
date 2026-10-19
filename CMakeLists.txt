@@ -505,6 +505,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_snapshot_reuse PRIVATE wengine_core)
     add_test(NAME snapshot_reuse COMMAND test_snapshot_reuse)
 
+    add_executable(test_particle_identity tests/test_particle_identity.cpp)
+    target_link_libraries(test_particle_identity PRIVATE wengine_core)
+    add_test(NAME particle_identity COMMAND test_particle_identity)
+
     add_executable(test_link_protocol tests/test_link_protocol.cpp)
     target_link_libraries(test_link_protocol PRIVATE wengine_core)
     add_test(NAME link_protocol COMMAND test_link_protocol)
