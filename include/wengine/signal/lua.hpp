@@ -30,6 +30,17 @@
 // Chunks load in text mode only (`"t"` — bytecode rejected). Budgets are
 // instruction counts, never wall-clock.
 //
+// Iteration policy (determinism contract): stock pairs/next visit keys in
+// per-state hash order (Lua randomizes string hashing per lua_State), so
+// the sandbox replaces both globals with implementations over one total
+// key order — booleans (false < true), numbers (ascending), strings (byte
+// order); `ipairs` keeps stock array-part order (already deterministic).
+// Only scalar keys iterate: identity-based keys (table/function/userdata/
+// thread) and NaN fail the step loudly. `pairs` snapshots the sorted keys
+// once (added keys unseen, removed keys read nil); `next` re-sorts the
+// live keys per call. Snapshot work is C-side O(n log n), outside the
+// instruction budget.
+//
 // Wiring: `LuaSignalSolver` is an EXTRA solver (see solvers/run.hpp): the
 // app registers it BEFORE `SignalSolver`, which skips `kLua` slots while
 // this solver evaluates them in slot order first — so sums over Lua

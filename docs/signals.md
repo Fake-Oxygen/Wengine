@@ -453,15 +453,38 @@ error, non-number, non-finite, overrun — is a loud `kInvalidArgument`
 step failure (time/index frozen), like expressions; the solver keeps the
 last message for CLI/GUI display.
 
+Iteration policy (determinism contract): stock `pairs`/`next` visit keys
+in per-`lua_State` hash order — Lua randomizes string hashing per state
+(`luai_makeseed`: time + ASLR addresses), so a pinned Lua version alone
+proves nothing (the same `{a=1e16,b=-1e16,c=1}` reduction returned 0 in
+13 of 24 fresh processes and 1 in 11). The sandbox replaces both globals
+with implementations over one total key order: booleans (`false < true`),
+then numbers (ascending; mixed integer/float compares in double space,
+exact ties break integer-first), then strings (byte order). `ipairs`
+keeps stock array-part order (already deterministic). Only scalar keys
+iterate: identity-based keys (`table`/`function`/`userdata`/`thread`)
+and `NaN` fail the step loudly instead of following hash order.
+`pairs` snapshots the sorted keys once per call (keys added mid-loop are
+never visited, removed keys read `nil`, values read live); `next`
+re-sorts the live keys on every call (stateless, same order) and keeps
+the stock protocol (`next(t)` first, `next(t, k)` successor, nil at the
+end, unknown keys are errors). Compatibility: scripts that depended on
+hash order see a different but now stable order; scripts iterating
+identity/`NaN` keys now fail instead of returning hash-ordered results.
+
 Wiring: `LuaSignalSolver` is an EXTRA solver (extras step before the
 primary — see solvers/run.hpp): it evaluates `kLua` slots in slot order
 first (serial-keyed chunk cache, recompiled when the pool text differs,
 pruned on despawn; stopped slots frozen), `SignalSolver` skips them, and
 sums over Lua operands stay fresh. Scripts persist as pool text (v5);
 without an extra solver the driver rejects `kLua` rather than freezing
-silently. Cost (measured 2026-09-24): ~7 us/source-step for a small
-script vs ~165 ns parametric — fine at 1 kHz with a few sources, not for
-100 kHz-class sweeps (use expression/table there).
+silently. Cost (measured 2026-10-19, this host): ~6 us/source-step for a
+small script (matches the ~7 us 2026-09-24 note) vs ~165 ns parametric —
+fine at 1 kHz with a few sources, not for 100 kHz-class sweeps (use
+expression/table there). Iteration adds C-side snapshot work outside the
+instruction budget: ~15 us for a 3-key `pairs` sum, ~3.4 ms for a
+1000-key `pairs` sum that also rebuilds its table every step (per-key
+script work dominates; roughly linear in key count).
 
 ## 8. Determinism rules
 

@@ -476,6 +476,142 @@ void test_save_load_dead_lua() {
   }
 }
 
+double run_lua_once(std::string_view script, double dt = 0.01) {
+  LuaRun r(dt);
+  spawn_lua(r.runner, script);
+  assert(r.runner.run(1).ok());
+  return r.runner.state().signals.value[0];
+}
+
+void expect_lua_step_failure(std::string_view script) {
+  LuaRun r(0.01);
+  spawn_lua(r.runner, script);
+  const std::uint64_t evals_before = r.lua->evals();
+  const core::Status st = r.runner.run(1);
+  assert(!st.ok() && st.code == core::StatusCode::kInvalidArgument);
+  assert(r.runner.state().step_index == 0); // time/index frozen
+  assert(!r.lua->last_error().empty());
+  assert(r.lua->evals() == evals_before && r.lua->failures() == 1);
+}
+
+void test_pairs_deterministic_across_states() {
+  // Review repro: {a=1e16, b=-1e16, c=1} summed via pairs. Stock iteration
+  // visits string keys in per-state hash order (13x 0, 11x 1 over 24 fresh
+  // CLI processes); sandbox order (byte order: a, b, c) sums to exactly 1
+  // every time: 1e16 + -1e16 is exact, then +1.
+  constexpr std::string_view kScript =
+      "local t = {a=1e16, b=-1e16, c=1}\n"
+      "local s = 0\n"
+      "for _, v in pairs(t) do s = s + v end\n"
+      "return s";
+  for (int k = 0; k < 16; ++k) {
+    // Fresh interpreter per iteration (fresh lua_State, fresh hash seed).
+    assert(run_lua_once(kScript) == 1.0);
+  }
+}
+
+void test_iteration_key_order() {
+  // Total key order: booleans (false < true), numbers (ascending), strings
+  // (byte order). The accumulator spells the visit order as decimal digits.
+  constexpr std::string_view kMixed =
+      "local t = {[-2]=1, [1.5]=2, [3]=3, a=4, b=5, [false]=6, [true]=7}\n"
+      "local acc = 0\n"
+      "for _, v in pairs(t) do acc = acc * 10 + v end\n"
+      "return acc";
+  assert(run_lua_once(kMixed) == 6712345.0); // 6,7,1,2,3,4,5
+
+  // Byte order is case-sensitive with prefix handling: "B" < "a" < "b" < "bb".
+  constexpr std::string_view kStrings =
+      "local t = {b=1, a=2, bb=3, B=4}\n"
+      "local acc = 0\n"
+      "for _, v in pairs(t) do acc = acc * 10 + v end\n"
+      "return acc";
+  assert(run_lua_once(kStrings) == 4213.0);
+
+  // Direct next() follows the same order, ends with nil, and pins the
+  // stock tail protocol.
+  constexpr std::string_view kNext =
+      "local t = {[10]=1, [2]=2, [1]=3}\n"
+      "local k1 = next(t)\n"
+      "local k2 = next(t, k1)\n"
+      "local k3 = next(t, k2)\n"
+      "if next(t, k3) ~= nil then error('tail') end\n"
+      "return k1 * 100 + k2 * 10 + k3";
+  assert(run_lua_once(kNext) == 130.0); // 1, 2, 10
+  constexpr std::string_view kNextEmpty =
+      "if next({}) ~= nil then error('empty') end\n"
+      "return 42";
+  assert(run_lua_once(kNextEmpty) == 42.0);
+  // Unknown keys fail like stock next (never a silent nil walk).
+  expect_lua_step_failure("local t = {a=1}\nlocal k = next(t, 'b')\nreturn 1");
+}
+
+void test_iteration_rejects_identity_keys() {
+  // Identity-based keys have no deterministic order: loud step failure
+  // (time/index frozen), never hash-order iteration.
+  expect_lua_step_failure("local t = {}\nt[{}] = 1\nfor _ in pairs(t) do end\nreturn 1");
+  expect_lua_step_failure(
+      "local t = {}\nt[function() end] = 1\nfor _ in pairs(t) do end\nreturn 1");
+  expect_lua_step_failure("local t = {}\nt[{}] = 1\nlocal k = next(t)\nreturn 1");
+  expect_lua_step_failure(
+      "local t = {a=1}\nt[{}] = 2\nlocal s = 0\nfor _, v in pairs(t) do s = s + v end\nreturn s");
+  expect_lua_step_failure("local t = {a=1}\nlocal k = next(t, {})\nreturn 1");
+  // NaN is unorderable (NaN ~= NaN, so even lookup is meaningless).
+  expect_lua_step_failure(
+      "local z = 0/0\nlocal t = {}\nt[z] = 1\nfor _ in pairs(t) do end\nreturn 1");
+}
+
+void test_pairs_snapshot_mutation() {
+  // pairs() snapshots keys at call time: added keys are never visited,
+  // removed keys yield nil values. Both outcomes are exact here because
+  // byte order visits "a" first deterministically.
+  constexpr std::string_view kAdd =
+      "local t = {a=1, b=2, c=3}\n"
+      "local visits = 0\n"
+      "local sum = 0\n"
+      "for k, v in pairs(t) do\n"
+      "  visits = visits + 1\n"
+      "  if v ~= nil then sum = sum + v end\n"
+      "  if k == 'a' then t.d = 100 end\n"
+      "end\n"
+      "return visits * 1000 + sum";
+  assert(run_lua_once(kAdd) == 3006.0); // 3 visits, d unseen, 1+2+3
+  constexpr std::string_view kRemove =
+      "local t = {a=1, b=2, c=3}\n"
+      "local visits = 0\n"
+      "local nils = 0\n"
+      "for k, v in pairs(t) do\n"
+      "  visits = visits + 1\n"
+      "  if v == nil then nils = nils + 1 end\n"
+      "  if k == 'a' then t.b = nil end\n"
+      "end\n"
+      "return visits * 100 + nils";
+  assert(run_lua_once(kRemove) == 301.0); // 3 visits, b reads nil
+}
+
+void test_iteration_save_load_continue() {
+  // An iterating script is still a pure function of its inputs:
+  // save/load/continue matches an uninterrupted run exactly.
+  constexpr std::string_view kScript =
+      "local t = {a=1e16, b=-1e16, c=1}\n"
+      "local s = seed\n"
+      "for _, v in pairs(t) do s = s + v end\n"
+      "return s + step";
+  LuaRun r(0.1);
+  spawn_lua(r.runner, kScript);
+  assert(r.runner.run(2).ok());
+  std::ostringstream bytes;
+  assert(world::save_state(r.runner.state(), bytes).ok());
+  world::State loaded;
+  std::istringstream in(bytes.str());
+  assert(world::load_state(loaded, in).ok());
+  assert(loaded == r.runner.state());
+  LuaRun r2(0.1);
+  r2.runner.state() = loaded;
+  assert(r.runner.run(2).ok() && r2.runner.run(2).ok());
+  assert(r2.runner.state() == r.runner.state());
+}
+
 } // namespace
 
 int main() {
@@ -494,6 +630,11 @@ int main() {
   test_examples();
   test_serialize_v5();
   test_save_load_dead_lua();
+  test_pairs_deterministic_across_states();
+  test_iteration_key_order();
+  test_iteration_rejects_identity_keys();
+  test_pairs_snapshot_mutation();
+  test_iteration_save_load_continue();
   std::cout << "test_lua: OK\n";
   return 0;
 }
