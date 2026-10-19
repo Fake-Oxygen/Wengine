@@ -244,6 +244,14 @@ static_assert((rng_next(0) & 0xFFFFFFFFu) == 0x7B1DCDAFu);
   return d != nullptr ? d->name : "?";
 }
 
+// Validity gate for QuantityId values arriving as raw bytes (pool stores,
+// snapshots, wire) or casts: every stamped sample must resolve in
+// kQuantities, so config edges reject the rest loudly instead of
+// rendering "?" downstream.
+[[nodiscard]] inline constexpr bool is_valid_quantity(QuantityId q) noexcept {
+  return detail::find_quantity(q) != nullptr;
+}
+
 // Config-edge parsing (may allocate on failure strings; never on hot path).
 [[nodiscard]] inline core::Result<SignalKind> parse_kind(std::string_view s) noexcept {
   for (std::size_t k = 0; k < kKindNames.size(); ++k) {
@@ -299,18 +307,29 @@ inline constexpr std::size_t kMaxLuaScriptBytes = 65536;
 // lua::configure_lua_source, the batch driver, the GUI controller —
 // SignalParams carries neither by design).
 [[nodiscard]] inline core::Status validate_params(const SignalParams &p) noexcept {
+  // Per-kind active numerics must be finite (inert fields are unchecked —
+  // dc ignores amp/phase, expression/table/lua carry programs/stores, so
+  // only the values evaluation actually reads are gated). Offset stamps
+  // the initial sample of every kind, so it is always active.
   switch (p.kind) {
   case SignalKind::kSine:
   case SignalKind::kSquare:
   case SignalKind::kTriangle:
   case SignalKind::kSaw:
   case SignalKind::kPulse:
-    if (!(p.freq_hz > 0.0)) {
+    if (!(p.freq_hz > 0.0) || !std::isfinite(p.freq_hz)) {
+      return {core::StatusCode::kInvalidArgument};
+    }
+    if (!std::isfinite(p.amp) || !std::isfinite(p.phase_rad)) {
+      return {core::StatusCode::kInvalidArgument};
+    }
+    break;
+  case SignalKind::kNoise:
+    if (!std::isfinite(p.amp)) {
       return {core::StatusCode::kInvalidArgument};
     }
     break;
   case SignalKind::kDc:
-  case SignalKind::kNoise:
   case SignalKind::kTable:
   case SignalKind::kLua:
     break;
@@ -324,6 +343,14 @@ inline constexpr std::size_t kMaxLuaScriptBytes = 65536;
       return {core::StatusCode::kInvalidArgument};
     }
     break;
+  default:
+    return {core::StatusCode::kInvalidArgument}; // unknown kind enumerator
+  }
+  if (!std::isfinite(p.offset)) {
+    return {core::StatusCode::kInvalidArgument};
+  }
+  if (!is_valid_quantity(p.quantity)) {
+    return {core::StatusCode::kInvalidArgument};
   }
   if ((p.kind == SignalKind::kSquare || p.kind == SignalKind::kPulse) &&
       !(p.duty >= 0.0 && p.duty <= 1.0)) {

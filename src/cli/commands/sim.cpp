@@ -20,6 +20,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <csignal>
 #include <iostream>
@@ -319,6 +320,15 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   }
   if (!(dt > 0.0)) {
     return usage_error(out, "dt must be > 0");
+  }
+  // Bare parse_double options accept inf/nan text (from_chars extension),
+  // so finiteness is enforced here at the CLI edge; the configured-run
+  // builder re-validates for every frontend (see configured_run.hpp).
+  if (has_gravity && !std::isfinite(gravity)) {
+    return usage_error(out, "gravity must be finite");
+  }
+  if (n_particles > 0 && (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(vx0) || !std::isfinite(vy0))) {
+    return usage_error(out, "initial conditions must be finite");
   }
   if (n_particles < 0) {
     return usage_error(out, "particle count must be >= 0");

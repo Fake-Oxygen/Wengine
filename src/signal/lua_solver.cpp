@@ -262,7 +262,7 @@ struct LuaSignalSolver::Impl {
       last_error = "Lua state unavailable";
       return {core::StatusCode::kInternal};
     }
-    if (!(dt > 0.0)) {
+    if (!(dt > 0.0) || !std::isfinite(dt)) {
       return {core::StatusCode::kInvalidArgument};
     }
     world::Signals &pool = s.signals;

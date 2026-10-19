@@ -589,7 +589,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     }
   }
   if (sig_seed < 0 || sig_count < 0 || !signal::validate_params(params).ok()) {
-    return usage_error(out, "invalid signal params (freq > 0, duty in 0..1, seed/count >= 0)");
+    return usage_error(out, "invalid signal params (finite values, freq > 0, duty in 0..1, seed/count >= 0)");
   }
   // Per-output sampling validation (PHYSI-34): stride/select without its
   // output is a usage error; selections address stable batch serials
@@ -1570,7 +1570,7 @@ int run_control(ArgCursor &args, std::ostream &out, std::string_view mode,
       }
     }
     if (!signal::validate_params(params).ok()) {
-      return usage_error(out, "invalid signal params (freq > 0, duty in 0..1)");
+      return usage_error(out, "invalid signal params (finite values, freq > 0, duty in 0..1)");
     }
     // One ADD line (EXPR last: the rest of the line is program text).
     std::string line =

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -307,6 +308,91 @@ void test_latch_noise_then_failing_expression() {
   assert(fixed.state().step_index == failed_step);
 }
 
+void test_nonfinite_dt_rejected() {
+  // NaN/infinite dt and wall-frame durations reject with kInvalidArgument
+  // before any solver runs; State stays bit-identical.
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (const double bad_dt : {inf, -inf, nan}) {
+    core::Runner runner{{.dt = bad_dt}};
+    Counter solver;
+    runner.add_solver(solver);
+    const world::State before = runner.state();
+    const core::Status st = runner.run(1);
+    assert(!st.ok() && st.code == core::StatusCode::kInvalidArgument);
+    assert(solver.calls == 0 && runner.state() == before);
+    assert(!runner.advance(0.01).ok()); // same config, same rejection
+    assert(solver.calls == 0 && runner.state() == before);
+  }
+  core::Runner runner{{.dt = 0.01}};
+  Counter solver;
+  runner.add_solver(solver);
+  const world::State before = runner.state();
+  assert(!runner.advance(inf).ok());
+  assert(!runner.advance(nan).ok());
+  assert(solver.calls == 0 && runner.state() == before);
+  assert(runner.run(1).ok()); // valid calls still step after rejections
+  assert(solver.calls == 1);
+}
+
+void test_clock_exhaustion_rejected() {
+  // Step-index overflow, non-finite next time, and dt-below-resolution
+  // reject with kOutOfRange before solvers run or sinks emit. The checks
+  // are pure pre-checks (not latched): restoring the clock steps again.
+  const double max_d = std::numeric_limits<double>::max();
+  const double tiny = std::numeric_limits<double>::denorm_min();
+  const std::uint64_t max_u = std::numeric_limits<std::uint64_t>::max();
+
+  core::Runner runner{{.dt = 0.01}};
+  Counter solver;
+  RecSink sink;
+  runner.add_solver(solver);
+  runner.add_sink(sink);
+
+  runner.state().step_index = max_u; // index range exhausted
+  const world::State overflowed = runner.state();
+  const core::Status of = runner.run(1);
+  assert(!of.ok() && of.code == core::StatusCode::kOutOfRange);
+  assert(solver.calls == 0 && sink.snaps.empty());
+  assert(runner.state() == overflowed);
+
+  runner.state().step_index = 7;
+  runner.state().sim_time = max_d; // max + dt is non-finite
+  const world::State saturated = runner.state();
+  const core::Status st = runner.run(1);
+  assert(!st.ok() && st.code == core::StatusCode::kOutOfRange);
+  assert(solver.calls == 0 && sink.snaps.empty());
+  assert(runner.state() == saturated);
+
+  // Not latched: a restored clock steps again on the same Runner.
+  runner.state().sim_time = 0.07;
+  assert(runner.run(1).ok());
+  assert(solver.calls == 1 && runner.state().step_index == 8);
+  assert(sink.snaps.size() == 1);
+
+  // Positive dt below clock resolution at the current time.
+  core::Runner stuck{{.dt = tiny}};
+  Counter solver2;
+  stuck.add_solver(solver2);
+  stuck.state().sim_time = 1.0; // 1.0 + tiny == 1.0
+  const world::State frozen = stuck.state();
+  const core::Status sr = stuck.run(3);
+  assert(!sr.ok() && sr.code == core::StatusCode::kOutOfRange);
+  assert(solver2.calls == 0 && stuck.state() == frozen);
+
+  // Valid extremes still step exactly as before.
+  core::Runner huge{{.dt = 1e308}};
+  Counter solver3;
+  huge.add_solver(solver3);
+  assert(huge.run(1).ok());
+  assert(huge.state().sim_time == 1e308 && huge.state().step_index == 1);
+  core::Runner denorm{{.dt = tiny}}; // advances from a zero clock
+  Counter solver4;
+  denorm.add_solver(solver4);
+  assert(denorm.run(1).ok());
+  assert(denorm.state().sim_time == tiny && denorm.state().step_index == 1);
+}
+
 void test_stop_callback() {
   core::Runner runner{{.dt = 0.01}};
   CountingSolver solver;
@@ -368,6 +454,8 @@ int main() {
   test_exact_stepping();
   test_determinism();
   test_emit_decimation();
+  test_nonfinite_dt_rejected();
+  test_clock_exhaustion_rejected();
   test_failure_latch();
   test_latch_noise_then_failing_expression();
   test_stop_callback();

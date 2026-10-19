@@ -301,8 +301,7 @@ struct Signals {
                                                      signal::QuantityId quantity,
                                                      double t_now) {
   if (len == 0 || len > signal::kMaxTablePoints || off > pool.table_times.size() ||
-      len > pool.table_times.size() - off ||
-      pool.table_values.size() < pool.table_times.size()) {
+      len > pool.table_times.size() - off || pool.table_values.size() < pool.table_times.size() || !signal::is_valid_quantity(quantity)) {
     return {core::StatusCode::kInvalidArgument};
   }
   pool.attach(e.index);
@@ -375,12 +374,10 @@ configure_table_source(Entity e, Signals &pool, std::span<const signal::TablePoi
 // within the step). Batch spawns and direct configures agree on this —
 // run_headless always steps at least once, so the 0 is never observed
 // there; direct API users read it only before the first step.
-[[nodiscard]] inline core::Status attach_lua_source(Entity e, Signals &pool,
-                                                   std::uint64_t off, std::uint64_t len,
-                                                   signal::QuantityId quantity,
+[[nodiscard]] inline core::Status attach_lua_source(Entity e, Signals &pool, std::uint64_t off, std::uint64_t len, signal::QuantityId quantity,
                                                    double t_now) {
   if (len == 0 || len > signal::kMaxLuaScriptBytes || off > pool.lua_text.size() ||
-      len > pool.lua_text.size() - off) {
+      len > pool.lua_text.size() - off || !signal::is_valid_quantity(quantity)) {
     return {core::StatusCode::kInvalidArgument};
   }
   pool.attach(e.index);

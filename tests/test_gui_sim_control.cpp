@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <span>
 
 namespace {
@@ -204,6 +205,34 @@ void test_step_failure_stops_play() {
   assert(sim.state().step_index == failed_at - 1);
 }
 
+void test_nonfinite_config_rejected() {
+  // GUI boundary: the shared builder rejects non-finite loop/plant values
+  // with a message; rejected edits leave the live run untouched.
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  wengine::gui::SimController sim;
+  assert(sim.set_config(default_cfg()).ok());
+
+  wengine::core::RunConfig bad_dt = default_cfg();
+  bad_dt.loop.dt = inf;
+  assert(!sim.set_config(bad_dt).ok());
+  assert(sim.error().find("dt") != std::string::npos);
+
+  wengine::core::RunConfig bad_g = default_cfg();
+  bad_g.gravity = nan;
+  bad_g.has_gravity = true;
+  assert(!sim.set_config(bad_g).ok());
+  assert(sim.error().find("gravity") != std::string::npos);
+
+  wengine::core::RunConfig bad_x = default_cfg();
+  bad_x.x0 = -inf;
+  assert(!sim.set_config(bad_x).ok());
+  assert(sim.error().find("initial conditions") != std::string::npos);
+
+  assert(sim.state().step_index == 0); // live run untouched throughout
+  assert(sim.run_exact(5).ok());
+}
+
 } // namespace
 
 int main() {
@@ -213,6 +242,7 @@ int main() {
   test_config_validation();
   test_gravity_config();
   test_step_failure_stops_play();
+  test_nonfinite_config_rejected();
   std::printf("test_gui_sim_control: OK\n");
   return 0;
 }

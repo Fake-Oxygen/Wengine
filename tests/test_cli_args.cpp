@@ -267,6 +267,43 @@ void test_sig_control_usage() {
   }
 }
 
+void test_sig_run_finite() {
+  // Batch boundary: non-finite numerics fail loudly instead of sampling
+  // inf/nan; unknown kinds fail at parse. Sinkless one-step runs.
+  auto run = [](std::string line) {
+    std::array<std::string_view, kMaxArgs> buf{};
+    std::size_t n = tokenize_into(line, buf);
+    std::span<const std::string_view> args{buf.data(), n};
+    ArgCursor cur{args};
+    std::ostringstream out;
+    int rc = commands::SigSpec::run(cur, out);
+    return std::pair<int, std::string>{rc, out.str()};
+  };
+  {
+    auto [rc, s] = run("run --steps 1 --sig-kind sine --sig-freq 1Hz");
+    assert(rc == 0);
+  }
+  {
+    auto [rc, s] = run("run --steps 1 --sig-phase inf");
+    assert(rc == 2); // shared validate_params rejects non-finite phase
+    assert(s.find("invalid signal params") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("run --steps 1 --sig-kind square --sig-duty inf");
+    assert(rc == 2); // duty range rejects inf/nan where active
+    assert(s.find("invalid signal params") != std::string::npos);
+  }
+  {
+    // Inert where unread: sine ignores duty (existing pinned behavior).
+    auto [rc, s] = run("run --steps 1 --sig-kind sine --sig-duty inf");
+    assert(rc == 0);
+  }
+  {
+    auto [rc, s] = run("run --steps 1 --sig-kind bogus");
+    assert(rc == 2); // unknown kind at parse
+  }
+}
+
 void test_shell_integration() {
   Shell sh;
   sh.set_history_file(""); // no file I/O in tests
@@ -611,6 +648,7 @@ int main() {
   test_registry_compile_time();
   test_ohm_handler();
   test_sig_control_usage();
+  test_sig_run_finite();
   test_completion();
   test_shell_integration();
   test_shell_run_fallback();

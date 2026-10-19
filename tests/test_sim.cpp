@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <sstream>
 #include <string>
@@ -86,6 +87,17 @@ void test_bad_dt() {
   wengine::world::State s;
   assert(!solver.step(s, 0.0).ok());
   assert(!solver.step(s, -0.01).ok());
+  // Non-finite dt and gravity reject before mutating the pool.
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  assert(!solver.step(s, inf).ok());
+  assert(!solver.step(s, nan).ok());
+  assert(s.particles.live_count == 0 && s.sim_time == 0.0);
+  ProjectileSolver inf_g(inf);
+  ProjectileSolver nan_g(nan);
+  assert(!inf_g.step(s, 0.01).ok());
+  assert(!nan_g.step(s, 0.01).ok());
+  assert(s.particles.live_count == 0 && s.sim_time == 0.0);
 }
 
 std::pair<int, std::string> run_sim(std::string line) {
@@ -172,6 +184,27 @@ void test_cli_errors() {
   assert(run_sim("run --particles -1").first == 2);
   assert(run_sim("run --bogus 1").first == 2);
   assert(run_sim("run extra").first == 2);
+  // Non-finite bare-double options (from_chars accepts inf/nan text)
+  // reject at the CLI edge with usage errors, never silent inf output.
+  {
+    const auto [rc, s] = run_sim("run --steps 2 --gravity inf");
+    assert(rc == 2 && s.find("gravity must be finite") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sim("run --steps 2 --gravity nan");
+    assert(rc == 2 && s.find("gravity must be finite") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sim("run --steps 2 --x0 inf");
+    assert(rc == 2 && s.find("initial conditions must be finite") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sim("run --steps 2 --vy0 -inf");
+    assert(rc == 2 && s.find("initial conditions must be finite") != std::string::npos);
+  }
+  assert(run_sim("run --steps 2 --dt inf").first == 2); // scaled parse tier
+  // Zero particles: unused initial conditions stay accepted.
+  assert(run_sim("run --steps 2 --particles 0 --x0 inf").first == 0);
   {
     const auto [rc, s] = run_sim("--help");
     assert(rc == 0 && s.find("sim run") != std::string::npos);

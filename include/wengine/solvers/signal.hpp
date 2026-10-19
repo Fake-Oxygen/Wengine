@@ -25,6 +25,7 @@
 #include "wengine/core/solver.hpp"
 #include "wengine/signal/types.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -46,7 +47,7 @@ public:
   [[nodiscard]] std::string_view name() const noexcept override { return kName; }
 
   core::Status step(world::State &s, double dt) noexcept override {
-    if (!(dt > 0.0)) {
+    if (!(dt > 0.0) || !std::isfinite(dt)) {
       return {core::StatusCode::kInvalidArgument};
     }
     const double t_end = s.sim_time + dt;

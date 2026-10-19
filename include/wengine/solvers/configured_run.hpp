@@ -33,6 +33,7 @@
 #include "wengine/solvers/solver_registry.hpp"
 #include "wengine/world/state.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -81,8 +82,11 @@ class ConfiguredRun {
       }
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     };
-    if (!(cfg.loop.dt > 0.0)) {
-      return fail("dt must be > 0");
+    if (!core::validate_runner_config(cfg.loop).ok()) {
+      return fail("dt must be finite and > 0");
+    }
+    if (cfg.particles > 0 && (!std::isfinite(cfg.x0) || !std::isfinite(cfg.y0) || !std::isfinite(cfg.vx0) || !std::isfinite(cfg.vy0))) {
+      return fail("initial conditions must be finite");
     }
     if (cfg.steps < 1) {
       return fail("steps must be >= 1");
@@ -103,6 +107,9 @@ class ConfiguredRun {
     std::unique_ptr<core::ISolver> solver = sdef->create();
     const bool is_projectile = solver->name() == ProjectileSolver::kName;
     if (is_projectile) {
+      if (!std::isfinite(cfg.gravity)) {
+        return fail("gravity must be finite");
+      }
       static_cast<ProjectileSolver *>(solver.get())->set_gravity(cfg.gravity);
     } else if (cfg.has_gravity) {
       return fail("--gravity only applies to solver 'projectile'");

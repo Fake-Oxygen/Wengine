@@ -12,6 +12,7 @@
 
 #include "wengine/core/solver.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -32,10 +33,16 @@ public:
 
   [[nodiscard]] std::string_view name() const noexcept override { return kName; }
   [[nodiscard]] double gravity() const noexcept { return gravity_; }
+  // Gravity must be finite; step() rejects a non-finite setting with
+  // kInvalidArgument before mutating state (the configured-run builder
+  // rejects it earlier for all frontends — see configured_run.hpp).
   void set_gravity(double g) noexcept { gravity_ = g; }
 
   core::Status step(world::State &s, double dt) noexcept override {
-    if (!(dt > 0.0)) {
+    if (!(dt > 0.0) || !std::isfinite(dt)) {
+      return {core::StatusCode::kInvalidArgument};
+    }
+    if (!std::isfinite(gravity_)) {
       return {core::StatusCode::kInvalidArgument};
     }
     const double dv = gravity_ * dt;

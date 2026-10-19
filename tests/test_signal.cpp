@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <span>
 #include <sstream>
@@ -146,6 +147,96 @@ void test_parse_and_validate() {
   p.kind = signal::SignalKind::kTable;
   p.expr = signal::ExprProgram{};
   assert(signal::validate_params(p).ok()); // points checked at configure
+}
+
+void test_validate_finite_and_unknown() {
+  // Non-finite active numerics, unknown kinds, and unknown quantities
+  // reject; valid extremes still pass; rejected configures leave the pool
+  // untouched (validated before attach).
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+
+  signal::SignalParams p; // default sine, all finite
+  assert(signal::validate_params(p).ok());
+  p.freq_hz = inf;
+  assert(!signal::validate_params(p).ok()); // periodic freq must be finite
+  p.freq_hz = 1.0;
+  p.amp = nan;
+  assert(!signal::validate_params(p).ok());
+  p.amp = 1.0;
+  p.phase_rad = -inf;
+  assert(!signal::validate_params(p).ok());
+  p.phase_rad = 0.0;
+  p.offset = nan;
+  assert(!signal::validate_params(p).ok()); // offset stamps every kind
+  p.offset = 0.0;
+  assert(signal::validate_params(p).ok());
+
+  p.amp = 1e308; // valid extremes still pass
+  p.freq_hz = std::numeric_limits<double>::max();
+  assert(signal::validate_params(p).ok());
+
+  p.kind = signal::SignalKind::kDc; // dc ignores amp/freq, not offset
+  p.amp = inf;
+  p.freq_hz = 0.0;
+  assert(signal::validate_params(p).ok());
+  p.offset = inf;
+  assert(!signal::validate_params(p).ok());
+  p.offset = 0.0;
+  p.amp = 1.0;
+
+  p.kind = static_cast<signal::SignalKind>(250); // no switch fallthrough
+  assert(!signal::validate_params(p).ok());
+  p.kind = signal::SignalKind::kNoise;
+  assert(signal::validate_params(p).ok());
+  p.amp = nan;
+  assert(!signal::validate_params(p).ok()); // noise reads amp
+  p.amp = 1.0;
+
+  p.quantity = static_cast<signal::QuantityId>(9);
+  assert(!signal::validate_params(p).ok());
+  assert(!signal::is_valid_quantity(static_cast<signal::QuantityId>(9)));
+  assert(signal::is_valid_quantity(signal::QuantityId::kVoltage));
+  p.quantity = signal::QuantityId::kCurrent;
+  assert(signal::validate_params(p).ok());
+
+  world::State s;
+  signal::SignalParams bad;
+  bad.kind = signal::SignalKind::kSine;
+  bad.amp = inf;
+  const world::Entity e = s.spawn_entity();
+  assert(!world::configure_source(e, s.signals, bad, 0.0).ok());
+  assert(s.signals.live_count == 0); // rejected before attach
+
+  // Table/Lua attaches reject unknown quantity tags (pool untouched).
+  std::vector<signal::TablePoint> pts;
+  std::string error;
+  std::istringstream good("time,value\n0,0.0\n1,10.0\n");
+  assert(signal::parse_table_csv(good, pts, error).ok());
+  world::State t;
+  std::uint64_t off = 0;
+  assert(world::append_table_points(t.signals, std::span(pts.data(), pts.size()), off)
+             .ok());
+  const std::uint64_t npts = static_cast<std::uint64_t>(pts.size());
+  const world::Entity t0 = t.spawn_entity();
+  assert(world::attach_table_source(t0, t.signals, off, npts,
+                                    signal::QuantityId::kVoltage, 0.0)
+             .ok());
+  const world::Entity t1 = t.spawn_entity();
+  const auto bad_qty = static_cast<signal::QuantityId>(9);
+  assert(!world::attach_table_source(t1, t.signals, off, npts, bad_qty, 0.0).ok());
+  assert(t.signals.live_count == 1);
+  const std::string_view script = "return 1";
+  std::uint64_t loff = 0;
+  assert(world::append_lua_script(t.signals, script, loff).ok());
+  const std::uint64_t nbytes = static_cast<std::uint64_t>(script.size());
+  const world::Entity l0 = t.spawn_entity();
+  assert(world::attach_lua_source(l0, t.signals, loff, nbytes,
+                                  signal::QuantityId::kCurrent, 0.0)
+             .ok());
+  const world::Entity l1 = t.spawn_entity();
+  assert(!world::attach_lua_source(l1, t.signals, loff, nbytes, bad_qty, 0.0).ok());
+  assert(t.signals.live_count == 2);
 }
 
 world::Entity spawn(core::Runner &runner, const signal::SignalParams &p) {
@@ -837,6 +928,7 @@ void test_dimension_scaling() {  using scaling_proof::TestTemp;
 int main() {
   test_eval_goldens();
   test_parse_and_validate();
+  test_validate_finite_and_unknown();
   test_solver_golden_and_snapshot();
   test_noise_sequence_and_determinism();
   test_holes_and_bad_dt();

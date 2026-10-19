@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -105,6 +106,63 @@ void test_bad_config_rejected() {
     cfg.has_gravity = true;
     const core::Status st = wengine::solvers::run_headless(cfg, none, out);
     assert(!st.ok() && st.code == core::StatusCode::kInvalidArgument);
+  }
+  {
+    // Non-finite loop/plant values reject through the shared edge with
+    // the same code; rejected configs never step (out untouched).
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (const double bad_dt : {inf, -inf, nan}) {
+      core::RunConfig cfg = make_config();
+      cfg.loop.dt = bad_dt;
+      const core::Status st = wengine::solvers::run_headless(cfg, none, out);
+      assert(!st.ok() && st.code == core::StatusCode::kInvalidArgument);
+      assert(out.step_index == 0);
+    }
+    for (const double bad_g : {inf, nan}) {
+      core::RunConfig cfg = make_config();
+      cfg.gravity = bad_g;
+      cfg.has_gravity = true;
+      const core::Status st = wengine::solvers::run_headless(cfg, none, out);
+      assert(!st.ok() && st.code == core::StatusCode::kInvalidArgument);
+      assert(out.step_index == 0);
+    }
+    {
+      core::RunConfig cfg = make_config();
+      cfg.x0 = inf;
+      const core::Status st = wengine::solvers::run_headless(cfg, none, out);
+      assert(!st.ok() && st.code == core::StatusCode::kInvalidArgument);
+      assert(out.step_index == 0);
+    }
+    {
+      // Inert with zero particles: unused initial conditions pass.
+      core::RunConfig cfg = make_config();
+      cfg.particles = 0;
+      cfg.x0 = inf;
+      wengine::world::State ok_out;
+      assert(wengine::solvers::run_headless(cfg, none, ok_out).ok());
+      assert(ok_out.step_index == 100);
+    }
+    {
+      // Non-finite signal params reject through the same builder.
+      core::RunConfig cfg = make_config();
+      cfg.solver = "signal";
+      cfg.particles = 0;
+      cfg.signal.set = true;
+      cfg.signal.params.amp = inf;
+      const core::Status st = wengine::solvers::run_headless(cfg, none, out);
+      assert(!st.ok() && st.code == core::StatusCode::kInvalidArgument);
+      assert(out.step_index == 0);
+    }
+    {
+      // Valid extremes still build and step.
+      core::RunConfig cfg = make_config();
+      cfg.loop.dt = std::numeric_limits<double>::denorm_min();
+      cfg.steps = 1;
+      wengine::world::State ok_out;
+      assert(wengine::solvers::run_headless(cfg, none, ok_out).ok());
+      assert(ok_out.step_index == 1);
+    }
   }
 }
 
