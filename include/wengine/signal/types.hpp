@@ -252,6 +252,21 @@ static_assert((rng_next(0) & 0xFFFFFFFFu) == 0x7B1DCDAFu);
   return detail::find_quantity(q) != nullptr;
 }
 
+// Dimensional rule for kSum (SIG-5): every operand must carry the same
+// quantity as the sum output. Equality only — no per-quantity switch —
+// so future kQuantities rows work untouched.
+[[nodiscard]] inline constexpr bool sum_quantities_compatible(QuantityId sum_q, std::span<const QuantityId> operand_qs) noexcept {
+  if (!is_valid_quantity(sum_q)) {
+    return false;
+  }
+  for (QuantityId q : operand_qs) {
+    if (!is_valid_quantity(q) || q != sum_q) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Config-edge parsing (may allocate on failure strings; never on hot path).
 [[nodiscard]] inline core::Result<SignalKind> parse_kind(std::string_view s) noexcept {
   for (std::size_t k = 0; k < kKindNames.size(); ++k) {

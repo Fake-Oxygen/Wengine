@@ -76,7 +76,9 @@ selection lives in adapters/filters at the edge, never in `Runner`:
 
 Sum rules: operands validated at configure time (each resolves to a live
 non-sum source — sums stay flattened, no dangling refs, no self-reference
-since the new serial doesn't exist yet). The solver evaluates generators
+since the new serial doesn't exist yet — AND carries the sum's own quantity:
+mixed quantities or a mismatched output tag fails before pool mutation).
+The solver evaluates generators
 first, sums second, so sums always read fresh values regardless of slot
 order. A later-despawned operand fails the step loudly (`kInvalidArgument`,
 time/index frozen) instead of reading a stale slot; a stopped operand
@@ -340,7 +342,8 @@ SELECT <serial> <index>            reserved: ERR not_implemented until mux lands
 PARAM/KEY names: `FREQ AMP OFFSET PHASE DUTY SEED QUANTITY` (QUANTITY is
 SET-only: `U|I`). ADD defaults match `SignalParams` (kind required,
 quantity defaults `U`); `OPS` is required for `kind=sum` (operand serials,
-validated live + non-sum, flattened); `EXPR` must be last (rest of the
+validated live + non-sum + same quantity as the sum output, flattened);
+`EXPR` must be last (rest of the
 line is the program). `ADD table/lua` is `ERR not_implemented` — bulk
 payloads ride batch runs, never a text line.
 
@@ -365,7 +368,10 @@ STOP/START are pause/resume exact: STOP shifts the time base
 (`t0 -= sim_time`, value + noise RNG frozen by the solver skip); START
 re-bases (`t0 += sim_time`) and continues — including across a
 save/load round-trip in between. `SET SEED` restarts the noise sequence
-(seed + live RNG). `DROP` detaches the pool slot (entity handle stays;
+(seed + live RNG). `SET QUANTITY` re-tags the source (SI value untouched)
+unless it would mix a live sum (sum retag must still match all operands;
+operand retag must still match every dependent sum — both fail loudly).
+`DROP` detaches the pool slot (entity handle stays;
 serials never recycle).
 
 Transports: stream and control are separate sockets (D4a-A). `sig run

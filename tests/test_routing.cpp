@@ -6,11 +6,13 @@
 #include "wengine/solvers/signal.hpp"
 #include "wengine/world/serialize.hpp"
 
+#include <array>
 #include <bit>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <span>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -365,6 +367,191 @@ void test_serialize_v3_and_v2() {
   assert(old.signals.serial[fresh.index] == 1);
 }
 
+void test_sum_quantity_validation() {
+  // Dimensional rule: every operand must carry the sum's own quantity.
+  // All quantity choices below derive from kQuantities (no per-quantity
+  // switch), so a future appended row works untouched.
+  assert(signal::kQuantityCount >= 2);
+  const signal::QuantityId q0 = signal::kQuantities[0].id;
+  const signal::QuantityId q1 = signal::kQuantities[1].id;
+  assert(q0 != q1);
+  // The helper agrees with the table: same-dimensional compatible,
+  // cross-dimensional rejected — generically, for every row.
+  for (const signal::QuantityDesc &d : signal::kQuantities) {
+    const signal::QuantityId same = d.id;
+    assert(signal::sum_quantities_compatible(same, std::span<const signal::QuantityId>(&same, 1)));
+    for (const signal::QuantityDesc &e : signal::kQuantities) {
+      if (e.id == d.id) {
+        continue;
+      }
+      const std::array<signal::QuantityId, 2> mixed{same, e.id};
+      assert(!signal::sum_quantities_compatible(
+          same, std::span<const signal::QuantityId>(mixed.data(), mixed.size())));
+    }
+  }
+
+  auto dc_q = [](double offset, signal::QuantityId q) {
+    signal::SignalParams p;
+    p.kind = signal::SignalKind::kDc;
+    p.quantity = q;
+    p.offset = offset;
+    return p;
+  };
+
+  core::Runner runner{{.dt = 0.01}};
+  solvers::SignalSolver solver;
+  runner.add_solver(solver);
+  const world::Entity a = spawn_checked(runner, dc_q(1.0, q0)); // serial 0
+  const world::Entity b = spawn_checked(runner, dc_q(2.0, q1)); // serial 1
+  const world::Entity c = spawn_checked(runner, dc_q(4.0, q0)); // serial 2
+  const std::uint64_t sa = runner.state().signals.serial[a.index];
+  const std::uint64_t sb = runner.state().signals.serial[b.index];
+  const std::uint64_t sc = runner.state().signals.serial[c.index];
+  const std::size_t live_before = runner.state().signals.live_count;
+
+  auto try_sum = [&](signal::QuantityId out_q, std::uint64_t o0, std::uint64_t o1) {
+    world::Entity e = runner.state().spawn_entity();
+    signal::SignalParams sum;
+    sum.kind = signal::SignalKind::kSum;
+    sum.quantity = out_q;
+    sum.ops[0] = o0;
+    sum.ops[1] = o1;
+    sum.op_count = 2;
+    const core::Status st =
+        world::configure_source(e, runner.state().signals, sum, 0.0);
+    runner.state().despawn_entity(e);
+    return st;
+  };
+  // Mixed operands fail for either output tag; a same-operand pair with a
+  // mismatched output tag fails too — all before pool mutation.
+  assert(!try_sum(q0, sa, sb).ok()); // q0 + q1 -> q0
+  assert(!try_sum(q1, sa, sb).ok()); // q0 + q1 -> q1
+  assert(!try_sum(q1, sa, sc).ok()); // q0 + q0 -> q1 (output mismatch)
+  assert(runner.state().signals.live_count == live_before);
+
+  // Same-dimension sums keep operand order and exact values (dc is exact,
+  // so == is the right assertion — no tolerance widening).
+  world::Entity e0 = runner.state().spawn_entity();
+  signal::SignalParams sum0;
+  sum0.kind = signal::SignalKind::kSum;
+  sum0.quantity = q0;
+  sum0.ops[0] = sa;
+  sum0.ops[1] = sc;
+  sum0.op_count = 2;
+  sum0.offset = 0.5;
+  assert(world::configure_source(e0, runner.state().signals, sum0, 0.0).ok());
+  assert(runner.state().signals.value[e0.index] == 1.0 + 4.0 + 0.5);
+  assert(runner.run(3).ok());
+  assert(runner.state().signals.value[e0.index] == 1.0 + 4.0 + 0.5);
+
+  // Generic loop: every table row sums with itself; any distinct pair fails.
+  for (const signal::QuantityDesc &d : signal::kQuantities) {
+    core::Runner g{{.dt = 0.01}};
+    solvers::SignalSolver gs;
+    g.add_solver(gs);
+    const world::Entity g0 = spawn_checked(g, dc_q(1.0, d.id));
+    const world::Entity g1 = spawn_checked(g, dc_q(2.0, d.id));
+    const std::uint64_t s0 = g.state().signals.serial[g0.index];
+    const std::uint64_t s1 = g.state().signals.serial[g1.index];
+    world::Entity ge = g.state().spawn_entity();
+    signal::SignalParams gp;
+    gp.kind = signal::SignalKind::kSum;
+    gp.quantity = d.id;
+    gp.ops[0] = s0;
+    gp.ops[1] = s1;
+    gp.op_count = 2;
+    assert(world::configure_source(ge, g.state().signals, gp, 0.0).ok());
+    assert(g.state().signals.value[ge.index] == 3.0);
+    for (const signal::QuantityDesc &f : signal::kQuantities) {
+      if (f.id == d.id) {
+        continue;
+      }
+      const world::Entity hx = g.state().spawn_entity();
+      signal::SignalParams hp = gp;
+      hp.quantity = f.id;
+      assert(!world::configure_source(hx, g.state().signals, hp, 0.0).ok());
+      g.state().despawn_entity(hx);
+    }
+  }
+
+  // Stopped operands contribute their frozen sample (exact ==, solver skips
+  // stopped slots so the bits never change).
+  core::Runner fr{{.dt = 0.01}};
+  solvers::SignalSolver fs;
+  fr.add_solver(fs);
+  signal::SignalParams sine;
+  sine.kind = signal::SignalKind::kSine;
+  sine.quantity = q0;
+  sine.freq_hz = 1.0;
+  sine.amp = 2.0;
+  const world::Entity fa = spawn_checked(fr, sine);
+  const world::Entity fb = spawn_checked(fr, dc_q(3.0, q0));
+  const std::uint64_t fsa = fr.state().signals.serial[fa.index];
+  const std::uint64_t fsb = fr.state().signals.serial[fb.index];
+  world::Entity fe = fr.state().spawn_entity();
+  signal::SignalParams fsum;
+  fsum.kind = signal::SignalKind::kSum;
+  fsum.quantity = q0;
+  fsum.ops[0] = fsa;
+  fsum.ops[1] = fsb;
+  fsum.op_count = 2;
+  assert(world::configure_source(fe, fr.state().signals, fsum, 0.0).ok());
+  assert(fr.run(5).ok());
+  fr.state().signals.running[fa.index] = 0; // freeze the sine in place
+  const double frozen = fr.state().signals.value[fa.index];
+  assert(fr.run(4).ok());
+  assert(fr.state().signals.value[fa.index] == frozen);
+  assert(fr.state().signals.value[fe.index] == frozen + 3.0);
+
+  // Checkpoint boundary: a valid same-dimension sum round-trips; flipping
+  // the stored output quantity (bypassing configure) fails the load, as
+  // does a dangling operand left by a despawn before save.
+  {
+    std::ostringstream bytes;
+    assert(world::save_state(runner.state(), bytes).ok());
+    world::State dst;
+    std::istringstream in(bytes.str());
+    assert(world::load_state(dst, in).ok());
+    assert(dst == runner.state());
+  }
+  {
+    // Corrupt the sum's output tag behind configure's back: save the
+    // tampered pool, then the load must reject it.
+    runner.state().signals.quantity[e0.index] =
+        static_cast<std::uint8_t>(q1);
+    std::ostringstream bad;
+    assert(world::save_state(runner.state(), bad).ok());
+    runner.state().signals.quantity[e0.index] =
+        static_cast<std::uint8_t>(q0); // restore the live pool
+    world::State dst;
+    std::istringstream in(bad.str());
+    assert(!world::load_state(dst, in).ok());
+  }
+  {
+    core::Runner dr{{.dt = 0.01}};
+    solvers::SignalSolver ds;
+    dr.add_solver(ds);
+    const world::Entity d0 = spawn_checked(dr, dc_q(1.0, q0));
+    const world::Entity d1 = spawn_checked(dr, dc_q(2.0, q0));
+    const std::uint64_t sd0 = dr.state().signals.serial[d0.index];
+    world::Entity de = dr.state().spawn_entity();
+    signal::SignalParams dp;
+    dp.kind = signal::SignalKind::kSum;
+    dp.quantity = q0;
+    dp.ops[0] = sd0;
+    dp.ops[1] = dr.state().signals.serial[d1.index];
+    dp.op_count = 2;
+    assert(world::configure_source(de, dr.state().signals, dp, 0.0).ok());
+    assert(dr.state().despawn_entity(d0)); // operand gone: dangling sum
+    std::ostringstream bad;
+    assert(world::save_state(dr.state(), bad).ok());
+    world::State dst;
+    std::istringstream in(bad.str());
+    assert(!world::load_state(dst, in).ok());
+  }
+  runner.state().despawn_entity(e0);
+}
+
 } // namespace
 
 int main() {
@@ -378,6 +565,7 @@ int main() {
   test_dangling_operand_fails_loudly();
   test_sink_failure_isolation();
   test_serialize_v3_and_v2();
+  test_sum_quantity_validation();
   std::cout << "test_routing: OK\n";
   return 0;
 }

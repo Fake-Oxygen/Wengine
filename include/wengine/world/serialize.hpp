@@ -499,6 +499,48 @@ inline bool get_f64_le(std::istream &in, double &v) {
       }
     }
   }
+  // Sum invariants (configure-time rule, re-checked so a crafted or
+  // hand-edited checkpoint cannot bypass it): live sums need 1..kMaxOps
+  // operands, each resolving to a live non-sum source with the sum's own
+  // quantity (QuantityId equality only — generic over kQuantities); live
+  // non-sums carry no operand count. Dead slots keep stale columns and are
+  // skipped. v2 predates sums, so any live kSum there fails (empty list).
+  for (std::uint32_t i = 0; i < sig_cap; ++i) {
+    if (tmp.signals.present[i] == 0) {
+      continue;
+    }
+    const bool is_sum = tmp.signals.kind[i] == static_cast<std::uint8_t>(signal::SignalKind::kSum);
+    if (!is_sum) {
+      if (tmp.signals.op_count[i] != 0) {
+        return invalid();
+      }
+      continue;
+    }
+    if (tmp.signals.op_count[i] < 1 || tmp.signals.op_count[i] > signal::SignalParams::kMaxOps) {
+      return invalid();
+    }
+    const auto sum_q = static_cast<signal::QuantityId>(tmp.signals.quantity[i]);
+    if (!signal::is_valid_quantity(sum_q)) {
+      return invalid();
+    }
+    for (std::uint8_t k = 0; k < tmp.signals.op_count[i]; ++k) {
+      const std::uint64_t want = tmp.signals.ops[i * signal::SignalParams::kMaxOps + k];
+      const auto oslot = find_serial(tmp.signals, want);
+      if (!oslot.has_value()) {
+        return invalid();
+      }
+      if (tmp.signals.kind[*oslot] == static_cast<std::uint8_t>(signal::SignalKind::kSum)) {
+        return invalid();
+      }
+      if (tmp.signals.present[*oslot] == 0) {
+        return invalid();
+      }
+      const auto op_q = static_cast<signal::QuantityId>(tmp.signals.quantity[*oslot]);
+      if (!signal::is_valid_quantity(op_q) || op_q != sum_q) {
+        return invalid();
+      }
+    }
+  }
   s = std::move(tmp);
   return core::Status::success();
 }

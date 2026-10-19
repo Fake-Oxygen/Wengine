@@ -199,6 +199,11 @@ inline void apply_command(world::State &s, const signal::control::Command &cmd,
           err({core::StatusCode::kInvalidArgument}, "sum operands must be non-sum");
           return;
         }
+        const auto op_q = static_cast<signal::QuantityId>(s.signals.quantity[*slot]);
+        if (!signal::is_valid_quantity(op_q) || op_q != p.quantity) {
+          err({core::StatusCode::kInvalidArgument}, "sum operands must match sum quantity");
+          return;
+        }
       }
       p.op_count = cmd.op_count;
       for (std::size_t k = 0; k < signal::SignalParams::kMaxOps; ++k) {
@@ -257,6 +262,49 @@ inline void apply_command(world::State &s, const signal::control::Command &cmd,
     if (!signal::validate_params(p).ok()) {
       err({core::StatusCode::kInvalidArgument}, "bad value (freq > 0, duty in 0..1)");
       return;
+    }
+    // Dimensional rule for sums (no per-quantity switch — QuantityId
+    // equality only): a sum retag must still match all its live operands;
+    // an operand retag must still match every live dependent sum. Either
+    // mismatch fails before pool mutation, so reconfiguration cannot
+    // bypass the configure/load rule.
+    if (cmd.param == sc::Param::kQuantity) {
+      const auto new_q = cmd.set_quantity;
+      const auto target_kind = static_cast<signal::SignalKind>(s.signals.kind[*slot]);
+      if (target_kind == signal::SignalKind::kSum) {
+        for (std::uint8_t k = 0; k < s.signals.op_count[*slot]; ++k) {
+          const std::uint64_t want = s.signals.ops[*slot * signal::SignalParams::kMaxOps + k];
+          const auto oslot = world::find_serial(s.signals, want);
+          if (!oslot.has_value() ||
+              s.signals.kind[*oslot] == static_cast<std::uint8_t>(signal::SignalKind::kSum)) {
+            err({core::StatusCode::kInvalidArgument}, "sum operands must be live non-sum");
+            return;
+          }
+          const auto op_q = static_cast<signal::QuantityId>(s.signals.quantity[*oslot]);
+          if (!signal::is_valid_quantity(op_q) || op_q != new_q) {
+            err({core::StatusCode::kInvalidArgument}, "sum quantity must match operands");
+            return;
+          }
+        }
+      } else {
+        const std::uint64_t target_serial = s.signals.serial[*slot];
+        for (std::uint32_t j = 0; j < s.signals.capacity(); ++j) {
+          if (!s.signals.has(j) || s.signals.kind[j] != static_cast<std::uint8_t>(signal::SignalKind::kSum)) {
+            continue;
+          }
+          bool uses = false;
+          for (std::uint8_t k = 0; k < s.signals.op_count[j]; ++k) {
+            if (s.signals.ops[j * signal::SignalParams::kMaxOps + k] == target_serial) {
+              uses = true;
+              break;
+            }
+          }
+          if (uses && static_cast<signal::QuantityId>(s.signals.quantity[j]) != new_q) {
+            err({core::StatusCode::kInvalidArgument}, "quantity must match dependent sums");
+            return;
+          }
+        }
+      }
     }
     // Validated: commit the single field (pool untouched on any refusal).
     switch (cmd.param) {

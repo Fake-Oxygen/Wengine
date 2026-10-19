@@ -23,7 +23,9 @@
 // Operands are serials (stable), validated at configure time against the
 // live pool: each must resolve to a live NON-SUM source (sums compose only
 // flattened — no sum-of-sum, no dangling refs, no self-reference since the
-// new serial doesn't exist yet). Operands evaluate in solver pass 1, sums
+// new serial doesn't exist yet) AND carry the sum's own quantity
+// (dimensional rule: QuantityId equality, generic over kQuantities — mixed
+// U+I or a mismatched output tag fails before pool mutation). Operands evaluate in solver pass 1, sums
 // in pass 2, so sums always read fresh values regardless of slot order.
 // A later-despawned operand fails the step loudly (kInvalidArgument,
 // deterministic) instead of reading a stale slot; a stopped operand
@@ -214,6 +216,13 @@ struct Signals {
       }
       if (pool.kind[*slot] == static_cast<std::uint8_t>(signal::SignalKind::kSum)) {
         return {core::StatusCode::kInvalidArgument}; // sums stay flattened
+      }
+      // Dimensional rule: every operand must carry the sum's own quantity
+      // (QuantityId equality only — generic over kQuantities, no per-unit
+      // switch). Mixed U+I or a mismatched output tag fails pre-mutation.
+      const auto op_q = static_cast<signal::QuantityId>(pool.quantity[*slot]);
+      if (!signal::is_valid_quantity(op_q) || op_q != p.quantity) {
+        return {core::StatusCode::kInvalidArgument};
       }
     }
   }

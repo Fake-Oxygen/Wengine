@@ -492,6 +492,66 @@ void test_stopped_save_load_resume() {
   assert(r.runner.state().signals.running[0] == 1);
 }
 
+void test_sum_quantity_reconfig() {
+  // Control-plane boundary: mixed-quantity ADDs and quantity retags that
+  // would mix a live sum fail loudly with the pool and replay log untouched.
+  // Quantity text derives from kQuantities (no per-quantity switch).
+  assert(signal::kQuantityCount >= 2);
+  const signal::QuantityId q0 = signal::kQuantities[0].id;
+  const signal::QuantityId q1 = signal::kQuantities[1].id;
+  const std::string s0(signal::quantity_suffix(q0));
+  const std::string s1(signal::quantity_suffix(q1));
+  Rig r;
+  r.local_cmd("ADD dc " + s0 + " OFFSET 1");
+  r.local_cmd("ADD dc " + s1 + " OFFSET 2");
+  r.local_cmd("ADD dc " + s0 + " OFFSET 4");
+  solvers::DrainStats st = r.drain();
+  assert(st.applied == 3);
+  r.responses(r.local);
+
+  const std::size_t live_before = r.runner.state().signals.live_count;
+  const std::size_t log_before = r.bus.log().size();
+  // Mixed operands fail for either output tag; same operands with a
+  // mismatched output tag fail too.
+  r.local_cmd("ADD sum " + s0 + " OPS 0,1");
+  r.local_cmd("ADD sum " + s1 + " OPS 0,1");
+  r.local_cmd("ADD sum " + s1 + " OPS 0,2");
+  st = r.drain();
+  assert(st.rejected == 3 && st.applied == 0);
+  assert(r.runner.state().signals.live_count == live_before);
+  assert(r.bus.log().size() == log_before);
+  r.responses(r.local);
+
+  // Same-dimension sum still applies and accumulates exactly.
+  r.local_cmd("ADD sum " + s0 + " OPS 0,2");
+  st = r.drain();
+  assert(st.applied == 1);
+  std::vector<std::string> out = r.responses(r.local);
+  assert(out.size() == 1 && out[0] == "OK added 3");
+  r.step(2);
+  assert(r.value_of(3) == 1.0 + 4.0);
+
+  // Reconfiguration cannot bypass the rule: retagging the sum or any of
+  // its operands to the other dimension fails with pool/log untouched.
+  const std::size_t log_mid = r.bus.log().size();
+  r.local_cmd("SET 3 QUANTITY " + s1); // sum retag vs U operands
+  r.local_cmd("SET 0 QUANTITY " + s1); // operand retag vs U sum
+  st = r.drain();
+  assert(st.rejected == 2 && st.applied == 0);
+  assert(r.bus.log().size() == log_mid);
+  assert(static_cast<signal::QuantityId>(r.runner.state().signals.quantity[3]) == q0);
+  assert(static_cast<signal::QuantityId>(r.runner.state().signals.quantity[0]) == q0);
+  out = r.responses(r.local);
+  assert(out.size() == 2 && out[0].substr(0, 3) == "ERR" && out[1].substr(0, 3) == "ERR");
+
+  // A retag with no dependent sum still applies (existing display-only rule).
+  r.local_cmd("SET 1 QUANTITY " + s0);
+  st = r.drain();
+  assert(st.applied == 1);
+  assert(static_cast<signal::QuantityId>(r.runner.state().signals.quantity[1]) == q0);
+  assert(near(r.value_of(1), 2.0)); // SI value untouched by the retag
+}
+
 } // namespace
 
 int main() {
@@ -502,6 +562,7 @@ int main() {
   test_stop_start_pause_resume_exact();
   test_noise_freeze_and_seed_restart();
   test_sum_add_and_dangling_operand();
+  test_sum_quantity_reconfig();
   test_reserved_verbs();
   test_channel_order_beats_arrival_timing();
   test_replay_log_replays_two_channel_session();
