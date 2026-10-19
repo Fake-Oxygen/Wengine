@@ -58,17 +58,20 @@ public:
       ++dropped_; // muted sink: every snapshot is a deliberate drop
       return;
     }
-    const world::Snapshot sub =
-        world::select_signals(s, std::span(serials_.data(), serials_.size()));
+    // Reused scratch: steady same-shape traffic performs no per-snapshot
+    // allocation after warmup. The inner sink gets the same
+    // valid-during-the-call reference the Runner hands out (see
+    // emit/sink.hpp) — it must copy before returning.
+    world::select_signals_into(s, std::span(serials_.data(), serials_.size()), scratch_);
     ++matched_;
-    forwarded_rows_ += static_cast<std::uint64_t>(sub.signal_count());
-    dropped_ += static_cast<std::uint64_t>(serials_.size()) -
-                static_cast<std::uint64_t>(sub.signal_count());
-    inner_.on_snapshot(sub);
+    forwarded_rows_ += static_cast<std::uint64_t>(scratch_.signal_count());
+    dropped_ += static_cast<std::uint64_t>(serials_.size()) - static_cast<std::uint64_t>(scratch_.signal_count());
+    inner_.on_snapshot(scratch_);
   }
 
 private:
   ISink &inner_;
+  world::Snapshot scratch_; // reused subset buffer (see on_snapshot)
   std::vector<std::uint64_t> serials_{};
   std::uint64_t matched_{0};
   std::uint64_t dropped_{0};
@@ -77,8 +80,7 @@ private:
 
 class StrideSink : public ISink {
 public:
-  explicit StrideSink(ISink &inner, std::uint64_t stride = 1)
-      : inner_(inner), stride_(stride) {}
+  explicit StrideSink(ISink &inner, std::uint64_t stride = 1) : inner_(inner), stride_(stride) {}
 
   // New stride takes effect on the next snapshot. 1 = every frame,
   // 0 = muted (never forwards, counts everything as dropped).

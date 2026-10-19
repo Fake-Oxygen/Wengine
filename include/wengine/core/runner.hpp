@@ -4,6 +4,12 @@
 // step_index, calls registered ISolver steps in order, and emits snapshots
 // to attached ISink lists at a decimated rate.
 //
+// Emission reuses one Snapshot buffer (no per-emit allocation after
+// warmup): each emit step refills it via world::fill_snapshot and fans the
+// reference out to every sink synchronously. The observer contract in
+// emit/sink.hpp applies — sinks copy or enqueue-owned before returning and
+// never reenter this Runner from inside on_snapshot.
+//
 // Two entry points:
 //   run(steps)            exact N steps; deterministic batch/headless/tests.
 //   advance(frame_dt)     real-time accumulator: folds variable frame time
@@ -101,9 +107,9 @@ private:
     state_.sim_time += config_.dt;
     state_.step_index += 1;
     if (config_.emit_every != 0 && !sinks_.empty() && state_.step_index % config_.emit_every == 0) {
-      const world::Snapshot snap = world::take_snapshot(state_);
+      world::fill_snapshot(state_, emit_snap_);
       for (emit::ISink *sink : sinks_) {
-        sink->on_snapshot(snap);
+        sink->on_snapshot(emit_snap_);
       }
     }
     return Status::success();
@@ -111,6 +117,7 @@ private:
 
   RunnerConfig config_{};
   world::State state_{};
+  world::Snapshot emit_snap_; // reused emission buffer (see header comment)
   std::vector<ISolver *> solvers_;
   std::vector<emit::ISink *> sinks_;
   double acc_{0.0};

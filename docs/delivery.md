@@ -141,6 +141,11 @@ losses by cause are (see the link benchmark tasks).
 - Publish path performs no syscalls or I/O: adapt, encode, seqlock
   copy (SHM) or non-blocking send (sockets). Failures are sticky
   `Status`, never throws out of `on_snapshot`.
+- Emission reuses one Runner-owned Snapshot buffer (allocation-free
+  after warmup): sinks observe it synchronously and take an owned copy
+  (or enqueue an owned block) before returning. Async stages must never
+  retain the reference — ownership crosses threads only through owning
+  queues (see `emit/sink.hpp`, `link/output_queue.hpp`).
 - Shutdown: `--forever` stops at a step boundary, then sinks flush
   and close normally. A stalled TCP peer cannot extend shutdown
   unboundedly: pending bytes are accounted (`has_pending_frame`) and

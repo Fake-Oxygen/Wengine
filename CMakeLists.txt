@@ -485,6 +485,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_emit PRIVATE wengine_core)
     add_test(NAME emit COMMAND test_emit)
 
+    add_executable(test_snapshot_reuse tests/test_snapshot_reuse.cpp)
+    target_link_libraries(test_snapshot_reuse PRIVATE wengine_core)
+    add_test(NAME snapshot_reuse COMMAND test_snapshot_reuse)
+
     add_executable(test_link_protocol tests/test_link_protocol.cpp)
     target_link_libraries(test_link_protocol PRIVATE wengine_core)
     add_test(NAME link_protocol COMMAND test_link_protocol)
@@ -620,6 +624,9 @@ if(BUILD_BENCHMARKS)
 
     add_executable(bench_signal benchmarks/bench_signal.cpp)
     target_link_libraries(bench_signal PRIVATE wengine_core)
+
+    add_executable(bench_snapshot benchmarks/bench_snapshot.cpp)
+    target_link_libraries(bench_snapshot PRIVATE wengine_core)
 
     add_executable(bench_link benchmarks/bench_link.cpp)
     target_link_libraries(bench_link PRIVATE wengine_core wengine_link_shm)

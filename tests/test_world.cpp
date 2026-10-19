@@ -1,10 +1,14 @@
 #include "wengine/world/serialize.hpp"
 #include "wengine/world/state.hpp"
+#include "wengine/signal/types.hpp"
 
 #include <cassert>
+#include <cstdint>
 #include <iostream>
+#include <span>
 #include <sstream>
 #include <string>
+#include <vector>
 
 using namespace wengine;
 
@@ -89,6 +93,127 @@ void test_snapshot() {
   assert(e.particle_count() == 0);
 }
 
+void test_fill_matches_take() {
+  // fill_snapshot into a reused buffer is value-identical to take_snapshot,
+  // for populated and empty states alike.
+  const world::State s = make_sample();
+  world::Snapshot buf;
+  world::fill_snapshot(s, buf);
+  assert(buf == world::take_snapshot(s));
+
+  world::State empty;
+  world::fill_snapshot(empty, buf); // shrink over a warmed buffer
+  assert(buf == world::take_snapshot(empty));
+  assert(buf.particle_count() == 0 && buf.signal_count() == 0);
+}
+
+signal::SignalParams dc_params(double offset) {
+  signal::SignalParams p;
+  p.kind = signal::SignalKind::kDc;
+  p.offset = offset;
+  return p;
+}
+
+void test_fill_signals_and_retained_copies() {
+  // Both pools in one buffer; retained owned copies survive live-State
+  // mutation plus buffer reuse.
+  world::State s;
+  s.sim_time = 0.5;
+  s.step_index = 5;
+  const world::Entity a = s.spawn_entity();
+  assert(world::configure_source(a, s.signals, dc_params(1.0), 0.0).ok());
+  const world::Entity b = s.spawn_entity();
+  assert(world::configure_source(b, s.signals, dc_params(2.0), 0.0).ok());
+  const world::Entity p = s.spawn_entity();
+  s.particles.attach(p.index);
+  s.particles.pos_x[p.index] = 7.0;
+
+  world::Snapshot buf;
+  world::fill_snapshot(s, buf);
+  assert(buf == world::take_snapshot(s));
+  assert(buf.signal_count() == 2);
+  assert(buf.sig_serial[0] == 0 && buf.sig_serial[1] == 1); // slot order
+  assert(buf.sig_value[0] == 1.0 && buf.sig_value[1] == 2.0);
+
+  const world::Snapshot retained = buf; // owned copy, like a retaining sink
+  s.signals.value[a.index] = 99.0;
+  s.particles.pos_x[p.index] = -1.0;
+  s.sim_time = 0.6;
+  s.step_index = 6;
+  world::fill_snapshot(s, buf); // reuse must not disturb `retained`
+  assert(buf == world::take_snapshot(s));
+  assert(buf.sig_value[0] == 99.0 && buf.pos_x[0] == -1.0);
+  assert(retained.sim_time == 0.5 && retained.step_index == 5);
+  assert(retained.sig_value[0] == 1.0 && retained.sig_value[1] == 2.0);
+  assert(retained.pos_x[0] == 7.0);
+  assert(!(buf == retained));
+}
+
+void test_fill_spawn_despawn_and_zero() {
+  // Growth, holes, despawn-to-zero, and respawn all refill correctly.
+  world::State s;
+  world::Snapshot buf;
+  world::fill_snapshot(s, buf); // zero sources, cold buffer
+  assert(buf == world::take_snapshot(s));
+  assert(buf.signal_count() == 0);
+
+  const world::Entity a = s.spawn_entity();
+  assert(world::configure_source(a, s.signals, dc_params(1.0), 0.0).ok());
+  const world::Entity b = s.spawn_entity();
+  assert(world::configure_source(b, s.signals, dc_params(2.0), 0.0).ok());
+  const world::Entity c = s.spawn_entity();
+  assert(world::configure_source(c, s.signals, dc_params(3.0), 0.0).ok());
+  world::fill_snapshot(s, buf);
+  assert(buf == world::take_snapshot(s));
+  assert(buf.signal_count() == 3);
+
+  assert(s.despawn_entity(b)); // hole in the middle, serials stable
+  world::fill_snapshot(s, buf);
+  assert(buf == world::take_snapshot(s));
+  assert(buf.signal_count() == 2);
+  assert(buf.sig_serial[0] == 0 && buf.sig_serial[1] == 2); // slot order
+  assert(buf.sig_value[0] == 1.0 && buf.sig_value[1] == 3.0);
+
+  assert(s.despawn_entity(a) && s.despawn_entity(c)); // back to zero live
+  world::fill_snapshot(s, buf);
+  assert(buf == world::take_snapshot(s)); // capacities retained, sizes zero
+  assert(buf.signal_count() == 0);
+
+  const world::Entity d = s.spawn_entity(); // slot recycled, serial fresh
+  assert(world::configure_source(d, s.signals, dc_params(9.0), 0.0).ok());
+  world::fill_snapshot(s, buf);
+  assert(buf == world::take_snapshot(s));
+  assert(buf.signal_count() == 1 && buf.sig_serial[0] == 3);
+  assert(buf.sig_value[0] == 9.0);
+}
+
+void test_select_into_matches_select() {
+  // select_signals_into reuses capacity and matches the owning copy;
+  // retained copies survive scratch reuse.
+  world::Snapshot s;
+  s.step_index = 4;
+  s.sim_time = 0.04;
+  s.sig_serial = {0, 1, 2};
+  s.sig_value = {10.0, 20.0, 30.0};
+  s.sig_quantity = {0, 0, 0};
+  const std::uint64_t want[2] = {2, 0};
+
+  world::Snapshot buf;
+  world::select_signals_into(s, std::span<const std::uint64_t>(want, 2), buf);
+  const world::Snapshot owned =
+      world::select_signals(s, std::span<const std::uint64_t>(want, 2));
+  assert(buf == owned); // slot order, not request order
+  assert(buf.signal_count() == 2);
+  assert(buf.sig_serial[0] == 0 && buf.sig_serial[1] == 2);
+  assert(buf.sig_value[0] == 10.0 && buf.sig_value[1] == 30.0);
+
+  const world::Snapshot retained = buf;
+  const std::uint64_t one[1] = {1};
+  world::select_signals_into(s, std::span<const std::uint64_t>(one, 1), buf);
+  assert(buf.signal_count() == 1 && buf.sig_serial[0] == 1);
+  assert(retained.signal_count() == 2 && retained.sig_serial[1] == 2);
+}
+
 void test_round_trip() {
   const world::State src = make_sample();
   std::ostringstream bytes;
@@ -157,6 +282,10 @@ int main() {
   test_registry();
   test_state_spawn_despawn();
   test_snapshot();
+  test_fill_matches_take();
+  test_fill_signals_and_retained_copies();
+  test_fill_spawn_despawn_and_zero();
+  test_select_into_matches_select();
   test_round_trip();
   test_corrupt_input();
   test_determinism();

@@ -5,8 +5,9 @@
 // producer and one async consumer. Storage/ownership only — worker threads
 // and endpoint wiring are separate tasks.
 //
-// WHY: Runner calls every ISink synchronously with a stack-local Snapshot
-// reference that no async observer may retain. This queue is the ownership
+// WHY: Runner calls every ISink synchronously with a reference into its
+// reusable emission buffer (see core/runner.hpp) that no async observer
+// may retain. This queue is the ownership
 // bridge: the producer copies a sealed SampleBlock in through a bounded
 // try_push, the consumer reads it while it is queue-owned (front) and
 // returns the slot by popping. An unbounded queue would only turn frame

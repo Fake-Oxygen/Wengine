@@ -65,9 +65,10 @@
 //   S3. Adapter output is deterministic (particle adapter preserves dense
 //       slot order); encode preserves item/channel order, decode restores
 //       it, so a round-trip is exactly equal (==), not approximately equal.
-//   S4. take_snapshot() already allocates per emit; the particle adapter
-//       allocates in the same cost class (one items vector, a handful of
-//       short channel strings). encode itself stays noexcept,
+//   S4. Snapshot capture reuses the Runner's emission buffer
+//       (fill_snapshot, allocation-free after warmup); the particle
+//       adapter allocates in the same cost class it always has (one items
+//       vector, a handful of short channel strings). encode itself stays noexcept,
 //       allocation-free, bounded memcpy. Decode may allocate (cold reader
 //       side, outside the sim loop) — the asymmetry is deliberate and
 //       documented on each function.
