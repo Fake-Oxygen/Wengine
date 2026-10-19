@@ -696,6 +696,12 @@ if(BUILD_BENCHMARKS)
     add_executable(bench_signal benchmarks/bench_signal.cpp)
     target_link_libraries(bench_signal PRIVATE wengine_core)
 
+    # Sparse-world / serial-lookup / custom-source scaling (pool-layout
+    # baseline before any parallelism or layout change). Links the isolated
+    # Lua runtime like test_lua to separate Lua step costs.
+    add_executable(bench_signal_scale benchmarks/bench_signal_scale.cpp)
+    target_link_libraries(bench_signal_scale PRIVATE wengine_core wengine_signal_lua)
+
     add_executable(bench_snapshot benchmarks/bench_snapshot.cpp)
     target_link_libraries(bench_snapshot PRIVATE wengine_core)
 
