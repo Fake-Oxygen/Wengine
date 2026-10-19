@@ -100,7 +100,7 @@ private:
     }
     state_.sim_time += config_.dt;
     state_.step_index += 1;
-    if (config_.emit_every != 0 && state_.step_index % config_.emit_every == 0) {
+    if (config_.emit_every != 0 && !sinks_.empty() && state_.step_index % config_.emit_every == 0) {
       const world::Snapshot snap = world::take_snapshot(state_);
       for (emit::ISink *sink : sinks_) {
         sink->on_snapshot(snap);
