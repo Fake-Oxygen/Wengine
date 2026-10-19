@@ -22,6 +22,22 @@ option(BUILD_TESTS "Build lightweight tests (no external deps)" ON)
 option(BUILD_BENCHMARKS "Build micro-benchmarks" ON)
 
 # ------------------------------------------------------------------
+# Test assertion policy: tests use plain assert(), often around
+# operations with side effects. Default CMake Release/RelWithDebInfo
+# defines NDEBUG, which would silently disable both the checks and
+# those operations. Every CTest binary links wengine_test_assert,
+# which undefines NDEBUG (-UNDEBUG on GCC/Clang, /UNDEBUG on MSVC)
+# after any -DNDEBUG from the build type, so Debug and optimized
+# test builds both execute assertions. Benchmarks never link this
+# target (separate config, keeps its own NDEBUG/optimization).
+# ------------------------------------------------------------------
+add_library(wengine_test_assert INTERFACE)
+target_compile_options(wengine_test_assert INTERFACE
+    $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>
+)
+
+# ------------------------------------------------------------------
 # Header-only engine modules: include/wengine/<module>/*.hpp
 # Convention: one INTERFACE target per module, snake_case files,
 # PascalCase types, wengine::<module> namespaces, no I/O in solvers.
@@ -607,9 +623,55 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/gui
     )
     add_test(NAME canvas2d COMMAND test_canvas2d)
+
+    # Assertion policy pin: fails the build if NDEBUG is ever defined
+    # for a test TU, and fails at runtime if an assert side effect is
+    # ever skipped. New test_* targets are picked up automatically by
+    # the loop below (keep the test_ prefix).
+    add_executable(test_assert_policy tests/test_assert_policy.cpp)
+    target_link_libraries(test_assert_policy PRIVATE wengine_core)
+    add_test(NAME assert_policy COMMAND test_assert_policy)
+
+    # Intentional-failure probe: assert(false) must abort even in an
+    # optimized build. CTest WILL_FAIL cannot invert a crash (an abort
+    # is reported as ***Exception failure regardless), so a small
+    # harness inverts the status: probe aborts -> pass, probe exits
+    # 0 -> assertions disabled -> fail loudly instead of silently
+    # passing.
+    add_executable(assert_fail_probe tests/assert_fail_probe.cpp)
+    target_link_libraries(assert_fail_probe PRIVATE wengine_core)
+    add_test(NAME assert_probe
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/assert_probe_check.sh
+            $<TARGET_FILE:assert_fail_probe>)
+
+    # Apply the assertion policy to every test executable defined
+    # above. Deliberately scoped here (not via link_libraries): bench_*
+    # targets below must keep their own NDEBUG/optimization behavior.
+    get_property(_wengine_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_t IN LISTS _wengine_test_targets)
+        if(_t MATCHES "^(test_|assert_fail_probe$)")
+            if(TARGET ${_t})
+                get_target_property(_ttype ${_t} TYPE)
+                if(_ttype STREQUAL "EXECUTABLE")
+                    target_link_libraries(${_t} PRIVATE wengine_test_assert)
+                endif()
+            endif()
+        endif()
+    endforeach()
+    unset(_wengine_test_targets)
+    unset(_t)
+    unset(_ttype)
 endif()
 
 if(BUILD_BENCHMARKS)
+    # Benchmarks keep the build-type NDEBUG/optimization untouched and
+    # never link wengine_test_assert (see above). Effective flags are
+    # reported at configure time and pinned by the bench preset in
+    # CMakePresets.json; verify with build-bench/CMakeCache.txt
+    # (CMAKE_CXX_FLAGS_RELEASE) or compile_commands.json.
+    message(STATUS "WEngine benchmarks: BUILD_TYPE='${CMAKE_BUILD_TYPE}' "
+        "CXX=${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} "
+        "FLAGS='${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_RELEASE}'")
     add_executable(bench_ohm benchmarks/bench_ohm.cpp)
     target_link_libraries(bench_ohm PRIVATE wengine_core)
 

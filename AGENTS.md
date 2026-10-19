@@ -124,6 +124,14 @@ Requirements:
 * Tests are plain-`assert` binaries printing `test_x: OK`.
 * Tests are registered with `add_executable`, `target_link_libraries`,
   and `add_test`.
+* Test assertion policy: every `test_*` target (plus `assert_fail_probe`)
+  links `wengine_test_assert` (`-UNDEBUG`/`/UNDEBUG`), so Debug and
+  optimized (`--preset test-opt`) CTest runs both execute assertions.
+  Keep the `test_` prefix so new tests inherit the policy automatically.
+* Reproducible configs: `cmake --preset dev|test-opt|bench`
+  (see `CMakePresets.json` + README "Build configurations"). Benchmarks
+  never link the assertion policy; their flags come from the `bench`
+  preset and are echoed at configure time.
 * Do not introduce external test dependencies without an explicit reason.
 
 After changes, run the narrowest relevant tests first, then the full test suite

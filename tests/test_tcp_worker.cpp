@@ -393,8 +393,10 @@ void test_stalled_sibling_isolation() {
   // A never-draining reader on worker A must not slow the sim thread or
   // worker B: B delivers every block, the final State equals a run with no
   // networking, and A reports queue-full loudly with a bounded finish.
-  // The burst (~1.1 MiB) volumes past loopback socket buffers so the stall
-  // is certain, never timing-dependent.
+  // The burst (~1.1 MiB) volumes past loopback socket buffers so the
+  // stall on A is certain; B's queue is sized past the whole 63-block
+  // burst so its lossless delivery is certain too, at any optimization
+  // level (an 8-slot default queue drops under an -O3 producer burst).
   constexpr std::uint64_t kSteps = 4000;
   constexpr std::uint64_t kSources = 32;
   std::uint16_t port_a = 0;
@@ -408,19 +410,43 @@ void test_stalled_sibling_isolation() {
   cfg_a.endpoint = endpoint_for(port_a);
   cfg_a.domain = "signal";
   cfg_a.mode = link::TcpWorkerMode::kOrdered;
-  cfg_a.queue.max_slots = 4; // tiny: fills fast under a stall
+  // Small relative to the 63-block burst, but sized past the pinned
+  // kernel buffers (worker's 256 KiB send buffer + the 8 KiB effective
+  // receive window pinned below): the worker stalls on full buffers
+  // after ~15 blocks at any producer speed, the queue stays full, and
+  // the rest drops loudly — volumetric, never timing-dependent. (A
+  // 4-slot default queue holds ~72 KiB, inside the send buffer alone,
+  // so an -O3 burst over before the buffers fill and finish() wrongly
+  // succeeds.)
+  cfg_a.queue.max_slots = 32;
+  cfg_a.queue.max_bytes = link::sample::kBlockMaxBytes * 32;
   link::TcpBlockWorker worker_a(cfg_a);
   assert(worker_a.ok());
   link::TcpWorkerConfig cfg_b;
   cfg_b.endpoint = endpoint_for(port_b);
   cfg_b.domain = "signal";
   cfg_b.mode = link::TcpWorkerMode::kOrdered;
+  // Absorb the whole burst deterministically: 4000 steps seal 63 blocks
+  // and an -O3 sim thread emits them faster than the worker's poll +
+  // encode + send loop drains an 8-slot default queue, so the default
+  // bound drops loudly by design. Sizing the queue past the known burst
+  // (slots and byte budget alike — the default byte budget also only
+  // covers 8 maximum-size blocks) removes the producer-speed assumption
+  // without touching the stall under test on worker A.
+  cfg_b.queue.max_slots = 128;
+  cfg_b.queue.max_bytes = link::sample::kBlockMaxBytes * 128;
   link::TcpBlockWorker worker_b(cfg_b);
   assert(worker_b.ok());
 
   const int peer_a = ::accept(listen_a, nullptr, nullptr);
   assert(peer_a >= 0); // stalled: never read
   set_recv_timeout(peer_a);
+  // Pin the stalled peer's receive window tiny (kernel doubles to 8 KiB)
+  // so worker A blocks on full kernel buffers after ~15 blocks at any
+  // producer speed; with default autotuned buffers the stall needs the
+  // worker to have moved megabytes first, which an -O3 burst never does.
+  const int tiny_rcv = 4096;
+  assert(::setsockopt(peer_a, SOL_SOCKET, SO_RCVBUF, &tiny_rcv, sizeof(tiny_rcv)) == 0);
   const int peer_b = ::accept(listen_b, nullptr, nullptr);
   assert(peer_b >= 0);
   set_recv_timeout(peer_b);

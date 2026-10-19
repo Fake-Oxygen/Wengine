@@ -52,6 +52,37 @@ solvers cannot be constant-folded away; each prints `ns/iter` (or
 
 `compile_commands.json` is exported to `build/` for clangd/clang-tidy.
 
+### Build configurations (presets)
+
+Reproducible presets live in `CMakePresets.json` — prefer them over
+hand-rolled `-D` flags:
+
+| Preset | Build type | Contents | Flags (GCC) |
+|---|---|---|---|
+| `dev` | `Debug` | tests + benchmarks | unoptimized, no `NDEBUG`, asserts active |
+| `test-opt` | `Release` | tests only | `-O3 -DNDEBUG` + forced `-UNDEBUG` on every `test_*` target, so asserts and their side effects still run optimized |
+| `bench` | `Release` | benchmarks only | `-O3 -DNDEBUG` (no test policy on `bench_*` targets) |
+
+```sh
+cmake --preset dev && cmake --build --preset dev && ctest --preset dev
+cmake --preset test-opt && cmake --build --preset test-opt && ctest --preset test-opt
+cmake --preset bench && cmake --build --preset bench
+./build-bench/bench_ohm
+```
+
+Assertion policy: tests use plain `assert()`, so every `test_*`
+binary links `wengine_test_assert` (`-UNDEBUG`, after any `-DNDEBUG`
+from the build type). `ctest -R 'assert_policy|assert_probe'` pins
+it: `assert_policy` fails the build (`#error`) or the run when an
+assert side effect is skipped, and `assert_probe`
+(`assert(false)` via a status-inverting `sh` harness, since CTest
+`WILL_FAIL` cannot invert a crash) fails the suite if an optimized build
+ever stops aborting. Benchmarks stay separate: they never link the
+policy target, and their effective flags are echoed at configure time
+plus recorded in `build-bench/CMakeCache.txt`
+(`CMAKE_CXX_FLAGS_RELEASE`) and `compile_commands.json` — never
+reconstruct them with a manual `-UNDEBUG`.
+
 ## Run (CLI)
 
 ```sh

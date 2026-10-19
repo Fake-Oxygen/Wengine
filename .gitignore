@@ -1,3 +1,6 @@
 build
 build-gui
+build-dev
+build-test-opt
+build-bench
 examples/__pycache__

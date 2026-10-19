@@ -1,0 +1,62 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "dev",
+      "displayName": "dev (Debug, tests + benchmarks)",
+      "description": "Default development build: unoptimized, assertions active everywhere.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTS": "ON",
+        "BUILD_BENCHMARKS": "ON",
+        "BUILD_GUI": "OFF"
+      }
+    },
+    {
+      "name": "test-opt",
+      "displayName": "test-opt (Release, optimized tests, assertions forced)",
+      "description": "Optimized (-O3) test run: wengine_test_assert (-UNDEBUG) keeps every assert() and its side effects alive despite -DNDEBUG from the build type.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-test-opt",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTS": "ON",
+        "BUILD_BENCHMARKS": "OFF",
+        "BUILD_GUI": "OFF"
+      }
+    },
+    {
+      "name": "bench",
+      "displayName": "bench (Release, optimized benchmarks)",
+      "description": "Benchmark build: -O3 -DNDEBUG (GCC Release defaults), no test assertion policy applied to bench_* targets. Effective flags are echoed at configure time and recorded in build-bench/CMakeCache.txt (CMAKE_CXX_FLAGS_RELEASE) and compile_commands.json.",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build-bench",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTS": "OFF",
+        "BUILD_BENCHMARKS": "ON",
+        "BUILD_GUI": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "test-opt", "configurePreset": "test-opt" },
+    { "name": "bench", "configurePreset": "bench" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "test-opt",
+      "configurePreset": "test-opt",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
