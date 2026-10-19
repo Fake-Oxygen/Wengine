@@ -6,6 +6,8 @@
 
 #include "state.hpp"
 
+#include "wengine/tui/views.hpp"
+
 #include <curses.h>
 
 #include <algorithm>
@@ -53,20 +55,39 @@ void draw_help_pane(State &s) {
   const std::string head = s.help_title + "  (type to compose, Enter runs + closes, PgUp/PgDn scroll, Esc closes)";
   (void)mvaddnstr(1, 0, head.c_str(), cols - 1);
   (void)wclrtoeol(stdscr);
+  const std::size_t width = cols > 1 ? static_cast<std::size_t>(cols - 1) : std::size_t{1};
   const std::size_t page = out_rows > 1 ? static_cast<std::size_t>(out_rows - 1) : std::size_t{1};
-  std::size_t max_first = 0;
-  if (s.help_lines.size() > page) {
-    max_first = s.help_lines.size() - page;
-  }
-  if (s.help_first > max_first) {
-    s.help_first = max_first;
+  const views::Wrapped wrapped = views::wrap_lines(s.help_lines, width);
+  const std::size_t total = wrapped.rows.size();
+  // `help_first` counts display rows (wrapped) so narrow resizes reflow
+  // instead of corrupting; clamped every frame like the scrollback.
+  if (total <= page) {
+    s.help_first = 0;
+  } else {
+    const std::size_t max_first = total - page;
+    if (s.help_first > max_first) {
+      s.help_first = max_first;
+    }
   }
   for (std::size_t i = 0; i < page; ++i) {
     const std::size_t idx = s.help_first + i;
-    if (idx >= s.help_lines.size()) {
+    if (idx >= total) {
       break;
     }
-    (void)mvaddnstr(static_cast<int>(2 + i), 0, s.help_lines[idx].c_str(), cols - 1);
+    const std::size_t logical = wrapped.logical_for_row[idx];
+    const views::LineKind kind = logical < s.help_lines.size() ? views::classify_line(s.help_lines[logical]) : views::LineKind::kNormal;
+    const int pair = views::color_pair_for(kind);
+    if (s.use_color && pair != 0) {
+      (void)attron(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail || kind == views::LineKind::kError)) {
+      (void)attron(A_BOLD);
+    }
+    (void)mvaddnstr(static_cast<int>(2 + i), 0, wrapped.rows[idx].c_str(), cols - 1);
+    if (s.use_color && pair != 0) {
+      (void)attroff(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail || kind == views::LineKind::kError)) {
+      (void)attroff(A_BOLD);
+    }
   }
 }
 

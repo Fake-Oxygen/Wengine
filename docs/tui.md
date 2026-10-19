@@ -2,7 +2,7 @@
 
 `PhysicsSimApp --tui` opens a terminal UI with the full CLI command set.
 Status: scaffolding + palette/help browser + closed-form guided forms
-(TUI-1..4) + async worker (TUI-5); output views are roadmap tasks in
+(TUI-1..4) + async worker (TUI-5) + output views (TUI-6); remaining work is in
 Plane (parent: TUI epic).
 
 ## 1. Reuse decision (D-TUI-1)
@@ -136,11 +136,42 @@ Clang-TSAN clean (never GCC per AGENTS.md). Verified on a real PTY
 (20M-step run: progress counts up, `abc` typing echoes live, Ctrl-C tails
 `interrupted by Ctrl-C`, 8-step CSV lands on disk, F10 exits 0).
 
+Output views (TUI-6): `include/wengine/tui/views.hpp` (ncurses-free model:
+text-only `LineKind` classification, substring search, hard-wrap reflow,
+display-row scroll math, `save_lines`, `TERM`/`NO_COLOR` gates,
+unit-tested). The scrollback + help + form/batch result panes render
+captured CLI text only (no per-command view code): PASS/OK green,
+FAIL/Error/WARN red (bold on no-color terminals), `> ` prompts cyan;
+usage doc lines mentioning `PASS/FAIL` together stay unhighlighted.
+`/` (on an empty input line — no valid command starts with `/`) opens a
+status-line search prompt, Enter confirms over the full logical scrollback
+(truncation notes included), `n`/`N` step through hits with a `match i/M`
+indicator, Esc clears; the query survives new output (recomputed on every
+completion). F5 from any pane prompts for a path on the status line and
+writes the raw logical scrollback (`save_lines`, loud open/write errors).
+Wrapping is per-frame at `cols-1` so narrow resizes reflow instead of
+corrupting; scroll counts display rows from the tail (0 = follow) and the
+status bar always shows `[first-last/total (pct)]` plus the scrolled hint.
+`TERM=dumb`/`unknown`/empty refuses loudly before `initscr` (exit 1:
+needs a cursor-addressable terminal; verified hang-free via PTY — the
+full-screen layout has no `cup` there, function keys are undefined, and
+flow-control swallows Ctrl-Q, so garbling is refused, not attempted);
+`NO_COLOR` on a capable terminal still runs full-screen, only without
+colors. `tests/test_tui_views.cpp` pins classification (incl. the
+`PASS/FAIL`-doc exclusion + `Unknown command` errors), the color and
+full-screen gates, search across a 600-line tail, wrap/reflow geometry,
+scroll math + indicator, save byte-identity + loud failure, and a
+no-per-command proof that runs one line per solver family through the real
+`Shell`. Verified on a real PTY (`/tmp/opencode/tui6_pty_smoke.py`: xterm
+PASS with color escapes, `/V` find + `n` step, F5 save byte-identical to
+the scrollback, narrow-resize reflow with continued interaction, F10 quit
+0; dumb refusal exit 1; `NO_COLOR=1` xterm boots and runs PASS).
+
 ## 4. Known limits (roadmap, not bugs)
 
 - One command's displayed output is capped at 500 lines (loud truncation
   note). Full logs belong in `--emit-csv` files.
-- No mouse, no scrollback search/save yet. `sig` per-source family
+- No mouse. `sig` per-source family
   (`list`/`add`/`set`/`start`/`stop`/`drop`) stays on the typed line; the
   F4 builders cover batch `run` modes only.
 
@@ -150,4 +181,8 @@ No input-automation tooling exists (same as the GUI panels): run
 `./build/PhysicsSimApp --tui` on a real TTY and check help display,
 completion, history recall across restarts, resize, a long-run
 truncation note, and an async cancel (`/tmp/opencode/tui5_pty_smoke.py`:
-progress, live typing, Ctrl-C tail, CSV, quit).
+progress, live typing, Ctrl-C tail, CSV, quit). Output views
+(`/tmp/opencode/tui6_pty_smoke.py`): PASS/FAIL/Error highlight with color
+escapes on xterm, `/` find + `n` stepping, F5 save byte-identical to the
+scrollback, narrow-resize reflow with continued interaction, F10 quit;
+`TERM=dumb` refusal (exit 1, no hang); `NO_COLOR=1` xterm boots and runs.

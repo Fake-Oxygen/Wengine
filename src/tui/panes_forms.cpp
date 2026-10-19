@@ -6,6 +6,8 @@
 
 #include "state.hpp"
 
+#include "wengine/tui/views.hpp"
+
 #include <curses.h>
 
 namespace wengine::tui {
@@ -104,12 +106,32 @@ void draw_form_pane(State &s) {
     }
   }
   std::size_t first_res = s.form_res_first[sfi];
-  if (!res_lines.empty() && first_res >= res_lines.size()) {
-    first_res = res_lines.size() - 1;
-    s.form_res_first[sfi] = first_res;
+  // Result tail reflows on resize: wrap to the current width and page in
+  // display-row space (highlight stays on the logical captured text).
+  const std::size_t res_width = cols > 1 ? static_cast<std::size_t>(cols - 1) : std::size_t{1};
+  const views::Wrapped res_wrapped = views::wrap_lines(res_lines, res_width);
+  const std::size_t res_total = res_wrapped.rows.size();
+  if (res_total == 0) {
+    first_res = 0;
+  } else if (first_res >= res_total) {
+    first_res = res_total - 1;
   }
-  for (std::size_t i = first_res; i < res_lines.size() && row < 1 + out_rows; ++i) {
-    (void)mvaddnstr(row, 0, res_lines[i].c_str(), cols - 1);
+  s.form_res_first[sfi] = first_res;
+  for (std::size_t i = first_res; i < res_total && row < 1 + out_rows; ++i) {
+    const std::size_t logical = res_wrapped.logical_for_row[i];
+    const views::LineKind kind = logical < res_lines.size() ? views::classify_line(res_lines[logical]) : views::LineKind::kNormal;
+    const int pair = views::color_pair_for(kind);
+    if (s.use_color && pair != 0) {
+      (void)attron(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail || kind == views::LineKind::kError)) {
+      (void)attron(A_BOLD);
+    }
+    (void)mvaddnstr(row, 0, res_wrapped.rows[i].c_str(), cols - 1);
+    if (s.use_color && pair != 0) {
+      (void)attroff(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail || kind == views::LineKind::kError)) {
+      (void)attroff(A_BOLD);
+    }
     (void)wclrtoeol(stdscr);
     ++row;
   }

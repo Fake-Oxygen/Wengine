@@ -5,6 +5,7 @@
 
 #include "wengine/cli/cancel.hpp"
 #include "wengine/tui/popup.hpp"
+#include "wengine/tui/views.hpp"
 
 #include <curses.h>
 
@@ -15,25 +16,41 @@ namespace wengine::tui {
 void draw_scrollback_pane(State &s) {
   const int out_rows = s.out_rows;
   const int cols = s.cols;
-  const std::size_t page = static_cast<std::size_t>(out_rows);
-  const std::size_t total = s.scrollback.size();
-  std::size_t max_scroll = 0;
-  if (total > page) {
-    max_scroll = total - page;
-  }
-  if (s.scroll > static_cast<int>(max_scroll)) {
-    s.scroll = static_cast<int>(max_scroll);
-  }
-  if (s.scroll < 0) {
-    s.scroll = 0;
-  }
-  const std::size_t first = max_scroll - static_cast<std::size_t>(s.scroll) > max_scroll ? 0 : max_scroll - static_cast<std::size_t>(s.scroll);
+  const std::size_t width = cols > 1 ? static_cast<std::size_t>(cols - 1) : std::size_t{1};
+  const std::size_t page = out_rows > 0 ? static_cast<std::size_t>(out_rows) : std::size_t{1};
+  const views::Wrapped wrapped = views::wrap_lines(s.scrollback, width);
+  const std::size_t total = wrapped.rows.size();
+  s.scroll = views::clamp_scroll(s.scroll, total, page);
+  const std::size_t first = views::display_first(total, page, s.scroll);
   for (int i = 0; i < out_rows; ++i) {
     const std::size_t idx = first + static_cast<std::size_t>(i);
     if (idx >= total) {
       break;
     }
-    (void)mvaddnstr(1 + i, 0, s.scrollback[idx].c_str(), cols - 1);
+    const std::size_t logical = wrapped.logical_for_row[idx];
+    const views::LineKind kind = logical < s.scrollback.size() ? views::classify_line(s.scrollback[logical]) : views::LineKind::kNormal;
+    const int pair = views::color_pair_for(kind);
+    if (s.use_color && pair != 0) {
+      (void)attron(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail || kind == views::LineKind::kError)) {
+      // No-color fallback: failures stay visible via bold, never vanish.
+      (void)attron(A_BOLD);
+    }
+    (void)mvaddnstr(1 + i, 0, wrapped.rows[idx].c_str(), cols - 1);
+    if (s.use_color && pair != 0) {
+      (void)attroff(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail || kind == views::LineKind::kError)) {
+      (void)attroff(A_BOLD);
+    }
+    // Search-hit highlight: reverse-video each query occurrence in the
+    // visible chunk (chunk-local, so a wrap-split hit still counts as a
+    // logical-line match for navigation, it just highlights the pieces).
+    if (!s.search_query.empty()) {
+      const auto spans = views::match_spans(wrapped.rows[idx], s.search_query);
+      for (const auto &sp : spans) {
+        (void)mvchgat(1 + i, static_cast<int>(sp.first), static_cast<int>(sp.second), A_REVERSE, 0, nullptr);
+      }
+    }
   }
 }
 
@@ -94,7 +111,11 @@ void draw_frame(State &s) {
     (void)attron(COLOR_PAIR(s.last_rc == 0 ? 2 : 3));
   }
   std::string status;
-  if (s.async.busy()) {
+  if (s.searching) {
+    status = "/" + s.search_query + "  (Enter: find, Esc: cancel)";
+  } else if (s.saving) {
+    status = "save pane to: " + s.save_path + "  (Enter: save, Esc: cancel)";
+  } else if (s.async.busy()) {
     // Progress line while the worker runs: step counts come from the CLI
     // chunk hooks (TUI-5), elapsed from the task clock. Loud cancel hint.
     std::string prog;
@@ -109,12 +130,46 @@ void draw_frame(State &s) {
     } else {
       prog = "starting...";
     }
-    status = "running `" + s.async.line() + "` " + prog + " (" +
-             std::to_string(static_cast<int>(s.async.elapsed_s())) +
-             "s) -- Ctrl-C cancels" +
-             (s.overlay == Overlay::kNone && s.scroll > 0 ? "  [scrolled -PgDn- to follow]" : "");
+    status = "running `" + s.async.line() + "` " + prog + " (" + std::to_string(static_cast<int>(s.async.elapsed_s())) + "s) -- Ctrl-C cancels";
+    if (s.overlay == Overlay::kNone) {
+      const std::size_t width = s.cols > 1 ? static_cast<std::size_t>(s.cols - 1) : std::size_t{1};
+      const std::size_t page = s.out_rows > 0 ? static_cast<std::size_t>(s.out_rows) : std::size_t{1};
+      const views::Wrapped w = views::wrap_lines(s.scrollback, width);
+      const std::size_t total = w.rows.size();
+      const int sc = views::clamp_scroll(s.scroll, total, page);
+      const std::size_t first = views::display_first(total, page, sc);
+      const std::size_t vis = total > first ? (total - first < page ? total - first : page) : 0;
+      status += "  [" + views::scroll_indicator(first, vis, total) + "]";
+      if (s.scroll > 0) {
+        status += " scrolled -PgDn- to follow";
+      }
+    }
+    if (!s.search_query.empty() && !s.search_matches.empty()) {
+      status += "  match " + std::to_string(s.search_sel + 1) + "/" + std::to_string(s.search_matches.size()) + " for `" + s.search_query + "` (n/N)";
+    }
   } else {
-    status = "rc=" + std::to_string(s.last_rc) + "  " + s.status_msg + (s.overlay == Overlay::kNone && s.scroll > 0 ? "  [scrolled -PgDn- to follow]" : "");
+    status = "rc=" + std::to_string(s.last_rc) + "  " + s.status_msg;
+    if (s.overlay == Overlay::kNone) {
+      const std::size_t width = s.cols > 1 ? static_cast<std::size_t>(s.cols - 1) : std::size_t{1};
+      const std::size_t page = s.out_rows > 0 ? static_cast<std::size_t>(s.out_rows) : std::size_t{1};
+      const views::Wrapped w = views::wrap_lines(s.scrollback, width);
+      const std::size_t total = w.rows.size();
+      const int sc = views::clamp_scroll(s.scroll, total, page);
+      const std::size_t first = views::display_first(total, page, sc);
+      const std::size_t vis = total > first ? (total - first < page ? total - first : page) : 0;
+      status += "  [" + views::scroll_indicator(first, vis, total) + "]";
+      if (s.scroll > 0) {
+        status += " scrolled -PgDn- to follow";
+      }
+    }
+    if (!s.search_query.empty()) {
+      if (!s.search_matches.empty()) {
+        status += "  match " + std::to_string(s.search_sel + 1) + "/" + std::to_string(s.search_matches.size()) +
+                  " for `" + s.search_query + "` (n/N, Esc clears)";
+      } else {
+        status += "  no match for `" + s.search_query + "` (Esc clears)";
+      }
+    }
   }
   (void)mvaddnstr(rows - 2, 0, status.c_str(), cols - 1);
   (void)wclrtoeol(stdscr);
@@ -198,6 +253,16 @@ void draw_frame(State &s) {
     }
   } else {
     (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (s.cursor - offset)));
+  }
+  // Search/save prompts live on the status line: park the cursor there
+  // while typing so resize never strands it off-screen.
+  if (s.searching) {
+    const int ccol = 1 + static_cast<int>(s.search_query.size());
+    (void)wmove(stdscr, rows - 2, ccol < cols - 1 ? ccol : cols - 1);
+  } else if (s.saving) {
+    const std::string pre = "save pane to: ";
+    const int ccol = static_cast<int>(pre.size() + s.save_path.size());
+    (void)wmove(stdscr, rows - 2, ccol < cols - 1 ? ccol : cols - 1);
   }
   (void)wrefresh(stdscr);
 }

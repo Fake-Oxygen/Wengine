@@ -6,6 +6,8 @@
 
 #include "state.hpp"
 
+#include "wengine/tui/views.hpp"
+
 namespace wengine::tui {
 
 namespace {
@@ -198,6 +200,27 @@ void finish_async(State &s, const AsyncResult &r) {
   // truncation note); `--emit-*` file outputs already landed on disk in
   // the worker via the normal CLI path, unaffected.
   push_text(s.scrollback, r.text, kMaxOutputLines);
+  // A live query stays valid across new output: recompute over the full
+  // logical scrollback (truncation notes included) so `/` finds across
+  // paged-out history, then re-park on the selected hit.
+  if (!s.search_query.empty()) {
+    s.search_matches = views::find_matches(s.scrollback, s.search_query);
+    if (s.search_matches.empty()) {
+      s.search_sel = 0;
+    } else {
+      if (s.search_sel >= s.search_matches.size()) {
+        s.search_sel = 0;
+      }
+      const std::size_t width = s.cols > 1 ? static_cast<std::size_t>(s.cols - 1) : std::size_t{1};
+      const std::size_t page = s.out_rows > 0 ? static_cast<std::size_t>(s.out_rows) : std::size_t{1};
+      const views::Wrapped w = views::wrap_lines(s.scrollback, width);
+      const std::size_t logical = s.search_matches[s.search_sel];
+      if (logical < w.row_start_for_logical.size()) {
+        const std::size_t target = w.row_start_for_logical[logical];
+        s.scroll = views::clamp_scroll(views::scroll_to_show(target, w.rows.size(), page), w.rows.size(), page);
+      }
+    }
+  }
   const std::string base = (r.cancelled ? "cancelled at step boundary -- " : "") + std::string("exit ") + std::to_string(r.rc);
   if (origin == AsyncOrigin::kForm && idx < s.form_defs.size() &&
       idx < s.form_res.size() && idx < s.form_has.size() &&

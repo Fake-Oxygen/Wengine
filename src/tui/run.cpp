@@ -18,9 +18,12 @@
 
 #include "state.hpp"
 
+#include "wengine/tui/views.hpp"
+
 #include <curses.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <csignal>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -50,6 +53,24 @@ int run_tui() {
   }
 #endif
 
+  // Minimal terminals (TERM=dumb/unknown/empty) lack cursor addressing, so
+  // the full-screen panes cannot render there (verified via PTY: the loop
+  // spins but `cup`/`el` are no-ops, function keys are undefined, and
+  // flow-control swallows Ctrl-Q). Refuse loudly instead of garbling or
+  // hanging; the REPL/headless CLI covers the same commands. NO_COLOR alone
+  // still runs full-screen, only without colors (see `use_color` below).
+  {
+    const char *term = std::getenv("TERM");
+    const std::string_view term_view = term != nullptr ? std::string_view(term) : std::string_view{};
+    if (!views::full_screen_supported(term_view)) {
+      std::fprintf(stderr,
+                   "PhysicsSimApp --tui needs a cursor-addressable terminal "
+                   "(TERM=%s is not supported); run without --tui for the REPL/headless CLI\n",
+                   term != nullptr ? term : "(unset)");
+      return 1;
+    }
+  }
+
   State s;
   init_state(s);
 
@@ -73,12 +94,15 @@ int run_tui() {
     return 1;
   }
 
-  s.use_color = has_colors() != FALSE;
+  s.use_color = (has_colors() != FALSE) && views::colors_allowed_env();
   if (s.use_color) {
     (void)start_color();
     (void)init_pair(1, COLOR_WHITE, COLOR_BLUE);
     (void)init_pair(2, COLOR_BLACK, COLOR_GREEN);
     (void)init_pair(3, COLOR_WHITE, COLOR_RED);
+    (void)init_pair(views::kPassPair, COLOR_GREEN, COLOR_BLACK);
+    (void)init_pair(views::kFailPair, COLOR_RED, COLOR_BLACK);
+    (void)init_pair(views::kPromptPair, COLOR_CYAN, COLOR_BLACK);
   }
 
   while (!s.quit) {

@@ -380,6 +380,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_tui_async PRIVATE Threads::Threads)
     add_test(NAME tui_async COMMAND test_tui_async)
 
+    # TUI-6 output views: highlight/search/save/resize/no-color (ncurses-free).
+    add_executable(test_tui_views tests/test_tui_views.cpp)
+    target_link_libraries(test_tui_views PRIVATE wengine_cli)
+    add_test(NAME tui_views COMMAND test_tui_views)
+
     add_executable(test_s0 tests/test_s0.cpp)
     target_link_libraries(test_s0 PRIVATE wengine_cli)
     add_test(NAME s0 COMMAND test_s0)

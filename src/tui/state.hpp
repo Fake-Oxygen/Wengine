@@ -43,7 +43,7 @@ constexpr std::size_t kMaxOutputLines = 500;
 
 constexpr std::string_view kTitle =
     "WEngine TUI  |  Enter: run  Tab: complete  F1: help  F2: commands  "
-    "F3: forms  F4: runs  PgUp/PgDn: scroll  F10/Ctrl-Q: quit";
+    "F3: forms  F4: runs  /:search n:next F5:save  PgUp/PgDn: scroll  F10/Ctrl-Q: quit";
 constexpr std::string_view kPrompt = "> ";
 
 enum class Overlay { kNone, kPalette, kHelp, kForms, kForm, kBatches, kBatch };
@@ -109,6 +109,19 @@ struct State {
   int cols = 0;
   int out_rows = 0;
   bool use_color = false;
+
+  // Output views (TUI-6): scrollback search + save-pane-to-file. The search
+  // runs on the captured logical lines (never on wrapped display rows), so
+  // it finds across truncation notes and paged-out history. `searching` /
+  // `saving` are transient prompt modes owned by the main-view key handler;
+  // `search_matches`/`search_sel` survive for `n`/`N` navigation until the
+  // next search or an Esc clear.
+  bool searching = false;
+  std::string search_query;
+  std::vector<std::size_t> search_matches;
+  std::size_t search_sel = 0;
+  bool saving = false;
+  std::string save_path;
 
   // Async worker (TUI-5): one CLI line off the UI thread. Input stays live
   // while it runs; Ctrl-C requests a step-boundary stop. Only the frame
