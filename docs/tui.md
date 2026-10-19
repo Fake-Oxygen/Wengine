@@ -2,15 +2,15 @@
 
 `PhysicsSimApp --tui` opens a terminal UI with the full CLI command set.
 Status: scaffolding + palette/help browser + closed-form guided forms
-(TUI-1..3); async runs and output views are roadmap tasks in Plane
-(parent: TUI epic).
+(TUI-1..4) + async worker (TUI-5); output views are roadmap tasks in
+Plane (parent: TUI epic).
 
 ## 1. Reuse decision (D-TUI-1)
 
 The TUI reuses the CLI command path verbatim and never forks one:
 
 ```text
-TUI input line -> tui::TuiExecutor -> cli::Shell::execute(line, ostringstream)
+TUI input line -> tui::AsyncTask (worker) -> cli::Shell::execute(line, ostringstream)
                                           -> CliRegistry::find -> Spec::run
                -> captured text rendered into the scrollback pane
 Tab            -> cli::complete_line over CliRegistry::all()
@@ -20,7 +20,13 @@ history        -> cli::History (same file as the REPL)
 Consequences:
 
 - TUI output is byte-identical to the REPL/headless CLI by construction;
-  `tests/test_tui_exec.cpp` pins executor-vs-`Shell` parity (codes + text).
+  `tests/test_tui_exec.cpp` pins executor-vs-`Shell` parity (codes + text);
+- Every line runs on the async worker (TUI-5): `tui::AsyncTask` owns one
+  worker thread + its own `Shell`, the UI thread only sets the global
+  `cli::request_cancel()` atom and reads the `cli::progress_*` atoms
+  (TSAN-clean). `tests/test_tui_async.cpp` pins worker-vs-`Shell` parity,
+  busy rejection, step-boundary cancel with flushed sinks, progress, and
+  `--emit-csv` file outputs.
 - New commands work in the TUI with no TUI-side change (same guarantee as
   `sim run --solver`: registry-driven).
 - Guided forms added later must only *compose argv strings* for the
@@ -88,12 +94,10 @@ Esc back, scrollback mirror).
 Run builders (TUI-4): `include/wengine/tui/batches.hpp` (ncurses-free
 composition model + registry-derived solver/kind pickers, unit-tested).
 F4 opens the builder browser (`sim run` / `sig run`), Enter opens the
-highlighted builder, Enter inside composes one argv string and submits it
-through `TuiExecutor` -- finite runs show the CLI-identical text beside
-the fields (also mirrored into the scrollback + shared history), while
-`--forever` lines never reach the sync executor: they are held with a
-loud note routing them to the async worker (TUI-5), so the builder never
-blocks. Solver names come from `SolverRegistry`, signal kinds from
+highlighted builder, Enter inside composes one argv string and runs it on
+the async worker -- finite batches and `--forever` alike show the
+CLI-identical text beside the fields (also mirrored into the scrollback +
+shared history), so the builder never blocks. Solver names come from `SolverRegistry`, signal kinds from
 `kKindNames` (plus `U|I` quantities and `ascii|cobs` UART modes), so new
 solvers/kinds appear with no builder-side change; file paths (e.g.
 `--emit-csv`, `--sig-table`, `--sig-lua`) are plain editable fields whose
@@ -106,17 +110,36 @@ parity matrix (projectile batches, every batch signal kind incl. the
 batch-rejected `sum` refusal, expression/table/lua file kinds, paced
 runs, csv strides/selects with on-disk CSV proof, plus usage-error
 shapes); paced runs pin rc + deterministic lines only (wall lateness
-varies run-to-run even headless); `--forever` pins composition +
-`wants_async` routing and is never executed synchronously.
+varies run-to-run even headless); `--forever` pins composition + `wants_async` routing; the worker executes
+it until Ctrl-C (step-boundary stop, sinks flushed/closed normally).
+
+Async runs (TUI-5): `include/wengine/cli/cancel.hpp` (global cancel +
+progress atoms, owned by the CLI so `sim`/`sig` chunk loops poll them at
+step boundaries) + `include/wengine/tui/async.hpp` (ncurses-free single
+worker: one thread + its own `Shell`, non-blocking `start`, `request_cancel`
+(Ctrl-C), non-blocking `try_take` for the 100 ms frame tick, blocking
+`wait_take` for quit). Every input-line / form / builder submission runs
+async: the scrollback echoes the prompt line immediately, history appends
+on the UI thread, and completion tails the captured text with the 500-line
+cap policy (`--emit-*` files land on disk in the worker via the normal CLI
+path, unaffected). The status bar shows `running <line> steps done/total
+(elapsed) -- Ctrl-C cancels` from the progress atoms (`(forever)` when
+`total == UINT64_MAX`); Ctrl-C anywhere (key or SIGINT) requests the
+step-boundary stop, F10/Ctrl-Q cancels + joins before exiting. `sim` fast
+batches and `sig` finite/control/forever/paced paths all poll
+`cli::cancel_requested()` (combined with their SIGINT flag), report
+`cli::progress_*` per chunk, and print the partial `interrupted by Ctrl-C`
+prefix on success + partial (sinks still flushed/closed, TCP finished).
+`tests/test_tui_async.cpp` pins parity, busy rejection, cancel (finite +
+forever, CSV flushed with partial rows), progress, and emit-csv outputs;
+Clang-TSAN clean (never GCC per AGENTS.md). Verified on a real PTY
+(20M-step run: progress counts up, `abc` typing echoes live, Ctrl-C tails
+`interrupted by Ctrl-C`, 8-step CSV lands on disk, F10 exits 0).
 
 ## 4. Known limits (roadmap, not bugs)
 
 - One command's displayed output is capped at 500 lines (loud truncation
   note). Full logs belong in `--emit-csv` files.
-- Long finite batch runs block input while computing (same as the REPL);
-  async runs with progress + step-boundary cancel are task TUI-5, which
-  also owns `--forever` builder lines (held with a loud note, never run
-  synchronously by the builder).
 - No mouse, no scrollback search/save yet. `sig` per-source family
   (`list`/`add`/`set`/`start`/`stop`/`drop`) stays on the typed line; the
   F4 builders cover batch `run` modes only.
@@ -125,5 +148,6 @@ varies run-to-run even headless); `--forever` pins composition +
 
 No input-automation tooling exists (same as the GUI panels): run
 `./build/PhysicsSimApp --tui` on a real TTY and check help display,
-completion, history recall across restarts, resize, and a long-run
-truncation note. A PTY-driven smoke test is a roadmap task.
+completion, history recall across restarts, resize, a long-run
+truncation note, and an async cancel (`/tmp/opencode/tui5_pty_smoke.py`:
+progress, live typing, Ctrl-C tail, CSV, quit).

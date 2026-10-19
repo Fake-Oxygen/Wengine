@@ -1,3 +1,4 @@
+#include "wengine/cli/cancel.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/cli/emit_options.hpp"
 #include "wengine/cli/status.hpp"
@@ -69,6 +70,12 @@ void request_sigint(int) noexcept { g_sigint_requested = 1; }
 
 bool sigint_requested() noexcept { return g_sigint_requested != 0; }
 
+// TUI-5 async stop: the worker sets the global cancel atom while the UI
+// stays live; headless runs never set it. Checked at step boundaries.
+bool combined_stop() noexcept {
+  return sigint_requested() || cli::cancel_requested();
+}
+
 constexpr std::array<std::string_view, 42> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
@@ -115,28 +122,23 @@ void print_live_health(std::uint64_t done_steps,
   std::cerr << '\n';
   if (shm) {
     std::cerr << "live shm: "
-              << link::format_publisher_health(shm->stats(), shm->status(),
-                                              shm->last_errno(), 0, 0, 0)
+              << link::format_publisher_health(shm->stats(), shm->status(), shm->last_errno(), 0, 0, 0)
               << '\n';
   }
   if (tcp) {
     const std::uint64_t pending = tcp->has_pending_frame() ? 1 : 0;
     std::cerr << "live tcp: "
-              << link::format_publisher_health(tcp->stats(), tcp->status(),
-                                              tcp->last_errno(), pending,
-                                              tcp->pending_bytes(), pending)
+              << link::format_publisher_health(tcp->stats(), tcp->status(), tcp->last_errno(), pending, tcp->pending_bytes(), pending)
               << '\n';
   }
   if (udp) {
     std::cerr << "live udp: "
-              << link::format_publisher_health(udp->stats(), udp->status(),
-                                              udp->last_errno(), 0, 0, 0)
+              << link::format_publisher_health(udp->stats(), udp->status(), udp->last_errno(), 0, 0, 0)
               << '\n';
   }
   if (uart != nullptr) {
     std::cerr << "live uart: "
-              << link::format_publisher_health(uart->stats(), uart->status(),
-                                              uart->last_errno(), 0, 0, 0)
+              << link::format_publisher_health(uart->stats(), uart->status(), uart->last_errno(), 0, 0, 0)
               << '\n';
   }
 }
@@ -239,8 +241,7 @@ void take_sig_options(ArgCursor &args, SigCliOptions &o) {
          o.emit_udp_select || o.emit_uart_select;
 }
 
-int run_batch(ArgCursor &args, std::ostream &out,
-              std::span<const std::string_view> extra_pos, const SigCliOptions &o) {
+int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_view> extra_pos, const SigCliOptions &o) {
   // (--help is served by the SigSpec::run dispatcher before dispatch.)
   // Sums configure through the per-source family (distinct per-source
   // operands cannot come from identical batch sources).
@@ -265,8 +266,7 @@ int run_batch(ArgCursor &args, std::ostream &out,
   long long udp_budget = static_cast<long long>(link::kDefaultUdpPayloadBudget);
   bool udp_budget_given = false;
 
-  auto take_i64 = [&](std::optional<std::string_view> v, const char *what,
-                      long long &slot) -> bool {
+  auto take_i64 = [&](std::optional<std::string_view> v, const char *what, long long &slot) -> bool {
     if (v) {
       const auto p = parse_i64(*v);
       if (!p.ok()) {
@@ -1036,6 +1036,8 @@ int run_batch(ArgCursor &args, std::ostream &out,
                                          wall_start)
         .count();
   };
+  std::uint64_t done = 0;
+  cli::progress_begin(total_steps);
   if (paced) {
     const auto epoch = solvers::paced::SteadyClock::now();
     auto last_report = std::chrono::steady_clock::now();
@@ -1053,16 +1055,20 @@ int run_batch(ArgCursor &args, std::ostream &out,
         }
       }
     };
-    auto before_chunk = [&](std::uint64_t) { ctl_service(); };
-    st = solvers::paced::run_paced<solvers::paced::SteadyClock>(
-        run, total_steps, rate_hz, 1, epoch, sigint_requested, idle, paced_stats,
-        before_chunk);
+    auto before_chunk = [&](std::uint64_t d) {
+      ctl_service();
+      cli::progress_update(d);
+    };
+    st = solvers::paced::run_paced<solvers::paced::SteadyClock>(run, total_steps, rate_hz, 1, epoch, combined_stop, idle, paced_stats, before_chunk);
+    done = paced_stats.steps_done;
+    cli::progress_update(done);
   } else if (has_control) {
     // Step-synchronous control: poll + drain before every single step
-    // (finite and --forever alike); health stays chunked as usual.
-    std::uint64_t done = 0;
+    // (finite and --forever alike); health stays chunked as usual. The TUI
+    // async worker stops here at a step boundary via the global cancel atom.
+    done = 0;
     while (done < total_steps) {
-      if (forever && sigint_requested()) {
+      if (cli::cancel_requested() || (forever && sigint_requested())) {
         break;
       }
       ctl_service();
@@ -1071,9 +1077,9 @@ int run_batch(ArgCursor &args, std::ostream &out,
         break;
       }
       ++done;
+      cli::progress_update(done);
       if (emit_health && has_live && done % kHealthChunkSteps == 0) {
-        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(),
-                          sample_rate_hz);
+        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(), sample_rate_hz);
       }
     }
     if (st.ok()) {
@@ -1084,39 +1090,44 @@ int run_batch(ArgCursor &args, std::ostream &out,
     // periodic health point with --emit-health (step-boundary stop
     // granularity stays one chunk, like paced). Telemetry failures never
     // stop the sim here — they surface per chunk and in the final summary.
-    std::uint64_t done = 0;
-    while (!sigint_requested()) {
-      st = run.run(kHealthChunkSteps, &sigint_requested);
+    // The TUI async worker stops here the same way (global cancel atom).
+    done = 0;
+    while (!combined_stop()) {
+      st = run.run(kHealthChunkSteps, &combined_stop);
       if (!st.ok()) {
         break;
       }
-      done += kHealthChunkSteps;
+      done = run.state().step_index;
+      cli::progress_update(done);
       if (emit_health && has_live) {
-        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(),
-                          sample_rate_hz);
+        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(), sample_rate_hz);
       }
     }
     if (st.ok()) {
       st = core::Status::success();
     }
   } else {
-    std::uint64_t done = 0;
+    done = 0;
     while (done < total_steps) {
+      if (cli::cancel_requested()) {
+        break;
+      }
       std::uint64_t n = kHealthChunkSteps;
       if (n > total_steps - done) {
         n = total_steps - done;
       }
-      st = run.run(n);
+      st = run.run(n, &combined_stop);
       if (!st.ok()) {
         break;
       }
-      done += n;
+      done = run.state().step_index;
+      cli::progress_update(done);
       if (emit_health && has_live && done < total_steps) {
-        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(),
-                          sample_rate_hz);
+        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(), sample_rate_hz);
       }
     }
   }
+  cli::progress_end();
   if (handles_sigint) {
     (void)std::signal(SIGINT, previous_sigint);
   }
@@ -1148,7 +1159,7 @@ int run_batch(ArgCursor &args, std::ostream &out,
   if (is_lua) {
     out << "lua: " << *o_sig_lua << " (" << cfg.signal.lua.size() << " bytes)\n";
   }
-  if (forever || (paced && paced_stats.steps_done < total_steps)) {
+  if (forever || done < total_steps) {
     out << "steps: interrupted by Ctrl-C at " << s.step_index << " x " << dt
         << "s -> t=" << s.sim_time << "s\n";
   } else {

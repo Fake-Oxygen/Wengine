@@ -5,8 +5,8 @@
 // session setup, text utilities, submission, line editing, frame chrome,
 // and the palette/help/form/builder panes with their key handlers.
 //
-// Reuse contract: every submitted line goes through `tui::TuiExecutor`
-// (i.e. `cli::Shell::execute` with a captured stream). This layer never
+// Reuse contract: every submitted line runs on the async worker (TUI-5)
+// through `cli::Shell::execute` with a captured stream. This layer never
 // parses commands or calls solvers.
 //
 // Chrome strings stay ASCII-only: under a C locale, plain (non-wide)
@@ -21,12 +21,26 @@
 #include <curses.h>
 
 #include <cstdio>
+#include <csignal>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
 #endif
 
 namespace wengine::tui {
+
+namespace {
+
+// TUI SIGINT flag: with `cbreak()` the tty may still deliver Ctrl-C as
+// SIGINT instead of a key. The handler only sets this flag (async-signal
+// safe); the frame loop converts it into `async.request_cancel()` on the
+// UI thread. Worker paced/forever runs install their own handler while
+// stepping and restore this one afterwards.
+volatile std::sig_atomic_t g_tui_sigint = 0;
+
+void on_tui_sigint(int) noexcept { g_tui_sigint = 1; }
+
+} // namespace
 
 int run_tui() {
 #if defined(__unix__) || defined(__APPLE__)
@@ -47,6 +61,17 @@ int run_tui() {
   (void)cbreak();
   (void)noecho();
   (void)keypad(stdscr, TRUE);
+  // 100 ms tick: progress redraws + async completion polling while idle.
+  // `getch` returns ERR on timeout (handled below, never dispatched).
+  (void)timeout(100);
+
+  using SignalHandler = void (*)(int);
+  SignalHandler previous_sigint = std::signal(SIGINT, on_tui_sigint);
+  if (previous_sigint == SIG_ERR) {
+    (void)endwin();
+    std::fprintf(stderr, "PhysicsSimApp --tui: could not install Ctrl-C handler\n");
+    return 1;
+  }
 
   s.use_color = has_colors() != FALSE;
   if (s.use_color) {
@@ -57,6 +82,20 @@ int run_tui() {
   }
 
   while (!s.quit) {
+    // Signal-path cancel (tty delivered SIGINT instead of a key).
+    if (g_tui_sigint != 0) {
+      g_tui_sigint = 0;
+      if (s.async.busy()) {
+        s.async.request_cancel();
+        s.status_msg = "cancelling `" + s.async.line() + "` at step boundary...";
+      }
+    }
+    // Async completion (non-blocking join + scrollback/history routing).
+    (void)poll_async(s);
+    if (s.quit) {
+      break;
+    }
+
     int rows = 0;
     int cols = 0;
     getmaxyx(stdscr, rows, cols);
@@ -73,6 +112,9 @@ int run_tui() {
     draw_frame(s);
 
     const int ch = getch();
+    if (ch == ERR) {
+      continue; // timeout tick: redraw + re-poll above
+    }
     if (ch != '\t') {
       // The completion popup is transient: any other key dismisses it.
       s.complete_names.clear();
@@ -80,6 +122,17 @@ int run_tui() {
     handle_key(s, ch);
   }
 
+  // Quit while running: step-boundary stop, then flush/close normally in
+  // the worker before exiting (sinks stay coherent, partial state kept).
+  if (s.async.busy()) {
+    s.async.request_cancel();
+    AsyncResult r;
+    if (s.async.wait_take(r)) {
+      finish_async(s, r);
+    }
+  }
+
+  (void)std::signal(SIGINT, previous_sigint);
   (void)endwin();
   return 0;
 }

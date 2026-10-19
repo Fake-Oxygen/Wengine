@@ -373,6 +373,13 @@ if(BUILD_TESTS)
     target_link_libraries(test_tui_batches PRIVATE wengine_cli)
     add_test(NAME tui_batches COMMAND test_tui_batches)
 
+    # TUI async worker: parity + busy/cancel/progress/emit-csv (needs threads).
+    add_executable(test_tui_async tests/test_tui_async.cpp)
+    target_link_libraries(test_tui_async PRIVATE wengine_cli)
+    find_package(Threads REQUIRED)
+    target_link_libraries(test_tui_async PRIVATE Threads::Threads)
+    add_test(NAME tui_async COMMAND test_tui_async)
+
     add_executable(test_s0 tests/test_s0.cpp)
     target_link_libraries(test_s0 PRIVATE wengine_cli)
     add_test(NAME s0 COMMAND test_s0)

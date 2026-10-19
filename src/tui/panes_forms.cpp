@@ -1,6 +1,6 @@
 // Closed-form guided forms: browser + field editor (draw + keys).
 //
-// Each form composes one argv string submitted through `TuiExecutor`;
+// Each form composes one argv string run on the async worker (TUI-5);
 // the CLI owns all validation, so invalid input surfaces the CLI
 // usage-error text verbatim.
 
@@ -78,14 +78,19 @@ void draw_form_pane(State &s) {
     (void)wclrtoeol(stdscr);
     ++row;
   }
+  const bool running_here = s.async.busy() && s.async_origin == AsyncOrigin::kForm && s.async_index == sfi;
   if (row < 1 + out_rows) {
-    const std::string sep = s.form_has[sfi] ? ("--- result rc=" + std::to_string(s.form_res[sfi].rc) + " ---") : "--- result (Enter to run) ---";
+    const std::string sep = running_here ? "--- running (Ctrl-C cancels) ---"
+                                         : (s.form_has[sfi] ? ("--- result rc=" + std::to_string(s.form_res[sfi].rc) + " ---") : "--- result (Enter to run) ---");
     (void)mvaddnstr(row, 0, sep.c_str(), cols - 1);
     (void)wclrtoeol(stdscr);
     ++row;
   }
   std::vector<std::string> res_lines;
-  if (!s.form_has[sfi]) {
+  if (running_here) {
+    res_lines.push_back("running `" + s.async.line() + "`");
+    res_lines.push_back("input stays live -- Ctrl-C cancels");
+  } else if (!s.form_has[sfi]) {
     res_lines.push_back("Fill fields, Enter to run. Empty fields are omitted;");
     res_lines.push_back("the CLI reports all errors (no form-side validation).");
   } else {

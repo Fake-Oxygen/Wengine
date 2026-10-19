@@ -1,3 +1,4 @@
+#include "wengine/cli/cancel.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/cli/emit_options.hpp"
 #include "wengine/cli/status.hpp"
@@ -62,6 +63,13 @@ void request_sigint(int) noexcept { g_sigint_requested = 1; }
 
 bool sigint_requested() noexcept { return g_sigint_requested != 0; }
 
+// TUI-5 async stop: the worker sets the global cancel atom while the UI
+// stays live; headless runs never set it. Checked at step boundaries, so
+// interruption never leaves a partially advanced step.
+bool combined_stop() noexcept {
+  return sigint_requested() || cli::cancel_requested();
+}
+
 constexpr std::array<std::string_view, 35> kSimOptions{{
     "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
     "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-tcp", "--emit-udp",
@@ -88,47 +96,38 @@ void print_live_health(std::uint64_t done_steps,
             << "Hz elapsed=" << elapsed_s << "s";
   if (elapsed_s > 0.0) {
     if (shm) {
-      std::cerr << " shm_bytes_s="
-                << static_cast<double>(shm->stats().bytes_accepted) / elapsed_s;
+      std::cerr << " shm_bytes_s=" << static_cast<double>(shm->stats().bytes_accepted) / elapsed_s;
     }
     if (tcp) {
-      std::cerr << " tcp_bytes_s="
-                << static_cast<double>(tcp->stats().bytes_accepted) / elapsed_s;
+      std::cerr << " tcp_bytes_s=" << static_cast<double>(tcp->stats().bytes_accepted) / elapsed_s;
     }
     if (udp) {
-      std::cerr << " udp_bytes_s="
-                << static_cast<double>(udp->stats().bytes_accepted) / elapsed_s;
+      std::cerr << " udp_bytes_s=" << static_cast<double>(udp->stats().bytes_accepted) / elapsed_s;
     }
     if (uart != nullptr) {
-      std::cerr << " uart_bytes_s="
-                << static_cast<double>(uart->stats().bytes_accepted) / elapsed_s;
+      std::cerr << " uart_bytes_s=" << static_cast<double>(uart->stats().bytes_accepted) / elapsed_s;
     }
   }
   std::cerr << '\n';
   if (shm) {
     std::cerr << "live shm: "
-              << link::format_publisher_health(shm->stats(), shm->status(),
-                                              shm->last_errno(), 0, 0, 0)
+              << link::format_publisher_health(shm->stats(), shm->status(), shm->last_errno(), 0, 0, 0)
               << '\n';
   }
   if (tcp) {
     const std::uint64_t pending = tcp->has_pending_frame() ? 1 : 0;
     std::cerr << "live tcp: "
-              << link::format_publisher_health(tcp->stats(), tcp->status(),
-                                              tcp->last_errno(), pending,
-                                              tcp->pending_bytes(), pending)
+              << link::format_publisher_health(tcp->stats(), tcp->status(), tcp->last_errno(), pending, tcp->pending_bytes(), pending)
               << '\n';
   }
   if (udp) {
     std::cerr << "live udp: "
-              << link::format_publisher_health(udp->stats(), udp->status(),
-                                              udp->last_errno(), 0, 0, 0)
+              << link::format_publisher_health(udp->stats(), udp->status(), udp->last_errno(), 0, 0, 0)
               << '\n';
   }
   if (uart != nullptr) {
     std::cerr << "live uart: "
-              << link::format_publisher_health(uart->stats(), uart->status(),
-                                              uart->last_errno(), 0, 0, 0)
+              << link::format_publisher_health(uart->stats(), uart->status(), uart->last_errno(), 0, 0, 0)
               << '\n';
   }
 }
@@ -161,8 +160,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   bool udp_budget_given = false;
   std::string_view solver_name = solvers::ProjectileSolver::kName;
 
-  auto take_i64 = [&](std::initializer_list<std::string_view> names, const char *what,
-                      long long &slot) -> bool {
+  auto take_i64 = [&](std::initializer_list<std::string_view> names, const char *what, long long &slot) -> bool {
     if (auto o = args.take_option(names)) {
       auto p = parse_i64(*o);
       if (!p.ok()) {
@@ -241,8 +239,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   cli::EmitOutputSampling tcp_sampling;
   cli::EmitOutputSampling udp_sampling;
   cli::EmitOutputSampling uart_sampling;
-  auto take_stride = [&](std::initializer_list<std::string_view> names, const char *what,
-                         cli::EmitOutputSampling &slot) -> bool {
+  auto take_stride = [&](std::initializer_list<std::string_view> names, const char *what, cli::EmitOutputSampling &slot) -> bool {
     if (auto o = args.take_option(names)) {
       const auto p = cli::parse_emit_stride(*o);
       if (!p.ok()) {
@@ -255,8 +252,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     }
     return true;
   };
-  auto take_select = [&](std::initializer_list<std::string_view> names, const char *what,
-                         cli::EmitOutputSampling &slot) -> bool {
+  auto take_select = [&](std::initializer_list<std::string_view> names, const char *what, cli::EmitOutputSampling &slot) -> bool {
     if (auto o = args.take_option(names)) {
       const auto p = cli::parse_emit_select(*o);
       if (!p.ok()) {
@@ -441,11 +437,9 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     // sim signal runs one default sine (serial 0); a select list addresses it.
     // UART lines are unbounded (no frame cap), so only the serial range
     // applies — no channels-fit check like the frame transports.
-    const cli::EmitOutputSampling *outs[4] = {&csv_sampling, &shm_sampling, &tcp_sampling,
-                                              &udp_sampling};
+    const cli::EmitOutputSampling *outs[4] = {&csv_sampling, &shm_sampling, &tcp_sampling, &udp_sampling};
     const char *names[4] = {"csv", "shm", "tcp", "udp"};
-    const bool requested[4] = {csv_path.has_value(), shm_name.has_value(),
-                               tcp_endpoint.has_value(), udp_endpoint.has_value()};
+    const bool requested[4] = {csv_path.has_value(), shm_name.has_value(), tcp_endpoint.has_value(), udp_endpoint.has_value()};
     for (int k = 0; k < 4; ++k) {
       if (!outs[k]->select_given) {
         continue;
@@ -752,10 +746,13 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   };
   using SignalHandler = void (*)(int);
   SignalHandler previous_sigint = nullptr;
+  cli::progress_begin(total_steps);
+  std::uint64_t done = 0;
   if (paced) {
     g_sigint_requested = 0;
     previous_sigint = std::signal(SIGINT, request_sigint);
     if (previous_sigint == SIG_ERR) {
+      cli::progress_end();
       out << "Error: cannot install Ctrl-C handler\n";
       return core::kExitRuntime;
     }
@@ -774,31 +771,37 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
         }
       }
     };
-    st = solvers::paced::run_paced<solvers::paced::SteadyClock>(
-        run, total_steps, rate_hz, 1, epoch, sigint_requested, idle, paced_stats);
+    auto before_chunk = [&](std::uint64_t d) { cli::progress_update(d); };
+    st = solvers::paced::run_paced<solvers::paced::SteadyClock>(run, total_steps, rate_hz, 1, epoch, combined_stop, idle, paced_stats, before_chunk);
     (void)std::signal(SIGINT, previous_sigint);
+    done = paced_stats.steps_done;
+    cli::progress_update(done);
   } else {
     // Chunked fast batch: bit-identical to one run(total_steps) while
     // surfacing mid-run sticky/backpressure/over-bound on stderr for long
     // runs when --emit-health is passed (PHYSI-39). Short runs and default
-    // runs stay silent beyond the final summary.
-    std::uint64_t done = 0;
+    // runs stay silent beyond the final summary. The TUI async worker
+    // (TUI-5) stops here at a step boundary via the global cancel atom.
     while (done < total_steps) {
+      if (cli::cancel_requested()) {
+        break;
+      }
       std::uint64_t n = kHealthChunkSteps;
       if (n > total_steps - done) {
         n = total_steps - done;
       }
-      st = run.run(n);
+      st = run.run(n, &combined_stop);
       if (!st.ok()) {
         break;
       }
-      done += n;
+      done = run.state().step_index;
+      cli::progress_update(done);
       if (emit_health && has_live && done < total_steps) {
-        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(),
-                          sample_rate_hz);
+        print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(), sample_rate_hz);
       }
     }
   }
+  cli::progress_end();
   s = run.state();
   // Explicit bounded stream finish (PHYSI-32): drain a partially accepted
   // TCP frame without generating a dummy snapshot. The destructor never
@@ -817,7 +820,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     out << " g=" << gravity;
   }
   out << '\n';
-  if (paced && paced_stats.steps_done < total_steps) {
+  if (done < total_steps) {
     out << "steps: interrupted by Ctrl-C at " << s.step_index << " x " << dt
         << "s -> t=" << s.sim_time << "s\n";
   } else {

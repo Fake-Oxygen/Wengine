@@ -44,7 +44,20 @@ void main_key(State &s, int ch) {
 
 void handle_key(State &s, int ch) {
   if (ch == KEY_F(10) || ch == kCtrlQ) {
+    // Quit while running cancels first; the run loop joins the worker so
+    // sinks flush/close normally before `endwin`.
+    if (s.async.busy()) {
+      s.async.request_cancel();
+      s.status_msg = "cancelling `" + s.async.line() + "`...";
+    }
     s.quit = true;
+    return;
+  }
+  // Ctrl-C while busy is cancel (step boundary), never line/field clear.
+  // Idle Ctrl-C keeps its existing clear/close meaning in each pane.
+  if (s.async.busy() && ch == kCtrlC) {
+    s.async.request_cancel();
+    s.status_msg = "cancelling `" + s.async.line() + "` at step boundary...";
     return;
   }
   if (s.overlay == Overlay::kPalette) {

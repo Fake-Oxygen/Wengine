@@ -3,9 +3,12 @@
 
 #include "state.hpp"
 
+#include "wengine/cli/cancel.hpp"
 #include "wengine/tui/popup.hpp"
 
 #include <curses.h>
+
+#include <cstdint>
 
 namespace wengine::tui {
 
@@ -90,8 +93,29 @@ void draw_frame(State &s) {
   if (s.use_color) {
     (void)attron(COLOR_PAIR(s.last_rc == 0 ? 2 : 3));
   }
-  const std::string status = "rc=" + std::to_string(s.last_rc) + "  " + s.status_msg + (s.overlay == Overlay::kNone && s.scroll > 0
-                                  ? "  [scrolled -PgDn- to follow]" : "");
+  std::string status;
+  if (s.async.busy()) {
+    // Progress line while the worker runs: step counts come from the CLI
+    // chunk hooks (TUI-5), elapsed from the task clock. Loud cancel hint.
+    std::string prog;
+    if (cli::progress_active()) {
+      const std::uint64_t done = cli::progress_done();
+      const std::uint64_t total = cli::progress_total();
+      if (total == UINT64_MAX) {
+        prog = "steps " + std::to_string(done) + " (forever)";
+      } else {
+        prog = "steps " + std::to_string(done) + "/" + std::to_string(total);
+      }
+    } else {
+      prog = "starting...";
+    }
+    status = "running `" + s.async.line() + "` " + prog + " (" +
+             std::to_string(static_cast<int>(s.async.elapsed_s())) +
+             "s) -- Ctrl-C cancels" +
+             (s.overlay == Overlay::kNone && s.scroll > 0 ? "  [scrolled -PgDn- to follow]" : "");
+  } else {
+    status = "rc=" + std::to_string(s.last_rc) + "  " + s.status_msg + (s.overlay == Overlay::kNone && s.scroll > 0 ? "  [scrolled -PgDn- to follow]" : "");
+  }
   (void)mvaddnstr(rows - 2, 0, status.c_str(), cols - 1);
   (void)wclrtoeol(stdscr);
   if (s.use_color) {

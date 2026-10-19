@@ -20,6 +20,7 @@
 // `cli::Shell::execute`), so panes never parse commands or call solvers.
 
 #include "wengine/cli/line_reader.hpp"
+#include "wengine/tui/async.hpp"
 #include "wengine/tui/batches.hpp"
 #include "wengine/tui/exec.hpp"
 #include "wengine/tui/forms.hpp"
@@ -46,6 +47,8 @@ constexpr std::string_view kTitle =
 constexpr std::string_view kPrompt = "> ";
 
 enum class Overlay { kNone, kPalette, kHelp, kForms, kForm, kBatches, kBatch };
+
+enum class AsyncOrigin { kNone, kLine, kForm, kBatch };
 
 // All mutable state of one TUI session. The frame loop in `run.cpp` owns a
 // single instance; domain TUs only borrow it.
@@ -106,6 +109,14 @@ struct State {
   int cols = 0;
   int out_rows = 0;
   bool use_color = false;
+
+  // Async worker (TUI-5): one CLI line off the UI thread. Input stays live
+  // while it runs; Ctrl-C requests a step-boundary stop. Only the frame
+  // loop polls/takes (`poll_async`); submissions start, completions route
+  // by `async_origin`/`async_index`.
+  AsyncTask async;
+  AsyncOrigin async_origin = AsyncOrigin::kNone;
+  std::size_t async_index = 0;
 };
 
 // One-time setup: defs, value stores, demo prefills, shared history load,
@@ -113,9 +124,13 @@ struct State {
 void init_state(State &s);
 
 // Submission through the executor (CLI owns every verdict).
+// Long sim/sig batches run on the async worker (TUI-5); the frame loop
+// polls completion via `poll_async` so input stays live.
 void submit_line(State &s);
 void submit_form(State &s);
 void submit_batch(State &s);
+bool poll_async(State &s);
+void finish_async(State &s, const AsyncResult &r);
 
 // Shared input-line editing + Tab completion. Returns true when consumed.
 bool edit_key(State &s, int edit_ch);

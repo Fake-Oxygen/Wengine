@@ -1,10 +1,13 @@
 // Run-builder panes: browser + field editor (draw + keys).
 //
-// Each builder composes one argv string submitted through `TuiExecutor`;
-// `--forever` lines are held for the async worker (TUI-5) and never reach
-// the sync executor, so the builder never blocks.
+// Each builder composes one argv string run on the async worker (TUI-5);
+// finite batches and `--forever` alike, so the builder never blocks.
 
 #include "state.hpp"
+
+#include "wengine/cli/cancel.hpp"
+
+#include <cstdint>
 
 #include <curses.h>
 
@@ -106,10 +109,11 @@ void draw_batch_pane(State &s) {
     (void)wclrtoeol(stdscr);
     ++row;
   }
+  const bool running_here = s.async.busy() && s.async_origin == AsyncOrigin::kBatch && s.async_index == sbi;
   if (row < 1 + out_rows) {
     std::string sep;
-    if (batches::wants_async(def, vals)) {
-      sep = "--- held for the async worker (TUI-5): clear --forever to run ---";
+    if (running_here) {
+      sep = "--- running (Ctrl-C cancels at step boundary) ---";
     } else {
       sep = s.batch_has[sbi] ? ("--- result rc=" + std::to_string(s.batch_res[sbi].rc) + " ---") : "--- result (Enter to run) ---";
     }
@@ -118,10 +122,19 @@ void draw_batch_pane(State &s) {
     ++row;
   }
   std::vector<std::string> res_lines;
-  if (batches::wants_async(def, vals)) {
-    res_lines.push_back("--forever runs until Ctrl-C: it never runs in the builder.");
-    res_lines.push_back("The async worker (TUI-5) will own it; clear the forever");
-    res_lines.push_back("field to run this builder synchronously instead.");
+  if (running_here) {
+    std::string prog = "starting...";
+    if (cli::progress_active()) {
+      const std::uint64_t done = cli::progress_done();
+      const std::uint64_t total = cli::progress_total();
+      if (total == UINT64_MAX) {
+        prog = "steps " + std::to_string(done) + " (forever)";
+      } else {
+        prog = "steps " + std::to_string(done) + "/" + std::to_string(total);
+      }
+    }
+    res_lines.push_back("running `" + s.async.line() + "` " + prog);
+    res_lines.push_back("input stays live -- Ctrl-C cancels, Esc lists");
   } else if (!s.batch_has[sbi]) {
     res_lines.push_back("Fill fields, Enter to run. Empty fields are omitted;");
     res_lines.push_back("the CLI reports all errors (no builder-side validation).");
