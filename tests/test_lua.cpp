@@ -426,6 +426,56 @@ void test_serialize_v5() {
   assert(legacy.signals.lua_text.empty());
 }
 
+void test_save_load_dead_lua() {
+  // Despawned Lua sources retain their script range; save/load round-trips
+  // exactly, slot reuse mints fresh serials over the shared blob, and a
+  // corrupted dead range still fails the load.
+  LuaRun r(0.1);
+  const world::Entity e = spawn_lua(r.runner, "return 2*t+1"); // serial 0
+  assert(r.runner.run(3).ok());
+  assert(r.runner.state().despawn_entity(e));
+  std::ostringstream bytes;
+  assert(world::save_state(r.runner.state(), bytes).ok());
+  world::State dst;
+  std::istringstream in(bytes.str());
+  assert(world::load_state(dst, in).ok());
+  assert(dst == r.runner.state());
+  assert(world::take_snapshot(dst) == world::take_snapshot(r.runner.state()));
+  assert(dst.signals.next_serial == 1);
+
+  // Reuse the dead slot with a new script: the blob holds both ranges and
+  // the live source reads only its own.
+  LuaRun r2(0.1);
+  r2.runner.state() = dst;
+  const world::Entity e2 = spawn_lua(r2.runner, "return 5*t");
+  assert(r2.runner.state().signals.serial[e2.index] == 1);
+  assert(r2.runner.run(2).ok());
+  // Restored clock (t0 = 0.3 s): two 0.1 s steps -> t = 0.2 s -> 5*0.2.
+  assert(near(r2.runner.state().signals.value[e2.index], 1.0, 1e-9));
+  std::ostringstream bytes2;
+  assert(world::save_state(r2.runner.state(), bytes2).ok());
+  world::State dst2;
+  std::istringstream in2(bytes2.str());
+  assert(world::load_state(dst2, in2).ok());
+  assert(dst2 == r2.runner.state());
+  LuaRun r3(0.1);
+  r3.runner.state() = dst2;
+  assert(r2.runner.run(2).ok() && r3.runner.run(2).ok());
+  assert(r2.runner.state() == r3.runner.state());
+
+  // Corrupt dead script range behind configure's back: load must reject.
+  {
+    world::State tampered = r.runner.state();
+    tampered.signals.lua_off[e.index] =
+        static_cast<std::uint64_t>(tampered.signals.lua_text.size() + 64);
+    std::ostringstream bad;
+    assert(world::save_state(tampered, bad).ok());
+    world::State rej;
+    std::istringstream bin(bad.str());
+    assert(!world::load_state(rej, bin).ok());
+  }
+}
+
 } // namespace
 
 int main() {
@@ -443,6 +493,7 @@ int main() {
   test_configure_rejections();
   test_examples();
   test_serialize_v5();
+  test_save_load_dead_lua();
   std::cout << "test_lua: OK\n";
   return 0;
 }

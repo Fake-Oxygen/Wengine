@@ -14,6 +14,9 @@
 //     u64 table_off, u64 table_len, u64 lua_off, u64 lua_len
 //   u32 table_store_size, f64 table_times[]..., f64 table_values[]...
 //   u32 lua_blob_size, u8 lua_text[]... (opaque script bytes)
+// Dead signal slots (present=0) retain their last live columns verbatim
+// (detach clears presence only); load re-checks their sizes/ranges but no
+// live-source invariant, so supported despawn/save/load round-trips exactly.
 // v4 files (no Lua columns or blob) still load: Lua ranges zero out, the
 // script store stays empty. v3 files (no expression/table columns or
 // store) still load: new columns zero out, both stores stay empty. v2
@@ -419,10 +422,16 @@ inline bool get_f64_le(std::istream &in, double &v) {
             (tmp.signals.lua_len[i] != 0 || tmp.signals.lua_off[i] != 0)) {
           return invalid();
         }
-      } else if (expr_len != 0 || tmp.signals.table_len[i] != 0 ||
-                 tmp.signals.table_off[i] != 0 || tmp.signals.lua_len[i] != 0 ||
-                 tmp.signals.lua_off[i] != 0) {
-        return invalid(); // dead slots carry no program or range
+      } else {
+        // Dead slots (p == 0) retain their last live columns verbatim:
+        // detach() only clears presence, and save_state writes every
+        // column. Load accepts the retained payload after the size/opcode
+        // bounds checked at read time above and the store/blob containment
+        // checks below; no live-source invariant (stack balance, non-empty
+        // range) applies. Retained data can never become live: every
+        // configure/attach path overwrites the custom columns, and
+        // next_serial advances past dead serials, so serial progression
+        // and shared table/script ranges stay exact.
       }
     } else {
       // v3 and earlier predate custom sources: programs empty, no ranges.

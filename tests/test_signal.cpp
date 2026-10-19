@@ -909,6 +909,104 @@ void test_serialize_v4_custom() {
   assert(legacy.signals.table_times.empty());
 }
 
+void test_serialize_dead_custom_round_trip() {
+  // detach() retains dead-slot columns while save_state writes them: the
+  // load must accept that representation exactly (sizes/ranges checked, no
+  // live-source invariant on dead slots).
+  core::Runner runner{{.dt = 0.1}};
+  solvers::SignalSolver solver;
+  runner.add_solver(solver);
+  const world::Entity xe = spawn_expr(runner, "2*t+1"); // serial 0
+  const std::vector<signal::TablePoint> pts{{0.0, 1.0}, {1.0, 3.0}};
+  const world::Entity te = runner.state().spawn_entity(); // serial 1
+  assert(world::configure_table_source(te, runner.state().signals,
+                                       std::span(pts.data(), pts.size()),
+                                       signal::QuantityId::kVoltage, 0.0)
+              .ok());
+  assert(runner.run(2).ok());
+  assert(runner.state().despawn_entity(xe));
+  assert(runner.state().despawn_entity(te));
+  assert(runner.state().signals.live_count == 0);
+
+  std::ostringstream bytes;
+  assert(world::save_state(runner.state(), bytes).ok());
+  world::State dst;
+  std::istringstream in(bytes.str());
+  assert(world::load_state(dst, in).ok());
+  assert(dst == runner.state()); // retained programs/ranges verbatim
+  assert(world::take_snapshot(dst) == world::take_snapshot(runner.state()));
+  assert(dst.signals.next_serial == 2); // dead serials still advance minting
+
+  // Slot reuse after load: a fresh source mints the next serial (never a
+  // retained dead one) and evaluates its own payload, never dead leftovers.
+  world::State fork = runner.state();
+  world::State dfork = dst;
+  for (world::State *sp : {&fork, &dfork}) {
+    const world::Entity ne = sp->spawn_entity();
+    signal::SignalParams dp;
+    dp.kind = signal::SignalKind::kDc;
+    dp.offset = 7.0;
+    assert(world::configure_source(ne, sp->signals, dp, sp->sim_time).ok());
+    assert(sp->signals.serial[ne.index] == 2);
+  }
+  assert(dfork == fork);
+  // Reuse with custom kinds too: the new table range shares the store with
+  // the retained dead range, and the new program overwrites dead columns.
+  for (world::State *sp : {&fork, &dfork}) {
+    const world::Entity ne = sp->spawn_entity();
+    const std::vector<signal::TablePoint> pts2{{0.0, 9.0}, {2.0, 1.0}};
+    assert(world::configure_table_source(ne, sp->signals,
+                                         std::span(pts2.data(), pts2.size()),
+                                         signal::QuantityId::kCurrent, sp->sim_time)
+                .ok());
+    const world::Entity ee = sp->spawn_entity();
+    signal::SignalParams xp;
+    xp.kind = signal::SignalKind::kExpression;
+    xp.expr = signal::parse_expression("t*3").value;
+    assert(world::configure_source(ee, sp->signals, xp, sp->sim_time).ok());
+  }
+  std::ostringstream bytes2;
+  assert(world::save_state(fork, bytes2).ok());
+  world::State dst2;
+  std::istringstream in2(bytes2.str());
+  assert(world::load_state(dst2, in2).ok());
+  assert(dst2 == fork);
+  assert(dfork == fork);
+  core::Runner r2{{.dt = 0.1}};
+  solvers::SignalSolver s2;
+  r2.add_solver(s2);
+  r2.state() = fork;
+  core::Runner r3{{.dt = 0.1}};
+  solvers::SignalSolver s3;
+  r3.add_solver(s3);
+  r3.state() = dst2;
+  assert(r2.run(3).ok() && r3.run(3).ok());
+  assert(r2.state() == r3.state());
+
+  // Genuinely corrupt dead ranges still fail: tamper a dead slot behind
+  // configure's back, save the tampered pool, and the load must reject it.
+  {
+    world::State tampered = runner.state();
+    tampered.signals.table_off[te.index] =
+        static_cast<std::uint64_t>(tampered.signals.table_times.size() + 100);
+    std::ostringstream bad;
+    assert(world::save_state(tampered, bad).ok());
+    world::State rej;
+    std::istringstream bin(bad.str());
+    assert(!world::load_state(rej, bin).ok());
+  }
+  {
+    world::State tampered = runner.state();
+    tampered.signals.expr_len[xe.index] =
+        static_cast<std::uint8_t>(signal::kMaxExprNodes + 1);
+    std::ostringstream bad;
+    assert(world::save_state(tampered, bad).ok());
+    world::State rej;
+    std::istringstream bin(bad.str());
+    assert(!world::load_state(rej, bin).ok());
+  }
+}
+
 // Scaling-path proof: a test-only dimension (no production change) plugs
 // into the generic units machinery — Dimension + literal + one scales row
 // is the whole recipe. This is the "one-entry change" SIG-3 requires.
@@ -1072,6 +1170,7 @@ int main() {
   test_table_solver_and_replay();
   test_run_headless_custom();
   test_serialize_v4_custom();
+  test_serialize_dead_custom_round_trip();
   std::cout << "test_signal: OK\n";
   return 0;
 }
