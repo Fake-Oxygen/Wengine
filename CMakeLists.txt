@@ -456,6 +456,11 @@ if(BUILD_TESTS)
     # Lua scripting source: isolated runtime + sandbox pin tests.
     add_executable(test_lua tests/test_lua.cpp)
     target_link_libraries(test_lua PRIVATE wengine_signal_lua)
+    # Fixture path: absolute source directory so out-of-tree builds
+    # (-B /tmp/..., including paths with spaces) load the shipped
+    # examples instead of assuming build/ sits inside the repo.
+    target_compile_definitions(test_lua PRIVATE
+        "WENGINE_LUA_EXAMPLE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/examples/lua\"")
     add_test(NAME lua COMMAND test_lua)
 
     add_executable(test_routing tests/test_routing.cpp)

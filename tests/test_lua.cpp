@@ -318,18 +318,35 @@ void test_configure_rejections() {
 
 void test_examples() {
   // Shipped examples stay runnable and keep their documented goldens.
-  // Paths assume the ctest working directory (build/); a missing file
-  // fails loudly rather than silently skipping.
-  const char *names[] = {"sine", "chirp", "burst", "seed_detune", "softclip"};
-  for (const char *name : names) {
-    const std::string path =
-        std::string("../examples/lua/") + name + ".lua";
+  // The fixture directory is pinned at configure time
+  // (WENGINE_LUA_EXAMPLE_DIR) so out-of-tree builds (-B /tmp/..., paths
+  // with spaces) load the same files; the relative fallback keeps
+  // ad-hoc compiler invocations working. A missing file fails loudly
+  // with its path rather than silently skipping.
+#ifdef WENGINE_LUA_EXAMPLE_DIR
+  constexpr std::string_view kDir = WENGINE_LUA_EXAMPLE_DIR;
+#else
+  constexpr std::string_view kDir = "../examples/lua";
+#endif
+  const auto load = [&](const char *name) {
+    const std::string path = std::string(kDir) + "/" + name + ".lua";
     std::ifstream in(path);
+    if (!in) {
+      std::cerr << "test_lua: missing Lua fixture: " << path << "\n";
+    }
     assert(static_cast<bool>(in));
     std::ostringstream buf;
     buf << in.rdbuf();
-    const std::string text = buf.str();
+    std::string text = buf.str();
+    if (text.empty()) {
+      std::cerr << "test_lua: empty Lua fixture: " << path << "\n";
+    }
     assert(!text.empty());
+    return text;
+  };
+  const char *names[] = {"sine", "chirp", "burst", "seed_detune", "softclip"};
+  for (const char *name : names) {
+    const std::string text = load(name);
     assert(lua::check_script(std::string_view(text.data(), text.size())).ok());
     LuaRun r(0.001);
     spawn_lua(r.runner, std::string_view(text.data(), text.size()));
@@ -338,20 +355,14 @@ void test_examples() {
   }
   // Documented goldens: sine hits 2 at t = 0.25 s, chirp hits -1 at t = 0.5 s.
   {
-    std::ifstream in("../examples/lua/sine.lua");
-    std::ostringstream buf;
-    buf << in.rdbuf();
-    const std::string text = buf.str();
+    const std::string text = load("sine");
     LuaRun r(0.001);
     spawn_lua(r.runner, std::string_view(text.data(), text.size()));
     assert(r.runner.run(250).ok());
     assert(near(r.runner.state().signals.value[0], 2.0, 1e-9));
   }
   {
-    std::ifstream in("../examples/lua/chirp.lua");
-    std::ostringstream buf;
-    buf << in.rdbuf();
-    const std::string text = buf.str();
+    const std::string text = load("chirp");
     LuaRun r(0.25);
     spawn_lua(r.runner, std::string_view(text.data(), text.size()));
     assert(r.runner.run(2).ok());
