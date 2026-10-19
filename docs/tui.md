@@ -1,9 +1,9 @@
 # TUI (ncurses) — design + decision log
 
 `PhysicsSimApp --tui` opens a terminal UI with the full CLI command set.
-Status: scaffolding + palette/help browser + closed-form guided forms
-(TUI-1..4) + async worker (TUI-5) + output views (TUI-6); remaining work is in
-Plane (parent: TUI epic).
+Status: TUI-1..7 shipped (scaffolding + palette/help browser +
+closed-form guided forms + run builders + async worker + output views +
+parity hardening/PTY smoke/final docs); no open Plane tasks.
 
 ## 1. Reuse decision (D-TUI-1)
 
@@ -167,7 +167,18 @@ PASS with color escapes, `/V` find + `n` step, F5 save byte-identical to
 the scrollback, narrow-resize reflow with continued interaction, F10 quit
 0; dumb refusal exit 1; `NO_COLOR=1` xterm boots and runs PASS).
 
-## 4. Known limits (roadmap, not bugs)
+Parity hardening (TUI-7): `tests/test_tui_exec.cpp` pins the executor over
+the full registry (every command golden + usage-error shape + stray
+positional, `exit`/`quit` signals, `help <cmd>` per entry), completion
+candidates equal to `cli::complete_line` outputs, and history-file sharing
+with the REPL (same default path, same format/cap, proven by round-trip).
+`tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`) drives launch, run,
+single/multi completion, history recall + re-run, F10 quit, the shared
+history file, non-TTY refusal (exit 1), and `--tui extra` usage (exit 2)
+headlessly on a PTY. Session setup creates the history parent dir (same as
+`LineReader`), so the first TUI run on a fresh `$XDG_CACHE_HOME` persists.
+
+## 4. Known limits (by design, not roadmap)
 
 - One command's displayed output is capped at 500 lines (loud truncation
   note). Full logs belong in `--emit-csv` files.
@@ -175,14 +186,16 @@ the scrollback, narrow-resize reflow with continued interaction, F10 quit
   (`list`/`add`/`set`/`start`/`stop`/`drop`) stays on the typed line; the
   F4 builders cover batch `run` modes only.
 
-## 5. Manual verification
+## 5. Verification
 
-No input-automation tooling exists (same as the GUI panels): run
-`./build/PhysicsSimApp --tui` on a real TTY and check help display,
-completion, history recall across restarts, resize, a long-run
-truncation note, and an async cancel (`/tmp/opencode/tui5_pty_smoke.py`:
-progress, live typing, Ctrl-C tail, CSV, quit). Output views
-(`/tmp/opencode/tui6_pty_smoke.py`): PASS/FAIL/Error highlight with color
-escapes on xterm, `/` find + `n` stepping, F5 save byte-identical to the
-scrollback, narrow-resize reflow with continued interaction, F10 quit;
-`TERM=dumb` refusal (exit 1, no hang); `NO_COLOR=1` xterm boots and runs.
+Automated (runs in CI, no display needed):
+
+```sh
+ctest --test-dir build -R "tui_exec|tui_forms|tui_batches|tui_async|tui_views|tui_pty_smoke"
+python3 tests/tui_pty_smoke.py --bin ./build/PhysicsSimApp
+```
+
+Manual feel (no input-automation tooling exists, same as the GUI panels):
+run `./build/PhysicsSimApp --tui` on a real TTY and check help display,
+completion feel, history recall across restarts, resize, a long-run
+truncation note, and an async cancel.

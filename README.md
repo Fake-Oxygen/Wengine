@@ -62,6 +62,16 @@ solvers cannot be constant-folded away; each prints `ns/iter` (or
 ./build/PhysicsSimApp --tui                 # ncurses TUI: same commands, form-guided display
 ```
 
+TUI (`--tui`): the full CLI over ncurses — every line runs on the async
+worker through `cli::Shell::execute`, so text stays byte-identical to the
+REPL/headless CLI by construction (pinned by `test_tui_exec` over every
+registry command: goldens + usage errors + stray positionals, and
+completion == REPL `complete_line`). History is the shared REPL file
+(`$XDG_CACHE_HOME/wengine/history`). `ctest -R tui_pty_smoke` drives
+launch/run/complete/history-recall/quit headlessly on a PTY
+(`tests/tui_pty_smoke.py`); non-TTY refusal (exit 1) and `--tui extra`
+usage (exit 2) are covered there too.
+
 Headless mode passes `argv` straight to the command — no shell startup, no
 re-tokenizing (an argument containing spaces stays one argument), exit code
 is the command result (`0` ok, `1` runtime/check failure, `2` usage error;
@@ -372,7 +382,7 @@ tests/  benchmarks/  examples/
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,x,y,vx,vy`, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions, `StrideSink` step-aligned decimation, drop counters) |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion. Two-level `ic` dispatch (`ic_dispatch.hpp` + `ic_registry.hpp`) keeps part-specific chips off the top level |
-| `tui` | `wengine/tui/exec.hpp`, `wengine/tui/async.hpp`, `wengine/tui/forms.hpp`, `wengine/tui/batches.hpp`, `wengine/tui/views.hpp`, `wengine/tui/run.hpp`, `wengine/cli/cancel.hpp`, `src/tui/` | Ncurses front end (`PhysicsSimApp --tui`, `BUILD_TUI`): terminal handling only — every line runs on the async worker (`AsyncTask` + its own `Shell::execute`) with captured output, so TUI text stays byte-identical to the CLI by construction; progress + step-boundary Ctrl-C cancel (sinks flushed/closed); guided forms compose argv strings only (F3 browser for the closed-form families, F4 builders for `sim run` / `sig run` batches incl. `--forever`); output views render captured text only (PASS/FAIL/Error highlight, `/`+`n`/`N` scrollback search, F5 save-pane-to-file, wrapped resize reflow, visible scroll position, `TERM=dumb`/NO_COLOR fallback with loud refusal on cursor-less terminals) |
+| `tui` | `wengine/tui/exec.hpp`, `wengine/tui/async.hpp`, `wengine/tui/forms.hpp`, `wengine/tui/batches.hpp`, `wengine/tui/views.hpp`, `wengine/tui/run.hpp`, `wengine/cli/cancel.hpp`, `src/tui/` | Ncurses front end (`PhysicsSimApp --tui`, `BUILD_TUI`): terminal handling only — every line runs on the async worker (`AsyncTask` + its own `Shell::execute`) with captured output, so TUI text stays byte-identical to the CLI by construction (full-registry parity matrix + completion == REPL); progress + step-boundary Ctrl-C cancel (sinks flushed/closed); guided forms compose argv strings only (F3 browser for the closed-form families, F4 builders for `sim run` / `sig run` batches incl. `--forever`); output views render captured text only (PASS/FAIL/Error highlight, `/`+`n`/`N` scrollback search, F5 save-pane-to-file, wrapped resize reflow, visible scroll position, `TERM=dumb`/NO_COLOR fallback with loud refusal on cursor-less terminals); history is the shared REPL file; `ctest -R tui_pty_smoke` covers launch/run/complete/recall/quit on a PTY |
 
 Dependency direction (never reversed):
 
@@ -533,7 +543,15 @@ particle + signal CSV-exactness, sink re-attach, plot bounds),
 `test_gui_stream_source`
 (SHM subscribe parity + lag isolation, CSV replay transport/pacing,
 CLI/frame/CSV exactness, signal-log replay), `test_canvas2d` (2D mapping,
-fit, zoom/pan, grid steps). Benchmarks:
+fit, zoom/pan, grid steps), `test_tui_exec` (full-registry executor parity:
+every command golden + usage error + stray positional, completion ==
+REPL `complete_line`, shared-history file proof, palette/help/popup),
+`test_tui_forms`/`test_tui_batches` (compose-only parity matrices),
+`test_tui_async` (worker parity, busy/cancel/progress/emit-csv),
+`test_tui_views` (highlight/search/save/reflow/scroll/no-color), plus the
+headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`:
+launch/run/complete/recall/quit, history sharing, non-TTY + extra-args
+shapes). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_signal`
 (ns/source-step over a live Runner + SignalSolver, opaque params), `bench_link`
 (publish ns/frame + frames/s through a live SHM segment, slow-reader
@@ -682,6 +700,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
 tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,sim,solver_registry,signal,lua,routing,runner,world,emit,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_async,tui_views}.cpp
+plus the headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`).
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)

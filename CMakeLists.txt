@@ -385,6 +385,18 @@ if(BUILD_TESTS)
     target_link_libraries(test_tui_views PRIVATE wengine_cli)
     add_test(NAME tui_views COMMAND test_tui_views)
 
+    # TUI-7 PTY smoke: launch/run/complete/recall/quit headlessly in CI.
+    # Real PTY via python3 pty.fork (no display needed); isolated history
+    # via a temp XDG_CACHE_HOME. Needs a cursor-addressable $TERM at run
+    # time (the script sets xterm itself) plus the built PhysicsSimApp.
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        add_test(NAME tui_pty_smoke
+            COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/tests/tui_pty_smoke.py
+                    --bin $<TARGET_FILE:PhysicsSimApp>)
+        set_tests_properties(tui_pty_smoke PROPERTIES TIMEOUT 120)
+    endif()
+
     add_executable(test_s0 tests/test_s0.cpp)
     target_link_libraries(test_s0 PRIVATE wengine_cli)
     add_test(NAME s0 COMMAND test_s0)

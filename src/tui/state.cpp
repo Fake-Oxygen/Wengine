@@ -2,14 +2,22 @@
 
 #include "state.hpp"
 
+#include <filesystem>
+#include <system_error>
+
 namespace wengine::tui {
 
 void init_state(State &s) {
   s.pal_entries = palette_entries();
 
-  // Same history file as the REPL (shared format, shared cap).
+  // Same history file as the REPL (shared format, shared cap). Create the
+  // parent dir like `LineReader::ensure_history_loaded` does, so the first
+  // TUI run on a fresh $XDG_CACHE_HOME still persists (appends below
+  // would otherwise fail silently on a missing directory).
   s.hist_path = cli::LineReader::default_history_path();
   if (!s.hist_path.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path{s.hist_path}.parent_path(), ec);
     (void)s.history.load(s.hist_path);
   }
 
