@@ -8,7 +8,7 @@
 // validation, so invalid input surfaces the CLI usage-error text verbatim.
 //
 // This header is ncurses-free and unit-testable (see
-// `tests/test_tui_forms.cpp`). The ncurses loop in `src/tui/run.cpp` owns
+// `tests/test_tui_forms.cpp`). The ncurses panes in `src/tui/` own
 // only field editing + result display.
 //
 // Field hints come from each spec's `kUsage`/completion vocabulary:

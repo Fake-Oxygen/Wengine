@@ -261,6 +261,15 @@ if(BUILD_CLI)
         if(CURSES_FOUND)
             add_library(wengine_tui STATIC
                 src/tui/run.cpp
+                src/tui/state.cpp
+                src/tui/text.cpp
+                src/tui/submit.cpp
+                src/tui/edit.cpp
+                src/tui/draw_main.cpp
+                src/tui/panes_help.cpp
+                src/tui/panes_forms.cpp
+                src/tui/panes_batches.cpp
+                src/tui/keys.cpp
             )
             target_include_directories(wengine_tui PUBLIC
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -358,6 +367,11 @@ if(BUILD_TESTS)
     add_executable(test_tui_forms tests/test_tui_forms.cpp)
     target_link_libraries(test_tui_forms PRIVATE wengine_cli)
     add_test(NAME tui_forms COMMAND test_tui_forms)
+
+    # TUI sim/sig run builders: compose-only parity matrix + async routing.
+    add_executable(test_tui_batches tests/test_tui_batches.cpp)
+    target_link_libraries(test_tui_batches PRIVATE wengine_cli)
+    add_test(NAME tui_batches COMMAND test_tui_batches)
 
     add_executable(test_s0 tests/test_s0.cpp)
     target_link_libraries(test_s0 PRIVATE wengine_cli)

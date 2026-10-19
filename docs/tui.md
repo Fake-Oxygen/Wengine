@@ -43,7 +43,9 @@ change for TUI work; `wengine/tui/exec.hpp` is ncurses-free.
 ## 3. Shipped scope
 
 Scaffolding (TUI-1): `include/wengine/tui/exec.hpp` (executor seam),
-`include/wengine/tui/run.hpp` + `src/tui/run.cpp` (`wengine_tui` STATIC TU),
+`include/wengine/tui/run.hpp` + `src/tui/` (`wengine_tui` STATIC TUs, one per
+work domain — `state`/`text`/`submit`/`edit`/`draw_main`/`panes_help`/
+`panes_forms`/`panes_batches`/`keys` behind the thin `run.cpp` assembly),
 `--tui` flag, `BUILD_TUI` option, `tests/test_tui_exec.cpp`, README updates.
 
 Palette + help browser (TUI-2): `include/wengine/tui/palette.hpp`
@@ -83,15 +85,41 @@ parity matrix (every option, every `ic` op, plus usage-error shapes).
 Verified on a real PTY (F3 browser, ohm prefill submit `R = 22.963`,
 Esc back, scrollback mirror).
 
+Run builders (TUI-4): `include/wengine/tui/batches.hpp` (ncurses-free
+composition model + registry-derived solver/kind pickers, unit-tested).
+F4 opens the builder browser (`sim run` / `sig run`), Enter opens the
+highlighted builder, Enter inside composes one argv string and submits it
+through `TuiExecutor` -- finite runs show the CLI-identical text beside
+the fields (also mirrored into the scrollback + shared history), while
+`--forever` lines never reach the sync executor: they are held with a
+loud note routing them to the async worker (TUI-5), so the builder never
+blocks. Solver names come from `SolverRegistry`, signal kinds from
+`kKindNames` (plus `U|I` quantities and `ascii|cobs` UART modes), so new
+solvers/kinds appear with no builder-side change; file paths (e.g.
+`--emit-csv`, `--sig-table`, `--sig-lua`) are plain editable fields whose
+values quote to one argv token when they carry spaces. Builders never
+validate: empty fields are omitted, bare flags (`--paced`, `--forever`,
+`--emit-health`, `--control-uart`) emit only when enabled, and the CLI
+owns every error.
+`tests/test_tui_batches.cpp` pins the composition + executor-vs-`Shell`
+parity matrix (projectile batches, every batch signal kind incl. the
+batch-rejected `sum` refusal, expression/table/lua file kinds, paced
+runs, csv strides/selects with on-disk CSV proof, plus usage-error
+shapes); paced runs pin rc + deterministic lines only (wall lateness
+varies run-to-run even headless); `--forever` pins composition +
+`wants_async` routing and is never executed synchronously.
+
 ## 4. Known limits (roadmap, not bugs)
 
 - One command's displayed output is capped at 500 lines (loud truncation
   note). Full logs belong in `--emit-csv` files.
-- Long batch runs block input while computing (same as the REPL); async
-  runs with progress + step-boundary cancel are a roadmap task.
-- No mouse, no scrollback search/save yet. Forms cover the closed-form
-  families only (`ohm`/`s0`/`i2c`/`ldo`/`led`/`ic`); `sim`/`sig` builders
-  are a roadmap task.
+- Long finite batch runs block input while computing (same as the REPL);
+  async runs with progress + step-boundary cancel are task TUI-5, which
+  also owns `--forever` builder lines (held with a loud note, never run
+  synchronously by the builder).
+- No mouse, no scrollback search/save yet. `sig` per-source family
+  (`list`/`add`/`set`/`start`/`stop`/`drop`) stays on the typed line; the
+  F4 builders cover batch `run` modes only.
 
 ## 5. Manual verification
 

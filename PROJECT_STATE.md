@@ -5,10 +5,11 @@ needs verification, fixing, or reworking. Refresh the counts and the
 commit pointer whenever they move. Architectural rules belong in
 `AGENTS.md`, not here.
 
-- Date: 2026-09-23
-- Tree: `f3f5957` ("Signal routing N:M") + uncommitted SIG-9 GUI work
-  (signal batch panel + model, sim status/graph tweaks, `test_signal_panel`)
-- Tests: 24/24 pass, zero warnings (default build; strict flags everywhere)
+- Date: 2026-10-19
+- Tree: `d01c621` ("Add INA219 solver") + uncommitted TUI-4 run-builder work
+  (`include/wengine/tui/batches.hpp`, F4 builders in `src/tui/panes_batches.cpp`,
+  `tests/test_tui_batches.cpp`)
+- Tests: 46/46 pass, zero warnings (default build; strict flags everywhere)
 - GUI build (`-DBUILD_GUI=ON`): clean, windowed runs verified on this
   machine (SDL2 2.30, Vulkan 1.3.275, lavapipe software rendering;
   8 s healthy loop, killed by timeout = exit 124, no crash), including

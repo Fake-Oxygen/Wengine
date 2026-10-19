@@ -1,7 +1,7 @@
 #pragma once
 
 // Ncurses TUI entry point. Declared without ncurses types so `apps/cli`
-// stays portable; the implementation lives in `src/tui/run.cpp` under
+// stays portable; the implementation lives in `src/tui/` (domain TUs under
 // the `wengine_tui` target, built only when Curses is found
 // (`-DBUILD_TUI=ON`, default ON).
 //
