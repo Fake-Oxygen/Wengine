@@ -177,6 +177,18 @@ void handle_key(State &s, int ch) {
     }
     return;
   }
+  if (ch == KEY_F(9)) {
+    if (s.overlay == Overlay::kSettings) {
+      settings_key(s, ch);
+    } else {
+      s.settings_original_theme = s.theme_index;
+      s.settings_selection = s.theme_index;
+      s.settings_return_overlay = s.overlay;
+      s.overlay = Overlay::kSettings;
+      s.status_msg = "settings -- select a theme, Enter applies, Esc cancels";
+    }
+    return;
+  }
   if (ch == KEY_F(5) && !s.searching) {
     if (s.save_path.empty()) {
       s.save_path = "tui_output.txt";
@@ -197,6 +209,8 @@ void handle_key(State &s, int ch) {
     form_key(s, ch);
   } else if (s.overlay == Overlay::kBatch) {
     batch_key(s, ch);
+  } else if (s.overlay == Overlay::kSettings) {
+    settings_key(s, ch);
   } else {
     main_key(s, ch);
   }

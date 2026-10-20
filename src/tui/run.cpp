@@ -19,6 +19,7 @@
 #include "state.hpp"
 
 #include "wengine/tui/views.hpp"
+#include "wengine/tui/theme_config.hpp"
 
 #include <curses.h>
 
@@ -73,6 +74,16 @@ int run_tui() {
 
   State s;
   init_state(s);
+  s.theme_preference_path = themes::preference_path();
+  const char *theme_override = std::getenv("WENGINE_TUI_THEME");
+  if (theme_override != nullptr) {
+    s.theme_index = themes::index_of(theme_override);
+  } else {
+    const std::string saved_theme = themes::load_preference(s.theme_preference_path);
+    if (!saved_theme.empty()) {
+      s.theme_index = themes::index_of(saved_theme);
+    }
+  }
 
   WINDOW *scr = initscr();
   if (scr == nullptr) {
@@ -94,15 +105,10 @@ int run_tui() {
     return 1;
   }
 
-  s.use_color = (has_colors() != FALSE) && views::colors_allowed_env();
+  s.use_color = (has_colors() != FALSE) && views::colors_allowed_env() && start_color() != ERR;
   if (s.use_color) {
-    (void)start_color();
-    (void)init_pair(1, COLOR_WHITE, COLOR_BLUE);
-    (void)init_pair(2, COLOR_BLACK, COLOR_GREEN);
-    (void)init_pair(3, COLOR_WHITE, COLOR_RED);
-    (void)init_pair(views::kPassPair, COLOR_GREEN, COLOR_BLACK);
-    (void)init_pair(views::kFailPair, COLOR_RED, COLOR_BLACK);
-    (void)init_pair(views::kPromptPair, COLOR_CYAN, COLOR_BLACK);
+    s.default_colors = use_default_colors() != ERR;
+    install_theme(themes::kThemes[s.theme_index], s.default_colors);
   }
 
   while (!s.quit) {

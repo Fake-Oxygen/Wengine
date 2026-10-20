@@ -1,7 +1,7 @@
 # TUI (ncurses) — design + decision log
 
 `PhysicsSimApp --tui` opens a terminal UI with the full CLI command set.
-Status: TUI-1..7 shipped (scaffolding + palette/help browser +
+Status: TUI-1..8 shipped (scaffolding + palette/help browser +
 closed-form guided forms + run builders + async worker + output views +
 parity hardening/PTY smoke/final docs); no open Plane tasks.
 
@@ -141,8 +141,21 @@ text-only `LineKind` classification, substring search, hard-wrap reflow,
 display-row scroll math, `save_lines`, `TERM`/`NO_COLOR` gates,
 unit-tested). The scrollback + help + form/batch result panes render
 captured CLI text only (no per-command view code): PASS/OK green,
-FAIL/Error/WARN red (bold on no-color terminals), `> ` prompts cyan;
+FAIL/Error/WARN red (bold on no-color terminals), `> ` prompts use the
+selected accent color;
 usage doc lines mentioning `PASS/FAIL` together stay unhighlighted.
+Theme settings (TUI-8): F9 opens the settings pane from any view. Up/Down
+previews the highlighted theme immediately, Enter saves it as the default,
+and Esc cancels the preview. The selected theme persists at
+`$XDG_CONFIG_HOME/wengine/tui-theme` (fallback `~/.config/wengine/tui-theme`).
+Built-ins are Catppuccin Mocha, Dracula,
+Nord, Gruvbox Dark, Tokyo Night, Light, and Terminal. `WENGINE_TUI_THEME`
+overrides the saved startup theme (e.g. `WENGINE_TUI_THEME=dracula`);
+`default` aliases `terminal`, and unknown names fall back to `terminal`. Themes use xterm indexed colors through
+ncurses/terminfo, with nearest-color fallback on terminals with fewer colors;
+there are no hard-coded ANSI escapes. `NO_COLOR` still disables colors while
+keeping the full-screen UI. The selected palette styles the full-screen
+background, title, status, prompt, and semantic output highlights.
 `/` (on an empty input line — no valid command starts with `/`) opens a
 status-line search prompt, Enter confirms over the full logical scrollback
 (truncation notes included), `n`/`N` step through hits with a `match i/M`
@@ -158,12 +171,12 @@ full-screen layout has no `cup` there, function keys are undefined, and
 flow-control swallows Ctrl-Q, so garbling is refused, not attempted);
 `NO_COLOR` on a capable terminal still runs full-screen, only without
 colors. `tests/test_tui_views.cpp` pins classification (incl. the
-`PASS/FAIL`-doc exclusion + `Unknown command` errors), the color and
-full-screen gates, search across a 600-line tail, wrap/reflow geometry,
+`PASS/FAIL`-doc exclusion + `Unknown command` errors), theme selection,
+color and full-screen gates, search across a 600-line tail, wrap/reflow geometry,
 scroll math + indicator, save byte-identity + loud failure, and a
 no-per-command proof that runs one line per solver family through the real
-`Shell`. Verified on a real PTY (`/tmp/opencode/tui6_pty_smoke.py`: xterm
-PASS with color escapes, `/V` find + `n` step, F5 save byte-identical to
+`Shell`. Verified on a real PTY (`tests/tui_pty_smoke.py`: F9 preview/apply,
+xterm PASS with color escapes, `/V` find + `n` step, F5 save byte-identical to
 the scrollback, narrow-resize reflow with continued interaction, F10 quit
 0; dumb refusal exit 1; `NO_COLOR=1` xterm boots and runs PASS).
 

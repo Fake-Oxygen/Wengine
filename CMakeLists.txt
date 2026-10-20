@@ -285,6 +285,7 @@ if(BUILD_CLI)
                 src/tui/panes_help.cpp
                 src/tui/panes_forms.cpp
                 src/tui/panes_batches.cpp
+                src/tui/panes_settings.cpp
                 src/tui/keys.cpp
             )
             target_include_directories(wengine_tui PUBLIC

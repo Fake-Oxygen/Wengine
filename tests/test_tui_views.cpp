@@ -3,6 +3,8 @@
 // per-command view code (D-TUI-1 holds: the model never parses commands).
 
 #include "wengine/tui/views.hpp"
+#include "wengine/tui/theme.hpp"
+#include "wengine/tui/theme_config.hpp"
 #include "wengine/cli/shell.hpp"
 
 #include <cassert>
@@ -16,6 +18,8 @@
 using namespace wengine;
 
 namespace {
+
+std::string tmp(const char *name);
 
 void test_classify() {
   using K = tui::views::LineKind;
@@ -61,6 +65,48 @@ void test_colors_allowed() {
   // Runtime env gate defaults to enabled here (CI TERM is not dumb and
   // NO_COLOR is unset); the PTY script pins both branches explicitly.
   (void)tui::views::colors_allowed_env();
+}
+
+void test_theme_selection() {
+  using namespace tui::themes;
+  assert(kThemes.size() == 7);
+  assert(find("terminal").name == "terminal");
+  assert(find("default").name == "terminal");
+  assert(find("catppuccin-mocha").name == "catppuccin-mocha");
+  assert(find("dracula").name == "dracula");
+  assert(find("nord").name == "nord");
+  assert(find("gruvbox-dark").name == "gruvbox-dark");
+  assert(find("tokyo-night").name == "tokyo-night");
+  assert(find("light").name == "light");
+  assert(find("not-a-theme").name == "terminal");
+  assert(index_of("dracula") == 2);
+  assert(contains("terminal") && contains("default") && contains("catppuccin-mocha"));
+  assert(!contains("not-a-theme"));
+  // Every palette uses the xterm 256-color range (or the terminal defaults).
+  for (const Theme &theme : kThemes) {
+    const PairStyle styles[]{theme.background, theme.title, theme.success_status, theme.error_status,
+                             theme.pass, theme.fail, theme.prompt};
+    for (const PairStyle style : styles) {
+      assert(style.foreground >= kDefaultColor && style.foreground <= 255);
+      assert(style.background >= kDefaultColor && style.background <= 255);
+    }
+  }
+}
+
+void test_theme_preference_round_trip() {
+  const std::string path = tmp("wengine_test_tui_theme_preference");
+  const std::string temporary = path + ".tmp";
+  std::remove(path.c_str());
+  std::remove(temporary.c_str());
+  std::string error;
+  assert(tui::themes::save_preference(path, "dracula", error));
+  assert(tui::themes::load_preference(path) == "dracula");
+  assert(tui::themes::save_preference(path, "catppuccin-mocha", error));
+  assert(tui::themes::load_preference(path) == "catppuccin-mocha");
+  assert(!tui::themes::save_preference(path, "not-a-theme", error));
+  assert(!error.empty());
+  std::remove(path.c_str());
+  std::remove(temporary.c_str());
 }
 
 void test_find_matches() {
@@ -226,6 +272,8 @@ void test_no_per_command_views() {
 int main() {
   test_classify();
   test_colors_allowed();
+  test_theme_selection();
+  test_theme_preference_round_trip();
   test_find_matches();
   test_match_spans();
   test_wrap_reflow();

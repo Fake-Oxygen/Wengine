@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""TUI-7 PTY smoke: launch, dynamic form builder, run, complete, recall, quit.
+"""TUI PTY smoke: launch, theme picker, forms, run, complete, recall, quit.
 
 Runs `PhysicsSimApp --tui` on a real PTY (no display needed), drives it
 like a user, and asserts the no-drift contract end to end:
   - boot renders the TUI title on a cursor-addressable terminal
+  - F9 opens theme settings; theme preview and selection work on the PTY
   - the Ohm form permits valid pairs, and S0 rules update when its mode changes
   - typing `ohm 12V 3A` + Enter shows the CLI-identical `R = 4` text
   - Tab single-completes (`o` -> `ohm `) and multi-candidate popups stay loud
@@ -107,7 +108,10 @@ def main():
     env = dict(os.environ)
     env["TERM"] = "xterm"
     env.pop("NO_COLOR", None)
+    env["WENGINE_TUI_THEME"] = "terminal"
     env["XDG_CACHE_HOME"] = tmp_xdg
+    env["XDG_CONFIG_HOME"] = tmp_xdg
+    env.pop("WENGINE_TUI_THEME", None)
 
     # --- full-screen session: launch / run / complete / recall / quit ---
     pid, fd = spawn_tui(binpath, env)
@@ -115,6 +119,24 @@ def main():
         boot = wait_for(fd, b"WEngine TUI", timeout=8.0)
         assert b"WEngine TUI" in boot, f"no TUI title on boot: {boot[-800:]!r}"
         print("boot ok")
+
+        # F9 opens the theme picker. Preview Dracula with two Down presses,
+        # apply it, and reopen settings to prove it remains active this run.
+        os.write(fd, b"\x1b[20~")  # F9
+        settings = wait_for(fd, b"Settings -- choose a color theme", timeout=6.0)
+        assert b"Settings -- choose a color theme" in settings, (
+            f"F9 did not open theme settings: {settings[-1200:]!r}"
+        )
+        os.write(fd, b"\x1bOB\x1bOB\r")  # Dracula, Enter to apply
+        applied = wait_for(fd, b"theme saved: Dracula", timeout=6.0)
+        assert b"theme saved: Dracula" in applied, f"theme selection failed: {applied[-1200:]!r}"
+        os.write(fd, b"\x1b[20~")
+        active_theme = wait_for(fd, b"Active: Dracula", timeout=6.0)
+        assert b"Active: Dracula" in active_theme, f"selected theme was lost: {active_theme[-1200:]!r}"
+        os.write(fd, b"\x1b")  # Escape closes settings without changing the applied theme
+        time.sleep(0.3)
+        read_available(fd, 1.0)
+        print("F9 theme picker + apply ok")
 
         # F3 opens forms; the first entry is Ohm. Its builder starts with U/I
         # selected. Switch to the argument pane, deselect I, select R, then
@@ -227,6 +249,29 @@ def main():
         body = f.read()
     assert "ohm 12V 3A" in body, f"history missing typed line: {body[-500:]!r}"
     print("history-file sharing ok")
+
+    theme_file = os.path.join(tmp_xdg, "wengine", "tui-theme")
+    assert os.path.exists(theme_file), f"theme preference missing: {theme_file}"
+    with open(theme_file, encoding="ascii") as f:
+        assert f.read() == "dracula\n"
+
+    # A fresh process, with no env override, must load the selected theme.
+    pid, fd = spawn_tui(binpath, env)
+    try:
+        boot = wait_for(fd, b"WEngine TUI", timeout=8.0)
+        assert b"WEngine TUI" in boot, f"TUI did not restart: {boot[-800:]!r}"
+        os.write(fd, b"\x1b[20~")  # F9
+        active = wait_for(fd, b"Active: Dracula", timeout=6.0)
+        assert b"Active: Dracula" in active, f"theme did not persist: {active[-1200:]!r}"
+        os.write(fd, b"\x1b[21~")  # F10
+        rc = wait_eof(pid, fd, timeout=10.0)
+        assert rc == 0, f"restart-session TUI quit exit {rc}, want 0"
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    print("theme preference survives restart")
 
     # Non-TTY refusal (exit 1) and extra-args usage error (exit 2): no PTY.
     p1 = subprocess.run([binpath, "--tui"], stdin=subprocess.DEVNULL,

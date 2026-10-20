@@ -25,6 +25,7 @@
 #include "wengine/tui/exec.hpp"
 #include "wengine/tui/forms.hpp"
 #include "wengine/tui/palette.hpp"
+#include "wengine/tui/theme.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -45,10 +46,10 @@ constexpr std::size_t kMaxOutputLines = 500;
 
 constexpr std::string_view kTitle =
     "WEngine TUI  |  Enter: run  Tab: complete  F1: help  F2: commands  "
-    "F3: forms  F4: runs  /:search n:next F5:save  PgUp/PgDn: scroll  F10/Ctrl-Q: quit";
+    "F3: forms  F4: runs  F9: themes  /:search n:next F5:save  PgUp/PgDn: scroll  F10/Ctrl-Q: quit";
 constexpr std::string_view kPrompt = "> ";
 
-enum class Overlay { kNone, kPalette, kHelp, kForms, kForm, kBatches, kBatch };
+enum class Overlay { kNone, kPalette, kHelp, kForms, kForm, kBatches, kBatch, kSettings };
 
 enum class AsyncOrigin { kNone, kLine, kForm, kBatch };
 
@@ -117,6 +118,12 @@ struct State {
   int cols = 0;
   int out_rows = 0;
   bool use_color = false;
+  bool default_colors = false;
+  std::size_t theme_index = 0;
+  std::string theme_preference_path;
+  std::size_t settings_selection = 0;
+  std::size_t settings_original_theme = 0;
+  Overlay settings_return_overlay = Overlay::kNone;
 
   // Output views (TUI-6): scrollback search + save-pane-to-file. The search
   // runs on the captured logical lines (never on wrapped display rows), so
@@ -175,6 +182,7 @@ void draw_forms_pane(State &s);
 void draw_batches_pane(State &s);
 void draw_form_pane(State &s);
 void draw_batch_pane(State &s);
+void draw_settings_pane(State &s);
 void draw_scrollback_pane(State &s);
 
 // Per-overlay key handlers (panes_*.cpp + keys.cpp, called by handle_key).
@@ -184,6 +192,8 @@ void forms_key(State &s, int ch);
 void batches_key(State &s, int ch);
 void form_key(State &s, int ch);
 void batch_key(State &s, int ch);
+void settings_key(State &s, int ch);
 void main_key(State &s, int ch);
+void install_theme(const themes::Theme &theme, bool default_colors);
 
 } // namespace wengine::tui

@@ -83,6 +83,8 @@ void draw_frame(State &s) {
     draw_form_pane(s);
   } else if (s.overlay == Overlay::kBatch) {
     draw_batch_pane(s);
+  } else if (s.overlay == Overlay::kSettings) {
+    draw_settings_pane(s);
   } else {
     draw_scrollback_pane(s);
   }
@@ -187,7 +189,13 @@ void draw_frame(State &s) {
     offset = s.cursor;
   }
   const std::string visible = s.input.substr(offset, avail);
+  if (s.use_color) {
+    (void)attron(COLOR_PAIR(views::kPromptPair));
+  }
   (void)mvaddstr(rows - 1, 0, kPrompt.data());
+  if (s.use_color) {
+    (void)attroff(COLOR_PAIR(views::kPromptPair));
+  }
   (void)addnstr(visible.c_str(), static_cast<int>(avail));
   (void)wclrtoeol(stdscr);
   if (s.overlay == Overlay::kForm && s.open_form >= 0 && static_cast<std::size_t>(s.open_form) < s.form_defs.size()) {

@@ -99,13 +99,25 @@ REPL/headless CLI by construction (pinned by `test_tui_exec` over every
 registry command: goldens + usage errors + stray positionals, and
 completion == REPL `complete_line`). History is the shared REPL file
 (`$XDG_CACHE_HOME/wengine/history`). `ctest -R tui_pty_smoke` drives
-launch/run/complete/history-recall/quit headlessly on a PTY. F3 opens guided
+launch/theme selection/run/complete/history-recall/quit headlessly on a PTY. F9
+opens the theme settings pane: use Up/Down to preview a palette, Enter to
+save it as the default theme, or Esc to cancel the preview. The choice is
+stored in `$XDG_CONFIG_HOME/wengine/tui-theme` (fallback:
+`~/.config/wengine/tui-theme`). Built-in
+themes include Catppuccin Mocha, Dracula, Nord, Gruvbox Dark, Tokyo Night,
+Light, and Terminal. F3 opens guided
 forms; the command forms use declarative argument profiles in a two-pane
 builder (Ctrl-B then Left/Right switches panes, Space selects/deselects
 viable inputs; mode/op-specific fields are filtered and computed values are
 dimmed). `tests/tui_pty_smoke.py` checks Ohm pair selection and S0 mode
 switching; non-TTY refusal (exit 1) and `--tui extra` usage (exit 2) are
-covered there too.
+covered there too. Initial theme can also be selected with
+`WENGINE_TUI_THEME=catppuccin-mocha|dracula|nord|gruvbox-dark|tokyo-night|light|terminal`
+(overrides the saved preference; default: `terminal`; `default` is an alias).
+Colors use ncurses/terminfo
+with 256-color palettes where available and degrade to the terminal's
+available colors. `NO_COLOR` disables colors while keeping the full-screen
+interface; unknown theme names fall back to `terminal`.
 
 Headless mode passes `argv` straight to the command — no shell startup, no
 re-tokenizing (an argument containing spaces stays one argument), exit code
