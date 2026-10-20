@@ -16,7 +16,7 @@ namespace wengine::tui::batches::definitions {
   const auto profile = [](std::string_view kind, std::uint64_t active,
                           std::uint64_t required, std::uint64_t defaults,
                           bool supported = true, bool fallback = false) {
-    return SignalProfile{kind, active, required, defaults, supported, fallback};
+    return BatchProfile{kind, active, required, defaults, supported, fallback};
   };
   // Runtime fields (steps/dt/emit/control/pacing) are shared by every kind;
   // signal fields (freq/amp/.../lua) vary per kind. Field indices must match

@@ -242,7 +242,7 @@ void draw_frame(State &s) {
       const auto &ff = cdef.fields[s.batch_field];
       const std::string prefix = "  " + std::string(ff.label) + " " + std::string(ff.key) + ": " + (ff.flag ? "[flag] " : "");
       const std::string &fval = s.batch_vals[sbi][s.batch_field];
-      const bool dynamic = !cdef.signal_profiles.empty() && !cdef.arguments.empty();
+      const bool dynamic = !cdef.profiles.empty() && !cdef.arguments.empty();
       const std::size_t editor_width = dynamic ? static_cast<std::size_t>(cols / 2) : static_cast<std::size_t>(cols);
       if (s.batch_col > fval.size()) {
         s.batch_col = fval.size();

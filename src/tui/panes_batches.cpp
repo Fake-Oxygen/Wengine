@@ -43,29 +43,29 @@ void draw_batches_pane(State &s) {
 
 namespace {
 
-const batches::SignalProfile *sync_signal_profile(State &s, std::size_t batch) {
+const batches::BatchProfile *sync_batch_profile(State &s, std::size_t batch) {
   const batches::BatchDef &def = s.batch_defs[batch];
-  const std::size_t index = batches::signal_profile_index(def, s.batch_vals[batch]);
-  if (index >= def.signal_profiles.size()) {
+  const std::size_t index = batches::batch_profile_index(def, s.batch_vals[batch]);
+  if (index >= def.profiles.size()) {
     return nullptr;
   }
   if (s.batch_active_profile[batch] != static_cast<int>(index)) {
     s.batch_active_profile[batch] = static_cast<int>(index);
-    s.batch_arg_selected[batch] = def.signal_profiles[index].default_selected;
+    s.batch_arg_selected[batch] = def.profiles[index].default_selected;
     s.batch_arg_sel = 0;
     while (s.batch_arg_sel < def.arguments.size() && batches::argument_state(def.arguments[s.batch_arg_sel], s.batch_arg_selected[batch],
-                                   def.signal_profiles[index]) == batches::ArgumentState::kInactive) {
+                                   def.profiles[index]) == batches::ArgumentState::kInactive) {
       ++s.batch_arg_sel;
     }
   }
-  return &def.signal_profiles[index];
+  return &def.profiles[index];
 }
 
 bool batch_field_visible(const batches::BatchDef &def, std::size_t field, std::uint64_t selected) {
   return batches::field_visible(def, field, selected);
 }
 
-std::vector<std::size_t> signal_argument_rows(const batches::BatchDef &def, const batches::SignalProfile &profile, std::uint64_t selected) {
+std::vector<std::size_t> batch_argument_rows(const batches::BatchDef &def, const batches::BatchProfile &profile, std::uint64_t selected) {
   std::vector<std::size_t> rows;
   for (std::size_t i = 0; i < def.arguments.size(); ++i) {
     if (batches::argument_state(def.arguments[i], selected, profile) != batches::ArgumentState::kInactive) {
@@ -75,11 +75,11 @@ std::vector<std::size_t> signal_argument_rows(const batches::BatchDef &def, cons
   return rows;
 }
 
-std::size_t step_signal_argument(const batches::BatchDef &def,
-                                 const batches::SignalProfile &profile,
+std::size_t step_batch_argument(const batches::BatchDef &def,
+                                 const batches::BatchProfile &profile,
                                  std::uint64_t selected, std::size_t current,
                                  int direction) {
-  const auto rows = signal_argument_rows(def, profile, selected);
+  const auto rows = batch_argument_rows(def, profile, selected);
   for (std::size_t i = 0; i < rows.size(); ++i) {
     if (rows[i] != current) {
       continue;
@@ -101,9 +101,9 @@ std::size_t first_visible_batch_field(const batches::BatchDef &def, std::uint64_
   return def.fields.size();
 }
 
-void draw_signal_batch(State &s, std::size_t sbi) {
+void draw_dynamic_batch(State &s, std::size_t sbi) {
   const batches::BatchDef &def = s.batch_defs[sbi];
-  const batches::SignalProfile *profile = sync_signal_profile(s, sbi);
+  const batches::BatchProfile *profile = sync_batch_profile(s, sbi);
   if (profile == nullptr) {
     return;
   }
@@ -116,14 +116,16 @@ void draw_signal_batch(State &s, std::size_t sbi) {
   const int right_width = cols - right_x;
   const int left_text_width = left_width > 1 ? left_width - 1 : 1;
 
-  const std::string left_header = s.batch_active_pane == 0 ? "sig run builder [active]" : "sig run builder (Ctrl+B, Left)";
+  const std::string builder_title =
+      std::string(def.command) + " " + std::string(def.mode) + " builder";
+  const std::string left_header = s.batch_active_pane == 0 ? builder_title + " [active]" : builder_title + " (Ctrl+B, Left)";
   const std::string right_header = s.batch_active_pane == 1 ? "Arguments [active]: " + std::string(profile->kind)
       : "Arguments: " + std::string(profile->kind) + " (Ctrl+B, Right)";
   (void)mvaddnstr(1, 0, left_header.c_str(), left_text_width);
   (void)mvaddnstr(1, right_x, right_header.c_str(), right_width - 1);
   const std::string argv = "argv: " + batches::compose_line(def, values, selected);
   (void)mvaddnstr(2, 0, argv.c_str(), left_text_width);
-  const std::string arg_hint = profile->supported ? "Space toggles valid arguments" : "sum is per-source only; use sig add";
+  const std::string arg_hint = profile->supported ? "Space toggles valid arguments" : "not supported in batch runs (configure per-source)";
   (void)mvaddnstr(2, right_x, arg_hint.c_str(), right_width - 1);
 
   std::vector<std::size_t> visible_fields;
@@ -263,7 +265,7 @@ void draw_signal_batch(State &s, std::size_t sbi) {
   }
 
   const std::vector<std::size_t> arguments =
-      signal_argument_rows(def, *profile, selected);
+      batch_argument_rows(def, *profile, selected);
   const std::size_t arg_cap = out_rows > 3
       ? static_cast<std::size_t>(out_rows - 3) : 1U;
   std::size_t &arg_top = s.batch_arg_top;
@@ -333,7 +335,7 @@ void draw_signal_batch(State &s, std::size_t sbi) {
     (void)addch('|');
   }
   if (profile->supported && arguments.empty() && arg_row < 1 + out_rows) {
-    (void)mvaddnstr(arg_row, right_x, "No active signal arguments.", right_width - 1);
+    (void)mvaddnstr(arg_row, right_x, "No active arguments.", right_width - 1);
     (void)move(arg_row, left_width);
     (void)addch('|');
   }
@@ -352,8 +354,8 @@ void draw_batch_pane(State &s) {
   const std::size_t bi = (s.open_batch >= 0) ? static_cast<std::size_t>(s.open_batch) : 0;
   const std::size_t sbi = bi < s.batch_defs.size() ? bi : 0;
   const batches::BatchDef &def = s.batch_defs[sbi];
-  if (!def.signal_profiles.empty() && !def.arguments.empty()) {
-    draw_signal_batch(s, sbi);
+  if (!def.profiles.empty() && !def.arguments.empty()) {
+    draw_dynamic_batch(s, sbi);
     return;
   }
   const std::vector<std::string> &vals = s.batch_vals[sbi];
@@ -529,11 +531,11 @@ void batches_key(State &s, int ch) {
       s.batch_field = 0;
       s.batch_active_pane = 0;
       s.batch_pane_prefix = false;
-      if (s.batch_defs[s.batches_sel].kind == batches::BatchKind::kSig) {
-        const batches::SignalProfile *profile =
-            sync_signal_profile(s, s.batches_sel);
+      if (!s.batch_defs[s.batches_sel].arguments.empty()) {
+        const batches::BatchProfile *profile =
+            sync_batch_profile(s, s.batches_sel);
         if (profile != nullptr) {
-          const auto rows = signal_argument_rows(
+          const auto rows = batch_argument_rows(
               s.batch_defs[s.batches_sel], *profile,
               s.batch_arg_selected[s.batches_sel]);
           s.batch_arg_sel = rows.empty() ? 0U : rows.front();
@@ -554,36 +556,36 @@ void batch_key(State &s, int ch) {
   const std::size_t sbi = (s.open_batch >= 0) ? static_cast<std::size_t>(s.open_batch) : 0;
   const std::size_t bnfields = sbi < s.batch_defs.size() ? s.batch_defs[sbi].fields.size() : 0;
   const std::size_t page = s.out_rows > 1 ? static_cast<std::size_t>(s.out_rows - 1) : std::size_t{1};
-  const batches::SignalProfile *profile = sbi < s.batch_defs.size()
-      ? sync_signal_profile(s, sbi) : nullptr;
-  const bool signal_builder =
+  const batches::BatchProfile *profile = sbi < s.batch_defs.size()
+      ? sync_batch_profile(s, sbi) : nullptr;
+  const bool dynamic_builder =
       profile != nullptr && !s.batch_defs[sbi].arguments.empty();
 
   if (s.batch_pane_prefix) {
     if (ch == KEY_LEFT) {
       s.batch_active_pane = 0;
       s.batch_pane_prefix = false;
-      s.status_msg = "signal builder pane";
+      s.status_msg = std::string(s.batch_defs[sbi].command) + " builder pane";
     } else if (ch == KEY_RIGHT) {
       s.batch_active_pane = 1;
       s.batch_pane_prefix = false;
-      s.status_msg = "signal argument pane (Space selects)";
+      s.status_msg = "argument pane (Space selects)";
     } else if (ch == kEsc) {
       s.batch_pane_prefix = false;
       s.status_msg = "pane switch cancelled";
     }
     return;
   }
-  if (signal_builder && ch == kCtrlB) {
+  if (dynamic_builder && ch == kCtrlB) {
     s.batch_pane_prefix = true;
     s.status_msg = "Ctrl+B then Left/Right to switch panes";
     return;
   }
 
-  if (signal_builder && s.batch_active_pane == 1) {
+  if (dynamic_builder && s.batch_active_pane == 1) {
     const batches::BatchDef &def = s.batch_defs[sbi];
     if (ch == KEY_UP || ch == KEY_DOWN) {
-      s.batch_arg_sel = step_signal_argument(
+      s.batch_arg_sel = step_batch_argument(
           def, *profile, s.batch_arg_selected[sbi], s.batch_arg_sel,
           ch == KEY_UP ? -1 : 1);
       return;
@@ -623,7 +625,7 @@ void batch_key(State &s, int ch) {
           }
         }
         if (!profile->supported) {
-          s.status_msg = "sum is per-source only; configure it with sig add";
+          s.status_msg = "not supported in batch runs (configure per-source)";
         } else if (!missing.empty()) {
           s.status_msg = std::string(def.fields[argument.field_index].label) +
                          " needs " + missing + " first";
@@ -676,7 +678,7 @@ void batch_key(State &s, int ch) {
     }
   } else if (ch == KEY_UP) {
     if (s.batch_field > 0) {
-      if (signal_builder) {
+      if (dynamic_builder) {
         do {
           --s.batch_field;
         } while (s.batch_field > 0 && s.batch_field < bnfields &&
@@ -694,7 +696,7 @@ void batch_key(State &s, int ch) {
     }
   } else if (ch == KEY_DOWN || ch == '\t') {
     if (s.batch_field <= bnfields) {
-      if (signal_builder) {
+      if (dynamic_builder) {
         do {
           ++s.batch_field;
         } while (s.batch_field < bnfields &&

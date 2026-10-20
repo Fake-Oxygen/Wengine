@@ -33,7 +33,7 @@ struct BatchArgument {
   std::uint64_t requires_mask = 0;
 };
 
-struct SignalProfile {
+struct BatchProfile {
   std::string_view kind;
   std::uint64_t active_mask;
   std::uint64_t required_mask = 0;
@@ -57,7 +57,7 @@ struct BatchDef {
   std::string_view usage;
   std::vector<BatchField> fields;
   std::vector<BatchArgument> arguments;
-  std::vector<SignalProfile> signal_profiles;
+  std::vector<BatchProfile> profiles;
 };
 
 // Registry-derived solver names for the `sim` builder (`SolverRegistry`
@@ -138,15 +138,15 @@ namespace detail {
 
 } // namespace detail
 
-[[nodiscard]] inline std::size_t signal_profile_index(
+[[nodiscard]] inline std::size_t batch_profile_index(
     const BatchDef &def, const std::vector<std::string> &values) noexcept {
-  std::size_t fallback = def.signal_profiles.size();
-  if (def.kind != BatchKind::kSig || values.empty()) {
+  std::size_t fallback = def.profiles.size();
+  if (def.profiles.empty() || values.empty()) {
     return fallback;
   }
   const std::string_view kind = detail::trim(values[0]);
-  for (std::size_t i = 0; i < def.signal_profiles.size(); ++i) {
-    const SignalProfile &profile = def.signal_profiles[i];
+  for (std::size_t i = 0; i < def.profiles.size(); ++i) {
+    const BatchProfile &profile = def.profiles[i];
     if (profile.fallback) {
       fallback = i;
     } else if (profile.kind == kind) {
@@ -156,16 +156,16 @@ namespace detail {
   return fallback;
 }
 
-[[nodiscard]] inline std::uint64_t signal_profile_default_selection(
+[[nodiscard]] inline std::uint64_t batch_profile_default_selection(
     const BatchDef &def, const std::vector<std::string> &values) noexcept {
-  const std::size_t index = signal_profile_index(def, values);
-  return index < def.signal_profiles.size()
-      ? def.signal_profiles[index].default_selected : 0U;
+  const std::size_t index = batch_profile_index(def, values);
+  return index < def.profiles.size()
+      ? def.profiles[index].default_selected : 0U;
 }
 
 [[nodiscard]] inline ArgumentState argument_state(
     const BatchArgument &argument, std::uint64_t selected,
-    const SignalProfile &profile) noexcept {
+    const BatchProfile &profile) noexcept {
   if ((profile.active_mask & argument.bit) == 0U) {
     return ArgumentState::kInactive;
   }
@@ -179,7 +179,7 @@ namespace detail {
 }
 
 [[nodiscard]] inline bool argument_required(
-    const BatchArgument &argument, const SignalProfile &profile) noexcept {
+    const BatchArgument &argument, const BatchProfile &profile) noexcept {
   return (profile.required_mask & argument.bit) != 0U;
 }
 

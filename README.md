@@ -110,11 +110,13 @@ forms; the command forms use declarative argument profiles in a two-pane
 builder (Ctrl-B then Left/Right switches panes, Space selects/deselects
 viable inputs; mode/op-specific fields are filtered and computed values are
 dimmed). `tests/tui_pty_smoke.py` checks Ohm pair selection and S0 mode
-switching. F4 opens run builders; the `sig run` builder uses the same
-two-pane pattern with kind-specific options and prerequisite states (for
-example, duty only for square/pulse and `--rate` only with `--paced`). The
-PTY smoke also exercises signal argument selection; non-TTY refusal (exit 1)
-and `--tui extra` usage (exit 2) are covered there too. Initial theme can
+switching. F4 opens run builders; both builders use the same two-pane
+pattern with solver/kind-specific options and prerequisite states (`sim run`
+hides signal-only UART/selects under projectile and gravity under signal;
+`sig run` shows duty only for square/pulse and `--rate` only with `--paced`).
+The PTY smoke exercises sim solver-profile switching and signal argument
+selection; non-TTY refusal (exit 1) and `--tui extra` usage (exit 2) are
+covered there too. Initial theme can
 also be selected with
 `WENGINE_TUI_THEME=catppuccin-mocha|dracula|nord|gruvbox-dark|tokyo-night|light|terminal`
 (overrides the saved preference; default: `terminal`; `default` is an alias).
@@ -433,7 +435,7 @@ tests/  benchmarks/  examples/
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,entity_index,entity_generation,x,y,vx,vy` v3 with stable IDs, legacy 7-col still parses as unavailable, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions over a reused scratch buffer, `StrideSink` step-aligned decimation, drop counters); the snapshot reference is valid only for the call — retaining sinks copy or enqueue-owned before returning |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion. Two-level `ic` dispatch (`ic_dispatch.hpp` + `ic_registry.hpp`) keeps part-specific chips off the top level |
-| `tui` | `wengine/tui/exec.hpp`, `wengine/tui/async.hpp`, `wengine/tui/forms.hpp`, `wengine/tui/forms/` (shared types + one form definition per command), `wengine/tui/batches.hpp`, `wengine/tui/batches/` (shared types + one builder definition per command), `wengine/tui/views.hpp`, `wengine/tui/run.hpp`, `wengine/cli/cancel.hpp`, `src/tui/` | Ncurses front end (`PhysicsSimApp --tui`, `BUILD_TUI`): terminal handling only — every line runs on the async worker (`AsyncTask` + its own `Shell::execute`) with captured output, so TUI text stays byte-identical to the CLI by construction (full-registry parity matrix + completion == REPL); progress + step-boundary Ctrl-C cancel (sinks flushed/closed); guided forms compose argv strings only (F3 browser for closed-form families, with declarative required/optional argument profiles and mode/op-specific filtering in the two-pane builders; Ctrl-B then Left/Right switches panes and Space toggles viable arguments; F4 builders for `sim run` / `sig run` batches incl. kind-aware, prerequisite-filtered `sig run` arguments and `--forever`); output views render captured text only (PASS/FAIL/Error highlight, `/`+`n`/`N` scrollback search, F5 save-pane-to-file, wrapped resize reflow, visible scroll position, `TERM=dumb`/NO_COLOR fallback with loud refusal on cursor-less terminals); history is the shared REPL file; `ctest -R tui_pty_smoke` covers launch/run/complete/recall/quit + dynamic form and signal-builder profiles on a PTY |
+| `tui` | `wengine/tui/exec.hpp`, `wengine/tui/async.hpp`, `wengine/tui/forms.hpp`, `wengine/tui/forms/` (shared types + one form definition per command), `wengine/tui/batches.hpp`, `wengine/tui/batches/` (shared types + one builder definition per command), `wengine/tui/views.hpp`, `wengine/tui/run.hpp`, `wengine/cli/cancel.hpp`, `src/tui/` | Ncurses front end (`PhysicsSimApp --tui`, `BUILD_TUI`): terminal handling only — every line runs on the async worker (`AsyncTask` + its own `Shell::execute`) with captured output, so TUI text stays byte-identical to the CLI by construction (full-registry parity matrix + completion == REPL); progress + step-boundary Ctrl-C cancel (sinks flushed/closed); guided forms compose argv strings only (F3 browser for closed-form families, with declarative required/optional argument profiles and mode/op-specific filtering in the two-pane builders; Ctrl-B then Left/Right switches panes and Space toggles viable arguments; F4 builders for `sim run` / `sig run` batches incl. solver/kind-aware, prerequisite-filtered arguments and `--forever`); output views render captured text only (PASS/FAIL/Error highlight, `/`+`n`/`N` scrollback search, F5 save-pane-to-file, wrapped resize reflow, visible scroll position, `TERM=dumb`/NO_COLOR fallback with loud refusal on cursor-less terminals); history is the shared REPL file; `ctest -R tui_pty_smoke` covers launch/run/complete/recall/quit + dynamic form and run-builder profiles on a PTY |
 
 Dependency direction (never reversed):
 
@@ -600,7 +602,7 @@ fit, zoom/pan, grid steps), `test_tui_exec` (full-registry executor parity:
 every command golden + usage error + stray positional, completion ==
 REPL `complete_line`, shared-history file proof, palette/help/popup),
 `test_tui_forms` (compose-only parity matrices + argument-profile metadata),
-`test_tui_batches` (compose-only parity matrices),
+`test_tui_batches` (compose-only parity matrices + batch argument profiles),
 `test_tui_async` (worker parity, busy/cancel/progress/emit-csv),
 `test_tui_views` (highlight/search/save/reflow/scroll/no-color), plus the
 headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`:

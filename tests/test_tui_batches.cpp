@@ -215,11 +215,11 @@ void test_signal_argument_profiles() {
   const auto *sig = find_batch(defs, "sig");
   assert(sig != nullptr);
   assert(sig->arguments.size() == 37);
-  assert(sig->signal_profiles.size() == 12);
+  assert(sig->profiles.size() == 12);
 
   const auto profile = [&](std::string_view name)
-      -> const tui::batches::SignalProfile * {
-    for (const auto &candidate : sig->signal_profiles) {
+      -> const tui::batches::BatchProfile * {
+    for (const auto &candidate : sig->profiles) {
       if (candidate.kind == name) {
         return &candidate;
       }
@@ -301,6 +301,128 @@ void test_signal_argument_profiles() {
   set(values, *sig, "--dt", "1ms");
   assert(tui::batches::compose_line(*sig, values, sine->default_selected) ==
          "sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --steps 2 --dt 1ms");
+}
+
+void test_sim_argument_profiles() {
+  const auto defs = tui::batches::batch_defs();
+  const auto *sim = find_batch(defs, "sim");
+  assert(sim != nullptr);
+  assert(sim->arguments.size() == 29);
+  assert(sim->profiles.size() == 3);
+
+  const auto profile = [&](std::string_view name)
+      -> const tui::batches::BatchProfile * {
+    for (const auto &candidate : sim->profiles) {
+      if (candidate.kind == name) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  };
+  const auto argument = [&](std::string_view key)
+      -> const tui::batches::BatchArgument * {
+    for (const auto &candidate : sim->arguments) {
+      if (sim->fields[candidate.field_index].key == key) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  };
+
+  const auto *projectile = profile("projectile");
+  const auto *signal = profile("signal");
+  const auto *other = profile("other");
+  assert(projectile && signal && other);
+  assert(other->fallback);
+
+  const auto *gravity = argument("--gravity");
+  const auto *uart = argument("--emit-uart");
+  const auto *uart_mode = argument("--emit-uart-mode");
+  const auto *csv_select = argument("--emit-csv-select");
+  const auto *csv_stride = argument("--emit-csv-stride");
+  const auto *csv = argument("--emit-csv");
+  const auto *paced = argument("--paced");
+  const auto *rate = argument("--rate");
+  const auto *steps = argument("--steps");
+  const auto *particles = argument("--particles");
+  assert(gravity && uart && uart_mode && csv_select && csv_stride && csv &&
+         paced && rate && steps && particles);
+
+  // --gravity is projectile-only; UART + all -select options are signal-only.
+  assert(tui::batches::argument_state(*gravity, projectile->default_selected,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*gravity, signal->default_selected,
+                                      *signal) ==
+         tui::batches::ArgumentState::kInactive);
+  assert(tui::batches::argument_state(*uart, signal->default_selected,
+                                      *signal) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*uart, projectile->default_selected,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kInactive);
+  assert(tui::batches::argument_state(*uart_mode, signal->default_selected,
+                                      *signal) ==
+         tui::batches::ArgumentState::kBlocked);
+  assert(tui::batches::argument_state(*csv_select, signal->default_selected,
+                                      *signal) ==
+         tui::batches::ArgumentState::kBlocked);
+  assert(tui::batches::argument_state(*csv_select,
+                                      signal->default_selected | csv->bit,
+                                      *signal) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*csv_select,
+                                      projectile->default_selected,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kInactive);
+
+  // Prerequisite chains match the CLI: stride/select need their output,
+  // --rate needs --paced, uart-mode needs --emit-uart.
+  assert(tui::batches::argument_state(*csv_stride,
+                                      projectile->default_selected,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kBlocked);
+  assert(tui::batches::argument_state(*csv_stride,
+                                      projectile->default_selected | csv->bit,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*rate, projectile->default_selected,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kBlocked);
+  assert(tui::batches::argument_state(*rate,
+                                      projectile->default_selected | paced->bit,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*uart_mode,
+                                      signal->default_selected | uart->bit,
+                                      *signal) ==
+         tui::batches::ArgumentState::kAvailable);
+
+  // Defaults cover the session prefills (solver=projectile, steps, particles).
+  assert((projectile->default_selected & steps->bit) != 0U);
+  assert((projectile->default_selected & particles->bit) != 0U);
+  assert((signal->default_selected & steps->bit) != 0U);
+
+  // Profile switching follows the --solver field, like --sig-kind for sig.
+  auto signal_values = blank(*sim);
+  set(signal_values, *sim, "--solver", "signal");
+  assert(sim->profiles[tui::batches::batch_profile_index(*sim, signal_values)]
+             .kind == "signal");
+  auto projectile_values = blank(*sim);
+  set(projectile_values, *sim, "--solver", "projectile");
+  assert(
+      sim->profiles[tui::batches::batch_profile_index(*sim, projectile_values)]
+          .kind == "projectile");
+
+  // Mask-filtered composition drops unselected values (gravity set but not
+  // chosen stays out of the argv line).
+  auto values = blank(*sim);
+  set(values, *sim, "--solver", "projectile");
+  set(values, *sim, "--steps", "2");
+  set(values, *sim, "--gravity", "9.81");
+  assert(tui::batches::compose_line(*sim, values,
+                                    projectile->default_selected) ==
+         "sim run --solver projectile --steps 2");
 }
 
 void test_compose_shapes() {
@@ -633,6 +755,7 @@ int main() {
   test_keys_match_complete_vocab();
   test_registry_driven();
   test_signal_argument_profiles();
+  test_sim_argument_profiles();
   test_compose_shapes();
   test_parity_matrix();
   test_invalid_surfaces_cli_error();

@@ -116,10 +116,10 @@ void init_state(State &s) {
   batch_set("sig", "--steps", "1000");
   batch_set("sig", "--dt", "0.1ms");
   for (std::size_t i = 0; i < s.batch_defs.size(); ++i) {
-    const std::size_t profile = batches::signal_profile_index(s.batch_defs[i], s.batch_vals[i]);
-    if (profile < s.batch_defs[i].signal_profiles.size()) {
+    const std::size_t profile = batches::batch_profile_index(s.batch_defs[i], s.batch_vals[i]);
+    if (profile < s.batch_defs[i].profiles.size()) {
       s.batch_active_profile[i] = static_cast<int>(profile);
-      s.batch_arg_selected[i] = s.batch_defs[i].signal_profiles[profile].default_selected;
+      s.batch_arg_selected[i] = s.batch_defs[i].profiles[profile].default_selected;
     }
   }
   s.batch_res.resize(s.batch_defs.size());

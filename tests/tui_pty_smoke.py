@@ -5,7 +5,7 @@ Runs `PhysicsSimApp --tui` on a real PTY (no display needed), drives it
 like a user, and asserts the no-drift contract end to end:
   - boot renders the TUI title on a cursor-addressable terminal
   - F9 opens theme settings; theme preview and selection work on the PTY
-  - form and signal builders switch panes, filter args, and submit CLI parity
+  - form, sim, and signal builders switch panes, filter args, submit CLI parity
   - typing `ohm 12V 3A` + Enter shows the CLI-identical `R = 4` text
   - Tab single-completes (`o` -> `ohm `) and multi-candidate popups stay loud
   - Up recalls history and re-runs byte-identical output
@@ -184,12 +184,32 @@ def main():
         time.sleep(0.4)
         read_available(fd, 1.0)
 
-        # F4 opens run builders; select sig. The signal pane has the same
-        # two-pane selection flow. Switch sine to square (duty becomes valid),
-        # add offset, and submit through the CLI executor.
+        # F4 opens run builders; sim is the first entry. It uses the same
+        # two-pane pattern: projectile shows gravity but hides the
+        # signal-only UART family; switching the solver to signal flips that.
         os.write(fd, b"\x1bOS")  # F4
         builders = wait_for(fd, b"Run builders --", timeout=6.0)
         assert b"Run builders --" in builders, f"F4 did not open builders: {builders[-1200:]!r}"
+        os.write(fd, b"\r")  # open sim run (first entry)
+        sim_open = wait_for(fd, b"Arguments: projectile", timeout=6.0)
+        assert b"Arguments: projectile" in sim_open, (
+            f"sim argument pane missing: {sim_open[-1600:]!r}"
+        )
+        assert b"gravity" in sim_open, "projectile should expose gravity"
+        assert b"uart" not in sim_open, "projectile should hide signal-only uart"
+        os.write(fd, b"\x15signal")  # solver selector is the focused first field
+        # NOTE: only the kind word is redrawn on a profile switch, so match
+        # the redrawn fragment, not the full header line.
+        sim_signal = wait_for(fd, b"signal (Ctrl+B, Right)", timeout=6.0)
+        assert b"signal (Ctrl+B, Right)" in sim_signal, (
+            f"sim signal profile missing: {sim_signal[-1600:]!r}"
+        )
+        assert b"uart" in sim_signal, "signal solver should expose uart"
+        assert b"gravity" not in sim_signal, "signal solver should hide gravity"
+        print("sim builder panes + solver-profile switching ok")
+        os.write(fd, b"\x1b")  # back to builders list
+        time.sleep(0.3)
+        read_available(fd, 1.0)
         os.write(fd, b"\x1bOB\r")  # select and open sig run
         sig_open = wait_for(fd, b"Arguments: sine", timeout=6.0)
         assert b"Arguments: sine" in sig_open, (
