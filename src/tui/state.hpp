@@ -27,6 +27,7 @@
 #include "wengine/tui/palette.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +37,7 @@ namespace wengine::tui {
 constexpr int kCtrlQ = 'Q' - '@';
 constexpr int kCtrlC = 'C' - '@';
 constexpr int kCtrlU = 'U' - '@';
+constexpr int kCtrlB = 'B' - '@';
 constexpr int kEsc = 27;
 constexpr int kBackspaceAscii = 127;
 constexpr std::size_t kMaxScrollback = 2000;
@@ -86,6 +88,11 @@ struct State {
   int open_form = -1; // index into form_defs while Overlay::kForm is active
   std::size_t form_field = 0; // 0..fields.size() (last row = Submit)
   std::size_t form_col = 0; // cursor within the active field value
+  std::vector<std::uint64_t> form_arg_selected;
+  std::size_t form_arg_sel = 0;
+  int form_active_pane = 0; // 0: command builder, 1: argument choices
+  bool form_pane_prefix = false; // tmux-style Ctrl-B prefix
+  int form_cursor_row = 3;
   std::vector<ExecResult> form_res;
   std::vector<bool> form_has;
   std::vector<std::string> form_argv;

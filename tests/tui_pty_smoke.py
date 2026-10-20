@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""TUI-7 PTY smoke: launch, run, complete, history recall, quit (CI-safe).
+"""TUI-7 PTY smoke: launch, dynamic form builder, run, complete, recall, quit.
 
 Runs `PhysicsSimApp --tui` on a real PTY (no display needed), drives it
 like a user, and asserts the no-drift contract end to end:
   - boot renders the TUI title on a cursor-addressable terminal
+  - the Ohm form has tmux-style panes and only permits valid input pairs
   - typing `ohm 12V 3A` + Enter shows the CLI-identical `R = 4` text
   - Tab single-completes (`o` -> `ohm `) and multi-candidate popups stay loud
   - Up recalls history and re-runs byte-identical output
@@ -114,6 +115,35 @@ def main():
         boot = wait_for(fd, b"WEngine TUI", timeout=8.0)
         assert b"WEngine TUI" in boot, f"no TUI title on boot: {boot[-800:]!r}"
         print("boot ok")
+
+        # F3 opens forms; the first entry is Ohm. Its builder starts with U/I
+        # selected. Switch to the argument pane, deselect I, select R, then
+        # switch back and enter R. The resulting command must use U+R only.
+        os.write(fd, b"\x1bOR")  # F3 in xterm application-keypad mode
+        forms = wait_for(fd, b"Forms --", timeout=6.0)
+        assert b"Forms --" in forms, f"F3 did not open forms: {forms[-1200:]!r}"
+        os.write(fd, b"\r")
+        opened = wait_for(fd, b"Arguments", timeout=6.0)
+        assert b"Arguments" in opened, f"Ohm argument pane missing: {opened[-1600:]!r}"
+        assert b"computed" in opened and b"derived" in opened, (
+            f"invalid/derived arguments were not marked: {opened[-1600:]!r}"
+        )
+        os.write(fd, b"\x02\x1bOC")  # Ctrl-B, Right pane
+        focused = wait_for(fd, b"argument choices pane", timeout=4.0)
+        assert b"argument choices pane" in focused, f"pane switch failed: {focused[-1200:]!r}"
+        os.write(fd, b"\x1bOB ")  # Down to I; deselect
+        time.sleep(0.3)
+        os.write(fd, b"\x1bOB ")  # Down to R; select
+        time.sleep(0.3)
+        os.write(fd, b"\x02\x1bOD4Ohm\r")  # Back to builder, enter R, run
+        form_result = wait_for(fd, b"I = 3.1 A", timeout=8.0)
+        assert b"I = 3.1 A" in form_result, (
+            f"builder did not submit the U+R pair: {form_result[-2000:]!r}"
+        )
+        print("dynamic Ohm form + pane switching ok")
+        os.write(fd, b"\x1b\x1b")  # form -> list -> main view
+        time.sleep(0.4)
+        read_available(fd, 1.0)
 
         os.write(fd, b"ohm 12V 3A\r")
         ran = wait_for(fd, b"R = 4", timeout=8.0)

@@ -22,6 +22,8 @@
 #include "wengine/cli/commands.hpp"
 #include "wengine/cli/ic_registry.hpp"
 
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -41,13 +43,57 @@ struct FormField {
   std::string_view hint;
 };
 
+// A command argument can be tied to an editable field or be a derived
+// output. `bit` identifies it in the selected-input mask; accepted masks
+// below describe the valid combinations without teaching the TUI solver
+// semantics.
+struct ArgumentDef {
+  static constexpr std::size_t kNoField = std::numeric_limits<std::size_t>::max();
+
+  std::string_view name;
+  std::string_view label;
+  std::size_t field_index;
+  std::uint64_t bit;
+  bool user_input;
+};
+
+enum class ArgumentState : std::uint8_t {
+  kSelected,
+  kAvailable,
+  kBlocked,
+  kComputed,
+  kDerived,
+};
+
 struct FormDef {
   FormKind kind{};
   std::string_view command;
   std::string_view description;
   std::string_view usage;
   std::vector<FormField> fields;
+  std::vector<ArgumentDef> arguments;
+  std::vector<std::uint64_t> valid_argument_sets;
 };
+
+[[nodiscard]] inline ArgumentState argument_state(const ArgumentDef &argument, std::uint64_t selected, const std::vector<std::uint64_t> &valid_sets) noexcept {
+  if (!argument.user_input) {
+    return ArgumentState::kDerived;
+  }
+  if ((selected & argument.bit) != 0U) {
+    return ArgumentState::kSelected;
+  }
+  for (const std::uint64_t valid : valid_sets) {
+    if ((selected & ~valid) == 0U && ((selected | argument.bit) & ~valid) == 0U) {
+      return ArgumentState::kAvailable;
+    }
+  }
+  for (const std::uint64_t valid : valid_sets) {
+    if (selected == valid) {
+      return ArgumentState::kComputed;
+    }
+  }
+  return ArgumentState::kBlocked;
+}
 
 // Registry-derived chip names for the `ic` form (`IcRegistry` order).
 [[nodiscard]] inline std::vector<std::string> ic_chip_names() {
@@ -102,6 +148,10 @@ struct FormDef {
   using cli::commands::LedSpec;
   using cli::commands::OhmSpec;
   using cli::commands::S0Spec;
+  constexpr std::uint64_t kOhmVoltage = std::uint64_t{1} << 0U;
+  constexpr std::uint64_t kOhmCurrent = std::uint64_t{1} << 1U;
+  constexpr std::uint64_t kOhmResistance = std::uint64_t{1} << 2U;
+  constexpr std::uint64_t kOhmPower = std::uint64_t{1} << 3U;
   std::vector<FormDef> defs;
   defs.push_back({
       FormKind::kOhm,
@@ -114,6 +164,13 @@ struct FormDef {
           {"--r", "R", "resistance, e.g. 4Ohm"},
           {"--from", "from", "bare-number order ui|ur|ir|iu|ru|ri"},
       },
+      {
+          {"voltage", "Voltage (U)", 0, kOhmVoltage, true},
+          {"current", "Current (I)", 1, kOhmCurrent, true},
+          {"resistance", "Resistance (R)", 2, kOhmResistance, true},
+          {"power", "Power (P)", ArgumentDef::kNoField, kOhmPower, false},
+      },
+      {kOhmVoltage | kOhmCurrent, kOhmVoltage | kOhmResistance, kOhmCurrent | kOhmResistance},
   });
   defs.push_back({
       FormKind::kS0,
@@ -132,6 +189,8 @@ struct FormDef {
           {"--i", "I", "current, e.g. 10A (full)"},
           {"--pf", "pf", "power factor (0,1], e.g. 0.9"},
       },
+      {},
+      {},
   });
   defs.push_back({
       FormKind::kI2c,
@@ -149,6 +208,8 @@ struct FormDef {
           {"--rp", "Rp", "pull-up, e.g. 1.5kOhm (empty=auto)"},
           {"--rs", "Rs", "series, e.g. 100Ohm (empty=auto)"},
       },
+      {},
+      {},
   });
   defs.push_back({
       FormKind::kLdo,
@@ -165,6 +226,8 @@ struct FormDef {
           {"--rth", "Rth", "C/W, e.g. 100 (default 0)"},
           {"--tjmax", "Tjmax", "limit C, e.g. 125 (default none)"},
       },
+      {},
+      {},
   });
   defs.push_back({
       FormKind::kLed,
@@ -178,6 +241,8 @@ struct FormDef {
           {"--rs", "Rs", "explicit resistor, e.g. 100Ohm (empty=E12)"},
           {"--prating", "Prating", "resistor rating, e.g. 0.25W"},
       },
+      {},
+      {},
   });
   defs.push_back({
       FormKind::kIc,
@@ -200,6 +265,8 @@ struct FormDef {
           {"--pd", "PD", "e.g. 0.5W (thermal)"},
           {"--ta", "TA", "ambient C, e.g. 85 (thermal)"},
       },
+      {},
+      {},
   });
   return defs;
 }
@@ -242,10 +309,22 @@ namespace detail {
 // Compose the CLI line for `def` with `values[i]` in each field.
 // Empty-after-trim fields are omitted (missing option); nothing is
 // validated here — the executor (CLI) reports all errors.
-[[nodiscard]] inline std::string compose_line(const FormDef &def,
-                                             const std::vector<std::string> &values) {
+// Compose with an explicit selected-argument mask. Non-argument form
+// fields (for example Ohm's --from ordering hint) remain ordinary optional
+// fields and are not controlled by this mask.
+[[nodiscard]] inline std::string compose_line(const FormDef &def, const std::vector<std::string> &values, std::uint64_t selected_arguments) {
   std::string line(def.command);
   for (std::size_t i = 0; i < def.fields.size() && i < values.size(); ++i) {
+    bool argument_selected = true;
+    for (const ArgumentDef &argument : def.arguments) {
+      if (argument.user_input && argument.field_index == i) {
+        argument_selected = (selected_arguments & argument.bit) != 0U;
+        break;
+      }
+    }
+    if (!argument_selected) {
+      continue;
+    }
     const std::string_view v = detail::trim(values[i]);
     if (v.empty()) {
       continue;
@@ -258,6 +337,10 @@ namespace detail {
     line += detail::quote_token(v);
   }
   return line;
+}
+
+[[nodiscard]] inline std::string compose_line(const FormDef &def, const std::vector<std::string> &values) {
+  return compose_line(def, values, std::numeric_limits<std::uint64_t>::max());
 }
 
 } // namespace wengine::tui::forms

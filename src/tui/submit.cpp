@@ -104,7 +104,7 @@ void submit_form(State &s) {
     return;
   }
   const std::size_t fi = static_cast<std::size_t>(s.open_form);
-  const std::string line = forms::compose_line(s.form_defs[fi], s.form_vals[fi]);
+  const std::string line = forms::compose_line(s.form_defs[fi], s.form_vals[fi], s.form_arg_selected[fi]);
   s.form_argv[fi] = line;
   push_text(s.scrollback, std::string(kPrompt) + line, kMaxScrollback);
   if (!line.empty()) {

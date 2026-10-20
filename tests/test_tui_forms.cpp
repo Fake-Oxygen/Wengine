@@ -13,6 +13,7 @@
 #include "wengine/cli/shell.hpp"
 
 #include <cassert>
+#include <cstdint>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -232,6 +233,65 @@ void test_compose_shapes() {
     set(v, *ic, "op", "spec");
     assert(tui::forms::compose_line(*ic, v) == "ic ap63205 spec");
   }
+}
+
+void test_argument_definitions() {
+  const auto defs = tui::forms::form_defs();
+  const auto *ohm = find_form(defs, "ohm");
+  assert(ohm != nullptr);
+  assert(ohm->arguments.size() == 4);
+  assert(ohm->valid_argument_sets.size() == 3);
+
+  const auto bit = [&](std::string_view name) {
+    for (const auto &argument : ohm->arguments) {
+      if (argument.name == name) {
+        return argument.bit;
+      }
+    }
+    assert(false);
+    return std::uint64_t{0};
+  };
+  const std::uint64_t voltage = bit("voltage");
+  const std::uint64_t current = bit("current");
+  const std::uint64_t resistance = bit("resistance");
+  const std::uint64_t power = bit("power");
+  const std::uint64_t selected = current | resistance;
+
+  for (const auto &argument : ohm->arguments) {
+    if (argument.name == "voltage") {
+      assert(tui::forms::argument_state(argument, selected,
+                                        ohm->valid_argument_sets) ==
+             tui::forms::ArgumentState::kComputed);
+    } else if (argument.name == "current" || argument.name == "resistance") {
+      assert(tui::forms::argument_state(argument, selected,
+                                        ohm->valid_argument_sets) ==
+             tui::forms::ArgumentState::kSelected);
+    } else if (argument.name == "power") {
+      assert(tui::forms::argument_state(argument, selected,
+                                        ohm->valid_argument_sets) ==
+             tui::forms::ArgumentState::kDerived);
+    }
+  }
+  assert(ohm->valid_argument_sets[0] == (voltage | current));
+  assert(ohm->valid_argument_sets[1] == (voltage | resistance));
+  assert(ohm->valid_argument_sets[2] == (current | resistance));
+  assert(tui::forms::argument_state(ohm->arguments[1], voltage,
+                                    ohm->valid_argument_sets) ==
+         tui::forms::ArgumentState::kAvailable);
+  assert(tui::forms::argument_state(ohm->arguments[2], voltage,
+                                    ohm->valid_argument_sets) ==
+         tui::forms::ArgumentState::kAvailable);
+  assert(tui::forms::argument_state(ohm->arguments[2], voltage | current,
+                                    ohm->valid_argument_sets) ==
+         tui::forms::ArgumentState::kComputed);
+
+  auto vals = blank(*ohm);
+  set(vals, *ohm, "--u", "12V");
+  set(vals, *ohm, "--i", "3A");
+  set(vals, *ohm, "--r", "4Ohm");
+  assert(tui::forms::compose_line(*ohm, vals, voltage | current) ==
+         "ohm --u 12V --i 3A");
+  assert(power != 0U);
 }
 
 void test_parity_matrix() {
@@ -643,6 +703,7 @@ int main() {
   test_keys_match_complete_vocab();
   test_ic_registry_driven();
   test_compose_shapes();
+  test_argument_definitions();
   test_parity_matrix();
   test_invalid_surfaces_cli_error();
   std::cout << "test_tui_forms: OK\n";

@@ -38,12 +38,183 @@ void draw_forms_pane(State &s) {
   }
 }
 
+namespace {
+
+bool form_field_visible(const forms::FormDef &def, std::size_t field, std::uint64_t selected) {
+  for (const forms::ArgumentDef &argument : def.arguments) {
+    if (argument.user_input && argument.field_index == field) {
+      return (selected & argument.bit) != 0U;
+    }
+  }
+  return true;
+}
+
+void draw_dynamic_form(State &s, std::size_t sfi) {
+  const int out_rows = s.out_rows;
+  const int cols = s.cols;
+  const forms::FormDef &def = s.form_defs[sfi];
+  const std::vector<std::string> &vals = s.form_vals[sfi];
+  const std::uint64_t selected = s.form_arg_selected[sfi];
+  const int left_width = cols / 2;
+  const int right_x = left_width + 1;
+  const int right_width = cols - right_x;
+  const int value_width = left_width > 1 ? left_width - 1 : 1;
+
+  const std::string left_head = s.form_active_pane == 0 ? "Command builder [active]" : "Command builder (Ctrl+B, Left)";
+  const std::string right_head = s.form_active_pane == 1 ? "Arguments [active]" : "Arguments (Ctrl+B, Right)";
+  (void)mvaddnstr(1, 0, left_head.c_str(), value_width);
+  (void)mvaddnstr(1, right_x, right_head.c_str(), right_width - 1);
+  (void)mvaddnstr(2, 0, ("argv: " + forms::compose_line(def, vals, selected)).c_str(), value_width);
+  (void)mvaddnstr(2, right_x, "Space: select / deselect", right_width - 1);
+
+  int row = 3;
+  s.form_cursor_row = s.rows - 1;
+  for (std::size_t i = 0; i < def.fields.size() && row < 1 + out_rows; ++i) {
+    if (!form_field_visible(def, i, selected)) {
+      continue;
+    }
+    const forms::FormField &field = def.fields[i];
+    const std::string key = field.key.empty() ? "(pos)" : std::string(field.key);
+    const std::string value = i < vals.size() ? vals[i] : std::string{};
+    const std::string text = "  " + std::string(field.label) + " " + key + ": " + value + "  # " + std::string(field.hint);
+    if (s.form_active_pane == 0 && i == s.form_field) {
+      (void)attron(A_REVERSE);
+    }
+    (void)mvaddnstr(row, 0, text.c_str(), value_width);
+    if (s.form_active_pane == 0 && i == s.form_field) {
+      (void)attroff(A_REVERSE);
+      s.form_cursor_row = row;
+    }
+    (void)move(row, left_width);
+    (void)addch('|');
+    (void)wclrtoeol(stdscr);
+    ++row;
+  }
+  if (row < 1 + out_rows) {
+    if (s.form_active_pane == 0 && s.form_field == def.fields.size()) {
+      (void)attron(A_REVERSE);
+    }
+    (void)mvaddnstr(row, 0, "  [ Submit ]", value_width);
+    if (s.form_active_pane == 0 && s.form_field == def.fields.size()) {
+      (void)attroff(A_REVERSE);
+      s.form_cursor_row = row;
+    }
+    (void)move(row, left_width);
+    (void)addch('|');
+    (void)wclrtoeol(stdscr);
+    ++row;
+  }
+
+  const bool running_here = s.async.busy() && s.async_origin == AsyncOrigin::kForm && s.async_index == sfi;
+  std::vector<std::string> result_lines;
+  if (running_here) {
+    result_lines.push_back("running `" + s.async.line() + "`");
+    result_lines.push_back("input stays live -- Ctrl-C cancels");
+  } else if (!s.form_has[sfi]) {
+    result_lines.push_back("Enter runs the composed command.");
+    result_lines.push_back("The CLI owns parsing and validation.");
+  } else {
+    std::size_t dropped = 0;
+    split_capped(result_lines, s.form_res[sfi].text, kMaxOutputLines, dropped);
+    if (dropped > 0) {
+      result_lines.push_back("[... " + std::to_string(dropped) + " lines truncated]");
+    }
+    if (result_lines.empty()) {
+      result_lines.push_back("(no output)");
+    }
+  }
+  if (row < 1 + out_rows) {
+    const std::string divider = running_here ? "--- running (Ctrl-C cancels) ---"
+        : (s.form_has[sfi] ? "--- result rc=" + std::to_string(s.form_res[sfi].rc) + " ---" : "--- result (Enter to run) ---");
+    (void)mvaddnstr(row, 0, divider.c_str(), value_width);
+    (void)move(row, left_width);
+    (void)addch('|');
+    ++row;
+  }
+  const std::size_t result_width = value_width > 1 ? static_cast<std::size_t>(value_width - 1) : std::size_t{1};
+  const views::Wrapped wrapped = views::wrap_lines(result_lines, result_width);
+  std::size_t first = s.form_res_first[sfi];
+  if (wrapped.rows.empty()) {
+    first = 0;
+  } else if (first >= wrapped.rows.size()) {
+    first = wrapped.rows.size() - 1;
+  }
+  s.form_res_first[sfi] = first;
+  for (std::size_t i = first; i < wrapped.rows.size() && row < 1 + out_rows; ++i) {
+    const std::size_t logical = wrapped.logical_for_row[i];
+    const views::LineKind kind = logical < result_lines.size() ? views::classify_line(result_lines[logical]) : views::LineKind::kNormal;
+    const int pair = views::color_pair_for(kind);
+    if (s.use_color && pair != 0) {
+      (void)attron(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail || kind == views::LineKind::kError)) {
+      (void)attron(A_BOLD);
+    }
+    (void)mvaddnstr(row, 0, wrapped.rows[i].c_str(), value_width);
+    if (s.use_color && pair != 0) {
+      (void)attroff(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail || kind == views::LineKind::kError)) {
+      (void)attroff(A_BOLD);
+    }
+    (void)move(row, left_width);
+    (void)addch('|');
+    ++row;
+  }
+
+  int arg_row = 3;
+  for (std::size_t i = 0; i < def.arguments.size() && arg_row < 1 + out_rows; ++i) {
+    const forms::ArgumentDef &argument = def.arguments[i];
+    const forms::ArgumentState state = forms::argument_state(argument, selected, def.valid_argument_sets);
+    std::string text;
+    switch (state) {
+    case forms::ArgumentState::kSelected:
+      text = "[x] " + std::string(argument.label) + "  selected";
+      break;
+    case forms::ArgumentState::kAvailable:
+      text = "[ ] " + std::string(argument.label) + "  valid";
+      break;
+    case forms::ArgumentState::kComputed:
+      text = "[-] " + std::string(argument.label) + "  computed";
+      break;
+    case forms::ArgumentState::kBlocked:
+      text = "[-] " + std::string(argument.label) + "  invalid";
+      break;
+    case forms::ArgumentState::kDerived:
+      text = "    " + std::string(argument.label) + "  derived";
+      break;
+    }
+    if (s.form_active_pane == 1 && i == s.form_arg_sel) {
+      (void)attron(A_REVERSE);
+    } else if (state == forms::ArgumentState::kBlocked || state == forms::ArgumentState::kComputed || state == forms::ArgumentState::kDerived) {
+      (void)attron(A_DIM);
+    }
+    (void)mvaddnstr(arg_row, right_x, text.c_str(), right_width - 1);
+    if (s.form_active_pane == 1 && i == s.form_arg_sel) {
+      (void)attroff(A_REVERSE);
+    } else if (state == forms::ArgumentState::kBlocked || state == forms::ArgumentState::kComputed || state == forms::ArgumentState::kDerived) {
+      (void)attroff(A_DIM);
+    }
+    (void)move(arg_row, left_width);
+    (void)addch('|');
+    ++arg_row;
+  }
+  for (int y = 1; y < 1 + out_rows; ++y) {
+    (void)move(y, left_width);
+    (void)addch('|');
+  }
+}
+
+} // namespace
+
 void draw_form_pane(State &s) {
   const int cols = s.cols;
   const int out_rows = s.out_rows;
   const std::size_t fi = (s.open_form >= 0) ? static_cast<std::size_t>(s.open_form) : 0;
   const std::size_t sfi = fi < s.form_defs.size() ? fi : 0;
   const forms::FormDef &def = s.form_defs[sfi];
+  if (!def.arguments.empty()) {
+    draw_dynamic_form(s, sfi);
+    return;
+  }
   const std::vector<std::string> &vals = s.form_vals[sfi];
   const std::string head = std::string(def.command) + " form  (Up/Down/Tab: field, Enter: run, PgUp/PgDn: result, Esc: back)";
   (void)mvaddnstr(1, 0, head.c_str(), cols - 1);
@@ -176,7 +347,16 @@ void forms_key(State &s, int ch) {
     if (!s.form_defs.empty() && s.forms_sel < s.form_defs.size()) {
       s.open_form = static_cast<int>(s.forms_sel);
       s.form_field = 0;
-      s.form_col = s.form_vals[s.forms_sel].empty() ? 0 : s.form_vals[s.forms_sel][0].size();
+      s.form_active_pane = 0;
+      s.form_arg_sel = 0;
+      s.form_pane_prefix = false;
+      const forms::FormDef &def = s.form_defs[s.forms_sel];
+      if (!def.arguments.empty()) {
+        while (s.form_field < def.fields.size() && !form_field_visible(def, s.form_field, s.form_arg_selected[s.forms_sel])) {
+          ++s.form_field;
+        }
+      }
+      s.form_col = s.form_field < s.form_vals[s.forms_sel].size() ? s.form_vals[s.forms_sel][s.form_field].size() : 0;
       s.overlay = Overlay::kForm;
       s.status_msg = std::string(s.form_defs[s.forms_sel].command) + " form -- Enter runs, Esc lists";
     }
@@ -189,6 +369,81 @@ void form_key(State &s, int ch) {
   const std::size_t sfi = (s.open_form >= 0) ? static_cast<std::size_t>(s.open_form) : 0;
   const std::size_t nfields = sfi < s.form_defs.size() ? s.form_defs[sfi].fields.size() : 0;
   const std::size_t page = s.out_rows > 1 ? static_cast<std::size_t>(s.out_rows - 1) : std::size_t{1};
+  const bool dynamic = sfi < s.form_defs.size() && !s.form_defs[sfi].arguments.empty();
+
+  if (s.form_pane_prefix) {
+    if (ch == KEY_LEFT) {
+      s.form_active_pane = 0;
+      s.form_pane_prefix = false;
+      s.status_msg = "command builder pane";
+    } else if (ch == KEY_RIGHT) {
+      s.form_active_pane = 1;
+      s.form_pane_prefix = false;
+      s.status_msg = "argument choices pane (Space selects)";
+    } else if (ch == kEsc) {
+      s.form_pane_prefix = false;
+      s.status_msg = "pane switch cancelled";
+    }
+    return;
+  }
+  if (dynamic && ch == kCtrlB) {
+    s.form_pane_prefix = true;
+    s.status_msg = "Ctrl+B then Left/Right to switch panes";
+    return;
+  }
+
+  if (dynamic && s.form_active_pane == 1) {
+    const forms::FormDef &def = s.form_defs[sfi];
+    if (ch == KEY_UP) {
+      if (s.form_arg_sel > 0) {
+        --s.form_arg_sel;
+      }
+      return;
+    }
+    if (ch == KEY_DOWN) {
+      if (s.form_arg_sel + 1 < def.arguments.size()) {
+        ++s.form_arg_sel;
+      }
+      return;
+    }
+    if (ch == ' ' && s.form_arg_sel < def.arguments.size()) {
+      const forms::ArgumentDef &argument = def.arguments[s.form_arg_sel];
+      const forms::ArgumentState state = forms::argument_state(argument, s.form_arg_selected[sfi], def.valid_argument_sets);
+      if (state == forms::ArgumentState::kSelected) {
+        s.form_arg_selected[sfi] &= ~argument.bit;
+        if (s.form_field < nfields && !form_field_visible(def, s.form_field, s.form_arg_selected[sfi])) {
+          s.form_field = 0;
+          while (s.form_field < nfields && !form_field_visible(def, s.form_field, s.form_arg_selected[sfi])) {
+            ++s.form_field;
+          }
+          if (s.form_field == nfields) {
+            s.form_field = nfields;
+          }
+        }
+        s.status_msg = std::string(argument.label) + " deselected";
+      } else if (state == forms::ArgumentState::kAvailable) {
+        s.form_arg_selected[sfi] |= argument.bit;
+        s.form_field = argument.field_index;
+        s.form_col = s.form_vals[sfi][s.form_field].size();
+        s.status_msg = std::string(argument.label) + " selected";
+      } else {
+        if (state == forms::ArgumentState::kComputed) {
+          s.status_msg = std::string(argument.label) + " is computed from the selected inputs";
+        } else if (state == forms::ArgumentState::kDerived) {
+          s.status_msg = std::string(argument.label) + " is a derived output";
+        } else {
+          s.status_msg = std::string(argument.label) + " is not valid with this selection";
+        }
+      }
+      return;
+    }
+    if (ch != kEsc && ch != KEY_F(1) && ch != KEY_F(2) && ch != KEY_F(3) &&
+        ch != KEY_F(4) && ch != KEY_PPAGE && ch != KEY_NPAGE &&
+        ch != '\n' && ch != '\r' && ch != KEY_ENTER) {
+      return;
+    }
+  }
+
   if (ch == kEsc) {
     s.overlay = Overlay::kForms;
     s.status_msg = "forms -- " + std::to_string(s.form_defs.size()) + " calculators";
@@ -224,7 +479,13 @@ void form_key(State &s, int ch) {
     }
   } else if (ch == KEY_UP) {
     if (s.form_field > 0) {
-      --s.form_field;
+      if (dynamic) {
+        do {
+          --s.form_field;
+        } while (s.form_field > 0 && s.form_field < nfields && !form_field_visible(s.form_defs[sfi], s.form_field, s.form_arg_selected[sfi]));
+      } else {
+        --s.form_field;
+      }
       if (s.form_field < nfields && sfi < s.form_vals.size() &&
           s.form_field < s.form_vals[sfi].size()) {
         s.form_col = s.form_vals[sfi][s.form_field].size();
@@ -234,9 +495,15 @@ void form_key(State &s, int ch) {
     }
   } else if (ch == KEY_DOWN || ch == '\t') {
     if (s.form_field <= nfields) {
-      ++s.form_field;
-      if (s.form_field > nfields) {
-        s.form_field = nfields;
+      if (dynamic) {
+        do {
+          ++s.form_field;
+        } while (s.form_field < nfields && !form_field_visible(s.form_defs[sfi], s.form_field, s.form_arg_selected[sfi]));
+      } else {
+        ++s.form_field;
+        if (s.form_field > nfields) {
+          s.form_field = nfields;
+        }
       }
       if (s.form_field < nfields && sfi < s.form_vals.size() && s.form_field < s.form_vals[sfi].size()) {
         s.form_col = s.form_vals[sfi][s.form_field].size();

@@ -34,8 +34,10 @@ void init_state(State &s) {
   // executor so validation/output stay CLI-identical.
   s.form_defs = forms::form_defs();
   s.form_vals.reserve(s.form_defs.size());
+  s.form_arg_selected.reserve(s.form_defs.size());
   for (const auto &d : s.form_defs) {
     s.form_vals.emplace_back(d.fields.size());
+    s.form_arg_selected.push_back(d.valid_argument_sets.empty() ? 0U : d.valid_argument_sets.front());
   }
   auto form_set = [&](std::string_view cmd, std::string_view key_or_label, std::string_view value) {
     for (std::size_t fi = 0; fi < s.form_defs.size(); ++fi) {

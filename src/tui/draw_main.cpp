@@ -210,9 +210,12 @@ void draw_frame(State &s) {
       if (s.form_col < foff) {
         foff = s.form_col;
       }
-      const int frow = 3 + static_cast<int>(s.form_field);
+      const bool dynamic = !cdef.arguments.empty();
+      const int frow = dynamic ? s.form_cursor_row : 3 + static_cast<int>(s.form_field);
       const int fcol = static_cast<int>(prefix.size() + (s.form_col - foff));
-      if (frow >= 1 && frow < rows - 2) {
+      if (dynamic && s.form_active_pane == 1) {
+        (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (s.cursor - offset)));
+      } else if (frow >= 1 && frow < rows - 2) {
         (void)wmove(stdscr, frow, fcol < cols - 1 ? fcol : cols - 1);
       } else {
         (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (s.cursor - offset)));
