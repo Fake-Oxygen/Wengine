@@ -41,12 +41,321 @@ void draw_batches_pane(State &s) {
   }
 }
 
+namespace {
+
+const batches::SignalProfile *sync_signal_profile(State &s, std::size_t batch) {
+  const batches::BatchDef &def = s.batch_defs[batch];
+  const std::size_t index = batches::signal_profile_index(def, s.batch_vals[batch]);
+  if (index >= def.signal_profiles.size()) {
+    return nullptr;
+  }
+  if (s.batch_active_profile[batch] != static_cast<int>(index)) {
+    s.batch_active_profile[batch] = static_cast<int>(index);
+    s.batch_arg_selected[batch] = def.signal_profiles[index].default_selected;
+    s.batch_arg_sel = 0;
+    while (s.batch_arg_sel < def.arguments.size() && batches::argument_state(def.arguments[s.batch_arg_sel], s.batch_arg_selected[batch],
+                                   def.signal_profiles[index]) == batches::ArgumentState::kInactive) {
+      ++s.batch_arg_sel;
+    }
+  }
+  return &def.signal_profiles[index];
+}
+
+bool batch_field_visible(const batches::BatchDef &def, std::size_t field, std::uint64_t selected) {
+  return batches::field_visible(def, field, selected);
+}
+
+std::vector<std::size_t> signal_argument_rows(const batches::BatchDef &def, const batches::SignalProfile &profile, std::uint64_t selected) {
+  std::vector<std::size_t> rows;
+  for (std::size_t i = 0; i < def.arguments.size(); ++i) {
+    if (batches::argument_state(def.arguments[i], selected, profile) != batches::ArgumentState::kInactive) {
+      rows.push_back(i);
+    }
+  }
+  return rows;
+}
+
+std::size_t step_signal_argument(const batches::BatchDef &def,
+                                 const batches::SignalProfile &profile,
+                                 std::uint64_t selected, std::size_t current,
+                                 int direction) {
+  const auto rows = signal_argument_rows(def, profile, selected);
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    if (rows[i] != current) {
+      continue;
+    }
+    if (direction < 0) {
+      return i > 0 ? rows[i - 1] : current;
+    }
+    return i + 1 < rows.size() ? rows[i + 1] : current;
+  }
+  return rows.empty() ? current : rows.front();
+}
+
+std::size_t first_visible_batch_field(const batches::BatchDef &def, std::uint64_t selected) {
+  for (std::size_t i = 0; i < def.fields.size(); ++i) {
+    if (batch_field_visible(def, i, selected)) {
+      return i;
+    }
+  }
+  return def.fields.size();
+}
+
+void draw_signal_batch(State &s, std::size_t sbi) {
+  const batches::BatchDef &def = s.batch_defs[sbi];
+  const batches::SignalProfile *profile = sync_signal_profile(s, sbi);
+  if (profile == nullptr) {
+    return;
+  }
+  const std::vector<std::string> &values = s.batch_vals[sbi];
+  const std::uint64_t selected = s.batch_arg_selected[sbi];
+  const int cols = s.cols;
+  const int out_rows = s.out_rows;
+  const int left_width = cols / 2;
+  const int right_x = left_width + 1;
+  const int right_width = cols - right_x;
+  const int left_text_width = left_width > 1 ? left_width - 1 : 1;
+
+  const std::string left_header = s.batch_active_pane == 0 ? "sig run builder [active]" : "sig run builder (Ctrl+B, Left)";
+  const std::string right_header = s.batch_active_pane == 1 ? "Arguments [active]: " + std::string(profile->kind)
+      : "Arguments: " + std::string(profile->kind) + " (Ctrl+B, Right)";
+  (void)mvaddnstr(1, 0, left_header.c_str(), left_text_width);
+  (void)mvaddnstr(1, right_x, right_header.c_str(), right_width - 1);
+  const std::string argv = "argv: " + batches::compose_line(def, values, selected);
+  (void)mvaddnstr(2, 0, argv.c_str(), left_text_width);
+  const std::string arg_hint = profile->supported ? "Space toggles valid arguments" : "sum is per-source only; use sig add";
+  (void)mvaddnstr(2, right_x, arg_hint.c_str(), right_width - 1);
+
+  std::vector<std::size_t> visible_fields;
+  for (std::size_t i = 0; i < def.fields.size(); ++i) {
+    if (batch_field_visible(def, i, selected)) {
+      visible_fields.push_back(i);
+    }
+  }
+  const std::size_t nfields = def.fields.size();
+  const std::size_t total_rows = visible_fields.size() + 1;
+  std::size_t focused_row = visible_fields.size();
+  for (std::size_t i = 0; i < visible_fields.size(); ++i) {
+    if (visible_fields[i] == s.batch_field) {
+      focused_row = i;
+      break;
+    }
+  }
+  std::size_t cap = out_rows > 5 ? static_cast<std::size_t>(out_rows - 4) : 1U;
+  cap = std::min(cap, total_rows);
+  std::size_t &field_top = s.batch_top[sbi];
+  if (field_top >= total_rows) {
+    field_top = total_rows > 0 ? total_rows - 1 : 0;
+  }
+  if (focused_row < field_top) {
+    field_top = focused_row;
+  } else if (focused_row >= field_top + cap) {
+    field_top = focused_row - cap + 1;
+  }
+  if (field_top + cap > total_rows) {
+    field_top = total_rows > cap ? total_rows - cap : 0;
+  }
+
+  int row = 3;
+  s.batch_cursor_row = s.rows - 1;
+  for (std::size_t visible = field_top; visible < total_rows && row < 1 + out_rows; ++visible) {
+    if (visible == visible_fields.size()) {
+      if (s.batch_active_pane == 0 && s.batch_field == nfields) {
+        (void)attron(A_REVERSE);
+      }
+      (void)mvaddnstr(row, 0, "  [ Submit ]", left_text_width);
+      if (s.batch_active_pane == 0 && s.batch_field == nfields) {
+        (void)attroff(A_REVERSE);
+        s.batch_cursor_row = row;
+      }
+    } else {
+      const std::size_t field_index = visible_fields[visible];
+      const batches::BatchField &field = def.fields[field_index];
+      const std::string val = field_index < values.size()
+          ? values[field_index] : std::string{};
+      const std::string flag_text = field.flag ? "[flag] " : "";
+      const std::string text = "  " + std::string(field.label) + " " +
+          std::string(field.key) + ": " + flag_text + val + "  # " +
+          std::string(field.hint);
+      if (s.batch_active_pane == 0 && field_index == s.batch_field) {
+        (void)attron(A_REVERSE);
+      }
+      (void)mvaddnstr(row, 0, text.c_str(), left_text_width);
+      if (s.batch_active_pane == 0 && field_index == s.batch_field) {
+        (void)attroff(A_REVERSE);
+        s.batch_cursor_row = row;
+      }
+    }
+    (void)move(row, left_width);
+    (void)addch('|');
+    (void)wclrtoeol(stdscr);
+    ++row;
+  }
+
+  const bool running_here = s.async.busy() && s.async_origin == AsyncOrigin::kBatch &&
+                            s.async_index == sbi;
+  std::vector<std::string> result_lines;
+  if (running_here) {
+    std::string progress = "starting...";
+    if (cli::progress_active()) {
+      const std::uint64_t done = cli::progress_done();
+      const std::uint64_t total = cli::progress_total();
+      progress = total == UINT64_MAX
+          ? "steps " + std::to_string(done) + " (forever)"
+          : "steps " + std::to_string(done) + "/" + std::to_string(total);
+    }
+    result_lines.push_back("running `" + s.async.line() + "` " + progress);
+    result_lines.push_back("input stays live -- Ctrl-C cancels");
+  } else if (!s.batch_has[sbi]) {
+    result_lines.push_back("Enter runs the composed command.");
+    result_lines.push_back("The CLI owns parsing and validation.");
+  } else {
+    std::size_t dropped = 0;
+    split_capped(result_lines, s.batch_res[sbi].text, kMaxOutputLines, dropped);
+    if (dropped > 0) {
+      result_lines.push_back("[... " + std::to_string(dropped) + " lines truncated]");
+    }
+    if (result_lines.empty()) {
+      result_lines.push_back("(no output)");
+    }
+  }
+  if (row < 1 + out_rows) {
+    const std::string divider = running_here ? "--- running (Ctrl-C cancels) ---"
+        : (s.batch_has[sbi] ? "--- result rc=" + std::to_string(s.batch_res[sbi].rc) + " ---"
+                            : "--- result (Enter to run) ---");
+    (void)mvaddnstr(row, 0, divider.c_str(), left_text_width);
+    (void)move(row, left_width);
+    (void)addch('|');
+    ++row;
+  }
+  const std::size_t result_width = left_text_width > 1
+      ? static_cast<std::size_t>(left_text_width - 1) : std::size_t{1};
+  const views::Wrapped wrapped = views::wrap_lines(result_lines, result_width);
+  std::size_t result_top = s.batch_res_first[sbi];
+  if (wrapped.rows.empty()) {
+    result_top = 0;
+  } else if (result_top >= wrapped.rows.size()) {
+    result_top = wrapped.rows.size() - 1;
+  }
+  s.batch_res_first[sbi] = result_top;
+  for (std::size_t i = result_top;
+       i < wrapped.rows.size() && row < 1 + out_rows; ++i) {
+    const std::size_t logical = wrapped.logical_for_row[i];
+    const views::LineKind kind = logical < result_lines.size()
+        ? views::classify_line(result_lines[logical]) : views::LineKind::kNormal;
+    const int pair = views::color_pair_for(kind);
+    if (s.use_color && pair != 0) {
+      (void)attron(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail ||
+                                kind == views::LineKind::kError)) {
+      (void)attron(A_BOLD);
+    }
+    (void)mvaddnstr(row, 0, wrapped.rows[i].c_str(), left_text_width);
+    if (s.use_color && pair != 0) {
+      (void)attroff(COLOR_PAIR(pair));
+    } else if (!s.use_color && (kind == views::LineKind::kFail ||
+                                kind == views::LineKind::kError)) {
+      (void)attroff(A_BOLD);
+    }
+    (void)move(row, left_width);
+    (void)addch('|');
+    ++row;
+  }
+
+  const std::vector<std::size_t> arguments =
+      signal_argument_rows(def, *profile, selected);
+  const std::size_t arg_cap = out_rows > 3
+      ? static_cast<std::size_t>(out_rows - 3) : 1U;
+  std::size_t &arg_top = s.batch_arg_top;
+  std::size_t focused_arg = 0;
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    if (arguments[i] == s.batch_arg_sel) {
+      focused_arg = i;
+      break;
+    }
+  }
+  if (focused_arg < arg_top) {
+    arg_top = focused_arg;
+  } else if (focused_arg >= arg_top + arg_cap) {
+    arg_top = focused_arg - arg_cap + 1;
+  }
+  if (arg_top + arg_cap > arguments.size()) {
+    arg_top = arguments.size() > arg_cap ? arguments.size() - arg_cap : 0;
+  }
+  std::size_t shown = 0;
+  int arg_row = 3;
+  for (std::size_t visible = arg_top;
+       visible < arguments.size() && shown < arg_cap && arg_row < 1 + out_rows;
+       ++visible, ++shown, ++arg_row) {
+    const std::size_t index = arguments[visible];
+    const batches::BatchArgument &argument = def.arguments[index];
+    const batches::BatchField &field = def.fields[argument.field_index];
+    const batches::ArgumentState state =
+        batches::argument_state(argument, selected, *profile);
+    std::string text;
+    switch (state) {
+    case batches::ArgumentState::kSelected:
+      text = "[x] " + std::string(field.label) +
+             (batches::argument_required(argument, *profile)
+                  ? "  selected (required)" : "  selected");
+      break;
+    case batches::ArgumentState::kAvailable:
+      text = "[ ] " + std::string(field.label) +
+             (batches::argument_required(argument, *profile)
+                  ? "  required" : "  optional");
+      break;
+    case batches::ArgumentState::kBlocked: {
+      std::string required;
+      for (const batches::BatchArgument &candidate : def.arguments) {
+        if ((argument.requires_mask & candidate.bit) != 0U) {
+          required = std::string(def.fields[candidate.field_index].label);
+          break;
+        }
+      }
+      text = "[-] " + std::string(field.label) + "  needs " + required;
+      break;
+    }
+    case batches::ArgumentState::kInactive:
+      continue;
+    }
+    if (s.batch_active_pane == 1 && index == s.batch_arg_sel) {
+      (void)attron(A_REVERSE);
+    } else if (state == batches::ArgumentState::kBlocked) {
+      (void)attron(A_DIM);
+    }
+    (void)mvaddnstr(arg_row, right_x, text.c_str(), right_width - 1);
+    if (s.batch_active_pane == 1 && index == s.batch_arg_sel) {
+      (void)attroff(A_REVERSE);
+    } else if (state == batches::ArgumentState::kBlocked) {
+      (void)attroff(A_DIM);
+    }
+    (void)move(arg_row, left_width);
+    (void)addch('|');
+  }
+  if (profile->supported && arguments.empty() && arg_row < 1 + out_rows) {
+    (void)mvaddnstr(arg_row, right_x, "No active signal arguments.", right_width - 1);
+    (void)move(arg_row, left_width);
+    (void)addch('|');
+  }
+  for (int y = 1; y < 1 + out_rows; ++y) {
+    (void)move(y, left_width);
+    (void)addch('|');
+  }
+  (void)def;
+}
+
+} // namespace
+
 void draw_batch_pane(State &s) {
   const int cols = s.cols;
   const int out_rows = s.out_rows;
   const std::size_t bi = (s.open_batch >= 0) ? static_cast<std::size_t>(s.open_batch) : 0;
   const std::size_t sbi = bi < s.batch_defs.size() ? bi : 0;
   const batches::BatchDef &def = s.batch_defs[sbi];
+  if (!def.signal_profiles.empty() && !def.arguments.empty()) {
+    draw_signal_batch(s, sbi);
+    return;
+  }
   const std::vector<std::string> &vals = s.batch_vals[sbi];
   const std::string head = std::string(def.command) + " " + std::string(def.mode) +
       " builder  (Up/Down/Tab: field, Enter: run, PgUp/PgDn: result, Esc: back)";
@@ -218,6 +527,19 @@ void batches_key(State &s, int ch) {
     if (!s.batch_defs.empty() && s.batches_sel < s.batch_defs.size()) {
       s.open_batch = static_cast<int>(s.batches_sel);
       s.batch_field = 0;
+      s.batch_active_pane = 0;
+      s.batch_pane_prefix = false;
+      if (s.batch_defs[s.batches_sel].kind == batches::BatchKind::kSig) {
+        const batches::SignalProfile *profile =
+            sync_signal_profile(s, s.batches_sel);
+        if (profile != nullptr) {
+          const auto rows = signal_argument_rows(
+              s.batch_defs[s.batches_sel], *profile,
+              s.batch_arg_selected[s.batches_sel]);
+          s.batch_arg_sel = rows.empty() ? 0U : rows.front();
+          s.batch_arg_top = 0;
+        }
+      }
       s.batch_col = s.batch_vals[s.batches_sel].empty() ? 0 : s.batch_vals[s.batches_sel][0].size();
       s.overlay = Overlay::kBatch;
       s.status_msg = std::string(s.batch_defs[s.batches_sel].command) + " " + std::string(s.batch_defs[s.batches_sel].mode) +
@@ -232,6 +554,93 @@ void batch_key(State &s, int ch) {
   const std::size_t sbi = (s.open_batch >= 0) ? static_cast<std::size_t>(s.open_batch) : 0;
   const std::size_t bnfields = sbi < s.batch_defs.size() ? s.batch_defs[sbi].fields.size() : 0;
   const std::size_t page = s.out_rows > 1 ? static_cast<std::size_t>(s.out_rows - 1) : std::size_t{1};
+  const batches::SignalProfile *profile = sbi < s.batch_defs.size()
+      ? sync_signal_profile(s, sbi) : nullptr;
+  const bool signal_builder =
+      profile != nullptr && !s.batch_defs[sbi].arguments.empty();
+
+  if (s.batch_pane_prefix) {
+    if (ch == KEY_LEFT) {
+      s.batch_active_pane = 0;
+      s.batch_pane_prefix = false;
+      s.status_msg = "signal builder pane";
+    } else if (ch == KEY_RIGHT) {
+      s.batch_active_pane = 1;
+      s.batch_pane_prefix = false;
+      s.status_msg = "signal argument pane (Space selects)";
+    } else if (ch == kEsc) {
+      s.batch_pane_prefix = false;
+      s.status_msg = "pane switch cancelled";
+    }
+    return;
+  }
+  if (signal_builder && ch == kCtrlB) {
+    s.batch_pane_prefix = true;
+    s.status_msg = "Ctrl+B then Left/Right to switch panes";
+    return;
+  }
+
+  if (signal_builder && s.batch_active_pane == 1) {
+    const batches::BatchDef &def = s.batch_defs[sbi];
+    if (ch == KEY_UP || ch == KEY_DOWN) {
+      s.batch_arg_sel = step_signal_argument(
+          def, *profile, s.batch_arg_selected[sbi], s.batch_arg_sel,
+          ch == KEY_UP ? -1 : 1);
+      return;
+    }
+    if (ch == ' ' && s.batch_arg_sel < def.arguments.size()) {
+      const batches::BatchArgument &argument = def.arguments[s.batch_arg_sel];
+      const batches::ArgumentState state = batches::argument_state(
+          argument, s.batch_arg_selected[sbi], *profile);
+      if (state == batches::ArgumentState::kSelected) {
+        s.batch_arg_selected[sbi] &= ~argument.bit;
+        if (s.batch_field < bnfields &&
+            !batch_field_visible(def, s.batch_field,
+                                 s.batch_arg_selected[sbi])) {
+          s.batch_field = first_visible_batch_field(
+              def, s.batch_arg_selected[sbi]);
+          s.batch_col = s.batch_field < bnfields
+              ? s.batch_vals[sbi][s.batch_field].size() : 0;
+        }
+        s.status_msg = std::string(def.fields[argument.field_index].label) +
+                       " deselected";
+      } else if (state == batches::ArgumentState::kAvailable) {
+        s.batch_arg_selected[sbi] |= argument.bit;
+        s.batch_field = argument.field_index;
+        if (def.fields[argument.field_index].flag) {
+          s.batch_vals[sbi][argument.field_index] = "1";
+        }
+        s.batch_col = s.batch_vals[sbi][s.batch_field].size();
+        s.status_msg = std::string(def.fields[argument.field_index].label) +
+                       " selected";
+      } else {
+        std::string missing;
+        for (const batches::BatchArgument &candidate : def.arguments) {
+          if ((argument.requires_mask & candidate.bit) != 0U &&
+              (s.batch_arg_selected[sbi] & candidate.bit) == 0U) {
+            missing = std::string(def.fields[candidate.field_index].label);
+            break;
+          }
+        }
+        if (!profile->supported) {
+          s.status_msg = "sum is per-source only; configure it with sig add";
+        } else if (!missing.empty()) {
+          s.status_msg = std::string(def.fields[argument.field_index].label) +
+                         " needs " + missing + " first";
+        } else {
+          s.status_msg = std::string(def.fields[argument.field_index].label) +
+                         " is not valid with this selection";
+        }
+      }
+      return;
+    }
+    if (ch != kEsc && ch != KEY_F(1) && ch != KEY_F(2) && ch != KEY_F(3) &&
+        ch != KEY_F(4) && ch != KEY_PPAGE && ch != KEY_NPAGE &&
+        ch != '\n' && ch != '\r' && ch != KEY_ENTER) {
+      return;
+    }
+  }
+
   if (ch == kEsc) {
     s.overlay = Overlay::kBatches;
     s.status_msg = "builders -- " + std::to_string(s.batch_defs.size()) + " batch runs";
@@ -267,7 +676,15 @@ void batch_key(State &s, int ch) {
     }
   } else if (ch == KEY_UP) {
     if (s.batch_field > 0) {
-      --s.batch_field;
+      if (signal_builder) {
+        do {
+          --s.batch_field;
+        } while (s.batch_field > 0 && s.batch_field < bnfields &&
+                 !batch_field_visible(s.batch_defs[sbi], s.batch_field,
+                                      s.batch_arg_selected[sbi]));
+      } else {
+        --s.batch_field;
+      }
       if (s.batch_field < bnfields && sbi < s.batch_vals.size() &&
           s.batch_field < s.batch_vals[sbi].size()) {
         s.batch_col = s.batch_vals[sbi][s.batch_field].size();
@@ -277,9 +694,17 @@ void batch_key(State &s, int ch) {
     }
   } else if (ch == KEY_DOWN || ch == '\t') {
     if (s.batch_field <= bnfields) {
-      ++s.batch_field;
-      if (s.batch_field > bnfields) {
-        s.batch_field = bnfields;
+      if (signal_builder) {
+        do {
+          ++s.batch_field;
+        } while (s.batch_field < bnfields &&
+                 !batch_field_visible(s.batch_defs[sbi], s.batch_field,
+                                      s.batch_arg_selected[sbi]));
+      } else {
+        ++s.batch_field;
+        if (s.batch_field > bnfields) {
+          s.batch_field = bnfields;
+        }
       }
       if (s.batch_field < bnfields && sbi < s.batch_vals.size() &&
           s.batch_field < s.batch_vals[sbi].size()) {

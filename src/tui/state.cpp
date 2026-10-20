@@ -88,8 +88,12 @@ void init_state(State &s) {
   // instead waits for the TUI-5 async worker.
   s.batch_defs = batches::batch_defs();
   s.batch_vals.reserve(s.batch_defs.size());
+  s.batch_arg_selected.reserve(s.batch_defs.size());
+  s.batch_active_profile.reserve(s.batch_defs.size());
   for (const auto &d : s.batch_defs) {
     s.batch_vals.emplace_back(d.fields.size());
+    s.batch_arg_selected.push_back(0U);
+    s.batch_active_profile.push_back(-1);
   }
   auto batch_set = [&](std::string_view cmd, std::string_view key, std::string_view value) {
     for (std::size_t bi = 0; bi < s.batch_defs.size(); ++bi) {
@@ -111,6 +115,13 @@ void init_state(State &s) {
   batch_set("sig", "--sig-amp", "3.3V");
   batch_set("sig", "--steps", "1000");
   batch_set("sig", "--dt", "0.1ms");
+  for (std::size_t i = 0; i < s.batch_defs.size(); ++i) {
+    const std::size_t profile = batches::signal_profile_index(s.batch_defs[i], s.batch_vals[i]);
+    if (profile < s.batch_defs[i].signal_profiles.size()) {
+      s.batch_active_profile[i] = static_cast<int>(profile);
+      s.batch_arg_selected[i] = s.batch_defs[i].signal_profiles[profile].default_selected;
+    }
+  }
   s.batch_res.resize(s.batch_defs.size());
   s.batch_has.resize(s.batch_defs.size(), false);
   s.batch_argv.resize(s.batch_defs.size());

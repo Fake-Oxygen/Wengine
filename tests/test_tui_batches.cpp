@@ -210,6 +210,99 @@ void test_registry_driven() {
   assert(modes.size() == 2 && modes[0] == "ascii" && modes[1] == "cobs");
 }
 
+void test_signal_argument_profiles() {
+  const auto defs = tui::batches::batch_defs();
+  const auto *sig = find_batch(defs, "sig");
+  assert(sig != nullptr);
+  assert(sig->arguments.size() == 37);
+  assert(sig->signal_profiles.size() == 12);
+
+  const auto profile = [&](std::string_view name)
+      -> const tui::batches::SignalProfile * {
+    for (const auto &candidate : sig->signal_profiles) {
+      if (candidate.kind == name) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  };
+  const auto argument = [&](std::string_view key)
+      -> const tui::batches::BatchArgument * {
+    for (const auto &candidate : sig->arguments) {
+      if (sig->fields[candidate.field_index].key == key) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  };
+
+  const auto *sine = profile("sine");
+  const auto *square = profile("square");
+  const auto *noise = profile("noise");
+  const auto *expression = profile("expression");
+  const auto *sum = profile("sum");
+  assert(sine && square && noise && expression && sum);
+  assert(!sum->supported);
+
+  const auto *freq = argument("--sig-freq");
+  const auto *duty = argument("--sig-duty");
+  const auto *seed = argument("--sig-seed");
+  const auto *expr = argument("--sig-expr");
+  const auto *paced = argument("--paced");
+  const auto *rate = argument("--rate");
+  const auto *csv = argument("--emit-csv");
+  const auto *csv_stride = argument("--emit-csv-stride");
+  const auto *forever = argument("--forever");
+  assert(freq && duty && seed && expr && paced && rate && csv && csv_stride &&
+         forever);
+
+  assert(tui::batches::argument_state(*freq, sine->default_selected, *sine) ==
+         tui::batches::ArgumentState::kSelected);
+  assert(tui::batches::argument_state(*duty, sine->default_selected, *sine) ==
+         tui::batches::ArgumentState::kInactive);
+  assert(tui::batches::argument_state(*duty, square->default_selected, *square) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*freq, noise->default_selected, *noise) ==
+         tui::batches::ArgumentState::kInactive);
+  assert(tui::batches::argument_state(*seed, noise->default_selected, *noise) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*expr, expression->default_selected,
+                                      *expression) ==
+         tui::batches::ArgumentState::kSelected);
+  assert(tui::batches::argument_required(*expr, *expression));
+
+  assert(tui::batches::argument_state(*rate, sine->default_selected, *sine) ==
+         tui::batches::ArgumentState::kBlocked);
+  const std::uint64_t paced_selected = sine->default_selected | paced->bit;
+  assert(tui::batches::argument_state(*rate, paced_selected, *sine) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*csv_stride, sine->default_selected,
+                                      *sine) ==
+         tui::batches::ArgumentState::kBlocked);
+  assert(tui::batches::argument_state(*csv_stride,
+                                      sine->default_selected | csv->bit,
+                                      *sine) ==
+         tui::batches::ArgumentState::kAvailable);
+  auto async_values = blank(*sig);
+  set(async_values, *sig, "--sig-kind", "sine");
+  set(async_values, *sig, "--forever", "1");
+  assert(!tui::batches::wants_async(*sig, async_values,
+                                    sine->default_selected));
+  assert(tui::batches::wants_async(*sig, async_values,
+                                   sine->default_selected | forever->bit));
+
+  auto values = blank(*sig);
+  set(values, *sig, "--sig-kind", "sine");
+  set(values, *sig, "--sig-freq", "1kHz");
+  set(values, *sig, "--sig-amp", "3.3V");
+  set(values, *sig, "--sig-expr", "t");
+  set(values, *sig, "--sig-duty", "0.2");
+  set(values, *sig, "--steps", "2");
+  set(values, *sig, "--dt", "1ms");
+  assert(tui::batches::compose_line(*sig, values, sine->default_selected) ==
+         "sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --steps 2 --dt 1ms");
+}
+
 void test_compose_shapes() {
   const auto defs = tui::batches::batch_defs();
   const auto *sim = find_batch(defs, "sim");
@@ -539,6 +632,7 @@ int main() {
   test_defs_track_specs();
   test_keys_match_complete_vocab();
   test_registry_driven();
+  test_signal_argument_profiles();
   test_compose_shapes();
   test_parity_matrix();
   test_invalid_surfaces_cli_error();

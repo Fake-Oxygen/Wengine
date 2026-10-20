@@ -144,7 +144,7 @@ void submit_batch(State &s) {
     return;
   }
   const std::size_t bi = static_cast<std::size_t>(s.open_batch);
-  const std::string line = batches::compose_line(s.batch_defs[bi], s.batch_vals[bi]);
+  const std::string line = batches::compose_line(s.batch_defs[bi], s.batch_vals[bi], s.batch_arg_selected[bi]);
   s.batch_argv[bi] = line;
   push_text(s.scrollback, std::string(kPrompt) + line, kMaxScrollback);
   if (!line.empty()) {

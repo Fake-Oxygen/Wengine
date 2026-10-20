@@ -5,7 +5,7 @@ Runs `PhysicsSimApp --tui` on a real PTY (no display needed), drives it
 like a user, and asserts the no-drift contract end to end:
   - boot renders the TUI title on a cursor-addressable terminal
   - F9 opens theme settings; theme preview and selection work on the PTY
-  - the Ohm form permits valid pairs, and S0 rules update when its mode changes
+  - form and signal builders switch panes, filter args, and submit CLI parity
   - typing `ohm 12V 3A` + Enter shows the CLI-identical `R = 4` text
   - Tab single-completes (`o` -> `ohm `) and multi-candidate popups stay loud
   - Up recalls history and re-runs byte-identical output
@@ -181,6 +181,35 @@ def main():
         )
         print("mode-specific S0 argument profile ok")
         os.write(fd, b"\x1b\x1b")  # form -> list -> main view
+        time.sleep(0.4)
+        read_available(fd, 1.0)
+
+        # F4 opens run builders; select sig. The signal pane has the same
+        # two-pane selection flow. Switch sine to square (duty becomes valid),
+        # add offset, and submit through the CLI executor.
+        os.write(fd, b"\x1bOS")  # F4
+        builders = wait_for(fd, b"Run builders --", timeout=6.0)
+        assert b"Run builders --" in builders, f"F4 did not open builders: {builders[-1200:]!r}"
+        os.write(fd, b"\x1bOB\r")  # select and open sig run
+        sig_open = wait_for(fd, b"Arguments: sine", timeout=6.0)
+        assert b"Arguments: sine" in sig_open, (
+            f"sig argument pane missing: {sig_open[-1600:]!r}"
+        )
+        assert b"duty" not in sig_open, "sine should not expose square/pulse duty"
+        os.write(fd, b"\x15square")  # kind selector is the focused first field
+        square_profile = wait_for(fd, b"duty", timeout=6.0)
+        assert b"duty" in square_profile, (
+            f"square profile did not expose duty: {square_profile[-1600:]!r}"
+        )
+        os.write(fd, b"\x02\x1bOC\x1bOB\x1bOB ")  # right pane; choose offset
+        time.sleep(0.3)
+        os.write(fd, b"\x02\x1bOD1V\r")  # left pane; enter offset and run
+        sig_result = wait_for(fd, b"sig run: kind=square", timeout=8.0)
+        assert b"sig run: kind=square" in sig_result, (
+            f"signal builder did not submit: {sig_result[-2000:]!r}"
+        )
+        print("signal builder panes + argument selection ok")
+        os.write(fd, b"\x1b\x1b")  # builder -> list -> main view
         time.sleep(0.4)
         read_available(fd, 1.0)
 

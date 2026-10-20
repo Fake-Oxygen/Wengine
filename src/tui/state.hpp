@@ -103,10 +103,17 @@ struct State {
   // Run builders (TUI-4): one argv-composing editor per batch command.
   std::vector<batches::BatchDef> batch_defs;
   std::vector<std::vector<std::string>> batch_vals;
+  std::vector<std::uint64_t> batch_arg_selected;
+  std::vector<int> batch_active_profile;
   std::size_t batches_sel = 0;
   int open_batch = -1; // index into batch_defs while Overlay::kBatch is active
   std::size_t batch_field = 0; // 0..fields.size() (last row = Submit)
   std::size_t batch_col = 0; // cursor within the active field value
+  std::size_t batch_arg_sel = 0;
+  std::size_t batch_arg_top = 0;
+  int batch_active_pane = 0; // 0: builder, 1: arguments
+  bool batch_pane_prefix = false; // tmux-style Ctrl+B prefix
+  int batch_cursor_row = 3;
   std::vector<ExecResult> batch_res;
   std::vector<bool> batch_has;
   std::vector<std::string> batch_argv;

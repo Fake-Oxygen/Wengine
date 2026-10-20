@@ -242,10 +242,12 @@ void draw_frame(State &s) {
       const auto &ff = cdef.fields[s.batch_field];
       const std::string prefix = "  " + std::string(ff.label) + " " + std::string(ff.key) + ": " + (ff.flag ? "[flag] " : "");
       const std::string &fval = s.batch_vals[sbi][s.batch_field];
+      const bool dynamic = !cdef.signal_profiles.empty() && !cdef.arguments.empty();
+      const std::size_t editor_width = dynamic ? static_cast<std::size_t>(cols / 2) : static_cast<std::size_t>(cols);
       if (s.batch_col > fval.size()) {
         s.batch_col = fval.size();
       }
-      const std::size_t favail = static_cast<std::size_t>(cols) > prefix.size() + 1 ? static_cast<std::size_t>(cols) - prefix.size() - 1 : std::size_t{1};
+      const std::size_t favail = editor_width > prefix.size() + 1 ? editor_width - prefix.size() - 1 : std::size_t{1};
       std::size_t foff = 0;
       if (fval.size() > favail) {
         foff = fval.size() - favail;
@@ -254,10 +256,13 @@ void draw_frame(State &s) {
         foff = s.batch_col;
       }
       const std::size_t top = s.batch_top[sbi] <= s.batch_field ? s.batch_top[sbi] : s.batch_field;
-      const int frow = 3 + static_cast<int>(s.batch_field - top);
+      const int frow = dynamic ? s.batch_cursor_row : 3 + static_cast<int>(s.batch_field - top);
       const int fcol = static_cast<int>(prefix.size() + (s.batch_col - foff));
-      if (frow >= 1 && frow < rows - 2) {
-        (void)wmove(stdscr, frow, fcol < cols - 1 ? fcol : cols - 1);
+      if (dynamic && s.batch_active_pane == 1) {
+        (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (s.cursor - offset)));
+      } else if (frow >= 1 && frow < rows - 2) {
+        const int max_col = dynamic ? cols / 2 - 1 : cols - 1;
+        (void)wmove(stdscr, frow, fcol < max_col ? fcol : max_col);
       } else {
         (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (s.cursor - offset)));
       }
