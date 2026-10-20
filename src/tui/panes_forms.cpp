@@ -40,19 +40,68 @@ void draw_forms_pane(State &s) {
 
 namespace {
 
-bool form_field_visible(const forms::FormDef &def, std::size_t field, std::uint64_t selected) {
+void reset_form_argument_cursor(State &s, std::size_t form, const forms::ArgumentProfile &profile) {
+  const forms::FormDef &def = s.form_defs[form];
+  s.form_arg_sel = 0;
+  while (s.form_arg_sel < def.arguments.size() &&
+         forms::argument_state(def.arguments[s.form_arg_sel], s.form_arg_selected[form], profile) == forms::ArgumentState::kInactive) {
+    ++s.form_arg_sel;
+  }
+}
+
+const forms::ArgumentProfile *sync_form_profile(State &s, std::size_t form) {
+  const forms::FormDef &def = s.form_defs[form];
+  const std::size_t index = forms::active_profile_index(def, s.form_vals[form]);
+  if (index >= def.profiles.size()) {
+    return nullptr;
+  }
+  if (s.form_active_profile[form] != static_cast<int>(index)) {
+    s.form_active_profile[form] = static_cast<int>(index);
+    s.form_arg_selected[form] = def.profiles[index].default_selected;
+    reset_form_argument_cursor(s, form, def.profiles[index]);
+  }
+  return &def.profiles[index];
+}
+
+bool form_field_visible(const forms::FormDef &def, const forms::ArgumentProfile &profile, std::size_t field, std::uint64_t selected) {
   for (const forms::ArgumentDef &argument : def.arguments) {
     if (argument.user_input && argument.field_index == field) {
-      return (selected & argument.bit) != 0U;
+      return forms::argument_state(argument, selected, profile) == forms::ArgumentState::kSelected;
     }
   }
   return true;
+}
+
+std::size_t step_form_argument(const forms::FormDef &def, const forms::ArgumentProfile &profile, std::uint64_t selected, std::size_t current,
+                               int direction) {
+  std::size_t candidate = current;
+  for (std::size_t n = 0; n < def.arguments.size(); ++n) {
+    if (direction < 0) {
+      if (candidate == 0) {
+        return current;
+      }
+      --candidate;
+    } else {
+      if (candidate + 1 >= def.arguments.size()) {
+        return current;
+      }
+      ++candidate;
+    }
+    if (forms::argument_state(def.arguments[candidate], selected, profile) != forms::ArgumentState::kInactive) {
+      return candidate;
+    }
+  }
+  return current;
 }
 
 void draw_dynamic_form(State &s, std::size_t sfi) {
   const int out_rows = s.out_rows;
   const int cols = s.cols;
   const forms::FormDef &def = s.form_defs[sfi];
+  const forms::ArgumentProfile *profile = sync_form_profile(s, sfi);
+  if (profile == nullptr) {
+    return;
+  }
   const std::vector<std::string> &vals = s.form_vals[sfi];
   const std::uint64_t selected = s.form_arg_selected[sfi];
   const int left_width = cols / 2;
@@ -61,7 +110,9 @@ void draw_dynamic_form(State &s, std::size_t sfi) {
   const int value_width = left_width > 1 ? left_width - 1 : 1;
 
   const std::string left_head = s.form_active_pane == 0 ? "Command builder [active]" : "Command builder (Ctrl+B, Left)";
-  const std::string right_head = s.form_active_pane == 1 ? "Arguments [active]" : "Arguments (Ctrl+B, Right)";
+  const std::string right_head = s.form_active_pane == 1
+      ? "Arguments [active]: " + std::string(profile->name)
+      : "Arguments: " + std::string(profile->name) + " (Ctrl+B, Right)";
   (void)mvaddnstr(1, 0, left_head.c_str(), value_width);
   (void)mvaddnstr(1, right_x, right_head.c_str(), right_width - 1);
   (void)mvaddnstr(2, 0, ("argv: " + forms::compose_line(def, vals, selected)).c_str(), value_width);
@@ -70,7 +121,7 @@ void draw_dynamic_form(State &s, std::size_t sfi) {
   int row = 3;
   s.form_cursor_row = s.rows - 1;
   for (std::size_t i = 0; i < def.fields.size() && row < 1 + out_rows; ++i) {
-    if (!form_field_visible(def, i, selected)) {
+    if (!form_field_visible(def, *profile, i, selected)) {
       continue;
     }
     const forms::FormField &field = def.fields[i];
@@ -161,16 +212,31 @@ void draw_dynamic_form(State &s, std::size_t sfi) {
   }
 
   int arg_row = 3;
+  std::size_t shown_arguments = 0;
   for (std::size_t i = 0; i < def.arguments.size() && arg_row < 1 + out_rows; ++i) {
     const forms::ArgumentDef &argument = def.arguments[i];
-    const forms::ArgumentState state = forms::argument_state(argument, selected, def.valid_argument_sets);
+    const forms::ArgumentState state = forms::argument_state(argument, selected, *profile);
+    if (state == forms::ArgumentState::kInactive) {
+      continue;
+    }
     std::string text;
     switch (state) {
     case forms::ArgumentState::kSelected:
       text = "[x] " + std::string(argument.label) + "  selected";
       break;
     case forms::ArgumentState::kAvailable:
-      text = "[ ] " + std::string(argument.label) + "  valid";
+      text = "[ ] " + std::string(argument.label) + "  ";
+      switch (forms::argument_requirement(argument, selected, *profile)) {
+      case forms::ArgumentRequirement::kRequired:
+        text += "required";
+        break;
+      case forms::ArgumentRequirement::kAlternative:
+        text += "choose path";
+        break;
+      case forms::ArgumentRequirement::kOptional:
+        text += "optional";
+        break;
+      }
       break;
     case forms::ArgumentState::kComputed:
       text = "[-] " + std::string(argument.label) + "  computed";
@@ -180,6 +246,8 @@ void draw_dynamic_form(State &s, std::size_t sfi) {
       break;
     case forms::ArgumentState::kDerived:
       text = "    " + std::string(argument.label) + "  derived";
+      break;
+    case forms::ArgumentState::kInactive:
       break;
     }
     if (s.form_active_pane == 1 && i == s.form_arg_sel) {
@@ -196,6 +264,13 @@ void draw_dynamic_form(State &s, std::size_t sfi) {
     (void)move(arg_row, left_width);
     (void)addch('|');
     ++arg_row;
+    ++shown_arguments;
+  }
+  if (shown_arguments == 0 && arg_row < 1 + out_rows) {
+    (void)mvaddnstr(arg_row, right_x, "No argument inputs for this operation.",
+                    right_width - 1);
+    (void)move(arg_row, left_width);
+    (void)addch('|');
   }
   for (int y = 1; y < 1 + out_rows; ++y) {
     (void)move(y, left_width);
@@ -210,6 +285,7 @@ void draw_form_pane(State &s) {
   const int out_rows = s.out_rows;
   const std::size_t fi = (s.open_form >= 0) ? static_cast<std::size_t>(s.open_form) : 0;
   const std::size_t sfi = fi < s.form_defs.size() ? fi : 0;
+  (void)sync_form_profile(s, sfi);
   const forms::FormDef &def = s.form_defs[sfi];
   if (!def.arguments.empty()) {
     draw_dynamic_form(s, sfi);
@@ -351,8 +427,14 @@ void forms_key(State &s, int ch) {
       s.form_arg_sel = 0;
       s.form_pane_prefix = false;
       const forms::FormDef &def = s.form_defs[s.forms_sel];
-      if (!def.arguments.empty()) {
-        while (s.form_field < def.fields.size() && !form_field_visible(def, s.form_field, s.form_arg_selected[s.forms_sel])) {
+      const forms::ArgumentProfile *profile = sync_form_profile(s, s.forms_sel);
+      if (profile != nullptr) {
+        reset_form_argument_cursor(s, s.forms_sel, *profile);
+      }
+      if (!def.arguments.empty() && profile != nullptr) {
+        while (s.form_field < def.fields.size() &&
+               !form_field_visible(def, *profile, s.form_field,
+                                   s.form_arg_selected[s.forms_sel])) {
           ++s.form_field;
         }
       }
@@ -369,7 +451,9 @@ void form_key(State &s, int ch) {
   const std::size_t sfi = (s.open_form >= 0) ? static_cast<std::size_t>(s.open_form) : 0;
   const std::size_t nfields = sfi < s.form_defs.size() ? s.form_defs[sfi].fields.size() : 0;
   const std::size_t page = s.out_rows > 1 ? static_cast<std::size_t>(s.out_rows - 1) : std::size_t{1};
-  const bool dynamic = sfi < s.form_defs.size() && !s.form_defs[sfi].arguments.empty();
+  const forms::ArgumentProfile *profile =
+      sfi < s.form_defs.size() ? sync_form_profile(s, sfi) : nullptr;
+  const bool dynamic = profile != nullptr && !s.form_defs[sfi].arguments.empty();
 
   if (s.form_pane_prefix) {
     if (ch == KEY_LEFT) {
@@ -395,25 +479,28 @@ void form_key(State &s, int ch) {
   if (dynamic && s.form_active_pane == 1) {
     const forms::FormDef &def = s.form_defs[sfi];
     if (ch == KEY_UP) {
-      if (s.form_arg_sel > 0) {
-        --s.form_arg_sel;
-      }
+      s.form_arg_sel = step_form_argument(def, *profile, s.form_arg_selected[sfi],
+                                          s.form_arg_sel, -1);
       return;
     }
     if (ch == KEY_DOWN) {
-      if (s.form_arg_sel + 1 < def.arguments.size()) {
-        ++s.form_arg_sel;
-      }
+      s.form_arg_sel = step_form_argument(def, *profile, s.form_arg_selected[sfi],
+                                          s.form_arg_sel, 1);
       return;
     }
     if (ch == ' ' && s.form_arg_sel < def.arguments.size()) {
       const forms::ArgumentDef &argument = def.arguments[s.form_arg_sel];
-      const forms::ArgumentState state = forms::argument_state(argument, s.form_arg_selected[sfi], def.valid_argument_sets);
+      const forms::ArgumentState state = forms::argument_state(
+          argument, s.form_arg_selected[sfi], *profile);
       if (state == forms::ArgumentState::kSelected) {
         s.form_arg_selected[sfi] &= ~argument.bit;
-        if (s.form_field < nfields && !form_field_visible(def, s.form_field, s.form_arg_selected[sfi])) {
+        if (s.form_field < nfields &&
+            !form_field_visible(def, *profile, s.form_field,
+                                s.form_arg_selected[sfi])) {
           s.form_field = 0;
-          while (s.form_field < nfields && !form_field_visible(def, s.form_field, s.form_arg_selected[sfi])) {
+          while (s.form_field < nfields &&
+                 !form_field_visible(def, *profile, s.form_field,
+                                     s.form_arg_selected[sfi])) {
             ++s.form_field;
           }
           if (s.form_field == nfields) {
@@ -482,7 +569,9 @@ void form_key(State &s, int ch) {
       if (dynamic) {
         do {
           --s.form_field;
-        } while (s.form_field > 0 && s.form_field < nfields && !form_field_visible(s.form_defs[sfi], s.form_field, s.form_arg_selected[sfi]));
+        } while (s.form_field > 0 && s.form_field < nfields &&
+                 !form_field_visible(s.form_defs[sfi], *profile, s.form_field,
+                                     s.form_arg_selected[sfi]));
       } else {
         --s.form_field;
       }
@@ -498,7 +587,9 @@ void form_key(State &s, int ch) {
       if (dynamic) {
         do {
           ++s.form_field;
-        } while (s.form_field < nfields && !form_field_visible(s.form_defs[sfi], s.form_field, s.form_arg_selected[sfi]));
+        } while (s.form_field < nfields &&
+                 !form_field_visible(s.form_defs[sfi], *profile, s.form_field,
+                                     s.form_arg_selected[sfi]));
       } else {
         ++s.form_field;
         if (s.form_field > nfields) {

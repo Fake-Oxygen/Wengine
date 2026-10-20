@@ -199,10 +199,12 @@ void draw_frame(State &s) {
       const std::string key_disp = ff.key.empty() ? "(pos)" : std::string(ff.key);
       const std::string prefix = "  " + std::string(ff.label) + " " + key_disp + ": ";
       const std::string &fval = s.form_vals[sfi][s.form_field];
+      const bool dynamic = !cdef.arguments.empty();
+      const std::size_t editor_width = dynamic ? static_cast<std::size_t>(cols / 2) : static_cast<std::size_t>(cols);
       if (s.form_col > fval.size()) {
         s.form_col = fval.size();
       }
-      const std::size_t favail = static_cast<std::size_t>(cols) > prefix.size() + 1 ? static_cast<std::size_t>(cols) - prefix.size() - 1 : std::size_t{1};
+      const std::size_t favail = editor_width > prefix.size() + 1 ? editor_width - prefix.size() - 1 : std::size_t{1};
       std::size_t foff = 0;
       if (fval.size() > favail) {
         foff = fval.size() - favail;
@@ -210,13 +212,13 @@ void draw_frame(State &s) {
       if (s.form_col < foff) {
         foff = s.form_col;
       }
-      const bool dynamic = !cdef.arguments.empty();
       const int frow = dynamic ? s.form_cursor_row : 3 + static_cast<int>(s.form_field);
       const int fcol = static_cast<int>(prefix.size() + (s.form_col - foff));
       if (dynamic && s.form_active_pane == 1) {
         (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (s.cursor - offset)));
       } else if (frow >= 1 && frow < rows - 2) {
-        (void)wmove(stdscr, frow, fcol < cols - 1 ? fcol : cols - 1);
+        const int max_col = dynamic ? cols / 2 - 1 : cols - 1;
+        (void)wmove(stdscr, frow, fcol < max_col ? fcol : max_col);
       } else {
         (void)wmove(stdscr, rows - 1, static_cast<int>(kPrompt.size() + (s.cursor - offset)));
       }

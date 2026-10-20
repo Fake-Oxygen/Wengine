@@ -1,0 +1,297 @@
+#pragma once
+
+// Shared data types and command-line composition helpers for ncurses forms.
+// Solver-specific definitions live beside this file, one per command.
+
+#include "wengine/cli/ic_registry.hpp"
+
+#include <cstdint>
+#include <cstddef>
+#include <limits>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace wengine::tui::forms {
+
+enum class FormKind : int { kOhm = 0, kS0, kI2c, kLdo, kLed, kIc };
+
+inline constexpr int kFormCount = 6;
+
+// One editable field. `key` is the CLI flag (e.g. "--u"); empty `key`
+// means a positional slot (mode/chip/op).
+struct FormField {
+  std::string_view key;
+  std::string_view label;
+  std::string_view hint;
+};
+
+struct ArgumentDef {
+  static constexpr std::size_t kNoField = std::numeric_limits<std::size_t>::max();
+
+  std::string_view name;
+  std::string_view label;
+  std::size_t field_index;
+  std::uint64_t bit;
+  bool user_input;
+};
+
+struct ArgumentRule {
+  std::uint64_t required_mask;
+  std::uint64_t optional_mask;
+  std::uint64_t computed_mask = 0;
+  std::uint64_t derived_mask = 0;
+};
+
+struct ProfileSelector {
+  std::size_t field_index;
+  std::string_view value;
+};
+
+struct ArgumentProfile {
+  std::string_view name;
+  std::vector<ProfileSelector> selectors;
+  std::vector<ArgumentRule> rules;
+  std::uint64_t default_selected = 0;
+  bool fallback = false;
+};
+
+enum class ArgumentState : std::uint8_t {
+  kSelected,
+  kAvailable,
+  kBlocked,
+  kComputed,
+  kDerived,
+  kInactive,
+};
+
+enum class ArgumentRequirement : std::uint8_t {
+  kRequired,
+  kAlternative,
+  kOptional,
+};
+
+struct FormDef {
+  FormKind kind{};
+  std::string_view command;
+  std::string_view description;
+  std::string_view usage;
+  std::vector<FormField> fields;
+  std::vector<ArgumentDef> arguments;
+  std::vector<ArgumentProfile> profiles;
+};
+
+[[nodiscard]] inline ArgumentState argument_state( const ArgumentDef &argument, std::uint64_t selected, const ArgumentProfile &profile) noexcept {
+  if (!argument.user_input) {
+    return ArgumentState::kDerived;
+  }
+  if ((selected & argument.bit) != 0U) {
+    return ArgumentState::kSelected;
+  }
+  bool appears_in_profile = false;
+  for (const ArgumentRule &rule : profile.rules) {
+    const std::uint64_t allowed = rule.required_mask | rule.optional_mask;
+    appears_in_profile = appears_in_profile || (allowed & argument.bit) != 0U || (rule.computed_mask & argument.bit) != 0U ||
+                         (rule.derived_mask & argument.bit) != 0U;
+    if ((selected & ~allowed) != 0U) {
+      continue;
+    }
+    if ((allowed & argument.bit) != 0U) {
+      return ArgumentState::kAvailable;
+    }
+    if (selected == rule.required_mask && (rule.computed_mask & argument.bit) != 0U) {
+      return ArgumentState::kComputed;
+    }
+  }
+  for (const ArgumentRule &rule : profile.rules) {
+    if ((rule.derived_mask & argument.bit) != 0U) {
+      return ArgumentState::kDerived;
+    }
+  }
+  return appears_in_profile ? ArgumentState::kBlocked : ArgumentState::kInactive;
+}
+
+[[nodiscard]] inline ArgumentRequirement argument_requirement(const ArgumentDef &argument, std::uint64_t selected,
+    const ArgumentProfile &profile) noexcept {
+  bool required = false;
+  bool optional = false;
+  for (const ArgumentRule &rule : profile.rules) {
+    const std::uint64_t allowed = rule.required_mask | rule.optional_mask;
+    if ((selected & ~allowed) == 0U && (allowed & argument.bit) != 0U) {
+      required = required || (rule.required_mask & argument.bit) != 0U;
+      optional = optional || (rule.optional_mask & argument.bit) != 0U;
+    }
+  }
+  if (required && !optional) {
+    return ArgumentRequirement::kRequired;
+  }
+  return required ? ArgumentRequirement::kAlternative
+                  : ArgumentRequirement::kOptional;
+}
+
+namespace definition {
+
+[[nodiscard]] constexpr std::uint64_t bit(unsigned index) noexcept {
+  return std::uint64_t{1} << index;
+}
+
+[[nodiscard]] inline ArgumentDef argument(std::string_view name,
+                                          std::string_view label,
+                                          std::size_t field_index,
+                                          unsigned bit_index,
+                                          bool user_input = true) {
+  return {name, label, field_index, bit(bit_index), user_input};
+}
+
+[[nodiscard]] constexpr ArgumentRule rule(std::uint64_t required,
+                                          std::uint64_t optional = 0U,
+                                          std::uint64_t computed = 0U,
+                                          std::uint64_t derived = 0U) noexcept {
+  return {required, optional, computed, derived};
+}
+
+[[nodiscard]] inline ArgumentProfile profile(
+    std::string_view name, std::vector<ProfileSelector> selectors,
+    std::vector<ArgumentRule> rules, std::uint64_t defaults,
+    bool fallback = false) {
+  return {name, std::move(selectors), std::move(rules), defaults, fallback};
+}
+
+} // namespace definition
+
+// Registry-derived chip names and per-chip vocabulary. Chip names and ops
+// are never maintained in the TUI form definitions.
+[[nodiscard]] inline std::vector<std::string> ic_chip_names() {
+  std::vector<std::string> out;
+  for (const auto &chip : cli::IcRegistry::all()) {
+    out.emplace_back(chip.name);
+  }
+  return out;
+}
+
+[[nodiscard]] inline std::vector<std::string> ic_op_names(std::string_view chip) {
+  const cli::CommandDef *def = cli::IcRegistry::find(chip);
+  if (def == nullptr || def->complete == nullptr) {
+    return {};
+  }
+  std::vector<std::string> raw;
+  const std::span<const std::string_view> empty{};
+  def->complete(empty, "", raw);
+  std::vector<std::string> ops;
+  for (const auto &value : raw) {
+    if (!value.empty() && value.front() != '-') {
+      ops.push_back(value);
+    }
+  }
+  return ops;
+}
+
+[[nodiscard]] inline std::vector<std::string> ic_option_names(std::string_view chip) {
+  const cli::CommandDef *def = cli::IcRegistry::find(chip);
+  if (def == nullptr || def->complete == nullptr) {
+    return {};
+  }
+  std::vector<std::string> out;
+  const std::span<const std::string_view> empty{};
+  def->complete(empty, "--", out);
+  return out;
+}
+
+namespace detail {
+
+[[nodiscard]] inline std::string_view trim(std::string_view s) noexcept {
+  std::size_t begin = 0;
+  while (begin < s.size() && (s[begin] == ' ' || s[begin] == '\t')) {
+    ++begin;
+  }
+  std::size_t end = s.size();
+  while (end > begin && (s[end - 1] == ' ' || s[end - 1] == '\t')) {
+    --end;
+  }
+  return s.substr(begin, end - begin);
+}
+
+[[nodiscard]] inline std::string quote_token(std::string_view token) {
+  const bool need_quotes = token.find_first_of(" \t'\"") != std::string_view::npos;
+  if (!need_quotes) {
+    return std::string(token);
+  }
+  if (token.find('\'') == std::string_view::npos) {
+    return "'" + std::string(token) + "'";
+  }
+  if (token.find('"') == std::string_view::npos) {
+    return "\"" + std::string(token) + "\"";
+  }
+  return std::string(token);
+}
+
+} // namespace detail
+
+[[nodiscard]] inline std::size_t active_profile_index(
+    const FormDef &def, const std::vector<std::string> &values) noexcept {
+  std::size_t fallback = def.profiles.size();
+  for (std::size_t i = 0; i < def.profiles.size(); ++i) {
+    const ArgumentProfile &profile = def.profiles[i];
+    if (profile.fallback) {
+      fallback = i;
+      continue;
+    }
+    bool matches = true;
+    for (const ProfileSelector &selector : profile.selectors) {
+      if (selector.field_index >= values.size() ||
+          detail::trim(values[selector.field_index]) != selector.value) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) {
+      return i;
+    }
+  }
+  return fallback;
+}
+
+[[nodiscard]] inline std::uint64_t profile_default_selection(
+    const FormDef &def, const std::vector<std::string> &values) noexcept {
+  const std::size_t index = active_profile_index(def, values);
+  return index < def.profiles.size() ? def.profiles[index].default_selected : 0U;
+}
+
+// Compose argv only. The CLI owns all parsing and validation.
+[[nodiscard]] inline std::string compose_line(
+    const FormDef &def, const std::vector<std::string> &values,
+    std::uint64_t selected_arguments) {
+  std::string line(def.command);
+  for (std::size_t i = 0; i < def.fields.size() && i < values.size(); ++i) {
+    bool selected = true;
+    for (const ArgumentDef &argument : def.arguments) {
+      if (argument.user_input && argument.field_index == i) {
+        selected = (selected_arguments & argument.bit) != 0U;
+        break;
+      }
+    }
+    if (!selected) {
+      continue;
+    }
+    const std::string_view value = detail::trim(values[i]);
+    if (value.empty()) {
+      continue;
+    }
+    line.push_back(' ');
+    if (!def.fields[i].key.empty()) {
+      line += def.fields[i].key;
+      line.push_back(' ');
+    }
+    line += detail::quote_token(value);
+  }
+  return line;
+}
+
+[[nodiscard]] inline std::string compose_line(
+    const FormDef &def, const std::vector<std::string> &values) {
+  return compose_line(def, values, std::numeric_limits<std::uint64_t>::max());
+}
+
+} // namespace wengine::tui::forms

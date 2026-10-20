@@ -4,7 +4,7 @@
 Runs `PhysicsSimApp --tui` on a real PTY (no display needed), drives it
 like a user, and asserts the no-drift contract end to end:
   - boot renders the TUI title on a cursor-addressable terminal
-  - the Ohm form has tmux-style panes and only permits valid input pairs
+  - the Ohm form permits valid pairs, and S0 rules update when its mode changes
   - typing `ohm 12V 3A` + Enter shows the CLI-identical `R = 4` text
   - Tab single-completes (`o` -> `ohm `) and multi-candidate popups stay loud
   - Up recalls history and re-runs byte-identical output
@@ -141,6 +141,23 @@ def main():
             f"builder did not submit the U+R pair: {form_result[-2000:]!r}"
         )
         print("dynamic Ohm form + pane switching ok")
+        os.write(fd, b"\x1b")  # back to forms list
+        time.sleep(0.3)
+        read_available(fd, 1.0)
+        os.write(fd, b"\x1bOB\r")  # select and open S0
+        s0_rate = wait_for(fd, b"Arguments: rate", timeout=6.0)
+        assert b"Arguments: rate" in s0_rate, (
+            f"S0 rate profile missing: {s0_rate[-1600:]!r}"
+        )
+        assert b"Meter constant" in s0_rate, f"S0 required arguments missing: {s0_rate[-1600:]!r}"
+        # Change the mode in the builder and ensure the right pane switches to
+        # that mode's rules (energy is incompatible with the power+time branch).
+        os.write(fd, b"\x15pulses")  # Ctrl-U clears mode; type pulses
+        s0_pulses = wait_for(fd, b"invalid", timeout=6.0)
+        assert b"invalid" in s0_pulses and b"Energy" in s0_pulses, (
+            f"S0 mode profile did not update: {s0_pulses[-1600:]!r}"
+        )
+        print("mode-specific S0 argument profile ok")
         os.write(fd, b"\x1b\x1b")  # form -> list -> main view
         time.sleep(0.4)
         read_available(fd, 1.0)

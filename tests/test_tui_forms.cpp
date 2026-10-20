@@ -201,6 +201,14 @@ void test_ic_registry_driven() {
     }
     assert(field_index(*ic, o) >= 0);
   }
+  const auto ina_opts = tui::forms::ic_option_names("ina219");
+  assert(!ina_opts.empty());
+  for (const auto &o : ina_opts) {
+    if (o == "--help" || o == "-h") {
+      continue;
+    }
+    assert(field_index(*ic, o) >= 0);
+  }
 }
 
 void test_compose_shapes() {
@@ -240,7 +248,9 @@ void test_argument_definitions() {
   const auto *ohm = find_form(defs, "ohm");
   assert(ohm != nullptr);
   assert(ohm->arguments.size() == 4);
-  assert(ohm->valid_argument_sets.size() == 3);
+  assert(ohm->profiles.size() == 1);
+  const auto &profile = ohm->profiles.front();
+  assert(profile.rules.size() == 3);
 
   const auto bit = [&](std::string_view name) {
     for (const auto &argument : ohm->arguments) {
@@ -259,30 +269,25 @@ void test_argument_definitions() {
 
   for (const auto &argument : ohm->arguments) {
     if (argument.name == "voltage") {
-      assert(tui::forms::argument_state(argument, selected,
-                                        ohm->valid_argument_sets) ==
+      assert(tui::forms::argument_state(argument, selected, profile) ==
              tui::forms::ArgumentState::kComputed);
     } else if (argument.name == "current" || argument.name == "resistance") {
-      assert(tui::forms::argument_state(argument, selected,
-                                        ohm->valid_argument_sets) ==
+      assert(tui::forms::argument_state(argument, selected, profile) ==
              tui::forms::ArgumentState::kSelected);
     } else if (argument.name == "power") {
-      assert(tui::forms::argument_state(argument, selected,
-                                        ohm->valid_argument_sets) ==
+      assert(tui::forms::argument_state(argument, selected, profile) ==
              tui::forms::ArgumentState::kDerived);
     }
   }
-  assert(ohm->valid_argument_sets[0] == (voltage | current));
-  assert(ohm->valid_argument_sets[1] == (voltage | resistance));
-  assert(ohm->valid_argument_sets[2] == (current | resistance));
-  assert(tui::forms::argument_state(ohm->arguments[1], voltage,
-                                    ohm->valid_argument_sets) ==
+  assert(profile.rules[0].required_mask == (voltage | current));
+  assert(profile.rules[1].required_mask == (voltage | resistance));
+  assert(profile.rules[2].required_mask == (current | resistance));
+  assert(tui::forms::argument_state(ohm->arguments[1], voltage, profile) ==
          tui::forms::ArgumentState::kAvailable);
-  assert(tui::forms::argument_state(ohm->arguments[2], voltage,
-                                    ohm->valid_argument_sets) ==
+  assert(tui::forms::argument_state(ohm->arguments[2], voltage, profile) ==
          tui::forms::ArgumentState::kAvailable);
   assert(tui::forms::argument_state(ohm->arguments[2], voltage | current,
-                                    ohm->valid_argument_sets) ==
+                                    profile) ==
          tui::forms::ArgumentState::kComputed);
 
   auto vals = blank(*ohm);
@@ -292,6 +297,127 @@ void test_argument_definitions() {
   assert(tui::forms::compose_line(*ohm, vals, voltage | current) ==
          "ohm --u 12V --i 3A");
   assert(power != 0U);
+
+  const auto *s0 = find_form(defs, "s0");
+  const auto *i2c = find_form(defs, "i2c");
+  const auto *ldo = find_form(defs, "ldo");
+  const auto *led = find_form(defs, "led");
+  const auto *ic = find_form(defs, "ic");
+  assert(s0 && i2c && ldo && led && ic);
+  assert(s0->profiles.size() >= 6 && i2c->profiles.size() >= 4);
+  assert(!ldo->profiles.front().rules.empty());
+  assert(!led->profiles.front().rules.empty());
+  assert(ic->profiles.size() >= 14);
+  for (const auto &definition : defs) {
+    assert(!definition.arguments.empty());
+    assert(!definition.profiles.empty());
+  }
+
+  const auto profile_named = [](const tui::forms::FormDef &def,
+                                 std::string_view name)
+      -> const tui::forms::ArgumentProfile * {
+    for (const auto &candidate : def.profiles) {
+      if (candidate.name == name) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  };
+  const auto *s0_pulses = profile_named(*s0, "pulses");
+  assert(s0_pulses && s0_pulses->rules.size() == 2);
+  const auto *i2c_pullup = profile_named(*i2c, "pullup");
+  const auto *i2c_series = profile_named(*i2c, "series");
+  assert(i2c_pullup && i2c_series);
+  const auto find_argument = [](const tui::forms::FormDef &def,
+                                std::string_view name)
+      -> const tui::forms::ArgumentDef * {
+    for (const auto &argument : def.arguments) {
+      if (argument.name == name) {
+        return &argument;
+      }
+    }
+    return nullptr;
+  };
+  const auto *rs = find_argument(*i2c, "rs");
+  assert(rs != nullptr);
+  assert(tui::forms::argument_state(*rs, 0U, *i2c_pullup) ==
+         tui::forms::ArgumentState::kInactive);
+  assert(tui::forms::argument_state(*rs, 0U, *i2c_series) ==
+         tui::forms::ArgumentState::kAvailable);
+  assert(ldo->profiles.front().rules.front().required_mask == 0b111U);
+  assert(led->profiles.front().rules.front().required_mask == 0b111U);
+  const auto *ap_delay = profile_named(*ic, "ap63205-delay");
+  const auto *ap_inductor = profile_named(*ic, "ap63205-inductor");
+  const auto *ina_shunt = profile_named(*ic, "ina219-shunt");
+  const auto *ina_config = profile_named(*ic, "ina219-config");
+  assert(ap_inductor != nullptr);
+  assert(ap_delay && ap_delay->rules.size() == 2);
+  assert(ina_shunt && ina_shunt->rules.size() == 2);
+  assert(ina_config && ina_config->rules.size() == 3);
+
+  const auto *energy = find_argument(*s0, "energy");
+  const auto *power_input = find_argument(*s0, "power");
+  const auto *time_input = find_argument(*s0, "time");
+  assert(energy && power_input && time_input);
+  assert(tui::forms::argument_state(*energy, s0_pulses->default_selected,
+                                    *s0_pulses) ==
+         tui::forms::ArgumentState::kBlocked);
+  const auto *s0_constant = find_argument(*s0, "constant");
+  assert(s0_constant != nullptr);
+  const std::uint64_t energy_branch =
+      s0_pulses->default_selected & ~power_input->bit & ~time_input->bit;
+  assert(energy_branch == s0_constant->bit);
+  assert(tui::forms::argument_state(*energy, energy_branch, *s0_pulses) ==
+         tui::forms::ArgumentState::kAvailable);
+
+  const auto *delay_ts = find_argument(*ic, "ts");
+  const auto *delay_cd = find_argument(*ic, "cd");
+  assert(delay_ts && delay_cd);
+  assert(tui::forms::argument_state(*delay_cd, ap_delay->default_selected,
+                                    *ap_delay) ==
+         tui::forms::ArgumentState::kBlocked);
+  assert(tui::forms::argument_state(*delay_cd, 0U, *ap_delay) ==
+         tui::forms::ArgumentState::kAvailable);
+  assert(tui::forms::argument_state(*delay_ts, 0U, *ap_delay) ==
+         tui::forms::ArgumentState::kAvailable);
+
+  const auto *ina_bits = find_argument(*ic, "bits");
+  const auto *ina_avg = find_argument(*ic, "avg");
+  assert(ina_bits && ina_avg);
+  assert(tui::forms::argument_state(*ina_avg, ina_bits->bit, *ina_config) ==
+         tui::forms::ArgumentState::kBlocked);
+
+  auto s0_values = blank(*s0);
+  set(s0_values, *s0, "mode", "pulses");
+  assert(s0->profiles[tui::forms::active_profile_index(*s0, s0_values)].name ==
+         "pulses");
+  auto s0_args = blank(*s0);
+  set(s0_args, *s0, "mode", "rate");
+  set(s0_args, *s0, "--power", "2kW");
+  set(s0_args, *s0, "--freq", "1Hz");
+  set(s0_args, *s0, "--const", "1000imp/kWh");
+  assert(tui::forms::compose_line(
+             *s0, s0_args,
+             tui::forms::profile_default_selection(*s0, s0_args)) ==
+         "s0 rate --power 2kW --const 1000imp/kWh");
+  auto i2c_values = blank(*i2c);
+  set(i2c_values, *i2c, "mode", "series");
+  assert(i2c->profiles[tui::forms::active_profile_index(*i2c, i2c_values)].name ==
+         "series");
+  auto ic_args = blank(*ic);
+  set(ic_args, *ic, "chip", "ap63205");
+  set(ic_args, *ic, "op", "inductor");
+  set(ic_args, *ic, "--vin", "12V");
+  set(ic_args, *ic, "--esr", "5mOhm");
+  assert(tui::forms::compose_line(
+             *ic, ic_args,
+             tui::forms::profile_default_selection(*ic, ic_args)) ==
+         "ic ap63205 inductor --vin 12V");
+  auto ic_values = blank(*ic);
+  set(ic_values, *ic, "chip", "ina219");
+  set(ic_values, *ic, "op", "shunt");
+  assert(ic->profiles[tui::forms::active_profile_index(*ic, ic_values)].name ==
+         "ina219-shunt");
 }
 
 void test_parity_matrix() {

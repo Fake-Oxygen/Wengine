@@ -89,6 +89,7 @@ struct State {
   std::size_t form_field = 0; // 0..fields.size() (last row = Submit)
   std::size_t form_col = 0; // cursor within the active field value
   std::vector<std::uint64_t> form_arg_selected;
+  std::vector<int> form_active_profile;
   std::size_t form_arg_sel = 0;
   int form_active_pane = 0; // 0: command builder, 1: argument choices
   bool form_pane_prefix = false; // tmux-style Ctrl-B prefix

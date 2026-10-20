@@ -35,9 +35,11 @@ void init_state(State &s) {
   s.form_defs = forms::form_defs();
   s.form_vals.reserve(s.form_defs.size());
   s.form_arg_selected.reserve(s.form_defs.size());
+  s.form_active_profile.reserve(s.form_defs.size());
   for (const auto &d : s.form_defs) {
     s.form_vals.emplace_back(d.fields.size());
-    s.form_arg_selected.push_back(d.valid_argument_sets.empty() ? 0U : d.valid_argument_sets.front());
+    s.form_arg_selected.push_back(0U);
+    s.form_active_profile.push_back(-1);
   }
   auto form_set = [&](std::string_view cmd, std::string_view key_or_label, std::string_view value) {
     for (std::size_t fi = 0; fi < s.form_defs.size(); ++fi) {
@@ -69,6 +71,11 @@ void init_state(State &s) {
   form_set("ic", "chip", "ap63205");
   form_set("ic", "op", "inductor");
   form_set("ic", "--vin", "12V");
+  for (std::size_t i = 0; i < s.form_defs.size(); ++i) {
+    const std::size_t profile = forms::active_profile_index(s.form_defs[i], s.form_vals[i]);
+    s.form_active_profile[i] = static_cast<int>(profile);
+    s.form_arg_selected[i] = forms::profile_default_selection(s.form_defs[i], s.form_vals[i]);
+  }
   s.form_res.resize(s.form_defs.size());
   s.form_has.resize(s.form_defs.size(), false);
   s.form_argv.resize(s.form_defs.size());
