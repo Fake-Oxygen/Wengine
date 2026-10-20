@@ -18,10 +18,10 @@ namespace wengine::tui::forms::definitions {
       I2cSpec::kDescription,
       I2cSpec::kUsage,
       {
-          {"", "mode", "pullup|series|full"},
+          {"", "mode", "Space: choose pullup|series|full", {"pullup", "series", "full"}},
           {"--vdd", "VDD", "supply, e.g. 3.3V"},
           {"--cb", "Cb", "bus cap, e.g. 200pF"},
-          {"--speed", "speed", "std|fast|fmp (default fast)"},
+          {"--speed", "speed", "Space: choose std|fast|fmp (default fast)", {"std", "fast", "fmp"}},
           {"--vol", "VOL", "low threshold V (empty=auto)"},
           {"--iol", "IOL", "low current, e.g. 3mA (empty=auto)"},
           {"--tr", "tr", "rise time, e.g. 300ns (empty=auto)"},

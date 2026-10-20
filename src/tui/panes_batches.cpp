@@ -173,12 +173,12 @@ void draw_dynamic_batch(State &s, std::size_t sbi) {
     } else {
       const std::size_t field_index = visible_fields[visible];
       const batches::BatchField &field = def.fields[field_index];
-      const std::string val = field_index < values.size()
-          ? values[field_index] : std::string{};
+      const std::string val = field_index < values.size() ? values[field_index] : std::string{};
       const std::string flag_text = field.flag ? "[flag] " : "";
+      const bool has_choice = batches::batch_field_has_choices(def, field_index, values);
+      const std::string choice_mark = has_choice ? " [choice]" : std::string{};
       const std::string text = "  " + std::string(field.label) + " " +
-          std::string(field.key) + ": " + flag_text + val + "  # " +
-          std::string(field.hint);
+          std::string(field.key) + ": " + flag_text + val + choice_mark + "  # " + std::string(field.hint);
       if (s.batch_active_pane == 0 && field_index == s.batch_field) {
         (void)attron(A_REVERSE);
       }
@@ -527,6 +527,7 @@ void batches_key(State &s, int ch) {
     }
   } else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
     if (!s.batch_defs.empty() && s.batches_sel < s.batch_defs.size()) {
+      close_choice(s.choice);
       s.open_batch = static_cast<int>(s.batches_sel);
       s.batch_field = 0;
       s.batch_active_pane = 0;
@@ -560,6 +561,52 @@ void batch_key(State &s, int ch) {
       ? sync_batch_profile(s, sbi) : nullptr;
   const bool dynamic_builder =
       profile != nullptr && !s.batch_defs[sbi].arguments.empty();
+
+  // Enum-choice dialog owns its keys while open (see form_key).
+  if (s.choice.open) {
+    if (ch == KEY_UP) {
+      choice_move(s.choice, -1);
+      return;
+    }
+    if (ch == KEY_DOWN) {
+      choice_move(s.choice, 1);
+      return;
+    }
+    if (ch == '\n' || ch == '\r' || ch == KEY_ENTER || ch == ' ') {
+      const std::string picked = choice_confirmed(s.choice);
+      const std::size_t field = s.choice.field;
+      close_choice(s.choice);
+      if (sbi < s.batch_vals.size() && field < s.batch_vals[sbi].size()) {
+        s.batch_vals[sbi][field] = picked;
+        if (s.batch_field == field) {
+          s.batch_col = picked.size();
+        }
+        s.status_msg = "chose '" + picked + "'";
+      }
+      return;
+    }
+    if (ch == kEsc) {
+      close_choice(s.choice);
+      s.status_msg = "choice cancelled";
+      return;
+    }
+    if (ch >= 32 && ch < 127) {
+      const char want = static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch);
+      for (std::size_t i = 0; i < s.choice.options.size(); ++i) {
+        if (s.choice.options[i].empty()) {
+          continue;
+        }
+        char lead = s.choice.options[i][0];
+        lead = static_cast<char>(lead >= 'A' && lead <= 'Z' ? lead + ('a' - 'A') : lead);
+        if (lead == want) {
+          s.choice.selected = i;
+          break;
+        }
+      }
+      return;
+    }
+    return;
+  }
 
   if (s.batch_pane_prefix) {
     if (ch == KEY_LEFT) {
@@ -644,17 +691,21 @@ void batch_key(State &s, int ch) {
   }
 
   if (ch == kEsc) {
+    close_choice(s.choice);
     s.overlay = Overlay::kBatches;
     s.status_msg = "builders -- " + std::to_string(s.batch_defs.size()) + " batch runs";
   } else if (ch == KEY_F(4)) {
+    close_choice(s.choice);
     s.overlay = Overlay::kNone;
     s.status_msg = "ready";
   } else if (ch == KEY_F(2)) {
+    close_choice(s.choice);
     s.pal_filter.clear();
     s.pal_sel = 0;
     s.overlay = Overlay::kPalette;
     s.status_msg = "palette -- " + std::to_string(s.pal_entries.size()) + " commands";
   } else if (ch == KEY_F(3)) {
+    close_choice(s.choice);
     s.forms_sel = 0;
     s.overlay = Overlay::kForms;
     s.status_msg = "forms -- " + std::to_string(s.form_defs.size()) + " calculators";
@@ -755,6 +806,25 @@ void batch_key(State &s, int ch) {
     submit_batch(s);
     // Stay in the builder so the CLI-identical result sits beside the
     // fields (or the async hold note for --forever); Esc lists, F4 closes.
+  } else if (ch == ' ' && s.batch_active_pane == 0 && s.batch_field < bnfields && sbi < s.batch_defs.size() && sbi < s.batch_vals.size()) {
+    // Space on an enum field opens the choice dialog instead of typing a
+    // space (enum values never contain spaces).
+    const batches::BatchDef &def = s.batch_defs[sbi];
+    const std::vector<std::string> options = batches::batch_field_choices(def, s.batch_field, s.batch_vals[sbi]);
+    if (!options.empty()) {
+      std::string_view current = s.batch_vals[sbi][s.batch_field];
+      const std::string_view trimmed = batches::detail::trim(current);
+      const std::string title = std::string(def.fields[s.batch_field].label) + " -- choose";
+      (void)open_choice(s.choice, title, options, s.batch_field, trimmed);
+      s.status_msg = "choose " + std::string(def.fields[s.batch_field].label) + " -- Up/Down, Enter picks, Esc cancels";
+    } else if (s.batch_field < s.batch_vals[sbi].size()) {
+      std::string &val = s.batch_vals[sbi][s.batch_field];
+      if (s.batch_col > val.size()) {
+        s.batch_col = val.size();
+      }
+      val.insert(s.batch_col, 1, ' ');
+      ++s.batch_col;
+    }
   } else if (ch >= 32 && ch < 127) {
     if (s.batch_field < bnfields && sbi < s.batch_vals.size() &&
         s.batch_field < s.batch_vals[sbi].size()) {

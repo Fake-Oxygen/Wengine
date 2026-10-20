@@ -83,7 +83,19 @@ string and submits it through `TuiExecutor` -- the result pane shows the
 CLI-identical text beside the fields (also mirrored into the scrollback +
 shared history). Field hints come from each spec's `kUsage`/completion
 vocabulary; `ic` chips/ops enumerate `IcRegistry` (plus each chip's
-`complete`), so new parts appear with no form-side change. Forms never
+`complete`), so new parts appear with no form-side change. Enum-valued
+fields (`s0`/`i2c` modes, `ohm --from`, `i2c --speed`, `ic` chip/op plus
+the INA219 `bits`/`avg`/`brng`/`pga`/`mode` sets) carry a `[choice]`
+marker: Space opens a dialog listing the options (Up/Down moves, Enter
+picks, Esc cancels, typing jumps to the first matching initial), so values
+are picked, never mistyped. Static options are declared once on the field
+(`FormField::choices`); registry vocabularies resolve through
+`form_field_choices` -- new enum arguments only declare, never touch pane
+logic (`tests/test_tui_choice.cpp` pins every enum field incl. a
+synthetic future one). The dialog is a themed floating panel (solid accent
+block, inverted-accent selection, drop shadow; reverse-video fallback on
+no-color terminals) drawn once in `draw_main.cpp` -- still ASCII-only, so
+the C-locale width guarantee holds. Forms never
 validate: empty fields are omitted and the CLI owns every error, so
 invalid input shows the CLI usage-error text verbatim.
 `tests/test_tui_forms.cpp` pins the composition + executor-vs-`Shell`
@@ -101,7 +113,12 @@ shared history), so the builder never blocks. Solver names come from `SolverRegi
 `kKindNames` (plus `U|I` quantities and `ascii|cobs` UART modes), so new
 solvers/kinds appear with no builder-side change; file paths (e.g.
 `--emit-csv`, `--sig-table`, `--sig-lua`) are plain editable fields whose
-values quote to one argv token when they carry spaces. Builders never
+values quote to one argv token when they carry spaces. Enum-valued fields
+(`--solver`, `--sig-kind`, `--sig-quantity`, both `--emit-uart-mode`)
+carry a `[choice]` marker: Space opens a dialog listing the options
+(Up/Down moves, Enter picks, Esc cancels) in the same themed floating
+panel, backed by the shared `wengine/tui/choice.hpp` model and
+`batch_field_choices` -- same declare-only scaling as the forms. Builders never
 validate: empty fields are omitted, bare flags (`--paced`, `--forever`,
 `--emit-health`, `--control-uart`) emit only when enabled, and the CLI
 owns every error.
@@ -204,7 +221,7 @@ headlessly on a PTY. Session setup creates the history parent dir (same as
 Automated (runs in CI, no display needed):
 
 ```sh
-ctest --test-dir build -R "tui_exec|tui_forms|tui_batches|tui_async|tui_views|tui_pty_smoke"
+ctest --test-dir build -R "tui_exec|tui_forms|tui_batches|tui_choice|tui_async|tui_views|tui_pty_smoke"
 python3 tests/tui_pty_smoke.py --bin ./build/PhysicsSimApp
 ```
 

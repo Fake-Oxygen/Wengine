@@ -18,7 +18,8 @@ namespace wengine::tui::forms::definitions {
       S0Spec::kDescription,
       S0Spec::kUsage,
       {
-          {"", "mode", "rate|power|energy|pulses|convert|full (empty=auto)"},
+          {"", "mode", "Space: choose rate|power|energy|pulses|convert|full (empty=auto)",
+           {"rate", "power", "energy", "pulses", "convert", "full"}},
           {"--power", "power", "e.g. 2kW"},
           {"--freq", "freq", "e.g. 0.555Hz"},
           {"--pulses", "pulses", "count, e.g. 500"},

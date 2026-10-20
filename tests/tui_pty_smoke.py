@@ -216,6 +216,18 @@ def main():
             f"sig argument pane missing: {sig_open[-1600:]!r}"
         )
         assert b"duty" not in sig_open, "sine should not expose square/pulse duty"
+        # Enum-choice dialog: Space on the kind field lists kinds, Esc
+        # cancels and keeps the current value for the typed path below.
+        os.write(fd, b" ")
+        kind_dialog = wait_for(fd, b"-- choose", timeout=6.0)
+        assert b"sine" in kind_dialog and b"square" in kind_dialog, (
+            f"kind choice dialog missing options: {kind_dialog[-2000:]!r}"
+        )
+        os.write(fd, b"\x1b")  # Esc cancels
+        kind_cancelled = wait_for(fd, b"cancelled", timeout=6.0)
+        assert b"cancelled" in kind_cancelled, (
+            f"kind dialog did not cancel: {kind_cancelled[-1200:]!r}"
+        )
         os.write(fd, b"\x15square")  # kind selector is the focused first field
         square_profile = wait_for(fd, b"duty", timeout=6.0)
         assert b"duty" in square_profile, (

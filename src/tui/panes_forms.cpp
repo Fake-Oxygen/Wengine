@@ -127,7 +127,9 @@ void draw_dynamic_form(State &s, std::size_t sfi) {
     const forms::FormField &field = def.fields[i];
     const std::string key = field.key.empty() ? "(pos)" : std::string(field.key);
     const std::string value = i < vals.size() ? vals[i] : std::string{};
-    const std::string text = "  " + std::string(field.label) + " " + key + ": " + value + "  # " + std::string(field.hint);
+    const bool has_choice = forms::form_field_has_choices(def, i, vals);
+    const std::string marker = has_choice ? " [choice]" : std::string{};
+    const std::string text = "  " + std::string(field.label) + " " + key + ": " + value + marker + "  # " + std::string(field.hint);
     if (s.form_active_pane == 0 && i == s.form_field) {
       (void)attron(A_REVERSE);
     }
@@ -421,6 +423,7 @@ void forms_key(State &s, int ch) {
     }
   } else if (ch == '\n' || ch == '\r' || ch == KEY_ENTER) {
     if (!s.form_defs.empty() && s.forms_sel < s.form_defs.size()) {
+      close_choice(s.choice);
       s.open_form = static_cast<int>(s.forms_sel);
       s.form_field = 0;
       s.form_active_pane = 0;
@@ -451,9 +454,58 @@ void form_key(State &s, int ch) {
   const std::size_t sfi = (s.open_form >= 0) ? static_cast<std::size_t>(s.open_form) : 0;
   const std::size_t nfields = sfi < s.form_defs.size() ? s.form_defs[sfi].fields.size() : 0;
   const std::size_t page = s.out_rows > 1 ? static_cast<std::size_t>(s.out_rows - 1) : std::size_t{1};
-  const forms::ArgumentProfile *profile =
-      sfi < s.form_defs.size() ? sync_form_profile(s, sfi) : nullptr;
+  const forms::ArgumentProfile *profile = sfi < s.form_defs.size() ? sync_form_profile(s, sfi) : nullptr;
   const bool dynamic = profile != nullptr && !s.form_defs[sfi].arguments.empty();
+
+  // Enum-choice dialog owns its keys while open (shared model in
+  // choice.hpp; options come from the field declaration, so new enum
+  // arguments need no handling here).
+  if (s.choice.open) {
+    if (ch == KEY_UP) {
+      choice_move(s.choice, -1);
+      return;
+    }
+    if (ch == KEY_DOWN) {
+      choice_move(s.choice, 1);
+      return;
+    }
+    if (ch == '\n' || ch == '\r' || ch == KEY_ENTER || ch == ' ') {
+      const std::string picked = choice_confirmed(s.choice);
+      const std::size_t field = s.choice.field;
+      close_choice(s.choice);
+      if (sfi < s.form_vals.size() && field < s.form_vals[sfi].size()) {
+        s.form_vals[sfi][field] = picked;
+        if (s.form_field == field) {
+          s.form_col = picked.size();
+        }
+        s.status_msg = "chose '" + picked + "'";
+      }
+      return;
+    }
+    if (ch == kEsc) {
+      close_choice(s.choice);
+      s.status_msg = "choice cancelled";
+      return;
+    }
+    if (ch >= 32 && ch < 127) {
+      // Type-to-jump for long vocabularies (chips): first option whose
+      // leading character matches, case-insensitive.
+      const char want = static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch);
+      for (std::size_t i = 0; i < s.choice.options.size(); ++i) {
+        if (s.choice.options[i].empty()) {
+          continue;
+        }
+        char lead = s.choice.options[i][0];
+        lead = static_cast<char>(lead >= 'A' && lead <= 'Z' ? lead + ('a' - 'A') : lead);
+        if (lead == want) {
+          s.choice.selected = i;
+          break;
+        }
+      }
+      return;
+    }
+    return;
+  }
 
   if (s.form_pane_prefix) {
     if (ch == KEY_LEFT) {
@@ -532,21 +584,26 @@ void form_key(State &s, int ch) {
   }
 
   if (ch == kEsc) {
+    close_choice(s.choice);
     s.overlay = Overlay::kForms;
     s.status_msg = "forms -- " + std::to_string(s.form_defs.size()) + " calculators";
   } else if (ch == KEY_F(3)) {
+    close_choice(s.choice);
     s.overlay = Overlay::kNone;
     s.status_msg = "ready";
   } else if (ch == KEY_F(2)) {
+    close_choice(s.choice);
     s.pal_filter.clear();
     s.pal_sel = 0;
     s.overlay = Overlay::kPalette;
     s.status_msg = "palette -- " + std::to_string(s.pal_entries.size()) + " commands";
   } else if (ch == KEY_F(4)) {
+    close_choice(s.choice);
     s.batches_sel = 0;
     s.overlay = Overlay::kBatches;
     s.status_msg = "builders -- " + std::to_string(s.batch_defs.size()) + " batch runs";
   } else if (ch == KEY_F(1)) {
+    close_choice(s.choice);
     if (sfi < s.form_defs.size()) {
       const std::string cmd(s.form_defs[sfi].command);
       int help_rc = 0;
@@ -638,6 +695,26 @@ void form_key(State &s, int ch) {
     submit_form(s);
     // Stay in the form so the CLI-identical result sits beside the
     // fields; Esc lists, F3 closes.
+  } else if (ch == ' ' && s.form_active_pane == 0 && s.form_field < nfields && sfi < s.form_defs.size() && sfi < s.form_vals.size()) {
+    // Space on an enum field opens the choice dialog instead of typing a
+    // space (enum values never contain spaces). Free-text fields keep the
+    // typing meaning by falling through below.
+    const forms::FormDef &def = s.form_defs[sfi];
+    const std::vector<std::string> options = forms::form_field_choices(def, s.form_field, s.form_vals[sfi]);
+    if (!options.empty()) {
+      std::string_view current = s.form_vals[sfi][s.form_field];
+      const std::string_view trimmed = forms::detail::trim(current);
+      const std::string title = std::string(def.fields[s.form_field].label) + " -- choose";
+      (void)open_choice(s.choice, title, options, s.form_field, trimmed);
+      s.status_msg = "choose " + std::string(def.fields[s.form_field].label) + " -- Up/Down, Enter picks, Esc cancels";
+    } else if (s.form_field < s.form_vals[sfi].size()) {
+      std::string &val = s.form_vals[sfi][s.form_field];
+      if (s.form_col > val.size()) {
+        s.form_col = val.size();
+      }
+      val.insert(s.form_col, 1, ' ');
+      ++s.form_col;
+    }
   } else if (ch >= 32 && ch < 127) {
     if (s.form_field < nfields && sfi < s.form_vals.size() && s.form_field < s.form_vals[sfi].size()) {
       std::string &val = s.form_vals[sfi][s.form_field];

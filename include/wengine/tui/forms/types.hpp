@@ -21,11 +21,14 @@ enum class FormKind : int { kOhm = 0, kS0, kI2c, kLdo, kLed, kIc };
 inline constexpr int kFormCount = 6;
 
 // One editable field. `key` is the CLI flag (e.g. "--u"); empty `key`
-// means a positional slot (mode/chip/op).
+// means a positional slot (mode/chip/op). `choices` lists static enum
+// options for the Space-opened choice dialog; empty means free text or a
+// dynamic vocabulary resolved by `form_field_choices` (ic chip/op).
 struct FormField {
   std::string_view key;
   std::string_view label;
   std::string_view hint;
+  std::vector<std::string_view> choices = {};
 };
 
 struct ArgumentDef {
@@ -292,6 +295,38 @@ namespace detail {
 [[nodiscard]] inline std::string compose_line(
     const FormDef &def, const std::vector<std::string> &values) {
   return compose_line(def, values, std::numeric_limits<std::uint64_t>::max());
+}
+
+// Choice options for one field: static `choices` when declared, else the
+// registry-derived vocabulary (ic chip/op). Empty means free text — Space
+// keeps its typing meaning there. Value-dependent entries (op needs the
+// chip value) read `values`; pass the live field values.
+[[nodiscard]] inline std::vector<std::string> form_field_choices(const FormDef &def, std::size_t field_index, const std::vector<std::string> &values) {
+  if (field_index >= def.fields.size()) {
+    return {};
+  }
+  if (!def.fields[field_index].choices.empty()) {
+    std::vector<std::string> out;
+    out.reserve(def.fields[field_index].choices.size());
+    for (std::string_view c : def.fields[field_index].choices) {
+      out.emplace_back(c);
+    }
+    return out;
+  }
+  if (def.command == "ic") {
+    const std::string_view label = def.fields[field_index].label;
+    if (label == "chip") {
+      return ic_chip_names();
+    }
+    if (label == "op" && !values.empty()) {
+      return ic_op_names(detail::trim(values[0]));
+    }
+  }
+  return {};
+}
+
+[[nodiscard]] inline bool form_field_has_choices(const FormDef &def, std::size_t field_index, const std::vector<std::string> &values) {
+  return !form_field_choices(def, field_index, values).empty();
 }
 
 } // namespace wengine::tui::forms

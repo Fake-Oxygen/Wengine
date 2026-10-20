@@ -390,6 +390,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_tui_batches PRIVATE wengine_cli)
     add_test(NAME tui_batches COMMAND test_tui_batches)
 
+    # TUI enum-choice dialogs: static + registry-derived options + model.
+    add_executable(test_tui_choice tests/test_tui_choice.cpp)
+    target_link_libraries(test_tui_choice PRIVATE wengine_cli)
+    add_test(NAME tui_choice COMMAND test_tui_choice)
+
     # TUI async worker: parity + busy/cancel/progress/emit-csv (needs threads).
     add_executable(test_tui_async tests/test_tui_async.cpp)
     target_link_libraries(test_tui_async PRIVATE wengine_cli)

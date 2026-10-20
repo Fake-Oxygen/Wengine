@@ -22,6 +22,7 @@
 #include "wengine/cli/line_reader.hpp"
 #include "wengine/tui/async.hpp"
 #include "wengine/tui/batches.hpp"
+#include "wengine/tui/choice.hpp"
 #include "wengine/tui/exec.hpp"
 #include "wengine/tui/forms.hpp"
 #include "wengine/tui/palette.hpp"
@@ -99,6 +100,12 @@ struct State {
   std::vector<bool> form_has;
   std::vector<std::string> form_argv;
   std::vector<std::size_t> form_res_first;
+
+  // Enum-choice dialog (shared by forms + builders): Space on a field with
+  // choices opens it; Up/Down moves, Enter picks, Esc cancels. Declared
+  // per field (`choices` or the registry resolvers), so new enum arguments
+  // need no key/draw changes.
+  ChoiceDialog choice;
 
   // Run builders (TUI-4): one argv-composing editor per batch command.
   std::vector<batches::BatchDef> batch_defs;
@@ -191,6 +198,7 @@ void draw_form_pane(State &s);
 void draw_batch_pane(State &s);
 void draw_settings_pane(State &s);
 void draw_scrollback_pane(State &s);
+void draw_choice_popup(State &s);
 
 // Per-overlay key handlers (panes_*.cpp + keys.cpp, called by handle_key).
 void palette_key(State &s, int ch);

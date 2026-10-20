@@ -21,7 +21,7 @@ namespace wengine::tui::forms::definitions {
           {"--u", "U", "voltage, e.g. 12V"},
           {"--i", "I", "current, e.g. 0.54A"},
           {"--r", "R", "resistance, e.g. 4Ohm"},
-          {"--from", "from", "bare-number order ui|ur|ir|iu|ru|ri"},
+          {"--from", "from", "bare-number order (Space: choose)", {"ui", "ur", "ir", "iu", "ru", "ri"}},
       },
       {
           argument("voltage", "Voltage (U)", 0, 0),

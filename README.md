@@ -109,11 +109,17 @@ Light, and Terminal. F3 opens guided
 forms; the command forms use declarative argument profiles in a two-pane
 builder (Ctrl-B then Left/Right switches panes, Space selects/deselects
 viable inputs; mode/op-specific fields are filtered and computed values are
-dimmed). `tests/tui_pty_smoke.py` checks Ohm pair selection and S0 mode
+dimmed). Enum-valued fields show a `[choice]` marker: Space opens an
+option dialog (Up/Down moves, Enter picks, Esc cancels) instead of typing,
+with static options declared once per field and registry vocabularies
+(solvers, signal kinds, `ic` chips/ops) resolved centrally, so future
+enum arguments scale without pane changes. `tests/tui_pty_smoke.py` checks Ohm pair selection and S0 mode
 switching. F4 opens run builders; both builders use the same two-pane
 pattern with solver/kind-specific options and prerequisite states (`sim run`
 hides signal-only UART/selects under projectile and gravity under signal;
-`sig run` shows duty only for square/pulse and `--rate` only with `--paced`).
+`sig run` shows duty only for square/pulse and `--rate` only with `--paced`),
+and the same Space-choice dialogs for `--solver`/`--sig-kind`/
+`--sig-quantity`/`--emit-uart-mode`.
 The PTY smoke exercises sim solver-profile switching and signal argument
 selection; non-TTY refusal (exit 1) and `--tui extra` usage (exit 2) are
 covered there too. Initial theme can
@@ -435,7 +441,7 @@ tests/  benchmarks/  examples/
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,entity_index,entity_generation,x,y,vx,vy` v3 with stable IDs, legacy 7-col still parses as unavailable, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions over a reused scratch buffer, `StrideSink` step-aligned decimation, drop counters); the snapshot reference is valid only for the call — retaining sinks copy or enqueue-owned before returning |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion. Two-level `ic` dispatch (`ic_dispatch.hpp` + `ic_registry.hpp`) keeps part-specific chips off the top level |
-| `tui` | `wengine/tui/exec.hpp`, `wengine/tui/async.hpp`, `wengine/tui/forms.hpp`, `wengine/tui/forms/` (shared types + one form definition per command), `wengine/tui/batches.hpp`, `wengine/tui/batches/` (shared types + one builder definition per command), `wengine/tui/views.hpp`, `wengine/tui/run.hpp`, `wengine/cli/cancel.hpp`, `src/tui/` | Ncurses front end (`PhysicsSimApp --tui`, `BUILD_TUI`): terminal handling only — every line runs on the async worker (`AsyncTask` + its own `Shell::execute`) with captured output, so TUI text stays byte-identical to the CLI by construction (full-registry parity matrix + completion == REPL); progress + step-boundary Ctrl-C cancel (sinks flushed/closed); guided forms compose argv strings only (F3 browser for closed-form families, with declarative required/optional argument profiles and mode/op-specific filtering in the two-pane builders; Ctrl-B then Left/Right switches panes and Space toggles viable arguments; F4 builders for `sim run` / `sig run` batches incl. solver/kind-aware, prerequisite-filtered arguments and `--forever`); output views render captured text only (PASS/FAIL/Error highlight, `/`+`n`/`N` scrollback search, F5 save-pane-to-file, wrapped resize reflow, visible scroll position, `TERM=dumb`/NO_COLOR fallback with loud refusal on cursor-less terminals); history is the shared REPL file; `ctest -R tui_pty_smoke` covers launch/run/complete/recall/quit + dynamic form and run-builder profiles on a PTY |
+| `tui` | `wengine/tui/exec.hpp`, `wengine/tui/async.hpp`, `wengine/tui/forms.hpp`, `wengine/tui/forms/` (shared types + one form definition per command), `wengine/tui/batches.hpp`, `wengine/tui/batches/` (shared types + one builder definition per command), `wengine/tui/choice.hpp` (shared ncurses-free enum-choice dialog model + per-field resolvers), `wengine/tui/views.hpp`, `wengine/tui/run.hpp`, `wengine/cli/cancel.hpp`, `src/tui/` | Ncurses front end (`PhysicsSimApp --tui`, `BUILD_TUI`): terminal handling only — every line runs on the async worker (`AsyncTask` + its own `Shell::execute`) with captured output, so TUI text stays byte-identical to the CLI by construction (full-registry parity matrix + completion == REPL); progress + step-boundary Ctrl-C cancel (sinks flushed/closed); guided forms compose argv strings only (F3 browser for closed-form families, with declarative required/optional argument profiles and mode/op-specific filtering in the two-pane builders; Ctrl-B then Left/Right switches panes and Space toggles viable arguments; Space on a `[choice]`-marked enum field opens the option dialog instead of typing (static options declared per field, registry vocabularies resolved centrally); F4 builders for `sim run` / `sig run` batches incl. solver/kind-aware, prerequisite-filtered arguments and `--forever`); output views render captured text only (PASS/FAIL/Error highlight, `/`+`n`/`N` scrollback search, F5 save-pane-to-file, wrapped resize reflow, visible scroll position, `TERM=dumb`/NO_COLOR fallback with loud refusal on cursor-less terminals); history is the shared REPL file; `ctest -R tui_pty_smoke` covers launch/run/complete/recall/quit + dynamic form and run-builder profiles + a choice-dialog open/cancel on a PTY |
 
 Dependency direction (never reversed):
 
@@ -603,11 +609,13 @@ every command golden + usage error + stray positional, completion ==
 REPL `complete_line`, shared-history file proof, palette/help/popup),
 `test_tui_forms` (compose-only parity matrices + argument-profile metadata),
 `test_tui_batches` (compose-only parity matrices + batch argument profiles),
+`test_tui_choice` (enum-choice dialogs: static + registry-derived options,
+dialog model, future-field scaling),
 `test_tui_async` (worker parity, busy/cancel/progress/emit-csv),
 `test_tui_views` (highlight/search/save/reflow/scroll/no-color), plus the
 headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`:
-launch/run/complete/recall/quit, history sharing, non-TTY + extra-args
-shapes). Benchmarks:
+launch/run/complete/recall/quit, history sharing, choice-dialog open/cancel,
+non-TTY + extra-args shapes). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_signal`
 (ns/source-step over a live Runner + SignalSolver, opaque params), `bench_signal_scale`
 (dense-vs-sparse bytes + ns/step, find_serial/fan-in slopes, subscriber
@@ -769,7 +777,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,sim,solver_registry,signal,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_async,tui_views}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,sim,solver_registry,signal,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_choice,tui_async,tui_views}.cpp
 plus the headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`).
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)

@@ -20,11 +20,15 @@ inline constexpr int kBatchCount = 2;
 
 // One editable builder field. `key` is the CLI flag; `flag` marks a bare
 // flag (no value). `label` is the short row name, `hint` the unit/example.
+// `choices` lists static enum options for the Space-opened choice dialog;
+// empty means free text or a dynamic vocabulary resolved by
+// `batch_field_choices` (solver/signal-kind).
 struct BatchField {
   std::string_view key;
   std::string_view label;
   std::string_view hint;
   bool flag = false;
+  std::vector<std::string_view> choices = {};
 };
 
 struct BatchArgument {
@@ -277,6 +281,36 @@ namespace detail {
 [[nodiscard]] inline std::string compose_line(const BatchDef &def,
                                               const std::vector<std::string> &values) {
   return compose_line(def, values, UINT64_MAX);
+}
+
+// Choice options for one field: static `choices` when declared, else the
+// registry-derived vocabulary (`--solver` from SolverRegistry,
+// `--sig-kind` from kKindNames). Empty means free text — Space keeps its
+// typing meaning there.
+[[nodiscard]] inline std::vector<std::string> batch_field_choices(const BatchDef &def, std::size_t field_index, const std::vector<std::string> & /*values*/) {
+  if (field_index >= def.fields.size()) {
+    return {};
+  }
+  if (!def.fields[field_index].choices.empty()) {
+    std::vector<std::string> out;
+    out.reserve(def.fields[field_index].choices.size());
+    for (std::string_view c : def.fields[field_index].choices) {
+      out.emplace_back(c);
+    }
+    return out;
+  }
+  const std::string_view key = def.fields[field_index].key;
+  if (key == "--solver") {
+    return solver_names();
+  }
+  if (key == "--sig-kind") {
+    return signal_kind_names();
+  }
+  return {};
+}
+
+[[nodiscard]] inline bool batch_field_has_choices(const BatchDef &def, std::size_t field_index, const std::vector<std::string> &values) {
+  return !batch_field_choices(def, field_index, values).empty();
 }
 
 } // namespace wengine::tui::batches

@@ -54,6 +54,146 @@ void draw_scrollback_pane(State &s) {
   }
 }
 
+// Solid floating choice panel (no line-art borders: chrome stays ASCII,
+// so this is exact on any locale). With colors the panel is a theme-accent
+// block with an inverted-accent selection and a drop shadow; without
+// colors it degrades to reverse-video blocks with the same layout.
+namespace {
+
+void paint_span(int y, int x, std::string_view text, std::size_t width, bool use_color, int pair, int attr) {
+  std::string line(width, ' ');
+  for (std::size_t i = 0; i < text.size() && i < line.size(); ++i) {
+    line[i] = text[i];
+  }
+  if (use_color && pair != 0) {
+    (void)attron(COLOR_PAIR(pair));
+  }
+  if (attr != 0) {
+    (void)attron(attr);
+  }
+  (void)mvaddnstr(y, x, line.c_str(), static_cast<int>(width));
+  if (attr != 0) {
+    (void)attroff(attr);
+  }
+  if (use_color && pair != 0) {
+    (void)attroff(COLOR_PAIR(pair));
+  }
+}
+
+} // namespace
+
+void draw_choice_popup(State &s) {
+  if (!s.choice.open) {
+    return;
+  }
+  if (s.overlay != Overlay::kForm && s.overlay != Overlay::kBatch) {
+    return;
+  }
+  const int rows = s.rows;
+  const int cols = s.cols;
+  if (rows < 10 || cols < 30) {
+    return;
+  }
+  // Rich styling needs the dialog pairs (installed when the terminal
+  // offers enough color pairs); otherwise the same layout renders in
+  // reverse video.
+  const bool rich = s.use_color && COLOR_PAIRS > views::kDialogShadowPair;
+
+  constexpr std::size_t kPad = 2;   // breathing room at each panel edge
+  constexpr std::size_t kMark = 2;  // "> " selection marker
+  constexpr std::string_view kFooter = "Up/Down move - Enter pick - Esc cancel";
+  std::size_t content = s.choice.title.size();
+  for (const auto &o : s.choice.options) {
+    if (o.size() > content) {
+      content = o.size();
+    }
+  }
+  if (kFooter.size() > content) {
+    content = kFooter.size();
+  }
+  std::size_t box_w = content + kPad * 2 + kMark;
+  const std::size_t max_w = static_cast<std::size_t>(cols) > 8 ? static_cast<std::size_t>(cols - 8) : std::size_t{22};
+  if (box_w > max_w) {
+    box_w = max_w;
+  }
+  const std::size_t text_w = box_w > kPad * 2 + kMark ? box_w - kPad * 2 - kMark : std::size_t{1};
+  const std::size_t max_visible = static_cast<std::size_t>(rows) > 12 ? static_cast<std::size_t>(rows - 12) : std::size_t{1};
+  const std::size_t total = s.choice.options.size();
+  const std::size_t visible = total < max_visible ? total : max_visible;
+  std::size_t top = 0;
+  if (s.choice.selected >= visible) {
+    top = s.choice.selected - visible + 1;
+  }
+  // Title + gap + options + gap + footer.
+  const int box_h = static_cast<int>(visible + 4);
+  const int y0 = (rows - box_h) / 2;
+  const int x0 = (cols - static_cast<int>(box_w)) / 2;
+  if (y0 < 1 || x0 < 1) {
+    return;
+  }
+
+  // Drop shadow: offset solid block, right + below the panel.
+  if (x0 + static_cast<int>(box_w) + 2 < cols && y0 + box_h + 1 < rows) {
+    const std::string shade(static_cast<std::size_t>(box_w), ' ');
+    for (int y = y0 + 1; y <= y0 + box_h; ++y) {
+      paint_span(y, x0 + 2, shade, box_w, rich, views::kDialogShadowPair, rich ? 0 : A_REVERSE);
+    }
+  }
+
+  const int body_pair = rich ? views::kDialogPair : 0;
+  const int body_attr = rich ? 0 : A_REVERSE;
+  const auto body_row = [&](int y, std::string_view text, int attr) {
+    paint_span(y, x0, std::string(kPad, ' ') + std::string(text), box_w, rich, body_pair, body_attr | attr);
+  };
+
+  // Title bar (bold) with a scroll counter when the list overflows.
+  std::string title(s.choice.title);
+  std::string counter;
+  if (total > visible) {
+    counter = std::to_string(top + 1) + "-" + std::to_string(top + visible) + "/" + std::to_string(total);
+  }
+  const std::size_t title_room = text_w + kMark;
+  if (title.size() > title_room) {
+    title.resize(title_room);
+  }
+  std::string title_row = title;
+  if (!counter.empty()) {
+    if (title_row.size() + 1 + counter.size() > title_room) {
+      title_row.resize(title_room - counter.size() - 1);
+    }
+    title_row += std::string(title_room - title_row.size() - counter.size(), ' ') + counter;
+  }
+  body_row(y0, title_row, A_BOLD);
+  body_row(y0 + 1, {}, 0);
+
+  for (std::size_t i = 0; i < visible; ++i) {
+    const std::size_t idx = top + i;
+    std::string label = s.choice.options[idx];
+    if (label.size() > text_w) {
+      label.resize(text_w);
+    }
+    const bool current = idx == s.choice.selected;
+    const std::string row_text = (current ? "> " : "  ") + label;
+    if (rich) {
+      paint_span(y0 + 2 + static_cast<int>(i), x0, std::string(kPad, ' ') + row_text, box_w,
+                 true, current ? views::kDialogSelPair : views::kDialogPair, current ? A_BOLD : 0);
+    } else {
+      // Mono modal: the panel is inverted, the pick inverts back out.
+      paint_span(y0 + 2 + static_cast<int>(i), x0, std::string(kPad, ' ') + row_text, box_w, false, 0, current ? A_BOLD : A_REVERSE);
+    }
+  }
+
+  body_row(y0 + 2 + static_cast<int>(visible), {}, 0);
+  std::string foot(kFooter);
+  if (foot.size() > title_room) {
+    foot.resize(title_room);
+  }
+  body_row(y0 + 3 + static_cast<int>(visible), foot, A_DIM);
+
+  const int cursor_row = y0 + 2 + static_cast<int>(s.choice.selected - top);
+  (void)wmove(stdscr, cursor_row, x0 + static_cast<int>(kPad) + 1);
+}
+
 void draw_frame(State &s) {
   const int rows = s.rows;
   const int cols = s.cols;
@@ -282,6 +422,9 @@ void draw_frame(State &s) {
     const int ccol = static_cast<int>(pre.size() + s.save_path.size());
     (void)wmove(stdscr, rows - 2, ccol < cols - 1 ? ccol : cols - 1);
   }
+  // Choice dialog draws last so its box stays on top and its wmove wins
+  // the cursor (it parks on the highlighted option).
+  draw_choice_popup(s);
   (void)wrefresh(stdscr);
 }
 

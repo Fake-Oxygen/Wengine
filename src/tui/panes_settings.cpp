@@ -94,6 +94,19 @@ void install_theme(const themes::Theme &theme, bool default_colors) {
   init(views::kFailPair, theme.fail);
   init(views::kPromptPair, theme.prompt);
   init(7, theme.background);
+  if (COLOR_PAIRS > views::kDialogShadowPair) {
+    // Floating choice-dialog styling, derived from the theme so every
+    // palette gets a matching modal: solid accent body, inverted-accent
+    // selection, black drop shadow. Chrome stays ASCII (spaces only), so
+    // this is exact on any locale; no-color terminals fall back to
+    // reverse-video blocks in the draw layer.
+    init(views::kDialogPair, theme.title);
+    init(views::kDialogSelPair, {theme.title.background, theme.title.foreground});
+    const auto shadow = [](short pair) {
+      (void)init_pair(pair, COLOR_BLACK, COLOR_BLACK);
+    };
+    shadow(views::kDialogShadowPair);
+  }
   (void)bkgd(COLOR_PAIR(7));
 }
 

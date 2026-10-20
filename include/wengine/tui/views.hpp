@@ -22,11 +22,16 @@
 namespace wengine::tui::views {
 
 // Color-pair ids for highlighted output lines (plus the title/status pairs
-// 1..3 owned by `src/tui/run.cpp`). The draw layer installs these when
-// `use_color` is true; the model never touches ncurses.
+// 1..3 owned by `src/tui/run.cpp` and the background pair 7 plus dialog
+// pairs 8..10 owned by `install_theme` in `src/tui/panes_settings.cpp`).
+// The draw layer installs these when `use_color` is true; the model never
+// touches ncurses.
 inline constexpr int kPassPair = 4;    // green text: PASS / OK verdicts
 inline constexpr int kFailPair = 5;    // red text: FAIL / Error / WARN
 inline constexpr int kPromptPair = 6;  // cyan text: echoed `> ` input lines
+inline constexpr int kDialogPair = 8;  // floating-panel body (theme accent block)
+inline constexpr int kDialogSelPair = 9;  // selected option (inverted accent block)
+inline constexpr int kDialogShadowPair = 10;  // drop shadow (solid black block)
 
 // One captured-text line's highlight class. Classification is purely
 // textual (substring match, no command knowledge) so new solvers need no

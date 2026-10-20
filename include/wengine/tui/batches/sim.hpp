@@ -9,8 +9,7 @@ namespace wengine::tui::batches::definitions {
   using cli::commands::SimSpec;
 
   const auto bit = [](unsigned index) { return std::uint64_t{1} << index; };
-  const auto argument = [&](std::size_t field,
-                            std::uint64_t requirements = 0U) {
+  const auto argument = [&](std::size_t field, std::uint64_t requirements = 0U) {
     return BatchArgument{field, bit(static_cast<unsigned>(field)), requirements};
   };
   const auto profile = [](std::string_view kind, std::uint64_t active,
@@ -55,7 +54,7 @@ namespace wengine::tui::batches::definitions {
       SimSpec::kDescription,
       SimSpec::kUsage,
       {
-          {"--solver", "solver", "registry: projectile|signal"},
+          {"--solver", "solver", "Space: choose registry solver"},
           {"--steps", "steps", "e.g. 100"},
           {"--dt", "dt", "e.g. 0.01s / 10ms"},
           {"--gravity", "gravity", "m/s^2, projectile only"},
@@ -79,7 +78,7 @@ namespace wengine::tui::batches::definitions {
           {"--emit-udp-select", "udp select", "serials e.g. 0 (signal only)"},
           {"--emit-udp-budget", "udp budget", "bytes 1..65507"},
           {"--emit-uart", "uart dev", "device[,baud] (signal only)"},
-          {"--emit-uart-mode", "uart mode", "ascii|cobs"},
+          {"--emit-uart-mode", "uart mode", "Space: choose ascii|cobs", false, {"ascii", "cobs"}},
           {"--emit-uart-stride", "uart stride", "0=muted, N>=1"},
           {"--emit-uart-select", "uart select", "serials e.g. 0 (signal only)"},
           {"--paced", "paced", "flag: 1 to enable wall-clock pacing", true},
