@@ -212,6 +212,7 @@ if(BUILD_CLI)
         src/cli/shell.cpp
         src/cli/line_reader.cpp
         src/cli/complete.cpp
+        src/cli/plot_sdl.cpp
         src/cli/commands/ohm.cpp
         src/cli/commands/s0.cpp
         src/cli/commands/i2c.cpp
@@ -234,6 +235,18 @@ if(BUILD_CLI)
         $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
             -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
     )
+
+    # Live `sig run --plot` window (system SDL2, like ncurses for the TUI:
+    # never vendored). Optional: without SDL2 the CLI still builds and
+    # --plot reports a rebuild hint at runtime (see wengine/cli/plot.hpp).
+    find_package(SDL2 QUIET)
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(wengine_cli PUBLIC SDL2::SDL2)
+        target_compile_definitions(wengine_cli PRIVATE WENGINE_HAVE_SDL2=1)
+        message(STATUS "WEngine live plot enabled (SDL2 --plot)")
+    else()
+        message(STATUS "WEngine live plot disabled (SDL2 not found: --plot reports a hint)")
+    endif()
 
     add_executable(PhysicsSimApp apps/cli/main.cpp)
     target_link_libraries(PhysicsSimApp PRIVATE wengine_cli)

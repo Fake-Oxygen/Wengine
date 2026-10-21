@@ -262,6 +262,10 @@ void test_sig_control_usage() {
     assert(rc == 2); // dimensional firewall: mA as volts fails
   }
   {
+    auto [rc, s] = run("list --control-tcp 127.0.0.1:1 --plot");
+    assert(rc == 2); // run-only flag never leaks into control modes
+  }
+  {
     auto [rc, s] = run("--help");
     assert(rc == 0 && s.find("sig add") != std::string::npos);
   }
@@ -301,6 +305,13 @@ void test_sig_run_finite() {
   {
     auto [rc, s] = run("run --steps 1 --sig-kind bogus");
     assert(rc == 2); // unknown kind at parse
+  }
+  {
+    // --plot is consumed as a run flag (validation precedes any window):
+    // bad steps still fail without opening a display.
+    auto [rc, s] = run("run --steps 0 --plot");
+    assert(rc == 2);
+    assert(s.find("steps must be >= 1") != std::string::npos);
   }
 }
 
@@ -482,7 +493,7 @@ void test_completion() {
            has(c, "--control-tcp") && has(c, "--control-uart") &&
            has(c, "--emit-uart") && has(c, "--emit-uart-mode") &&
            has(c, "--emit-uart-stride") && has(c, "--emit-uart-select") &&
-           has(c, "--paced") && has(c, "--rate") && has(c, "--sig-kind") &&
+           has(c, "--paced") && has(c, "--rate") && has(c, "--plot") && has(c, "--sig-kind") &&
            has(c, "--sig-freq") && has(c, "--sig-quantity") && has(c, "--sig-count") &&
            has(c, "--sig-expr") && has(c, "--sig-table") && has(c, "--sig-lua") &&
            has(c, "--sig-operands"));

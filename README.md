@@ -322,6 +322,7 @@ bloat `sim run`): unlimited sources, stamped U/I:
 > sig run --sig-kind table --sig-table wave.csv --steps 1000
 > sig run --sig-kind lua --sig-lua wah.lua --steps 1000
 > sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V --forever
+> sig run --sig-kind sine --sig-freq 1kHz --paced --plot   (live window)
 > sig run --sig-kind sine --sig-freq 1kHz --dt 0.1ms --emit-uart /dev/ttyUSB0 --emit-every 4
 ```
 
@@ -363,6 +364,18 @@ python3 examples/link_udp_signal_plot.py --port 9001 --history 1000
 ./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --sig-amp 3.3V \
   --steps 1000 --dt 0.1ms --emit-udp 127.0.0.1:9001
 ```
+
+Without any external app, `sig run --plot` opens an in-process live window
+instead (SDL2 build, needs a display) — independent of the `WEngineGui`
+backend and of the `--emit-*` receivers above:
+
+```sh
+./build/PhysicsSimApp sig run --sig-kind sine --sig-freq 1kHz --paced --plot
+```
+
+The window draws every emitted tick as it arrives; closing it stops the
+run at a step boundary like Ctrl-C, and a finished finite run parks the
+final frame until the window closes.
 
 Kinds: `sine square triangle saw dc pulse noise sum expression table lua`
 (`--sig-kind`, Tab-completed).

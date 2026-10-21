@@ -1,6 +1,7 @@
 #include "wengine/cli/cancel.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/cli/emit_options.hpp"
+#include "wengine/cli/plot.hpp"
 #include "wengine/cli/status.hpp"
 #include "wengine/core/run_config.hpp"
 #include "wengine/emit/routing.hpp"
@@ -76,7 +77,7 @@ bool combined_stop() noexcept {
   return sigint_requested() || cli::cancel_requested();
 }
 
-constexpr std::array<std::string_view, 42> kSigOptions{{
+constexpr std::array<std::string_view, 43> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
     "--sig-expr", "--sig-table", "--sig-lua", "--sig-operands", "--emit-csv", "--emit-shm", "--emit-tcp",
@@ -84,7 +85,7 @@ constexpr std::array<std::string_view, 42> kSigOptions{{
     "--emit-tcp-stride", "--emit-udp-stride", "--emit-udp-budget", "--emit-csv-select",
     "--emit-shm-select", "--emit-tcp-select", "--emit-udp-select", "--emit-health",
     "--emit-uart", "--emit-uart-mode", "--emit-uart-stride", "--emit-uart-select",
-    "--control-tcp", "--control-uart", "--forever", "--paced", "--rate", "--help", "-h",
+    "--control-tcp", "--control-uart", "--forever", "--paced", "--rate", "--plot", "--help", "-h",
 }};
 
 // Chunked live-output health (PHYSI-39): shared with sim run. Fast batches
@@ -254,6 +255,10 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   const bool forever = args.take_flag({"--forever"});
   const bool paced = args.take_flag({"--paced"});
   const bool emit_health = args.take_flag({"--emit-health"});
+  // Live plot window: in-process SDL2 2D view, independent of the GUI
+  // backend and of the external Python receivers (see --emit-tcp). The
+  // window observes emitted ticks only, like every other sink.
+  const bool plot = args.take_flag({"--plot"});
   const auto o_rate = o.rate;
   std::optional<std::string_view> csv_path = o.emit_csv;
   std::optional<std::string_view> shm_name = o.emit_shm;
@@ -890,8 +895,44 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
       return core::kExitRuntime;
     }
   }
+  // Live plot feed (in-process SDL2 window): a best-effort ISink that
+  // copies every emitted tick into the window's rolling history. Opened
+  // after validation/build so usage errors never pop a window.
+  PlotWindow plot_win;
+  struct PlotFeed final : public emit::ISink {
+    PlotWindow *win = nullptr;
+    void on_snapshot(const world::Snapshot &s) override {
+      if (win != nullptr && s.sig_value.size() == s.sig_serial.size()) {
+        win->push(s.sim_time, s.sig_serial.data(), s.sig_value.data(), s.sig_value.size());
+      }
+    }
+  };
+  PlotFeed plot_feed;
+  if (plot) {
+    if (!PlotWindow::supported()) {
+      out << "Error: --plot needs an SDL2 build (rebuild with SDL2 available)\n";
+      return core::kExitRuntime;
+    }
+    if (!plot_win.open("sig run --plot")) {
+      out << "Error: cannot open plot window (no display?)\n";
+      return core::kExitRuntime;
+    }
+    plot_feed.win = &plot_win;
+  }
+  bool plot_quit = false;
+  auto plot_pump = [&] {
+    if (!plot || plot_quit) {
+      return;
+    }
+    if (!plot_win.poll()) {
+      plot_quit = true;
+      return;
+    }
+    plot_win.render();
+  };
+
   world::State s;
-  std::array<emit::ISink *, 5> sink_arr{};
+  std::array<emit::ISink *, 6> sink_arr{};
   std::size_t n_sinks = 0;
   if (csv_out) {
     sink_arr[n_sinks++] = csv_out;
@@ -907,6 +948,9 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   }
   if (uart_out) {
     sink_arr[n_sinks++] = uart_out;
+  }
+  if (plot) {
+    sink_arr[n_sinks++] = &plot_feed;
   }
   for (std::size_t k = 0; k < n_sinks; ++k) {
     run.add_sink(*sink_arr[k]);
@@ -1012,7 +1056,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   };
   using SignalHandler = void (*)(int);
   SignalHandler previous_sigint = nullptr;
-  const bool handles_sigint = forever || paced;
+  const bool handles_sigint = forever || paced || plot;
   if (handles_sigint) {
     g_sigint_requested = 0;
     previous_sigint = std::signal(SIGINT, request_sigint);
@@ -1043,6 +1087,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     auto last_report = std::chrono::steady_clock::now();
     auto idle = [&] {
       ctl_on_idle();
+      plot_pump();
       if (tcp) {
         (void)tcp->service_pending();
       }
@@ -1057,9 +1102,12 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     };
     auto before_chunk = [&](std::uint64_t d) {
       ctl_service();
+      plot_pump();
       cli::progress_update(d);
     };
-    st = solvers::paced::run_paced<solvers::paced::SteadyClock>(run, total_steps, rate_hz, 1, epoch, combined_stop, idle, paced_stats, before_chunk);
+    // Window close stops paced runs like Ctrl-C (chunk granularity: 1 step).
+    auto paced_stop = [&] { return combined_stop() || plot_quit; };
+    st = solvers::paced::run_paced<solvers::paced::SteadyClock>(run, total_steps, rate_hz, 1, epoch, paced_stop, idle, paced_stats, before_chunk);
     done = paced_stats.steps_done;
     cli::progress_update(done);
   } else if (has_control) {
@@ -1068,7 +1116,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     // async worker stops here at a step boundary via the global cancel atom.
     done = 0;
     while (done < total_steps) {
-      if (cli::cancel_requested() || (forever && sigint_requested())) {
+      if (cli::cancel_requested() || (forever && sigint_requested()) || plot_quit) {
         break;
       }
       ctl_service();
@@ -1077,6 +1125,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
         break;
       }
       ++done;
+      plot_pump();
       cli::progress_update(done);
       if (emit_health && has_live && done % kHealthChunkSteps == 0) {
         print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(), sample_rate_hz);
@@ -1092,12 +1141,13 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     // stop the sim here — they surface per chunk and in the final summary.
     // The TUI async worker stops here the same way (global cancel atom).
     done = 0;
-    while (!combined_stop()) {
+    while (!combined_stop() && !plot_quit) {
       st = run.run(kHealthChunkSteps, &combined_stop);
       if (!st.ok()) {
         break;
       }
       done = run.state().step_index;
+      plot_pump();
       cli::progress_update(done);
       if (emit_health && has_live) {
         print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(), sample_rate_hz);
@@ -1109,7 +1159,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   } else {
     done = 0;
     while (done < total_steps) {
-      if (cli::cancel_requested()) {
+      if (cli::cancel_requested() || plot_quit) {
         break;
       }
       std::uint64_t n = kHealthChunkSteps;
@@ -1121,6 +1171,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
         break;
       }
       done = run.state().step_index;
+      plot_pump();
       cli::progress_update(done);
       if (emit_health && has_live && done < total_steps) {
         print_live_health(done, shm, tcp, udp, uart_live, wall_elapsed_s(), sample_rate_hz);
@@ -1128,6 +1179,16 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     }
   }
   cli::progress_end();
+  if (plot && !plot_quit && !sigint_requested() && !cli::cancel_requested()) {
+    // Finite runs park the final frame: the sim already finished, so this
+    // loop is display-only until the window closes (or Ctrl-C).
+    plot_win.render();
+    while (plot_win.poll() && !sigint_requested() && !cli::cancel_requested()) {
+      plot_win.render();
+      PlotWindow::wait_frame();
+    }
+    plot_quit = plot_win.should_close();
+  }
   if (handles_sigint) {
     (void)std::signal(SIGINT, previous_sigint);
   }
@@ -1160,8 +1221,8 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     out << "lua: " << *o_sig_lua << " (" << cfg.signal.lua.size() << " bytes)\n";
   }
   if (forever || done < total_steps) {
-    out << "steps: interrupted by Ctrl-C at " << s.step_index << " x " << dt
-        << "s -> t=" << s.sim_time << "s\n";
+    out << "steps: interrupted by " << (plot_quit ? "window close" : "Ctrl-C") << " at "
+        << s.step_index << " x " << dt << "s -> t=" << s.sim_time << "s\n";
   } else {
     out << "steps: " << steps << " x " << dt << "s -> t=" << s.sim_time << "s\n";
   }
@@ -1331,6 +1392,9 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
         << uctl->malformed() << " commands=" << uctl->commands_rx()
         << " responses=" << uctl->responses_tx()
         << " dropped=" << uctl->responses_dropped() << ")\n";
+  }
+  if (plot) {
+    out << "plot: live window (" << plot_win.samples() << " samples" << (plot_quit ? ", closed by user" : "") << ")\n";
   }
   return core::kExitOk;
 }
