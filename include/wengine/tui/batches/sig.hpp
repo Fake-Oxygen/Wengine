@@ -21,7 +21,7 @@ namespace wengine::tui::batches::definitions {
   // Runtime fields (steps/dt/emit/control/pacing) are shared by every kind;
   // signal fields (freq/amp/.../lua) vary per kind. Field indices must match
   // the `fields` order below (bit N == field N).
-  const std::uint64_t kRuntimeMask = bit(38) - bit(12);
+  const std::uint64_t kRuntimeMask = bit(39) - bit(12);
   const std::uint64_t kRuntimeDefault = bit(12) | bit(13);
   const std::uint64_t kPeriodicMask = bit(1) | bit(2) | bit(3) | bit(4) |
                                       bit(7) | bit(8);
@@ -72,6 +72,7 @@ namespace wengine::tui::batches::definitions {
           {"--rate", "rate", "wall steps/s, e.g. 1kHz (needs --paced)"},
           {"--forever", "forever", "flag: 1 runs until Ctrl-C (async, TUI-5)", true},
           {"--emit-health", "health", "flag: 1 for live-output report", true},
+          {"--plot", "plot", "flag: 1 for live SDL2 window", true},
       },
       {
           argument(1), argument(2), argument(3), argument(4), argument(5),
@@ -84,6 +85,7 @@ namespace wengine::tui::batches::definitions {
           argument(28), argument(29, bit(28)), argument(30, bit(28)),
           argument(31, bit(28)), argument(32), argument(33, bit(28)),
           argument(34), argument(35, bit(34)), argument(36), argument(37),
+          argument(38),
       },
       {
           profile("sine", kRuntimeMask | kPeriodicMask, 0U,

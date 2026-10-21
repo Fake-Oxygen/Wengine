@@ -173,7 +173,8 @@ void test_keys_match_complete_vocab() {
                                "--emit-udp-stride", "--emit-udp-select", "--emit-udp-budget",
                                "--emit-uart", "--emit-uart-mode", "--emit-uart-stride",
                                "--emit-uart-select", "--control-tcp", "--control-uart",
-                               "--paced", "--rate", "--forever", "--emit-health"}) {
+                               "--paced", "--rate", "--forever", "--emit-health",
+                               "--plot"}) {
       assert(field_index(*sig, k) >= 0);
     }
   }
@@ -214,7 +215,7 @@ void test_signal_argument_profiles() {
   const auto defs = tui::batches::batch_defs();
   const auto *sig = find_batch(defs, "sig");
   assert(sig != nullptr);
-  assert(sig->arguments.size() == 37);
+  assert(sig->arguments.size() == 38);
   assert(sig->profiles.size() == 12);
 
   const auto profile = [&](std::string_view name)
@@ -253,8 +254,9 @@ void test_signal_argument_profiles() {
   const auto *csv = argument("--emit-csv");
   const auto *csv_stride = argument("--emit-csv-stride");
   const auto *forever = argument("--forever");
+  const auto *plot = argument("--plot");
   assert(freq && duty && seed && expr && paced && rate && csv && csv_stride &&
-         forever);
+         forever && plot);
 
   assert(tui::batches::argument_state(*freq, sine->default_selected, *sine) ==
          tui::batches::ArgumentState::kSelected);
@@ -282,6 +284,10 @@ void test_signal_argument_profiles() {
   assert(tui::batches::argument_state(*csv_stride,
                                       sine->default_selected | csv->bit,
                                       *sine) ==
+         tui::batches::ArgumentState::kAvailable);
+  // --plot is a runtime flag like --paced: available in every profile,
+  // never required, never kind-gated.
+  assert(tui::batches::argument_state(*plot, sine->default_selected, *sine) ==
          tui::batches::ArgumentState::kAvailable);
   auto async_values = blank(*sig);
   set(async_values, *sig, "--sig-kind", "sine");
@@ -664,6 +670,21 @@ void test_parity_matrix() {
     set(v, *sig, "--forever", "1");
     assert(tui::batches::wants_async(*sig, v));
     assert(tui::batches::compose_line(*sig, v).find("--forever") != std::string::npos);
+  }
+  // sig: --plot composes the flag but is never executed here (it would
+  // pop a window; headless CI has no display). Finite plot runs complete
+  // synchronously on window close, so unlike --forever it stays sync.
+  {
+    auto v = blank(*sig);
+    set(v, *sig, "--sig-kind", "sine");
+    set(v, *sig, "--plot", "1");
+    assert(!tui::batches::wants_async(*sig, v));
+    assert(tui::batches::compose_line(*sig, v) ==
+           "sig run --sig-kind sine --plot");
+    auto w = blank(*sig);
+    set(w, *sig, "--sig-kind", "sine");
+    set(w, *sig, "--plot", "0");
+    assert(tui::batches::compose_line(*sig, w) == "sig run --sig-kind sine");
   }
 }
 
