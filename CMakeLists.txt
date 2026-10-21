@@ -223,6 +223,7 @@ if(BUILD_CLI)
         src/cli/commands/ic.cpp
         src/cli/commands/ic/ap63205.cpp
         src/cli/commands/ic/ina219.cpp
+        src/cli/commands/ic/tmc22xx.cpp
     )
     target_include_directories(wengine_cli PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -459,6 +460,10 @@ if(BUILD_TESTS)
     add_executable(test_ina219 tests/test_ina219.cpp)
     target_link_libraries(test_ina219 PRIVATE wengine_cli)
     add_test(NAME ina219 COMMAND test_ina219)
+
+    add_executable(test_tmc22xx tests/test_tmc22xx.cpp)
+    target_link_libraries(test_tmc22xx PRIVATE wengine_cli)
+    add_test(NAME tmc22xx COMMAND test_tmc22xx)
 
     add_executable(test_sim tests/test_sim.cpp)
     target_link_libraries(test_sim PRIVATE wengine_cli)

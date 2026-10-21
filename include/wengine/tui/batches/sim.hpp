@@ -8,12 +8,12 @@ namespace wengine::tui::batches::definitions {
 [[nodiscard]] inline BatchDef sim() {
   using cli::commands::SimSpec;
 
-  const auto bit = [](unsigned index) { return std::uint64_t{1} << index; };
-  const auto argument = [&](std::size_t field, std::uint64_t requirements = 0U) {
+  const auto bit = [](unsigned index) { return ArgSet::single(index); };
+  const auto argument = [&](std::size_t field, ArgSet requirements = ArgSet{}) {
     return BatchArgument{field, bit(static_cast<unsigned>(field)), requirements};
   };
-  const auto profile = [](std::string_view kind, std::uint64_t active,
-                          std::uint64_t required, std::uint64_t defaults,
+  const auto profile = [](std::string_view kind, const ArgSet &active,
+                          const ArgSet &required, const ArgSet &defaults,
                           bool supported = true, bool fallback = false) {
     return BatchProfile{kind, active, required, defaults, supported, fallback};
   };
@@ -22,30 +22,30 @@ namespace wengine::tui::batches::definitions {
   // --gravity is projectile-only; UART + all -select options need the
   // signal solver; strides/modes/budgets need their output; --rate needs
   // --paced. Nothing is strictly required: every option has a CLI default.
-  const std::uint64_t kSteps = bit(1) | bit(2);
-  const std::uint64_t kGravity = bit(3);
-  const std::uint64_t kParticles = bit(4) | bit(5) | bit(6) | bit(7) | bit(8);
-  const std::uint64_t kEmitEvery = bit(9);
-  const std::uint64_t kCsv = bit(10);
-  const std::uint64_t kCsvOpts = bit(11);
-  const std::uint64_t kShm = bit(13);
-  const std::uint64_t kShmOpts = bit(14);
-  const std::uint64_t kTcp = bit(16);
-  const std::uint64_t kTcpOpts = bit(17);
-  const std::uint64_t kUdp = bit(19);
-  const std::uint64_t kUdpOpts = bit(20) | bit(22);
-  const std::uint64_t kPaced = bit(27);
-  const std::uint64_t kHealth = bit(29);
-  const std::uint64_t kProjectileActive =
+  const ArgSet kSteps = bit(1) | bit(2);
+  const ArgSet kGravity = bit(3);
+  const ArgSet kParticles = bit(4) | bit(5) | bit(6) | bit(7) | bit(8);
+  const ArgSet kEmitEvery = bit(9);
+  const ArgSet kCsv = bit(10);
+  const ArgSet kCsvOpts = bit(11);
+  const ArgSet kShm = bit(13);
+  const ArgSet kShmOpts = bit(14);
+  const ArgSet kTcp = bit(16);
+  const ArgSet kTcpOpts = bit(17);
+  const ArgSet kUdp = bit(19);
+  const ArgSet kUdpOpts = bit(20) | bit(22);
+  const ArgSet kPaced = bit(27);
+  const ArgSet kHealth = bit(29);
+  const ArgSet kProjectileActive =
       kSteps | kGravity | kParticles | kEmitEvery | kCsv | kCsvOpts | kShm |
       kShmOpts | kTcp | kTcpOpts | kUdp | kUdpOpts | kPaced | bit(28) | kHealth;
-  const std::uint64_t kSignalActive =
+  const ArgSet kSignalActive =
       kSteps | kParticles | kEmitEvery | bit(10) | bit(11) | bit(12) | bit(13) |
       bit(14) | bit(15) | bit(16) | bit(17) | bit(18) | bit(19) | bit(20) |
       bit(21) | bit(22) | bit(23) | bit(24) | bit(25) | bit(26) | kPaced |
       bit(28) | kHealth;
-  const std::uint64_t kAllSimMask = bit(30) - bit(1);
-  const std::uint64_t kDefaultSelected = bit(1) | bit(4);
+  const ArgSet kAllSimMask = ArgSet::below(30) - ArgSet::below(1);
+  const ArgSet kDefaultSelected = bit(1) | bit(4);
 
   return {
       BatchKind::kSim,
@@ -97,9 +97,9 @@ namespace wengine::tui::batches::definitions {
           argument(29),
       },
       {
-          profile("projectile", kProjectileActive, 0U, kDefaultSelected),
-          profile("signal", kSignalActive, 0U, kDefaultSelected),
-          profile("other", kAllSimMask, 0U, kDefaultSelected, true, true),
+          profile("projectile", kProjectileActive, ArgSet{}, kDefaultSelected),
+          profile("signal", kSignalActive, ArgSet{}, kDefaultSelected),
+          profile("other", kAllSimMask, ArgSet{}, kDefaultSelected, true, true),
       },
   };
 }

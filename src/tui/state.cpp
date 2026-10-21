@@ -38,7 +38,7 @@ void init_state(State &s) {
   s.form_active_profile.reserve(s.form_defs.size());
   for (const auto &d : s.form_defs) {
     s.form_vals.emplace_back(d.fields.size());
-    s.form_arg_selected.push_back(0U);
+    s.form_arg_selected.emplace_back();
     s.form_active_profile.push_back(-1);
   }
   auto form_set = [&](std::string_view cmd, std::string_view key_or_label, std::string_view value) {
@@ -92,7 +92,7 @@ void init_state(State &s) {
   s.batch_active_profile.reserve(s.batch_defs.size());
   for (const auto &d : s.batch_defs) {
     s.batch_vals.emplace_back(d.fields.size());
-    s.batch_arg_selected.push_back(0U);
+    s.batch_arg_selected.emplace_back();
     s.batch_active_profile.push_back(-1);
   }
   auto batch_set = [&](std::string_view cmd, std::string_view key, std::string_view value) {

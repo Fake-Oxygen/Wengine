@@ -63,7 +63,7 @@ const forms::ArgumentProfile *sync_form_profile(State &s, std::size_t form) {
   return &def.profiles[index];
 }
 
-bool form_field_visible(const forms::FormDef &def, const forms::ArgumentProfile &profile, std::size_t field, std::uint64_t selected) {
+bool form_field_visible(const forms::FormDef &def, const forms::ArgumentProfile &profile, std::size_t field, const ArgSet &selected) {
   for (const forms::ArgumentDef &argument : def.arguments) {
     if (argument.user_input && argument.field_index == field) {
       return forms::argument_state(argument, selected, profile) == forms::ArgumentState::kSelected;
@@ -72,7 +72,7 @@ bool form_field_visible(const forms::FormDef &def, const forms::ArgumentProfile 
   return true;
 }
 
-std::size_t step_form_argument(const forms::FormDef &def, const forms::ArgumentProfile &profile, std::uint64_t selected, std::size_t current,
+std::size_t step_form_argument(const forms::FormDef &def, const forms::ArgumentProfile &profile, const ArgSet &selected, std::size_t current,
                                int direction) {
   std::size_t candidate = current;
   for (std::size_t n = 0; n < def.arguments.size(); ++n) {
@@ -103,7 +103,7 @@ void draw_dynamic_form(State &s, std::size_t sfi) {
     return;
   }
   const std::vector<std::string> &vals = s.form_vals[sfi];
-  const std::uint64_t selected = s.form_arg_selected[sfi];
+  const ArgSet selected = s.form_arg_selected[sfi];
   const int left_width = cols / 2;
   const int right_x = left_width + 1;
   const int right_width = cols - right_x;
@@ -545,7 +545,7 @@ void form_key(State &s, int ch) {
       const forms::ArgumentState state = forms::argument_state(
           argument, s.form_arg_selected[sfi], *profile);
       if (state == forms::ArgumentState::kSelected) {
-        s.form_arg_selected[sfi] &= ~argument.bit;
+        s.form_arg_selected[sfi] -= argument.bit;
         if (s.form_field < nfields &&
             !form_field_visible(def, *profile, s.form_field,
                                 s.form_arg_selected[sfi])) {

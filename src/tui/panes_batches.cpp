@@ -61,11 +61,11 @@ const batches::BatchProfile *sync_batch_profile(State &s, std::size_t batch) {
   return &def.profiles[index];
 }
 
-bool batch_field_visible(const batches::BatchDef &def, std::size_t field, std::uint64_t selected) {
+bool batch_field_visible(const batches::BatchDef &def, std::size_t field, const ArgSet &selected) {
   return batches::field_visible(def, field, selected);
 }
 
-std::vector<std::size_t> batch_argument_rows(const batches::BatchDef &def, const batches::BatchProfile &profile, std::uint64_t selected) {
+std::vector<std::size_t> batch_argument_rows(const batches::BatchDef &def, const batches::BatchProfile &profile, const ArgSet &selected) {
   std::vector<std::size_t> rows;
   for (std::size_t i = 0; i < def.arguments.size(); ++i) {
     if (batches::argument_state(def.arguments[i], selected, profile) != batches::ArgumentState::kInactive) {
@@ -77,7 +77,7 @@ std::vector<std::size_t> batch_argument_rows(const batches::BatchDef &def, const
 
 std::size_t step_batch_argument(const batches::BatchDef &def,
                                  const batches::BatchProfile &profile,
-                                 std::uint64_t selected, std::size_t current,
+                                 const ArgSet &selected, std::size_t current,
                                  int direction) {
   const auto rows = batch_argument_rows(def, profile, selected);
   for (std::size_t i = 0; i < rows.size(); ++i) {
@@ -92,7 +92,7 @@ std::size_t step_batch_argument(const batches::BatchDef &def,
   return rows.empty() ? current : rows.front();
 }
 
-std::size_t first_visible_batch_field(const batches::BatchDef &def, std::uint64_t selected) {
+std::size_t first_visible_batch_field(const batches::BatchDef &def, const ArgSet &selected) {
   for (std::size_t i = 0; i < def.fields.size(); ++i) {
     if (batch_field_visible(def, i, selected)) {
       return i;
@@ -108,7 +108,7 @@ void draw_dynamic_batch(State &s, std::size_t sbi) {
     return;
   }
   const std::vector<std::string> &values = s.batch_vals[sbi];
-  const std::uint64_t selected = s.batch_arg_selected[sbi];
+  const ArgSet selected = s.batch_arg_selected[sbi];
   const int cols = s.cols;
   const int out_rows = s.out_rows;
   const int left_width = cols / 2;
@@ -309,7 +309,7 @@ void draw_dynamic_batch(State &s, std::size_t sbi) {
     case batches::ArgumentState::kBlocked: {
       std::string required;
       for (const batches::BatchArgument &candidate : def.arguments) {
-        if ((argument.requires_mask & candidate.bit) != 0U) {
+        if ((argument.requires_mask & candidate.bit).any()) {
           required = std::string(def.fields[candidate.field_index].label);
           break;
         }
@@ -642,7 +642,7 @@ void batch_key(State &s, int ch) {
       const batches::ArgumentState state = batches::argument_state(
           argument, s.batch_arg_selected[sbi], *profile);
       if (state == batches::ArgumentState::kSelected) {
-        s.batch_arg_selected[sbi] &= ~argument.bit;
+        s.batch_arg_selected[sbi] -= argument.bit;
         if (s.batch_field < bnfields &&
             !batch_field_visible(def, s.batch_field,
                                  s.batch_arg_selected[sbi])) {
@@ -665,8 +665,8 @@ void batch_key(State &s, int ch) {
       } else {
         std::string missing;
         for (const batches::BatchArgument &candidate : def.arguments) {
-          if ((argument.requires_mask & candidate.bit) != 0U &&
-              (s.batch_arg_selected[sbi] & candidate.bit) == 0U) {
+          if ((argument.requires_mask & candidate.bit).any() &&
+              !(s.batch_arg_selected[sbi] & candidate.bit).any()) {
             missing = std::string(def.fields[candidate.field_index].label);
             break;
           }

@@ -250,6 +250,10 @@ the top level):
 > ic ina219 cal --imax 15A --rshunt 2mOhm     # Cal/PGA/BRNG design (SBOS448G)
 > ic ina219 decode --shunt 0x07D0 --bus 0x5D98 --cal 20480 --lsb 1mA
 > ic ina219 config --brng 16 --pga 40 --avg 128 --mode bus
+> ic tmc22xx current --rsense 220mOhm         # IRMS/peak vs 1.2A/2A ratings
+> ic tmc22xx chop --freq 25kHz --fclk 12MHz   # TOFF/tBLANK from chopper target
+> ic tmc22xx stealth --vm 24V --rcoil 5Ohm --icoil 0.5A  # ILower + PWM_AMPL
+> ic tmc22xx velocity --tpwmthrs 500 --fclk 12MHz  # TSTEP<->Hz/rpm/VACTUAL
 ```
 
 Each chip dispatches its own subcommands (`ic <chip> <op> [options]`);
@@ -537,7 +541,9 @@ point goldens + CLI run/usage/stray/completion), `test_led` (LED resistor
 goldens incl. E12 recompute + CLI run/usage/stray/completion), `test_ic` (two-level
 `ic` dispatch incl. chip completion), `test_ap63205` (AP63205 datasheet
 goldens + CLI run/usage/stray/completion), `test_ina219` (INA219 calibration
-goldens Sec. 9.2.2 + CLI run/usage/stray/completion), `test_sim` (link cli),
+goldens Sec. 9.2.2 + CLI run/usage/stray/completion), `test_tmc22xx` (TMC22xx
+Rev. 1.14 current/chopper/StealthChop/standby/UART goldens + CLI run/usage/
+stray/completion), `test_sim` (link cli),
 `test_solver_registry`, `test_runner`, `test_signal` (waveform goldens,
 seeded-noise sequence, solver end-of-step convention, headless signal
 config + rejections, signal Frame adapter + wire round-trip, signals CSV
@@ -790,7 +796,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,sim,solver_registry,signal,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_choice,tui_async,tui_views}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,tmc22xx,sim,solver_registry,signal,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_choice,tui_async,tui_views}.cpp
 plus the headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`).
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)

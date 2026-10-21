@@ -20,6 +20,7 @@
 // `cli::Shell::execute`), so panes never parse commands or call solvers.
 
 #include "wengine/cli/line_reader.hpp"
+#include "wengine/tui/arg_set.hpp"
 #include "wengine/tui/async.hpp"
 #include "wengine/tui/batches.hpp"
 #include "wengine/tui/choice.hpp"
@@ -90,7 +91,7 @@ struct State {
   int open_form = -1; // index into form_defs while Overlay::kForm is active
   std::size_t form_field = 0; // 0..fields.size() (last row = Submit)
   std::size_t form_col = 0; // cursor within the active field value
-  std::vector<std::uint64_t> form_arg_selected;
+  std::vector<ArgSet> form_arg_selected;
   std::vector<int> form_active_profile;
   std::size_t form_arg_sel = 0;
   int form_active_pane = 0; // 0: command builder, 1: argument choices
@@ -110,7 +111,7 @@ struct State {
   // Run builders (TUI-4): one argv-composing editor per batch command.
   std::vector<batches::BatchDef> batch_defs;
   std::vector<std::vector<std::string>> batch_vals;
-  std::vector<std::uint64_t> batch_arg_selected;
+  std::vector<ArgSet> batch_arg_selected;
   std::vector<int> batch_active_profile;
   std::size_t batches_sel = 0;
   int open_batch = -1; // index into batch_defs while Overlay::kBatch is active

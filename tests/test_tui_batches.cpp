@@ -275,7 +275,7 @@ void test_signal_argument_profiles() {
 
   assert(tui::batches::argument_state(*rate, sine->default_selected, *sine) ==
          tui::batches::ArgumentState::kBlocked);
-  const std::uint64_t paced_selected = sine->default_selected | paced->bit;
+  const auto paced_selected = sine->default_selected | paced->bit;
   assert(tui::batches::argument_state(*rate, paced_selected, *sine) ==
          tui::batches::ArgumentState::kAvailable);
   assert(tui::batches::argument_state(*csv_stride, sine->default_selected,
@@ -405,9 +405,9 @@ void test_sim_argument_profiles() {
          tui::batches::ArgumentState::kAvailable);
 
   // Defaults cover the session prefills (solver=projectile, steps, particles).
-  assert((projectile->default_selected & steps->bit) != 0U);
-  assert((projectile->default_selected & particles->bit) != 0U);
-  assert((signal->default_selected & steps->bit) != 0U);
+  assert((projectile->default_selected & steps->bit).any());
+  assert((projectile->default_selected & particles->bit).any());
+  assert((signal->default_selected & steps->bit).any());
 
   // Profile switching follows the --solver field, like --sig-kind for sig.
   auto signal_values = blank(*sim);

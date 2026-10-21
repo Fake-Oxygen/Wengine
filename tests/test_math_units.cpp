@@ -29,6 +29,13 @@ void test_value_comparisons() {
   assert(!(12.0_V < 12.0_V));
   // Cross-magnitude via literals (kV vs V share the dimension).
   assert(0.012_kW > 3.0_W);
+  // MHz literal spot-check (scale-table proof is table-driven above).
+  static_assert(12.0_MHz == 12000000.0_Hz);
+  assert(1.0_MHz == 1000.0_Hz + 999000.0_Hz);
+  // rpm/rps literals (motor-speed spellings of the Frequency table).
+  static_assert(1.0_rps == 1.0_Hz);
+  static_assert(60.0_rpm == 1.0_Hz);
+  assert((60.0_rpm).get() == 1.0 && (1.0_rps).get() == 1.0);
 }
 
 void test_value_printing() {

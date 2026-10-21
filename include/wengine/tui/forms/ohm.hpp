@@ -30,9 +30,9 @@ namespace wengine::tui::forms::definitions {
           argument("power", "Power (P)", ArgumentDef::kNoField, 3, false),
       },
       {profile("ohm", {},
-               {rule(bit(0) | bit(1), 0U, bit(2), bit(3)),
-                rule(bit(0) | bit(2), 0U, bit(1), bit(3)),
-                rule(bit(1) | bit(2), 0U, bit(0), bit(3))},
+               {rule(bit(0) | bit(1), {}, bit(2), bit(3)),
+                rule(bit(0) | bit(2), {}, bit(1), bit(3)),
+                rule(bit(1) | bit(2), {}, bit(0), bit(3))},
                bit(0) | bit(1))},
   };
 }

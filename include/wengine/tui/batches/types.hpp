@@ -5,9 +5,9 @@
 
 #include "wengine/signal/types.hpp"
 #include "wengine/solvers/solver_registry.hpp"
+#include "wengine/tui/arg_set.hpp"
 
 #include <cstddef>
-#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,15 +33,15 @@ struct BatchField {
 
 struct BatchArgument {
   std::size_t field_index;
-  std::uint64_t bit;
-  std::uint64_t requires_mask = 0;
+  ArgSet bit; // singleton {bit_index}: which set slot this argument occupies
+  ArgSet requires_mask;
 };
 
 struct BatchProfile {
   std::string_view kind;
-  std::uint64_t active_mask;
-  std::uint64_t required_mask = 0;
-  std::uint64_t default_selected = 0;
+  ArgSet active_mask;
+  ArgSet required_mask;
+  ArgSet default_selected;
   bool supported = true;
   bool fallback = false;
 };
@@ -140,6 +140,16 @@ namespace detail {
   return !(low == "0" || low == "false" || low == "no" || low == "off" || low == "n" || low == "f");
 }
 
+// Union of every builder argument slot: the "everything selected"
+// default composes all non-empty fields however many options arrive.
+[[nodiscard]] inline ArgSet all_arguments(const BatchDef &def) {
+  ArgSet out;
+  for (const BatchArgument &argument : def.arguments) {
+    out |= argument.bit;
+  }
+  return out;
+}
+
 } // namespace detail
 
 [[nodiscard]] inline std::size_t batch_profile_index(
@@ -160,54 +170,43 @@ namespace detail {
   return fallback;
 }
 
-[[nodiscard]] inline std::uint64_t batch_profile_default_selection(
-    const BatchDef &def, const std::vector<std::string> &values) noexcept {
+[[nodiscard]] inline ArgSet batch_profile_default_selection(const BatchDef &def, const std::vector<std::string> &values) {
   const std::size_t index = batch_profile_index(def, values);
-  return index < def.profiles.size()
-      ? def.profiles[index].default_selected : 0U;
+  return index < def.profiles.size() ? def.profiles[index].default_selected : ArgSet{};
 }
 
-[[nodiscard]] inline ArgumentState argument_state(
-    const BatchArgument &argument, std::uint64_t selected,
-    const BatchProfile &profile) noexcept {
-  if ((profile.active_mask & argument.bit) == 0U) {
+[[nodiscard]] inline ArgumentState argument_state(const BatchArgument &argument, const ArgSet &selected, const BatchProfile &profile) {
+  if (!(profile.active_mask & argument.bit).any()) {
     return ArgumentState::kInactive;
   }
-  if ((selected & argument.bit) != 0U) {
+  if ((selected & argument.bit).any()) {
     return ArgumentState::kSelected;
   }
-  if ((selected & argument.requires_mask) != argument.requires_mask) {
+  if ((argument.requires_mask - selected).any()) {
     return ArgumentState::kBlocked;
   }
   return ArgumentState::kAvailable;
 }
 
-[[nodiscard]] inline bool argument_required(
-    const BatchArgument &argument, const BatchProfile &profile) noexcept {
-  return (profile.required_mask & argument.bit) != 0U;
+[[nodiscard]] inline bool argument_required(const BatchArgument &argument, const BatchProfile &profile) {
+  return (profile.required_mask & argument.bit).any();
 }
 
-[[nodiscard]] inline bool field_visible(const BatchDef &def,
-                                        std::size_t field_index,
-                                        std::uint64_t selected) noexcept {
+[[nodiscard]] inline bool field_visible(const BatchDef &def, std::size_t field_index, const ArgSet &selected) {
   for (const BatchArgument &argument : def.arguments) {
     if (argument.field_index == field_index) {
-      return (selected & argument.bit) != 0U;
+      return (selected & argument.bit).any();
     }
   }
   return true;
 }
 
 // True when the builder values request a bare flag field.
-[[nodiscard]] inline bool field_flag_set(const BatchDef &def,
-                                         const std::vector<std::string> &values,
-                                         std::string_view key,
-                                         std::uint64_t selected) {
+[[nodiscard]] inline bool field_flag_set(const BatchDef &def, const std::vector<std::string> &values, std::string_view key, const ArgSet &selected) {
   for (std::size_t i = 0; i < def.fields.size() && i < values.size(); ++i) {
     if (def.fields[i].key == key && def.fields[i].flag) {
       for (const BatchArgument &argument : def.arguments) {
-        if (argument.field_index == i &&
-            (selected & argument.bit) == 0U) {
+        if (argument.field_index == i && !(selected & argument.bit).any()) {
           return false;
         }
       }
@@ -221,30 +220,23 @@ namespace detail {
 // Ctrl-C, which would block the builder loop exactly like a long batch
 // blocks the REPL today. The ncurses layer routes such lines to the
 // async worker (TUI-5) and never calls `execute_line` with them.
-[[nodiscard]] inline bool wants_async(const BatchDef &def,
-                                      const std::vector<std::string> &values,
-                                      std::uint64_t selected) {
+[[nodiscard]] inline bool wants_async(const BatchDef &def, const std::vector<std::string> &values, const ArgSet &selected) {
   return field_flag_set(def, values, "--forever", selected);
 }
 
-[[nodiscard]] inline bool field_flag_set(const BatchDef &def,
-                                         const std::vector<std::string> &values,
-                                         std::string_view key) {
-  return field_flag_set(def, values, key, UINT64_MAX);
+[[nodiscard]] inline bool field_flag_set(const BatchDef &def, const std::vector<std::string> &values, std::string_view key) {
+  return field_flag_set(def, values, key, detail::all_arguments(def));
 }
 
-[[nodiscard]] inline bool wants_async(const BatchDef &def,
-                                      const std::vector<std::string> &values) {
-  return wants_async(def, values, UINT64_MAX);
+[[nodiscard]] inline bool wants_async(const BatchDef &def, const std::vector<std::string> &values) {
+  return wants_async(def, values, detail::all_arguments(def));
 }
 
 // Compose the CLI line for `def` with `values[i]` in each field.
 // Empty-after-trim fields are omitted (missing option); bare flags emit
 // the key only when enabled; nothing is validated here — the executor
 // (CLI) reports all errors.
-[[nodiscard]] inline std::string compose_line(const BatchDef &def,
-                                              const std::vector<std::string> &values,
-                                              std::uint64_t selected_arguments) {
+[[nodiscard]] inline std::string compose_line(const BatchDef &def, const std::vector<std::string> &values, const ArgSet &selected_arguments) {
   std::string line(def.command);
   line.push_back(' ');
   line += def.mode;
@@ -252,7 +244,7 @@ namespace detail {
     bool selected = true;
     for (const BatchArgument &argument : def.arguments) {
       if (argument.field_index == i) {
-        selected = (selected_arguments & argument.bit) != 0U;
+        selected = (selected_arguments & argument.bit).any();
         break;
       }
     }
@@ -278,9 +270,8 @@ namespace detail {
   return line;
 }
 
-[[nodiscard]] inline std::string compose_line(const BatchDef &def,
-                                              const std::vector<std::string> &values) {
-  return compose_line(def, values, UINT64_MAX);
+[[nodiscard]] inline std::string compose_line(const BatchDef &def, const std::vector<std::string> &values) {
+  return compose_line(def, values, detail::all_arguments(def));
 }
 
 // Choice options for one field: static `choices` when declared, else the

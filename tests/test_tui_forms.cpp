@@ -13,7 +13,7 @@
 #include "wengine/cli/shell.hpp"
 
 #include <cassert>
-#include <cstdint>
+#include <initializer_list>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -189,25 +189,43 @@ void test_ic_registry_driven() {
     assert(found);
   }
   assert(tui::forms::ic_op_names("nope-chip").empty());
-  // The ic form covers the chip's option vocabulary.
-  const auto opts = tui::forms::ic_option_names("ap63205");
+  // Every registered chip is covered: each completion option has a form
+  // field and each op has a guided profile. Adding a chip can only add
+  // fields/profiles, never revisit this loop.
   const auto defs = tui::forms::form_defs();
   const auto *ic = find_form(defs, "ic");
   assert(ic != nullptr);
   assert(field_index(*ic, "chip") >= 0 && field_index(*ic, "op") >= 0);
-  for (const auto &o : opts) {
-    if (o == "--help" || o == "-h") {
-      continue; // help lives in the help pane, not the form
+  auto has_profile = [&](std::string_view chip, std::string_view op) {
+    for (const auto &profile : ic->profiles) {
+      bool chip_ok = false;
+      bool op_ok = false;
+      for (const auto &sel : profile.selectors) {
+        chip_ok = chip_ok || (sel.field_index == 0 && sel.value == chip);
+        op_ok = op_ok || (sel.field_index == 1 && sel.value == op);
+      }
+      if (chip_ok && op_ok) {
+        return true;
+      }
     }
-    assert(field_index(*ic, o) >= 0);
-  }
-  const auto ina_opts = tui::forms::ic_option_names("ina219");
-  assert(!ina_opts.empty());
-  for (const auto &o : ina_opts) {
-    if (o == "--help" || o == "-h") {
-      continue;
+    return false;
+  };
+  const auto all_chips = tui::forms::ic_chip_names();
+  assert(!all_chips.empty());
+  for (const auto &chip : all_chips) {
+    const auto chip_opts = tui::forms::ic_option_names(chip);
+    assert(!chip_opts.empty());
+    for (const auto &o : chip_opts) {
+      if (o == "--help" || o == "-h") {
+        continue; // help lives in the help pane, not the form
+      }
+      assert(field_index(*ic, o) >= 0);
     }
-    assert(field_index(*ic, o) >= 0);
+    const auto chip_ops = tui::forms::ic_op_names(chip);
+    assert(!chip_ops.empty());
+    for (const auto &op : chip_ops) {
+      assert(has_profile(chip, op));
+    }
   }
 }
 
@@ -259,13 +277,13 @@ void test_argument_definitions() {
       }
     }
     assert(false);
-    return std::uint64_t{0};
+    return tui::ArgSet{};
   };
-  const std::uint64_t voltage = bit("voltage");
-  const std::uint64_t current = bit("current");
-  const std::uint64_t resistance = bit("resistance");
-  const std::uint64_t power = bit("power");
-  const std::uint64_t selected = current | resistance;
+  const auto voltage = bit("voltage");
+  const auto current = bit("current");
+  const auto resistance = bit("resistance");
+  const auto power = bit("power");
+  const auto selected = current | resistance;
 
   for (const auto &argument : ohm->arguments) {
     if (argument.name == "voltage") {
@@ -296,7 +314,7 @@ void test_argument_definitions() {
   set(vals, *ohm, "--r", "4Ohm");
   assert(tui::forms::compose_line(*ohm, vals, voltage | current) ==
          "ohm --u 12V --i 3A");
-  assert(power != 0U);
+  assert(power.any());
 
   const auto *s0 = find_form(defs, "s0");
   const auto *i2c = find_form(defs, "i2c");
@@ -340,12 +358,12 @@ void test_argument_definitions() {
   };
   const auto *rs = find_argument(*i2c, "rs");
   assert(rs != nullptr);
-  assert(tui::forms::argument_state(*rs, 0U, *i2c_pullup) ==
+  assert(tui::forms::argument_state(*rs, tui::ArgSet{}, *i2c_pullup) ==
          tui::forms::ArgumentState::kInactive);
-  assert(tui::forms::argument_state(*rs, 0U, *i2c_series) ==
+  assert(tui::forms::argument_state(*rs, tui::ArgSet{}, *i2c_series) ==
          tui::forms::ArgumentState::kAvailable);
-  assert(ldo->profiles.front().rules.front().required_mask == 0b111U);
-  assert(led->profiles.front().rules.front().required_mask == 0b111U);
+  assert(ldo->profiles.front().rules.front().required_mask == tui::ArgSet::below(3));
+  assert(led->profiles.front().rules.front().required_mask == tui::ArgSet::below(3));
   const auto *ap_delay = profile_named(*ic, "ap63205-delay");
   const auto *ap_inductor = profile_named(*ic, "ap63205-inductor");
   const auto *ina_shunt = profile_named(*ic, "ina219-shunt");
@@ -364,8 +382,8 @@ void test_argument_definitions() {
          tui::forms::ArgumentState::kBlocked);
   const auto *s0_constant = find_argument(*s0, "constant");
   assert(s0_constant != nullptr);
-  const std::uint64_t energy_branch =
-      s0_pulses->default_selected & ~power_input->bit & ~time_input->bit;
+  const tui::ArgSet energy_branch =
+      s0_pulses->default_selected - power_input->bit - time_input->bit;
   assert(energy_branch == s0_constant->bit);
   assert(tui::forms::argument_state(*energy, energy_branch, *s0_pulses) ==
          tui::forms::ArgumentState::kAvailable);
@@ -376,9 +394,9 @@ void test_argument_definitions() {
   assert(tui::forms::argument_state(*delay_cd, ap_delay->default_selected,
                                     *ap_delay) ==
          tui::forms::ArgumentState::kBlocked);
-  assert(tui::forms::argument_state(*delay_cd, 0U, *ap_delay) ==
+  assert(tui::forms::argument_state(*delay_cd, tui::ArgSet{}, *ap_delay) ==
          tui::forms::ArgumentState::kAvailable);
-  assert(tui::forms::argument_state(*delay_ts, 0U, *ap_delay) ==
+  assert(tui::forms::argument_state(*delay_ts, tui::ArgSet{}, *ap_delay) ==
          tui::forms::ArgumentState::kAvailable);
 
   const auto *ina_bits = find_argument(*ic, "bits");
@@ -719,6 +737,43 @@ void test_parity_matrix() {
     set(v, *ic, "op", "spec");
     check_parity(exec, shell, *ic, v);
   }
+
+  // tmc22xx: one parity case per op (same goldens as test_tmc22xx).
+  auto tmc = [&](std::string_view op,
+                 std::initializer_list<std::pair<std::string_view, std::string_view>> kv) {
+    auto v = blank(*ic);
+    set(v, *ic, "chip", "tmc22xx");
+    set(v, *ic, "op", op);
+    for (const auto &[k, val] : kv) {
+      set(v, *ic, k, val);
+    }
+    check_parity(exec, shell, *ic, v);
+  };
+  tmc("current", {{"--rsense", "220mOhm"}});
+  tmc("current", {{"--rsense", "220mOhm"}, {"--irun", "16"}, {"--vsense", "1"}});
+  tmc("rsense", {{"--imax", "1A"}});
+  tmc("rdson", {{"--rref", "10kOhm"}});
+  tmc("rdson", {{"--ipeak", "1.5A"}});
+  tmc("chop", {{"--toff", "3"}, {"--fclk", "12MHz"}, {"--tbl", "2"}});
+  tmc("chop", {{"--freq", "25kHz"}, {"--fclk", "16MHz"}});
+  tmc("hyst", {{"--hend", "6"}, {"--hstrt", "0"}});
+  tmc("pwmfreq", {{"--fclk", "12MHz"}, {"--sel", "1"}});
+  tmc("velocity", {{"--tpwmthrs", "500"}, {"--fclk", "12MHz"}});
+  tmc("velocity", {{"--vactual", "1000"}, {"--fclk", "12MHz"}});
+  tmc("velocity", {{"--vel", "24kHz"}, {"--fclk", "12MHz"}});
+  tmc("velocity", {{"--vel", "28.125rpm"}, {"--fsc", "200"}, {"--fclk", "12MHz"}});
+  tmc("stealth", {{"--vm", "24V"}, {"--rcoil", "5Ohm"}, {"--icoil", "0.5A"}, {"--tbl", "1"}});
+  tmc("grad", {{"--torque", "0.4"}, {"--icoilnom", "1A"}, {"--vm", "24V"}});
+  tmc("grad", {{"--cbemf", "0.2"}, {"--vm", "24V"}});
+  tmc("standby", {{"--tpowerdown", "20"}, {"--fclk", "12MHz"}});
+  tmc("thermal", {{"--irms", "1A"}});
+  tmc("mres", {{"--code", "4"}});
+  tmc("mres", {{"--pins", "222x"}, {"--ms1", "1"}, {"--ms2", "1"}});
+  tmc("otp", {{"--pwmgrad", "18"}});
+  tmc("otp", {{"--tpwmthrs", "500"}});
+  tmc("uart", {{"--fclk", "12MHz"}, {"--senddelay", "15"}});
+  tmc("crc", {});
+  tmc("spec", {});
 }
 
 void test_invalid_surfaces_cli_error() {
@@ -824,7 +879,26 @@ void test_invalid_surfaces_cli_error() {
 
 } // namespace
 
+void test_arg_set_scales() {
+  // The unbounded selection set behind guided forms/builders: spot-check
+  // singleton/range construction plus union/intersection/difference.
+  using tui::ArgSet;
+  assert(ArgSet{}.empty() && !ArgSet{}.any());
+  assert(ArgSet::single(70).contains(70));
+  assert(!ArgSet::single(70).contains(69) && !ArgSet::single(0).contains(70));
+  assert((ArgSet::single(2) | ArgSet::single(70)).contains(70));
+  assert(!(ArgSet::single(2) & ArgSet::single(70)).any());
+  assert((ArgSet::single(2) & (ArgSet::single(2) | ArgSet::single(70))).contains(2));
+  assert((ArgSet::below(3) - ArgSet::single(1)) ==
+         (ArgSet::single(0) | ArgSet::single(2)));
+  assert(ArgSet::below(0).empty());
+  const ArgSet big = ArgSet::single(0) | ArgSet::single(1000);
+  assert((big - ArgSet::single(1000)) == ArgSet::single(0));
+  assert((big - big).empty());
+}
+
 int main() {
+  test_arg_set_scales();
   test_defs_track_specs();
   test_keys_match_complete_vocab();
   test_ic_registry_driven();

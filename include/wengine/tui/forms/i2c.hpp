@@ -7,11 +7,22 @@ namespace wengine::tui::forms::definitions {
 
 [[nodiscard]] inline FormDef i2c() {
   using cli::commands::I2cSpec;
+  using definition::all_arguments;
   using definition::argument;
   using definition::bit;
   using definition::profile;
   using definition::rule;
 
+  const std::vector<ArgumentDef> args{
+          argument("vdd", "VDD", 1, 0),
+          argument("capacitance", "Bus capacitance", 2, 1),
+          argument("speed", "Speed", 3, 2),
+          argument("vol", "VOL", 4, 3),
+          argument("iol", "IOL", 5, 4),
+          argument("rise-time", "Rise time", 6, 5),
+          argument("rp", "Rp", 7, 6),
+          argument("rs", "Rs", 8, 7),
+  };
   return {
       FormKind::kI2c,
       I2cSpec::kName,
@@ -28,21 +39,12 @@ namespace wengine::tui::forms::definitions {
           {"--rp", "Rp", "pull-up, e.g. 1.5kOhm (empty=auto)"},
           {"--rs", "Rs", "series, e.g. 100Ohm (empty=auto)"},
       },
-      {
-          argument("vdd", "VDD", 1, 0),
-          argument("capacitance", "Bus capacitance", 2, 1),
-          argument("speed", "Speed", 3, 2),
-          argument("vol", "VOL", 4, 3),
-          argument("iol", "IOL", 5, 4),
-          argument("rise-time", "Rise time", 6, 5),
-          argument("rp", "Rp", 7, 6),
-          argument("rs", "Rs", 8, 7),
-      },
+      args,
       {
           profile("pullup", {{0, "pullup"}}, {rule(bit(0) | bit(1), bit(2) | bit(3) | bit(4) | bit(5) | bit(6))}, bit(0) | bit(1)),
           profile("series", {{0, "series"}}, {rule(bit(0) | bit(1), bit(2) | bit(3) | bit(4) | bit(5) | bit(6) | bit(7))}, bit(0) | bit(1)),
           profile("full", {{0, "full"}}, {rule(bit(0) | bit(1), bit(2) | bit(3) | bit(4) | bit(5) | bit(6) | bit(7))}, bit(0) | bit(1)),
-          profile("auto", {}, {rule(0U, bit(8) - 1U)}, 0U, true),
+          profile("auto", {}, {rule({}, all_arguments(args))}, {}, true),
       },
   };
 }

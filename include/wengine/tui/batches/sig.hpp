@@ -8,24 +8,22 @@ namespace wengine::tui::batches::definitions {
 [[nodiscard]] inline BatchDef sig() {
   using cli::commands::SigSpec;
 
-  const auto bit = [](unsigned index) { return std::uint64_t{1} << index; };
-  const auto argument = [&](std::size_t field,
-                            std::uint64_t requirements = 0U) {
+  const auto bit = [](unsigned index) { return ArgSet::single(index); };
+  const auto argument = [&](std::size_t field, ArgSet requirements = ArgSet{}) {
     return BatchArgument{field, bit(static_cast<unsigned>(field)), requirements};
   };
-  const auto profile = [](std::string_view kind, std::uint64_t active,
-                          std::uint64_t required, std::uint64_t defaults,
+  const auto profile = [](std::string_view kind, const ArgSet &active,
+                          const ArgSet &required, const ArgSet &defaults,
                           bool supported = true, bool fallback = false) {
     return BatchProfile{kind, active, required, defaults, supported, fallback};
   };
   // Runtime fields (steps/dt/emit/control/pacing) are shared by every kind;
   // signal fields (freq/amp/.../lua) vary per kind. Field indices must match
   // the `fields` order below (bit N == field N).
-  const std::uint64_t kRuntimeMask = bit(39) - bit(12);
-  const std::uint64_t kRuntimeDefault = bit(12) | bit(13);
-  const std::uint64_t kPeriodicMask = bit(1) | bit(2) | bit(3) | bit(4) |
-                                      bit(7) | bit(8);
-  const std::uint64_t kAllSignalMask = bit(12) - bit(1);
+  const ArgSet kRuntimeMask = ArgSet::below(39) - ArgSet::below(12);
+  const ArgSet kRuntimeDefault = bit(12) | bit(13);
+  const ArgSet kPeriodicMask = bit(1) | bit(2) | bit(3) | bit(4) | bit(7) | bit(8);
+  const ArgSet kAllSignalMask = ArgSet::below(12) - ArgSet::below(1);
 
   return {
       BatchKind::kSig,
@@ -88,19 +86,19 @@ namespace wengine::tui::batches::definitions {
           argument(38),
       },
       {
-          profile("sine", kRuntimeMask | kPeriodicMask, 0U,
+          profile("sine", kRuntimeMask | kPeriodicMask, ArgSet{},
                   kRuntimeDefault | bit(1) | bit(2)),
-          profile("square", kRuntimeMask | kPeriodicMask | bit(5), 0U,
+          profile("square", kRuntimeMask | kPeriodicMask | bit(5), ArgSet{},
                   kRuntimeDefault | bit(1) | bit(2)),
-          profile("triangle", kRuntimeMask | kPeriodicMask, 0U,
+          profile("triangle", kRuntimeMask | kPeriodicMask, ArgSet{},
                   kRuntimeDefault | bit(1) | bit(2)),
-          profile("saw", kRuntimeMask | kPeriodicMask, 0U,
+          profile("saw", kRuntimeMask | kPeriodicMask, ArgSet{},
                   kRuntimeDefault | bit(1) | bit(2)),
-          profile("pulse", kRuntimeMask | kPeriodicMask | bit(5), 0U,
+          profile("pulse", kRuntimeMask | kPeriodicMask | bit(5), ArgSet{},
                   kRuntimeDefault | bit(1) | bit(2)),
           profile("noise", kRuntimeMask | bit(2) | bit(3) | bit(6) | bit(7) | bit(8),
-                  0U, kRuntimeDefault | bit(2)),
-          profile("dc", kRuntimeMask | bit(3) | bit(7) | bit(8), 0U,
+                  ArgSet{}, kRuntimeDefault | bit(2)),
+          profile("dc", kRuntimeMask | bit(3) | bit(7) | bit(8), ArgSet{},
                   kRuntimeDefault),
           profile("expression", kRuntimeMask | bit(3) | bit(7) | bit(8) | bit(9),
                   bit(9), kRuntimeDefault | bit(9)),
@@ -108,8 +106,8 @@ namespace wengine::tui::batches::definitions {
                   bit(10), kRuntimeDefault | bit(10)),
           profile("lua", kRuntimeMask | bit(3) | bit(6) | bit(7) | bit(8) | bit(11),
                   bit(11), kRuntimeDefault | bit(11)),
-          profile("sum", kRuntimeMask, 0U, kRuntimeDefault, false),
-          profile("other", kRuntimeMask | kAllSignalMask, 0U,
+          profile("sum", kRuntimeMask, ArgSet{}, kRuntimeDefault, false),
+          profile("other", kRuntimeMask | kAllSignalMask, ArgSet{},
                   kRuntimeDefault, true, true),
       },
   };

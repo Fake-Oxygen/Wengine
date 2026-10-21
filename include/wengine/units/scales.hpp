@@ -87,10 +87,13 @@ struct scales_for<Energy> {
 
 template <>
 struct scales_for<Frequency> {
-  static constexpr std::array<SuffixScale, 3> value{{
+  static constexpr std::array<SuffixScale, 6> value{{
       {"Hz", 1.0},
       {"mHz", 1e-3},
       {"kHz", 1e3},
+      {"MHz", 1e6},
+      {"rpm", 1.0 / 60.0}, // revolutions per minute (motor speed)
+      {"rps", 1.0},        // revolutions per second (motor speed)
   }};
 };
 

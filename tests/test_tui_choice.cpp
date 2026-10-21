@@ -174,7 +174,8 @@ void test_form_dynamic_choices() {
   assert(chip >= 0 && op >= 0);
   // Chips come from IcRegistry, never hardcoded.
   const auto chips = tui::forms::form_field_choices(*ic, static_cast<std::size_t>(chip), v);
-  assert(!chips.empty() && contains(chips, "ap63205") && contains(chips, "ina219"));
+  assert(!chips.empty() && contains(chips, "ap63205") && contains(chips, "ina219") &&
+         contains(chips, "tmc22xx"));
   // Ops follow the chip value.
   v[static_cast<std::size_t>(chip)] = "ap63205";
   const auto ap_ops =
@@ -184,6 +185,11 @@ void test_form_dynamic_choices() {
   const auto ina_ops =
       tui::forms::form_field_choices(*ic, static_cast<std::size_t>(op), v);
   assert(contains(ina_ops, "cal") && contains(ina_ops, "config"));
+  v[static_cast<std::size_t>(chip)] = "tmc22xx";
+  const auto tmc_ops =
+      tui::forms::form_field_choices(*ic, static_cast<std::size_t>(op), v);
+  assert(contains(tmc_ops, "current") && contains(tmc_ops, "stealth") &&
+         contains(tmc_ops, "spec"));
   // Unknown/empty chip offers nothing (no misleading dialog).
   v[static_cast<std::size_t>(chip)] = "nope-chip";
   assert(tui::forms::form_field_choices(*ic, static_cast<std::size_t>(op), v).empty());

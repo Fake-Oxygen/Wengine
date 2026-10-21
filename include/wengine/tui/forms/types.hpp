@@ -4,8 +4,8 @@
 // Solver-specific definitions live beside this file, one per command.
 
 #include "wengine/cli/ic_registry.hpp"
+#include "wengine/tui/arg_set.hpp"
 
-#include <cstdint>
 #include <cstddef>
 #include <limits>
 #include <span>
@@ -37,15 +37,15 @@ struct ArgumentDef {
   std::string_view name;
   std::string_view label;
   std::size_t field_index;
-  std::uint64_t bit;
+  ArgSet bit; // singleton {bit_index}: which set slot this argument occupies
   bool user_input;
 };
 
 struct ArgumentRule {
-  std::uint64_t required_mask;
-  std::uint64_t optional_mask;
-  std::uint64_t computed_mask = 0;
-  std::uint64_t derived_mask = 0;
+  ArgSet required_mask;
+  ArgSet optional_mask;
+  ArgSet computed_mask;
+  ArgSet derived_mask;
 };
 
 struct ProfileSelector {
@@ -57,7 +57,7 @@ struct ArgumentProfile {
   std::string_view name;
   std::vector<ProfileSelector> selectors;
   std::vector<ArgumentRule> rules;
-  std::uint64_t default_selected = 0;
+  ArgSet default_selected;
   bool fallback = false;
 };
 
@@ -86,45 +86,45 @@ struct FormDef {
   std::vector<ArgumentProfile> profiles;
 };
 
-[[nodiscard]] inline ArgumentState argument_state( const ArgumentDef &argument, std::uint64_t selected, const ArgumentProfile &profile) noexcept {
+[[nodiscard]] inline ArgumentState argument_state( const ArgumentDef &argument, const ArgSet &selected, const ArgumentProfile &profile) {
   if (!argument.user_input) {
     return ArgumentState::kDerived;
   }
-  if ((selected & argument.bit) != 0U) {
+  if ((selected & argument.bit).any()) {
     return ArgumentState::kSelected;
   }
   bool appears_in_profile = false;
   for (const ArgumentRule &rule : profile.rules) {
-    const std::uint64_t allowed = rule.required_mask | rule.optional_mask;
-    appears_in_profile = appears_in_profile || (allowed & argument.bit) != 0U || (rule.computed_mask & argument.bit) != 0U ||
-                         (rule.derived_mask & argument.bit) != 0U;
-    if ((selected & ~allowed) != 0U) {
+    const ArgSet allowed = rule.required_mask | rule.optional_mask;
+    appears_in_profile = appears_in_profile || (allowed & argument.bit).any() || (rule.computed_mask & argument.bit).any() ||
+                         (rule.derived_mask & argument.bit).any();
+    if (!(selected - allowed).empty()) {
       continue;
     }
-    if ((allowed & argument.bit) != 0U) {
+    if ((allowed & argument.bit).any()) {
       return ArgumentState::kAvailable;
     }
-    if (selected == rule.required_mask && (rule.computed_mask & argument.bit) != 0U) {
+    if (selected == rule.required_mask && (rule.computed_mask & argument.bit).any()) {
       return ArgumentState::kComputed;
     }
   }
   for (const ArgumentRule &rule : profile.rules) {
-    if ((rule.derived_mask & argument.bit) != 0U) {
+    if ((rule.derived_mask & argument.bit).any()) {
       return ArgumentState::kDerived;
     }
   }
   return appears_in_profile ? ArgumentState::kBlocked : ArgumentState::kInactive;
 }
 
-[[nodiscard]] inline ArgumentRequirement argument_requirement(const ArgumentDef &argument, std::uint64_t selected,
-    const ArgumentProfile &profile) noexcept {
+[[nodiscard]] inline ArgumentRequirement argument_requirement(const ArgumentDef &argument, const ArgSet &selected,
+    const ArgumentProfile &profile) {
   bool required = false;
   bool optional = false;
   for (const ArgumentRule &rule : profile.rules) {
-    const std::uint64_t allowed = rule.required_mask | rule.optional_mask;
-    if ((selected & ~allowed) == 0U && (allowed & argument.bit) != 0U) {
-      required = required || (rule.required_mask & argument.bit) != 0U;
-      optional = optional || (rule.optional_mask & argument.bit) != 0U;
+    const ArgSet allowed = rule.required_mask | rule.optional_mask;
+    if ((selected - allowed).empty() && (allowed & argument.bit).any()) {
+      required = required || (rule.required_mask & argument.bit).any();
+      optional = optional || (rule.optional_mask & argument.bit).any();
     }
   }
   if (required && !optional) {
@@ -136,8 +136,20 @@ struct FormDef {
 
 namespace definition {
 
-[[nodiscard]] constexpr std::uint64_t bit(unsigned index) noexcept {
-  return std::uint64_t{1} << index;
+// Singleton {index}: which argument slot a definition occupies. Indices
+// are unbounded (see arg_set.hpp); keep them dense per form, 0..N-1.
+[[nodiscard]] inline ArgSet bit(unsigned index) {
+  return ArgSet::single(index);
+}
+
+// Union of every argument slot in a form: the generic catch-all profiles
+// (unknown chip/mode) stay complete as new options arrive.
+[[nodiscard]] inline ArgSet all_arguments(const std::vector<ArgumentDef> &arguments) {
+  ArgSet out;
+  for (const ArgumentDef &argument : arguments) {
+    out |= argument.bit;
+  }
+  return out;
 }
 
 [[nodiscard]] inline ArgumentDef argument(std::string_view name,
@@ -148,16 +160,16 @@ namespace definition {
   return {name, label, field_index, bit(bit_index), user_input};
 }
 
-[[nodiscard]] constexpr ArgumentRule rule(std::uint64_t required,
-                                          std::uint64_t optional = 0U,
-                                          std::uint64_t computed = 0U,
-                                          std::uint64_t derived = 0U) noexcept {
+[[nodiscard]] inline ArgumentRule rule(ArgSet required,
+                                          ArgSet optional = ArgSet{},
+                                          ArgSet computed = ArgSet{},
+                                          ArgSet derived = ArgSet{}) {
   return {required, optional, computed, derived};
 }
 
 [[nodiscard]] inline ArgumentProfile profile(
     std::string_view name, std::vector<ProfileSelector> selectors,
-    std::vector<ArgumentRule> rules, std::uint64_t defaults,
+    std::vector<ArgumentRule> rules, ArgSet defaults,
     bool fallback = false) {
   return {name, std::move(selectors), std::move(rules), defaults, fallback};
 }
@@ -256,22 +268,22 @@ namespace detail {
   return fallback;
 }
 
-[[nodiscard]] inline std::uint64_t profile_default_selection(
-    const FormDef &def, const std::vector<std::string> &values) noexcept {
+[[nodiscard]] inline ArgSet profile_default_selection(
+    const FormDef &def, const std::vector<std::string> &values) {
   const std::size_t index = active_profile_index(def, values);
-  return index < def.profiles.size() ? def.profiles[index].default_selected : 0U;
+  return index < def.profiles.size() ? def.profiles[index].default_selected : ArgSet{};
 }
 
 // Compose argv only. The CLI owns all parsing and validation.
 [[nodiscard]] inline std::string compose_line(
     const FormDef &def, const std::vector<std::string> &values,
-    std::uint64_t selected_arguments) {
+    const ArgSet &selected_arguments) {
   std::string line(def.command);
   for (std::size_t i = 0; i < def.fields.size() && i < values.size(); ++i) {
     bool selected = true;
     for (const ArgumentDef &argument : def.arguments) {
       if (argument.user_input && argument.field_index == i) {
-        selected = (selected_arguments & argument.bit) != 0U;
+        selected = (selected_arguments & argument.bit).any();
         break;
       }
     }
@@ -294,7 +306,7 @@ namespace detail {
 
 [[nodiscard]] inline std::string compose_line(
     const FormDef &def, const std::vector<std::string> &values) {
-  return compose_line(def, values, std::numeric_limits<std::uint64_t>::max());
+  return compose_line(def, values, definition::all_arguments(def.arguments));
 }
 
 // Choice options for one field: static `choices` when declared, else the

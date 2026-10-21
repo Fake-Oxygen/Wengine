@@ -156,6 +156,18 @@ constexpr Value<Frequency> operator""_Hz(long double val) {
   return Value<Frequency>(static_cast<double>(val));
 }
 
+constexpr Value<Frequency> operator""_MHz(long double val) {
+  return Value<Frequency>(static_cast<double>(val) * 1e6);
+}
+
+constexpr Value<Frequency> operator""_rpm(long double val) {
+  return Value<Frequency>(static_cast<double>(val) / 60.0);
+}
+
+constexpr Value<Frequency> operator""_rps(long double val) {
+  return Value<Frequency>(static_cast<double>(val));
+}
+
 constexpr Value<Time> operator""_s(long double val) {
   return Value<Time>(static_cast<double>(val));
 }

@@ -16,6 +16,7 @@
 #include "wengine/cli/command.hpp"
 #include "wengine/cli/ic/ap63205.hpp"
 #include "wengine/cli/ic/ina219.hpp"
+#include "wengine/cli/ic/tmc22xx.hpp"
 
 // Chip spec headers (one per part, e.g. "wengine/cli/ic/ne555.hpp"):
 /* #include "wengine/cli/ic/ne555.hpp" */
@@ -24,6 +25,6 @@ namespace wengine::cli {
 
 // Append new chip specs here, e.g. `Registry<ic::Ap63205Spec, ic::Ne555Spec>`.
 // Names stay unique via the compile-time validation.
-using IcRegistry = Registry<ic::Ap63205Spec, ic::Ina219Spec>;
+using IcRegistry = Registry<ic::Ap63205Spec, ic::Ina219Spec, ic::Tmc22xxSpec>;
 
 } // namespace wengine::cli
