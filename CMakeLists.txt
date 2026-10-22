@@ -17,6 +17,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BUILD_CLI "Build CLI app" ON)
 option(BUILD_GUI "Build GUI app (scaffold, backend TBD per PHYSI-13)" OFF)
+option(BUILD_ROS2 "Build ROS2 bridge (rclcpp, edge-only; OFF keeps builds ROS-free)" OFF)
 option(BUILD_TUI "Build ncurses TUI for PhysicsSimApp (--tui flag, system libncurses)" ON)
 option(BUILD_TESTS "Build lightweight tests (no external deps)" ON)
 option(BUILD_BENCHMARKS "Build micro-benchmarks" ON)
@@ -135,6 +136,26 @@ target_compile_options(wengine_link_net PRIVATE
     $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
 )
+
+# ------------------------------------------------------------------
+# ROS2 bridge (scaffolding, D-ROS-1): edge-only, OFF by default so all
+# builds stay ROS-free. Headers in include/wengine/ros2/* are ROS-free
+# vocabulary (config/naming/verb mapping, header-only, covered by
+# test_ros2_mapping without rclcpp). The rclcpp TU + example below are the
+# only places that may include ROS headers (same seam as src/link/*.cpp
+# owning POSIX syscalls while link headers stay platform-free).
+# ------------------------------------------------------------------
+if(BUILD_ROS2)
+    find_package(rclcpp REQUIRED)
+    find_package(std_msgs REQUIRED)
+    add_executable(ros2_bridge examples/ros2_bridge.cpp)
+    target_link_libraries(ros2_bridge PRIVATE wengine_core rclcpp::rclcpp)
+    target_compile_options(ros2_bridge PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+        $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+    )
+endif()
 
 # ------------------------------------------------------------------
 # Lua scripting source (SIG-4b): PUC Lua 5.4.9 (external/lua submodule,
@@ -476,6 +497,11 @@ if(BUILD_TESTS)
     add_executable(test_signal tests/test_signal.cpp)
     target_link_libraries(test_signal PRIVATE wengine_core)
     add_test(NAME signal COMMAND test_signal)
+
+    # ROS2 scaffolding: pure mapping/naming/verb vocabulary, no rclcpp.
+    add_executable(test_ros2_mapping tests/test_ros2_mapping.cpp)
+    target_link_libraries(test_ros2_mapping PRIVATE wengine_core)
+    add_test(NAME ros2_mapping COMMAND test_ros2_mapping)
 
     # Lua scripting source: isolated runtime + sandbox pin tests.
     add_executable(test_lua tests/test_lua.cpp)
