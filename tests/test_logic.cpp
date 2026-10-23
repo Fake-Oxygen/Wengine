@@ -1,5 +1,6 @@
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/optimize.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <array>
@@ -711,6 +712,693 @@ void test_bit_arg_errors() {
   }
 }
 
+// ---- LOGIC-4 optimizer -------------------------------------------------
+// Equivalence helper: positional by default; `proj` maps each optimized
+// block input to the original block input it replicates (identity when the
+// level preserves the interface; explicit groups when O2 duplicates a pin
+// across a tied-together inverter, e.g. NAND(a,a) -> proj {0,0}).
+// Exhaustive over the ORIGINAL input space up to 10 inputs, deterministic
+// xorshift samples + corners beyond.
+
+bool netlists_equal(const Netlist &a, const Netlist &b) {
+  if (a.live_count != b.live_count) {
+    return false;
+  }
+  for (std::size_t k = 0; k < 8; ++k) {
+    if (a.next_counter[k] != b.next_counter[k]) {
+      return false;
+    }
+  }
+  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+    const logic::Gate &x = a.gates[s];
+    const logic::Gate &y = b.gates[s];
+    if (x.live != y.live || x.kind != y.kind || x.counter != y.counter ||
+        x.input_count != y.input_count || x.ignored_mask != y.ignored_mask ||
+        x.ignore_output != y.ignore_output || x.output_fanout != y.output_fanout ||
+        x.propagation_delay_ps != y.propagation_delay_ps) {
+      return false;
+    }
+    for (std::size_t i = 0; i < logic::kMaxInputs; ++i) {
+      if (x.drivers[i] != y.drivers[i]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+void assert_names_unique(const Netlist &nl) {
+  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+    if (!nl.gates[s].live) {
+      continue;
+    }
+    for (std::uint16_t t = static_cast<std::uint16_t>(s + 1); t < logic::kMaxGates; ++t) {
+      if (!nl.gates[t].live) {
+        continue;
+      }
+      assert(!(nl.gates[s].kind == nl.gates[t].kind && nl.gates[s].counter == nl.gates[t].counter));
+    }
+  }
+}
+
+void check_equiv_proj(Netlist &orig, Netlist &opt, const std::vector<std::size_t> &proj) {
+  const std::size_t nin_o = logic::block_input_count(orig);
+  const std::size_t nout_o = logic::block_output_count(orig);
+  const std::size_t nin_p = logic::block_input_count(opt);
+  const std::size_t nout_p = logic::block_output_count(opt);
+  assert(proj.size() == nin_p);
+  assert(nout_o == nout_p && nout_o > 0);
+  for (std::size_t j = 0; j < nin_p; ++j) {
+    assert(proj[j] < nin_o);
+  }
+  std::vector<LogicValue> in_o(nin_o == 0 ? 1 : nin_o, kL);
+  std::vector<LogicValue> in_p(nin_p == 0 ? 1 : nin_p, kL);
+  std::vector<LogicValue> oo(nout_o, kL);
+  std::vector<LogicValue> pp(nout_p, kL);
+  auto run_row = [&]() {
+    for (std::size_t j = 0; j < nin_p; ++j) {
+      in_p[j] = in_o[proj[j]];
+    }
+    assert(logic::solve(orig, std::span<const LogicValue>(in_o.data(), nin_o),
+                         std::span<LogicValue>(oo.data(), nout_o))
+                .ok());
+    assert(logic::solve(opt, std::span<const LogicValue>(in_p.data(), nin_p),
+                        std::span<LogicValue>(pp.data(), nout_p))
+                .ok());
+    for (std::size_t o = 0; o < nout_o; ++o) {
+      assert(oo[o] == pp[o]);
+    }
+  };
+  if (nin_o <= 10) {
+    const auto rows = static_cast<std::uint64_t>(1ULL << nin_o);
+    for (std::uint64_t r = 0; r < rows; ++r) {
+      for (std::size_t j = 0; j < nin_o; ++j) {
+        in_o[j] = (((r >> j) & 1ULL) != 0ULL) ? kH : kL;
+      }
+      run_row();
+    }
+    return;
+  }
+  for (std::size_t j = 0; j < nin_o; ++j) {
+    in_o[j] = kL;
+  }
+  run_row();
+  for (std::size_t j = 0; j < nin_o; ++j) {
+    in_o[j] = kH;
+  }
+  run_row();
+  for (std::size_t w = 0; w < nin_o; ++w) {
+    for (std::size_t j = 0; j < nin_o; ++j) {
+      in_o[j] = (j == w) ? kH : kL;
+    }
+    run_row();
+    for (std::size_t j = 0; j < nin_o; ++j) {
+      in_o[j] = (j == w) ? kL : kH;
+    }
+    run_row();
+  }
+  std::uint32_t st = 0xC10C4E96u;
+  for (std::size_t rep = 0; rep < 1024; ++rep) {
+    st ^= st << 13;
+    st ^= st >> 17;
+    st ^= st << 5;
+    std::uint32_t v = st;
+    for (std::size_t j = 0; j < nin_o; ++j) {
+      in_o[j] = (((v >> (j % 32)) & 1u) != 0u) ? kH : kL;
+      if ((j % 32) == 31) {
+        st ^= st << 13;
+        st ^= st >> 17;
+        st ^= st << 5;
+        v = st;
+      }
+    }
+    run_row();
+  }
+}
+
+void check_equiv(Netlist &orig, Netlist &opt) {
+  const std::size_t nin = logic::block_input_count(orig);
+  assert(logic::block_input_count(opt) == nin);
+  std::vector<std::size_t> proj(nin, 0);
+  for (std::size_t j = 0; j < nin; ++j) {
+    proj[j] = j;
+  }
+  check_equiv_proj(orig, opt, proj);
+}
+
+void test_optimize_parses() {
+  assert(logic::parse_opt_level("O0").value == logic::OptLevel::kO0);
+  assert(logic::parse_opt_level("O1").value == logic::OptLevel::kO1);
+  assert(logic::parse_opt_level("o2").value == logic::OptLevel::kO2);
+  assert(!logic::parse_opt_level("").ok());
+  assert(!logic::parse_opt_level("O3").ok());
+  assert(!logic::parse_opt_level("O").ok());
+  assert(!logic::parse_opt_level("0").ok());
+  assert(!logic::parse_opt_level("nand").ok());
+  assert(logic::parse_opt_target("nand").value == logic::OptTarget::kNand);
+  assert(logic::parse_opt_target("NAND").value == logic::OptTarget::kNand);
+  assert(logic::parse_opt_target("Nor").value == logic::OptTarget::kNor);
+  assert(!logic::parse_opt_target("").ok());
+  assert(!logic::parse_opt_target("and").ok());
+  assert(!logic::parse_opt_target("nandx").ok());
+  assert(!logic::parse_opt_target("O1").ok());
+}
+
+void test_optimize_purity() {
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok()); // AND1 @0
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok()); // NOT1 @1
+  assert(logic::add_gate(nl, GateKind::kOr, 2).ok());  // OR1 @2
+  assert(logic::add_gate(nl, GateKind::kBuf, 1).ok()); // BUF1 @3
+  assert(logic::wire(nl, 0, 1, 0).ok());
+  assert(logic::wire(nl, 0, 2, 0).ok());
+  assert(logic::wire(nl, 1, 3, 0).ok());
+  const Netlist snapshot = nl;
+  const logic::OptLevel levels[3] = {logic::OptLevel::kO0, logic::OptLevel::kO1,
+                                     logic::OptLevel::kO2};
+  for (int li = 0; li < 3; ++li) {
+    for (int ti = 0; ti < 2; ++ti) {
+      logic::OptimizeOptions opts;
+      opts.level = levels[li];
+      opts.target = (ti == 0) ? logic::OptTarget::kNand : logic::OptTarget::kNor;
+      auto r = logic::optimize(nl, opts);
+      assert(r.ok());
+      assert_names_unique(r.value);
+      assert(netlists_equal(nl, snapshot)); // input untouched at every level
+    }
+  }
+}
+
+void test_optimize_o0_bypass() {
+  // AND1(a,b) -> NOT1 -> NOT2 -> OR1(c): internal double negation folds,
+  // 4 gates -> 2, interface (3 in, 1 out) preserved positionally.
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+  assert(logic::add_gate(nl, GateKind::kOr, 2).ok());
+  assert(logic::wire(nl, 0, 1, 0).ok());
+  assert(logic::wire(nl, 1, 2, 0).ok());
+  assert(logic::wire(nl, 2, 3, 0).ok());
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(nl, o0);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert_names_unique(opt);
+  assert(nl.live_count == 4 && opt.live_count == 2);
+  assert(logic::block_input_count(opt) == 3);
+  assert(logic::block_output_count(opt) == 1);
+  check_equiv(nl, opt); // OR(AND(a,b),c) both ways, exhaustive 2^3
+}
+
+void test_optimize_o0_buf() {
+  // AND1(a,b) -> BUF1 -> NOT1(out): BUF bypass, 3 -> 2.
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+  assert(logic::add_gate(nl, GateKind::kBuf, 1).ok());
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+  assert(logic::wire(nl, 0, 1, 0).ok());
+  assert(logic::wire(nl, 1, 2, 0).ok());
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(nl, o0);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert(opt.live_count == 2);
+  check_equiv(nl, opt); // NOT(AND(a,b)) both ways
+}
+
+void test_optimize_o0_const_fold() {
+  // AND1(a, tied-0) -> NOT1(out): the AND is constant-0, the output folds
+  // to constant-1; 2 -> 1 gate, 1 -> 0 block inputs.
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+  assert(logic::wire(nl, 0, 1, 0).ok());
+  auto pin = logic::parse_pin(nl, "AND1.2");
+  assert(pin.ok());
+  assert(logic::ignore_pin(nl, pin.value).ok()); // AND1.2 ties to 0
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(nl, o0);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert(opt.live_count == 1);
+  assert(logic::block_input_count(opt) == 0);
+  assert(logic::block_output_count(opt) == 1);
+  check_equiv_proj(nl, opt, std::vector<std::size_t>{}); // vacuous: HIGH for both rows
+  std::array<LogicValue, 1> out{kL};
+  assert(logic::solve(opt, std::span<const LogicValue>(), std::span<LogicValue>(out.data(), 1)).ok());
+  assert(out[0] == kH);
+}
+
+void test_optimize_o0_identity() {
+  // OR1(a, tied-0) -> out: identity drops the tied input, 2-fan-in OR
+  // becomes single-input BUF. Gate count stays 1.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kOr, 2).ok());
+    auto pin = logic::parse_pin(nl, "OR1.2");
+    assert(pin.ok());
+    assert(logic::ignore_pin(nl, pin.value).ok());
+    logic::OptimizeOptions o0;
+    auto r = logic::optimize(nl, o0);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 1);
+    assert(opt.gates[0].live && opt.gates[0].kind == GateKind::kBuf);
+    assert(opt.gates[0].input_count == 1);
+    check_equiv(nl, opt);
+  }
+  // AND2(C1, b) -> out with C1 = NAND(all-tied): AND(x,1) -> x drops the
+  // constant input, the constant source is DCE'd. 2 -> 1.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kNand, 2).ok()); // NAND1: the C1 source
+    auto p1 = logic::parse_pin(nl, "NAND1.1");
+    auto p2 = logic::parse_pin(nl, "NAND1.2");
+    assert(p1.ok() && p2.ok());
+    assert(logic::ignore_pin(nl, p1.value).ok());
+    assert(logic::ignore_pin(nl, p2.value).ok());
+    assert(logic::add_gate(nl, GateKind::kAnd, 2).ok()); // AND1
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    logic::OptimizeOptions o0;
+    auto r = logic::optimize(nl, o0);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 1);
+    assert(logic::block_input_count(opt) == 1);
+    check_equiv(nl, opt); // AND(1,b) == b
+  }
+  // AND(a, tied-0) -> OR1 -> out: the annihilator propagates through
+  // the OR's drop rule; the dead AND is DCE'd. 2 -> 1 gate, 2 -> 1 input
+  // (original pin 1 survives as the only optimized pin).
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+    auto pa = logic::parse_pin(nl, "AND1.2");
+    assert(pa.ok());
+    assert(logic::ignore_pin(nl, pa.value).ok());
+    assert(logic::add_gate(nl, GateKind::kOr, 2).ok());
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    logic::OptimizeOptions o0;
+    auto r = logic::optimize(nl, o0);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 1);
+    assert(logic::block_input_count(opt) == 1);
+    const std::vector<std::size_t> proj{1};
+    check_equiv_proj(nl, opt, proj);
+  }
+}
+
+void test_optimize_o0_keeps_ignored_cone() {
+  // Ignored outputs hide logic but do not kill it: the cone feeding an
+  // ignored output survives O0 (DCE roots include ignored sinks).
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+  assert(logic::wire(nl, 0, 1, 0).ok());
+  auto oy = logic::parse_pin(nl, "NOT1.Y");
+  assert(oy.ok());
+  assert(logic::ignore_pin(nl, oy.value).ok());
+  assert(logic::block_output_count(nl) == 0);
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(nl, o0);
+  assert(r.ok());
+  assert(r.value.live_count == 2); // nothing removed
+}
+
+void assert_o1_canonical(const Netlist &nl) {
+  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+    const logic::Gate &g = nl.gates[s];
+    if (!g.live || g.kind != GateKind::kNot) {
+      continue;
+    }
+    const std::uint16_t d = g.drivers[0];
+    if (d == logic::kNoDriver) {
+      continue;
+    }
+    assert(nl.gates[d].live);
+    if (g.output_fanout == 0) {
+      // Output NOT: only a preserved double-negation may remain.
+      assert(nl.gates[d].kind == GateKind::kNot);
+    } else {
+      assert(false); // internal NOT must dangle after O1
+    }
+  }
+}
+
+void test_optimize_o1_demorgan() {
+  // NOT(AND) -> NAND, NOT(OR) -> NOR, NOT(NAND) -> AND, NOT(XOR) -> XNOR:
+  // each 2 -> 1 with the fused kind, exhaustive equivalence.
+  const GateKind inner[4] = {GateKind::kAnd, GateKind::kOr, GateKind::kNand, GateKind::kXor};
+  const GateKind fused[4] = {GateKind::kNand, GateKind::kNor, GateKind::kAnd, GateKind::kXnor};
+  for (int k = 0; k < 4; ++k) {
+    Netlist nl;
+    assert(logic::add_gate(nl, inner[k], 2).ok());
+    assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    logic::OptimizeOptions o1;
+    o1.level = logic::OptLevel::kO1;
+    auto r = logic::optimize(nl, o1);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert_names_unique(opt);
+    assert(opt.live_count == 1);
+    assert(logic::block_input_count(opt) == 2);
+    bool found = false;
+    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+      if (opt.gates[s].live) {
+        assert(opt.gates[s].kind == fused[k]);
+        found = true;
+      }
+    }
+    assert(found);
+    assert_o1_canonical(opt);
+    check_equiv(nl, opt);
+  }
+  // Internal double negation collapses through fusion:
+  // AND(a,b) -> NOT -> NOT(out) becomes a single AND. 3 -> 1.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+    assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+    assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    assert(logic::wire(nl, 1, 2, 0).ok());
+    logic::OptimizeOptions o1;
+    o1.level = logic::OptLevel::kO1;
+    auto r = logic::optimize(nl, o1);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 1);
+    assert(opt.gates[opt.topo_order[0]].kind == GateKind::kAnd);
+    check_equiv(nl, opt);
+  }
+  // Pure output double negation is preserved (interface stability wins):
+  // NOT(a) -> NOT(out) stays 2 gates.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+    assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    logic::OptimizeOptions o1;
+    o1.level = logic::OptLevel::kO1;
+    auto r = logic::optimize(nl, o1);
+    assert(r.ok());
+    assert(r.value.live_count == 2);
+    assert_o1_canonical(r.value);
+    Netlist opt = r.value;
+    check_equiv(nl, opt);
+  }
+}
+
+void test_optimize_o2_nand_family() {
+  logic::OptimizeOptions o2;
+  o2.level = logic::OptLevel::kO2;
+  o2.target = logic::OptTarget::kNand;
+  auto all_nand = [](const Netlist &nl) {
+    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+      if (nl.gates[s].live) {
+        assert(nl.gates[s].kind == GateKind::kNand);
+      }
+    }
+  };
+  // OR(a,b) -> NAND(~a,~b): 1 -> 3, inverter pins duplicate positionally.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kOr, 2).ok());
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 3);
+    all_nand(opt);
+    const std::vector<std::size_t> proj{0, 0, 1, 1};
+    check_equiv_proj(nl, opt, proj);
+  }
+  // XOR(a,b) -> 4 NANDs: 1 -> 4.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kXor, 2).ok());
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 4);
+    all_nand(opt);
+    const std::vector<std::size_t> proj{0, 1, 0, 1};
+    check_equiv_proj(nl, opt, proj);
+  }
+  // AND(a,b) -> NOT(out): O1 fuses to one NAND, O2 keeps it. 2 -> 1.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+    assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 1);
+    all_nand(opt);
+    check_equiv(nl, opt);
+  }
+  // BUF(a) -> out: double negation, 1 -> 2, duplicated inverter pin.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kBuf, 1).ok());
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 2);
+    all_nand(opt);
+    const std::vector<std::size_t> proj{0, 0};
+    check_equiv_proj(nl, opt, proj);
+  }
+}
+
+void test_optimize_o2_nor_family() {
+  logic::OptimizeOptions o2;
+  o2.level = logic::OptLevel::kO2;
+  o2.target = logic::OptTarget::kNor;
+  auto all_nor = [](const Netlist &nl) {
+    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+      if (nl.gates[s].live) {
+        assert(nl.gates[s].kind == GateKind::kNor);
+      }
+    }
+  };
+  // AND(a,b) -> NOR(~a,~b): 1 -> 3.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 3);
+    all_nor(opt);
+    const std::vector<std::size_t> proj{0, 0, 1, 1};
+    check_equiv_proj(nl, opt, proj);
+  }
+  // XOR(a,b) -> 5 NORs: 1 -> 5.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kXor, 2).ok());
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 5);
+    all_nor(opt);
+    const std::vector<std::size_t> proj{0, 1, 0, 0, 1, 1};
+    check_equiv_proj(nl, opt, proj);
+  }
+  // OR(a,b) -> NOT(out): fused to one NOR. 2 -> 1.
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kOr, 2).ok());
+    assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 1);
+    all_nor(opt);
+    check_equiv(nl, opt);
+  }
+}
+
+void test_optimize_o2_multioutput_order() {
+  // Two outputs keep their relative order and functions positionally:
+  // AND(a,b)->NOT(o1), OR(c,d)->NOT(o2). O1 fuses both (4 -> 2 NANDs),
+  // O2 keeps the single gates. Exhaustive over 2^4.
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok()); // @0
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok()); // @1 -> o1
+  assert(logic::add_gate(nl, GateKind::kOr, 2).ok());  // @2
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok()); // @3 -> o2
+  assert(logic::wire(nl, 0, 1, 0).ok());
+  assert(logic::wire(nl, 2, 3, 0).ok());
+  assert(logic::block_output_count(nl) == 2);
+  {
+    // O1 fuses both NOTs (4 -> 2 NAND/NOR gates); outputs stay positional.
+    logic::OptimizeOptions o1;
+    o1.level = logic::OptLevel::kO1;
+    auto r = logic::optimize(nl, o1);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 2);
+    assert(logic::block_input_count(opt) == 4);
+    assert(logic::block_output_count(opt) == 2);
+    check_equiv(nl, opt); // [NAND(a,b), NOR(c,d)] positionally
+  }
+  {
+    // O2(nand): the NAND stays single, the NOR expands to 4 NANDs (2 -> 5).
+    logic::OptimizeOptions o2;
+    o2.level = logic::OptLevel::kO2;
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 5);
+    assert(logic::block_input_count(opt) == 6);
+    assert(logic::block_output_count(opt) == 2);
+    const std::vector<std::size_t> proj{0, 1, 2, 2, 3, 3};
+    check_equiv_proj(nl, opt, proj);
+  }
+}
+
+void test_optimize_o2_const_pool() {
+  // A constant-0 output (AND with both inputs tied) converts under NAND
+  // through the shared C0 pool: 1 -> 4 gates, still 0 inputs, still LOW.
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+  auto p1 = logic::parse_pin(nl, "AND1.1");
+  auto p2 = logic::parse_pin(nl, "AND1.2");
+  assert(p1.ok() && p2.ok());
+  assert(logic::ignore_pin(nl, p1.value).ok());
+  assert(logic::ignore_pin(nl, p2.value).ok());
+  logic::OptimizeOptions o2;
+  o2.level = logic::OptLevel::kO2;
+  auto r = logic::optimize(nl, o2);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert(opt.live_count == 4);
+  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+    if (opt.gates[s].live) {
+      assert(opt.gates[s].kind == GateKind::kNand);
+    }
+  }
+  assert(logic::block_input_count(opt) == 0);
+  check_equiv_proj(nl, opt, std::vector<std::size_t>{});
+  std::array<LogicValue, 1> out{kH};
+  assert(logic::solve(opt, std::span<const LogicValue>(), std::span<LogicValue>(out.data(), 1)).ok());
+  assert(out[0] == kL);
+}
+
+void test_optimize_o2_overflow() {
+  // 40 XNOR8 (8 dangling inputs each): O2 needs 40*29 = 1160 > 1024 gates
+  // and must fail loudly; O0/O1 never grow and succeed; input untouched.
+  Netlist nl;
+  for (int k = 0; k < 40; ++k) {
+    assert(logic::add_gate(nl, GateKind::kXnor, 8).ok());
+  }
+  assert(nl.live_count == 40);
+  const Netlist snapshot = nl;
+  logic::OptimizeOptions o0;
+  assert(logic::optimize(nl, o0).ok());
+  logic::OptimizeOptions o1;
+  o1.level = logic::OptLevel::kO1;
+  assert(logic::optimize(nl, o1).ok());
+  logic::OptimizeOptions o2;
+  o2.level = logic::OptLevel::kO2;
+  auto r = logic::optimize(nl, o2);
+  assert(!r.ok());
+  assert(r.error.find("budget") != std::string_view::npos);
+  assert(netlists_equal(nl, snapshot));
+  // Just under the cap fits exactly: 35 XNOR8 -> 35*29 = 1015 gates.
+  Netlist small;
+  for (int k = 0; k < 35; ++k) {
+    assert(logic::add_gate(small, GateKind::kXnor, 8).ok());
+  }
+  auto ok = logic::optimize(small, o2);
+  assert(ok.ok());
+  assert(ok.value.live_count == 1015);
+}
+
+void test_optimize_sampled_large() {
+  // 12 block inputs exceed the exhaustive cap (10): the sampled path runs
+  // (corners + deterministic xorshift). AND8 + OR4 feeding XOR2.
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 8).ok()); // @0: inputs 0..7
+  assert(logic::add_gate(nl, GateKind::kOr, 4).ok());  // @1: inputs 8..11
+  assert(logic::add_gate(nl, GateKind::kXor, 2).ok()); // @2: out
+  assert(logic::wire(nl, 0, 2, 0).ok());
+  assert(logic::wire(nl, 1, 2, 1).ok());
+  assert(logic::block_input_count(nl) == 12);
+  logic::OptimizeOptions o1;
+  o1.level = logic::OptLevel::kO1;
+  {
+    auto r = logic::optimize(nl, o1);
+    assert(r.ok());
+    Netlist opt = r.value;
+    assert(opt.live_count == 3); // nothing to fuse, nothing dead
+    check_equiv(nl, opt);        // sampled (12 > 10)
+  }
+  logic::OptimizeOptions o2;
+  o2.level = logic::OptLevel::kO2;
+  {
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    Netlist opt = r.value;
+    // AND8 -> NAND+NOT (2), OR4 -> 4 inverters + mid (5), XOR2 -> 4.
+    assert(opt.live_count == 11);
+    assert(logic::block_input_count(opt) == 16);
+    const std::vector<std::size_t> proj{0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11};
+    check_equiv_proj(nl, opt, proj); // sampled (12 > 10)
+  }
+}
+
+void test_optimize_report() {
+  // Gate-count report golden (the before/after numbers LOGIC-8's `optimize`
+  // verb will print): AND(a,b) -> NOT -> NOT -> OR(c) -> out, 4 gates.
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+  assert(logic::add_gate(nl, GateKind::kOr, 2).ok());
+  assert(logic::wire(nl, 0, 1, 0).ok());
+  assert(logic::wire(nl, 1, 2, 0).ok());
+  assert(logic::wire(nl, 2, 3, 0).ok());
+  const std::uint16_t before = nl.live_count;
+  assert(before == 4);
+  logic::OptimizeOptions o0;
+  auto r0 = logic::optimize(nl, o0);
+  assert(r0.ok() && r0.value.live_count == 2);
+  logic::OptimizeOptions o1;
+  o1.level = logic::OptLevel::kO1;
+  auto r1 = logic::optimize(nl, o1);
+  assert(r1.ok() && r1.value.live_count == 2);
+  logic::OptimizeOptions o2n;
+  o2n.level = logic::OptLevel::kO2;
+  auto r2n = logic::optimize(nl, o2n);
+  assert(r2n.ok() && r2n.value.live_count == 5);
+  logic::OptimizeOptions o2r;
+  o2r.level = logic::OptLevel::kO2;
+  o2r.target = logic::OptTarget::kNor;
+  auto r2r = logic::optimize(nl, o2r);
+  assert(r2r.ok() && r2r.value.live_count == 5);
+  std::cout << "optimize report: O0: " << before << " -> " << r0.value.live_count << "; O1: " << before
+            << " -> " << r1.value.live_count << "; O2(nand): " << before << " -> "
+            << r2n.value.live_count << "; O2(nor): " << before << " -> " << r2r.value.live_count
+            << '\n';
+  Netlist o0n = r0.value;
+  check_equiv(nl, o0n);
+}
+
+void test_optimize_noexcept() {
+  Netlist nl;
+  static_assert(noexcept(logic::parse_opt_level("O0")));
+  static_assert(noexcept(logic::parse_opt_target("nand")));
+  logic::OptimizeOptions opts;
+  static_assert(noexcept(logic::optimize(nl, opts)));
+  assert(logic::optimize(nl, opts).ok()); // empty net optimizes to empty
+}
 } // namespace
 
 int main() {
@@ -733,6 +1421,22 @@ int main() {
   test_bit_columns();
   test_bit_matches_scalar_goldens();
   test_bit_arg_errors();
+  test_optimize_parses();
+  test_optimize_purity();
+  test_optimize_o0_bypass();
+  test_optimize_o0_buf();
+  test_optimize_o0_const_fold();
+  test_optimize_o0_identity();
+  test_optimize_o0_keeps_ignored_cone();
+  test_optimize_o1_demorgan();
+  test_optimize_o2_nand_family();
+  test_optimize_o2_nor_family();
+  test_optimize_o2_multioutput_order();
+  test_optimize_o2_const_pool();
+  test_optimize_o2_overflow();
+  test_optimize_sampled_large();
+  test_optimize_report();
+  test_optimize_noexcept();
   std::cout << "test_logic: OK\n";
   return 0;
 }
