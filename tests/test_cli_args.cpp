@@ -9,6 +9,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -674,11 +675,26 @@ void test_history() {
 }
 
 void test_logic_session() {
-  // Module registry shape (LOGIC-1: help + back; LOGIC-8 appends verbs).
-  static_assert(logic::LogicRegistry::all().size() == 2);
+  // Module registry shape (LOGIC-8: full v1 verb set, 17 specs).
+  static_assert(logic::LogicRegistry::all().size() == 17);
   static_assert(logic::LogicRegistry::find("help") != nullptr);
   static_assert(logic::LogicRegistry::find("back") != nullptr);
-  static_assert(logic::LogicRegistry::find("wire") == nullptr);
+  static_assert(logic::LogicRegistry::find("add") != nullptr);
+  static_assert(logic::LogicRegistry::find("list") != nullptr);
+  static_assert(logic::LogicRegistry::find("wire") != nullptr);
+  static_assert(logic::LogicRegistry::find("unwire") != nullptr);
+  static_assert(logic::LogicRegistry::find("remove") != nullptr);
+  static_assert(logic::LogicRegistry::find("ignore") != nullptr);
+  static_assert(logic::LogicRegistry::find("use") != nullptr);
+  static_assert(logic::LogicRegistry::find("reset") != nullptr);
+  static_assert(logic::LogicRegistry::find("solve") != nullptr);
+  static_assert(logic::LogicRegistry::find("truth") != nullptr);
+  static_assert(logic::LogicRegistry::find("optimize") != nullptr);
+  static_assert(logic::LogicRegistry::find("draw") != nullptr);
+  static_assert(logic::LogicRegistry::find("save") != nullptr);
+  static_assert(logic::LogicRegistry::find("load") != nullptr);
+  static_assert(logic::LogicRegistry::find("export") != nullptr);
+  static_assert(logic::LogicRegistry::find("nope") == nullptr);
 
   Shell sh;
   sh.set_history_file("");
@@ -765,13 +781,455 @@ void test_logic_session() {
     const auto all = CliRegistry::all();
     const auto verbs = complete_line("logic ", 6, all);
     assert(has(verbs, "help") && has(verbs, "back"));
+    assert(has(verbs, "add") && has(verbs, "list") && has(verbs, "wire") &&
+           has(verbs, "unwire") && has(verbs, "remove") && has(verbs, "ignore") &&
+           has(verbs, "use") && has(verbs, "reset") && has(verbs, "solve") &&
+           has(verbs, "truth") && has(verbs, "optimize") && has(verbs, "draw") &&
+           has(verbs, "save") && has(verbs, "load") && has(verbs, "export"));
+    assert(verbs.size() == 17);
     assert(!has(verbs, "ohm") && !has(verbs, "--help")); // flags need a '-' prefix
     const std::vector<std::string> want_dash_help{"--help"};
     assert(complete_line("logic --h", 9, all) == want_dash_help);
     const std::vector<std::string> want_help{"help"};
     assert(complete_line("logic h", 7, all) == want_help);
-    assert(complete_line("logic help ", 11, all).size() == 2); // help|back
+    assert(complete_line("logic help ", 11, all).size() == 17); // every verb
+    // Session help lists module verbs only (never top-level commands).
+    {
+      std::ostringstream help_out;
+      const std::span<const std::string_view> no_args{};
+      ArgCursor help_cur{no_args};
+      assert(logic::LogicHelpSpec::run(help_cur, help_out) == 0);
+      const std::string hs = help_out.str();
+      assert(hs.find("add - Add a gate") != std::string::npos);
+      assert(hs.find("solve - Evaluate") != std::string::npos);
+      assert(hs.find("optimize - Simplify") != std::string::npos);
+      assert(hs.find("export - Export") != std::string::npos);
+      assert(hs.find("  ohm - ") == std::string::npos);
+      assert(hs.find("  sim - ") == std::string::npos);
+      assert(hs.find("  sig - ") == std::string::npos);
+    }
   }
+}
+
+void test_logic_verbs() {
+  // LOGIC-8: every v1 verb through the one-shot path (same registry as the
+  // session). The workspace is process-wide: reset before and after.
+  auto run = [](const std::string &line) {
+    Shell sh;
+    sh.set_history_file("");
+    std::ostringstream out;
+    const int rc = sh.execute(line, out);
+    return std::pair<int, std::string>{rc, out.str()};
+  };
+  auto read_file = [](const std::string &path) {
+    std::ifstream f(path, std::ios::binary);
+    assert(!!f);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  };
+  logic::reset_logic_workspace();
+
+  // add/list basics + usage discipline.
+  {
+    auto [rc, s] = run("logic reset");
+    assert(rc == 0);
+    assert(s.find("cleared 0 gates") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("logic add AND");
+    assert(rc == 0);
+    assert(s.find("added AND1 kind=AND inputs=2") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("logic add OR --inputs 3");
+    assert(rc == 0);
+    assert(s.find("added OR1") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("logic add NOT");
+    assert(rc == 0);
+    assert(s.find("added NOT1") != std::string::npos);
+  }
+  assert(run("logic add").first == 2);
+  assert(run("logic add BOGUS").first == 2);
+  assert(run("logic add AND --inputs 1").first == 2); // AND needs 2..8
+  assert(run("logic add NOT --inputs 2").first == 2);
+  assert(run("logic add AND extra").first == 2); // stray positional
+  assert(run("logic add AND --bogus").first == 2);
+  {
+    auto [rc, s] = run("logic list");
+    assert(rc == 0);
+    assert(s.find("gates (3):") != std::string::npos);
+    assert(s.find("AND1 AND") != std::string::npos);
+    assert(s.find("wires (0):") != std::string::npos);
+    assert(s.find("inputs (6):") != std::string::npos); // 2+3+1
+    assert(s.find("outputs (3):") != std::string::npos);
+    assert(s.find("ignored (0):") != std::string::npos);
+  }
+  assert(run("logic list extra").first == 2);
+  {
+    auto [rc, s] = run("logic list --wires");
+    assert(rc == 0);
+    assert(s.find("wires (0):") != std::string::npos);
+    assert(s.find("inputs (") == std::string::npos); // wires only
+  }
+  {
+    auto [rc, s] = run("logic list --iface");
+    assert(rc == 0);
+    assert(s.find("inputs (6):") != std::string::npos);
+    assert(s.find("wires (") == std::string::npos); // iface only
+  }
+
+  // wire / unwire / remove + cycle + occupancy discipline.
+  {
+    auto [rc, s] = run("logic wire AND1.Y NOT1.1");
+    assert(rc == 0);
+    assert(s.find("wired AND1.Y -> NOT1.1") != std::string::npos);
+  }
+  assert(run("logic wire OR1.1 NOT1.1").first == 2); // occupied
+  assert(run("logic wire NOT1.Y NOT1.1").first == 2); // occupied (same)
+  assert(run("logic wire AND1.Y").first == 2); // missing TO
+  assert(run("logic wire AND1.Y NOT1.1 extra").first == 2);
+  assert(run("logic wire AND1.1 NOT1.1").first == 2); // FROM must be Y
+  assert(run("logic wire AND1.Y AND1.1").first == 2); // self-loop cycle
+  assert(run("logic wire NOPE.Y NOT1.1").first == 2);
+  {
+    auto [rc, s] = run("logic list --wires");
+    assert(rc == 0);
+    assert(s.find("AND1.Y -> NOT1.1") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("logic unwire NOT1.1");
+    assert(rc == 0);
+    assert(s.find("unwired NOT1.1") != std::string::npos);
+  }
+  assert(run("logic unwire NOT1.1").first == 2); // not wired
+  assert(run("logic unwire AND1.Y").first == 2); // outputs carry no wire
+  assert(run("logic unwire").first == 2);
+  {
+    auto [rc, s] = run("logic remove NOT1");
+    assert(rc == 0);
+    assert(s.find("removed NOT1") != std::string::npos);
+  }
+  assert(run("logic remove NOT1").first == 2); // unknown now
+  assert(run("logic remove").first == 2);
+  assert(run("logic remove AND1 extra").first == 2);
+  // Counters never reused: the next NOT is NOT2.
+  {
+    auto [rc, s] = run("logic add NOT");
+    assert(rc == 0);
+    assert(s.find("added NOT2") != std::string::npos);
+  }
+  assert(run("logic wire AND1.Y NOT2.1").first == 0);
+  assert(run("logic wire NOT2.Y AND1.1").first == 2); // cycle
+
+  // ignore / use + interface accounting.
+  assert(run("logic ignore AND1.2").first == 0);
+  {
+    auto [rc, s] = run("logic list --iface");
+    assert(rc == 0);
+    assert(s.find("ignored (1):") != std::string::npos);
+    assert(s.find("AND1.2") != std::string::npos);
+  }
+  assert(run("logic ignore").first == 2);
+  assert(run("logic ignore BOGUS").first == 2);
+  assert(run("logic use AND1.2").first == 0);
+  assert(run("logic use AND1.2 extra").first == 2);
+
+  // solve over a clean NAND (AND1.Y -> NOT1.1).
+  assert(run("logic reset").first == 0);
+  assert(run("logic add AND").first == 0);
+  assert(run("logic add NOT").first == 0);
+  assert(run("logic wire AND1.Y NOT1.1").first == 0);
+  {
+    auto [rc, s] = run("logic solve --in 11");
+    assert(rc == 0);
+    assert(s.find("NOT1.Y=0") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("logic solve --in 01");
+    assert(rc == 0);
+    assert(s.find("NOT1.Y=1") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("logic solve --from AND1.1=1 --from AND1.2=1");
+    assert(rc == 0);
+    assert(s.find("NOT1.Y=0") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("logic solve");
+    assert(rc == 0);
+    assert(s.find("(defaults assumed)") != std::string::npos);
+    assert(s.find("NOT1.Y=1") != std::string::npos); // NAND(0,0)=1
+  }
+  assert(run("logic solve --in 1").first == 2); // arity
+  assert(run("logic solve --in 1x").first == 2);
+  assert(run("logic solve --from AND1.1=2").first == 2);
+  assert(run("logic solve --from AND1.9=1").first == 2); // out of range
+  assert(run("logic solve --from NOT1.Y=1").first == 2); // not a block input
+  assert(run("logic solve extra").first == 2);
+
+  // truth: full table, --limit slice, --csv file, terminal cap refusal.
+  {
+    auto [rc, s] = run("logic truth");
+    assert(rc == 0);
+    assert(s.find("AND1.1,AND1.2,NOT1.Y") != std::string::npos);
+    assert(s.find("\n1,1,0\n") != std::string::npos);
+    assert(s.find("\n0,0,1\n") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("logic truth --limit 2");
+    assert(rc == 0);
+    std::size_t newlines = 0;
+    for (char c : s) {
+      if (c == '\n') {
+        ++newlines;
+      }
+    }
+    assert(newlines == 3); // header + 2 rows
+  }
+  assert(run("logic truth extra").first == 2);
+  assert(run("logic truth --limit 0").first == 2);
+  {
+    const std::string csv = "/tmp/opencode/logic_truth_test.csv";
+    std::remove(csv.c_str());
+    auto [rc, s] = run(std::string("logic truth --csv ") + csv);
+    assert(rc == 0);
+    assert(s.find("wrote 4 rows") != std::string::npos);
+    const std::string content = read_file(csv);
+    assert(content.find("AND1.1,AND1.2,NOT1.Y\n") == 0);
+    assert(content.find("\n1,1,0\n") != std::string::npos);
+    std::remove(csv.c_str());
+  }
+  {
+    assert(run("logic reset").first == 0);
+    for (int i = 0; i < 9; ++i) {
+      assert(run("logic add AND").first == 0);
+    }
+    assert(run("logic truth").first == 2); // 18 inputs: needs --limit/--csv
+    assert(run("logic truth --limit 4").first == 0);
+    assert(run("logic reset").first == 0);
+  }
+
+  // optimize: NOT(AND) fuses to NAND at O1; --to needs O2.
+  assert(run("logic add AND").first == 0);
+  assert(run("logic add NOT").first == 0);
+  assert(run("logic wire AND1.Y NOT1.1").first == 0);
+  {
+    auto [rc, s] = run("logic optimize --level O1");
+    assert(rc == 0);
+    assert(s.find("2 -> 1 gates") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("logic list");
+    assert(rc == 0);
+    assert(s.find("NAND1") != std::string::npos);
+  }
+  assert(run("logic optimize --to nand").first == 2); // needs O2
+  assert(run("logic optimize --level O3").first == 2);
+  assert(run("logic optimize extra").first == 2);
+  {
+    auto [rc, s] = run("logic optimize --level O2 --to nor");
+    assert(rc == 0);
+    assert(s.find("to=nor") != std::string::npos);
+  }
+
+  // save / load round-trip is byte-identical; load is atomic.
+  {
+    assert(run("logic reset").first == 0);
+    assert(run("logic add AND").first == 0);
+    assert(run("logic add NOT").first == 0);
+    assert(run("logic wire AND1.Y NOT1.1").first == 0);
+    const std::string y1 = "/tmp/opencode/logic_ws_a.yaml";
+    const std::string y2 = "/tmp/opencode/logic_ws_b.yaml";
+    std::remove(y1.c_str());
+    std::remove(y2.c_str());
+    {
+      auto [rc, s] = run(std::string("logic save ") + y1);
+      assert(rc == 0);
+      assert(s.find("saved 2 gates 1 wires") != std::string::npos);
+    }
+    const std::string before = read_file(y1);
+    assert(before.find("version: 1\n") == 0);
+    assert(before.find("AND1") != std::string::npos);
+    assert(run("logic reset").first == 0);
+    {
+      auto [rc, s] = run(std::string("logic load ") + y1);
+      assert(rc == 0);
+      assert(s.find("loaded 2 gates 1 wires") != std::string::npos);
+    }
+    {
+      auto [rc, s] = run(std::string("logic save ") + y2);
+      assert(rc == 0);
+    }
+    assert(read_file(y2) == before); // byte-identical round-trip
+    {
+      auto [rc, s] = run("logic solve --in 11");
+      assert(rc == 0);
+      assert(s.find("NOT1.Y=0") != std::string::npos);
+    }
+    assert(run("logic save").first == 2);
+    assert(run("logic load").first == 2);
+    assert(run("logic load /tmp/opencode/nope_missing.yaml").first == 1);
+    {
+      const std::string bad = "/tmp/opencode/logic_bad.yaml";
+      {
+        std::ofstream f(bad, std::ios::binary | std::ios::trunc);
+        assert(!!f);
+        f << "version: 2\ngates:\nwires:\nmeta:\n  tool: x\n";
+      }
+      assert(run(std::string("logic load ") + bad).first == 1);
+      auto [rc, s] = run("logic list");
+      assert(rc == 0);
+      assert(s.find("AND1") != std::string::npos); // workspace kept
+      std::remove(bad.c_str());
+    }
+    std::remove(y1.c_str());
+    std::remove(y2.c_str());
+  }
+
+  // draw: ASCII schematic + BMP export.
+  {
+    auto [rc, s] = run("logic draw");
+    assert(rc == 0);
+    assert(s.find("schematic (gates=2, levels=2):") != std::string::npos);
+    assert(s.find("L0: AND1") != std::string::npos);
+    assert(s.find("L1: NOT1") != std::string::npos);
+  }
+  assert(run("logic draw extra").first == 2);
+  assert(run("logic draw --out /tmp/opencode/x.txt").first == 2); // needs .bmp
+  {
+    const std::string bmp = "/tmp/opencode/logic_schem.bmp";
+    std::remove(bmp.c_str());
+    auto [rc, s] = run(std::string("logic draw --out ") + bmp);
+    assert(rc == 0);
+    assert(s.find("drew 2 gates") != std::string::npos);
+    std::ifstream f(bmp, std::ios::binary);
+    assert(!!f);
+    char magic[2] = {};
+    f.read(magic, 2);
+    assert(f.gcount() == 2 && magic[0] == 'B' && magic[1] == 'M');
+    std::remove(bmp.c_str());
+  }
+
+  // export: one command, three artifacts.
+  {
+    const std::string t = "/tmp/opencode/logic_exp_t.csv";
+    const std::string sc = "/tmp/opencode/logic_exp_s.yaml";
+    const std::string b = "/tmp/opencode/logic_exp_b.bmp";
+    std::remove(t.c_str());
+    std::remove(sc.c_str());
+    std::remove(b.c_str());
+    auto [rc, s] = run(std::string("logic export --truth ") + t + " --schema " + sc + " --bmp " + b);
+    assert(rc == 0);
+    assert(s.find("truth: 4 rows") != std::string::npos);
+    assert(s.find("schema: 2 gates 1 wires") != std::string::npos);
+    assert(s.find("bmp: ") != std::string::npos);
+    std::remove(t.c_str());
+    std::remove(sc.c_str());
+    std::remove(b.c_str());
+  }
+  assert(run("logic export --truth /tmp/opencode/a.csv").first == 2); // missing schema
+  assert(run("logic export --schema /tmp/opencode/a.yaml").first == 2);
+
+  // help/back leftovers + stray discipline.
+  {
+    auto [rc, s] = run("logic help wire");
+    assert(rc == 0);
+    assert(s.find("wire - Wire") != std::string::npos);
+  }
+  assert(run("logic help bogusverb").first == 1);
+  assert(run("logic back extra").first == 2);
+  assert(run("logic ignore").first == 2);
+  assert(run("logic use").first == 2);
+  assert(run("logic reset extra").first == 2);
+  assert(run("logic reset --force").first == 0);
+  logic::reset_logic_workspace();
+}
+
+void test_logic_completion() {
+  // LOGIC-8 scoped-autocomplete matrix: verb names, --to/--level values,
+  // live pin names, file paths (no candidates).
+  const auto all = CliRegistry::all();
+  auto has = [](const std::vector<std::string> &v, std::string_view word) {
+    for (const auto &e : v) {
+      if (e == word) {
+        return true;
+      }
+    }
+    return false;
+  };
+  logic::reset_logic_workspace();
+  Shell sh;
+  sh.set_history_file("");
+  std::ostringstream sink;
+  assert(sh.execute("logic add AND", sink) == 0); // AND1
+  assert(sh.execute("logic add NOT", sink) == 0); // NOT1
+  assert(sh.execute("logic wire AND1.Y NOT1.1", sink) == 0);
+
+  // Verb-name prefixes follow registry order.
+  const std::vector<std::string> want_a{"add"};
+  assert(complete_line("logic a", 7, all) == want_a);
+  const std::vector<std::string> want_s{"solve", "save"};
+  assert(complete_line("logic s", 7, all) == want_s);
+  const std::vector<std::string> want_u{"unwire", "use"};
+  assert(complete_line("logic u", 7, all) == want_u);
+
+  // --level / --to values, space and = forms.
+  {
+    const std::vector<std::string> want{"O0", "O1", "O2"};
+    assert(complete_line("logic optimize --level ", 23, all) == want);
+  }
+  {
+    const std::vector<std::string> want{"nand", "nor"};
+    assert(complete_line("logic optimize --to ", 20, all) == want);
+  }
+  {
+    const std::vector<std::string> want{"--level=O0", "--level=O1", "--level=O2"};
+    assert(complete_line("logic optimize --level=O", 24, all) == want);
+  }
+  {
+    const std::vector<std::string> want{"--to=nand", "--to=nor"};
+    assert(complete_line("logic optimize --to=n", 21, all) == want);
+  }
+
+  // Live pin names: wire sources are outputs, destinations are inputs;
+  // solve --from sees block inputs only (wired NOT1.1 excluded).
+  {
+    const auto c = complete_line("logic wire ", 11, all);
+    assert(has(c, "AND1.Y") && has(c, "NOT1.Y"));
+    assert(!has(c, "AND1.1"));
+  }
+  {
+    const auto c = complete_line("logic wire AND1.Y ", 18, all);
+    assert(has(c, "AND1.1") && has(c, "NOT1.1"));
+  }
+  {
+    const auto c = complete_line("logic remove ", 13, all);
+    assert(has(c, "AND1") && has(c, "NOT1"));
+  }
+  {
+    const auto c = complete_line("logic solve --from ", 19, all);
+    assert(has(c, "AND1.1") && has(c, "AND1.2"));
+    assert(!has(c, "AND1.Y") && !has(c, "NOT1.1"));
+  }
+  {
+    const std::vector<std::string> want{"AND1.1=0", "AND1.1=1"};
+    assert(complete_line("logic solve --from=AND1.1", 25, all) == want);
+  }
+
+  // Option names per verb.
+  assert(has(complete_line("logic solve --", 14, all), "--from"));
+  assert(has(complete_line("logic optimize --", 17, all), "--to"));
+  assert(has(complete_line("logic list --", 13, all), "--iface"));
+
+  // File paths / numeric values: no candidates, never option leakage.
+  assert(complete_line("logic save ", 11, all).empty());
+  assert(complete_line("logic load ", 11, all).empty());
+  assert(complete_line("logic draw --out ", 17, all).empty());
+  assert(complete_line("logic truth --csv ", 18, all).empty());
+  assert(complete_line("logic export --schema ", 22, all).empty());
+  assert(complete_line("logic solve --in=", 17, all).empty());
+  logic::reset_logic_workspace();
 }
 
 } // namespace
@@ -792,6 +1250,8 @@ int main() {
   test_shell_headless();
   test_history();
   test_logic_session();
+  test_logic_verbs();
+  test_logic_completion();
   std::cout << "test_cli_args: OK\n";
   return 0;
 }

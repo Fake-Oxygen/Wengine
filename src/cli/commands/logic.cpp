@@ -72,6 +72,17 @@ void LogicSpec::complete(std::span<const std::string_view> prior_args, std::stri
 
 namespace wengine::cli::logic {
 
+namespace {
+
+wengine::logic::Netlist &workspace_impl() {
+  static wengine::logic::Netlist nl{};
+  return nl;
+}
+
+} // namespace
+
+::wengine::logic::Netlist &workspace() { return workspace_impl(); }
+
 int LogicHelpSpec::run(ArgCursor &args, std::ostream &out) {
   if (!args.has_remaining()) {
     out << "Logic session commands (prompt [logic]> ; `back` leaves):\n";

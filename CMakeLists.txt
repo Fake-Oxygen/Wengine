@@ -275,6 +275,22 @@ if(BUILD_CLI)
         src/cli/commands/sig.cpp
         src/cli/commands/ic.cpp
         src/cli/commands/logic.cpp
+        src/cli/commands/logic/add.cpp
+        src/cli/commands/logic/common.cpp
+        src/cli/commands/logic/draw.cpp
+        src/cli/commands/logic/export.cpp
+        src/cli/commands/logic/ignore.cpp
+        src/cli/commands/logic/list.cpp
+        src/cli/commands/logic/load.cpp
+        src/cli/commands/logic/optimize.cpp
+        src/cli/commands/logic/remove.cpp
+        src/cli/commands/logic/reset.cpp
+        src/cli/commands/logic/save.cpp
+        src/cli/commands/logic/solve.cpp
+        src/cli/commands/logic/truth.cpp
+        src/cli/commands/logic/unwire.cpp
+        src/cli/commands/logic/use.cpp
+        src/cli/commands/logic/wire.cpp
         src/cli/commands/ic/ap63205.cpp
         src/cli/commands/ic/ina219.cpp
         src/cli/commands/ic/tmc22xx.cpp
