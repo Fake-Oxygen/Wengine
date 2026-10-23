@@ -276,7 +276,7 @@ if(BUILD_CLI)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     )
-    target_link_libraries(wengine_cli PUBLIC wengine_core wengine_link_shm wengine_link_net wengine_signal_lua)
+    target_link_libraries(wengine_cli PUBLIC wengine_core wengine_link_shm wengine_link_net wengine_signal_lua wengine_ros2)
 
     target_compile_options(wengine_cli PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
@@ -515,6 +515,15 @@ if(BUILD_TESTS)
     add_executable(test_sim tests/test_sim.cpp)
     target_link_libraries(test_sim PRIVATE wengine_cli)
     add_test(NAME sim COMMAND test_sim)
+    if(BUILD_ROS2)
+        # Live `sig run --emit-ros` in test_sim dlopens the rmw typesupport
+        # by soname (standard rosidl dispatch): prepend the fresh build-tree
+        # msgs lib dir so the just-built SignalBlock/SigCommand support is
+        # found without a sourced install (sourcing ROS itself stays the
+        # caller's job, like every other ROS run).
+        set_tests_properties(sim PROPERTIES ENVIRONMENT_MODIFICATION
+            "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/src/ros2/msgs")
+    endif()
 
     add_executable(test_solver_registry tests/test_solver_registry.cpp)
     target_link_libraries(test_solver_registry PRIVATE wengine_core)

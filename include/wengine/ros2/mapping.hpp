@@ -17,8 +17,12 @@
 //     dimensional safety lives at parse/display edges (signal/types.hpp).
 //   * sim_time (double, seconds) maps to the message header stamp; the ROS
 //     wall clock is never the simulation clock.
-//   * Message choice, std_msgs-only until the custom SignalBlock IDL
-//     lands (ROS2-3); resolved at the edge, not here:
+//   * Message choice: grouped signals ride BOTH the RViz-friendly
+//     sensor_msgs/JointState on `<ns>/<signal_stem>` AND the exact
+//     wengine_msgs/SignalBlock on `<ns>/<signal_stem>/block` (step +
+//     sim_time + serial/value/quantity arrays, see msg/SignalBlock.msg);
+//     per-serial mode keeps single-entry JointStates and publishes no
+//     block. The edge TU resolves the choice, never here.
 //       grouped signals -> sensor_msgs/JointState (header.stamp = sim_time,
 //                          name `sig.<serial>.U`, position SI value).
 //       per-signal topic -> single-entry JointState on the serial topic.
@@ -26,6 +30,7 @@
 //                          frame_from_snapshot items (views stay on Frame).
 
 #include "wengine/link/frame.hpp"
+#include "wengine/ros2/config.hpp"
 #include "wengine/signal/types.hpp"
 #include "wengine/world/state.hpp"
 
@@ -77,6 +82,20 @@ namespace wengine::ros2 {
   std::string out(stem);
   out += '/';
   out += sanitize_channel(channel);
+  return out;
+}
+
+// Exact grouped record topic: the JointState on the signal stem stays the
+// RViz-friendly view; the SignalBlock on this sub-topic carries the same
+// payload with serial + quantity code arrays (see msg/SignalBlock.msg).
+// Grouped mode only — per-serial mode publishes single-entry JointStates
+// and no block.
+[[nodiscard]] inline std::string signals_block_topic(const BridgeConfig &c) {
+  std::string out("/");
+  out += std::string(c.ns);
+  out += '/';
+  out += std::string(c.signal_topic_stem);
+  out += "/block";
   return out;
 }
 

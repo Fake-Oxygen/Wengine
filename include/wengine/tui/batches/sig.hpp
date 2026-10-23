@@ -20,7 +20,7 @@ namespace wengine::tui::batches::definitions {
   // Runtime fields (steps/dt/emit/control/pacing) are shared by every kind;
   // signal fields (freq/amp/.../lua) vary per kind. Field indices must match
   // the `fields` order below (bit N == field N).
-  const ArgSet kRuntimeMask = ArgSet::below(39) - ArgSet::below(12);
+  const ArgSet kRuntimeMask = ArgSet::below(50) - ArgSet::below(12);
   const ArgSet kRuntimeDefault = bit(12) | bit(13);
   const ArgSet kPeriodicMask = bit(1) | bit(2) | bit(3) | bit(4) | bit(7) | bit(8);
   const ArgSet kAllSignalMask = ArgSet::below(12) - ArgSet::below(1);
@@ -64,8 +64,19 @@ namespace wengine::tui::batches::definitions {
           {"--emit-uart-mode", "uart mode", "Space: choose ascii|cobs", false, {"ascii", "cobs"}},
           {"--emit-uart-stride", "uart stride", "0=muted, N>=1"},
           {"--emit-uart-select", "uart select", "serials e.g. 0,2"},
+          {"--emit-ros", "ros out", "flag: 1 to publish to ROS2 topics", true},
+          {"--emit-ros-stride", "ros stride", "0=muted, N>=1"},
+          {"--emit-ros-select", "ros select", "serials e.g. 0,2"},
+          {"--ros-node", "ros node", "node name, e.g. wengine"},
+          {"--ros-ns", "ros ns", "topic namespace, e.g. wengine"},
+          {"--ros-signal-stem", "ros sig stem", "e.g. signals"},
+          {"--ros-particle-stem", "ros pts stem", "e.g. particles"},
+          {"--ros-qos", "ros qos", "Space: choose latest|reliable", false, {"latest", "reliable"}},
+          {"--ros-grouped", "ros grouped", "flag: 1 (default layout)", true},
+          {"--ros-per-serial", "ros per-serial", "flag: 1 (one topic per serial)", true},
           {"--control-tcp", "control", "host:port (step-sync server)"},
           {"--control-uart", "ctl-uart", "flag: 1 (needs --emit-uart)", true},
+          {"--control-ros", "ctl-ros", "flag: 1 (ROS services, needs ROS build)", true},
           {"--paced", "paced", "flag: 1 to enable wall-clock pacing", true},
           {"--rate", "rate", "wall steps/s, e.g. 1kHz (needs --paced)"},
           {"--forever", "forever", "flag: 1 runs until Ctrl-C (async, TUI-5)", true},
@@ -81,9 +92,12 @@ namespace wengine::tui::batches::definitions {
           argument(22, bit(21)), argument(23, bit(21)), argument(24),
           argument(25, bit(24)), argument(26, bit(24)), argument(27, bit(24)),
           argument(28), argument(29, bit(28)), argument(30, bit(28)),
-          argument(31, bit(28)), argument(32), argument(33, bit(28)),
-          argument(34), argument(35, bit(34)), argument(36), argument(37),
-          argument(38),
+          argument(31, bit(28)), argument(32), argument(33, bit(32)),
+          argument(34, bit(32)), argument(35), argument(36),
+          argument(37, bit(32)), argument(38, bit(32)), argument(39, bit(32)),
+          argument(40, bit(32)), argument(41, bit(32)), argument(42),
+          argument(43, bit(28)), argument(44), argument(45),
+          argument(46, bit(45)), argument(47), argument(48), argument(49),
       },
       {
           profile("sine", kRuntimeMask | kPeriodicMask, ArgSet{},

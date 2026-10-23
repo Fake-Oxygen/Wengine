@@ -461,6 +461,11 @@ void test_completion() {
            has(c, "--emit-udp") && has(c, "--emit-every") &&
            has(c, "--emit-shm-stride") && has(c, "--emit-shm-select") &&
            has(c, "--emit-udp-budget") && has(c, "--emit-health") && has(c, "--solver") &&
+           has(c, "--emit-ros") && has(c, "--emit-ros-stride") &&
+           has(c, "--emit-ros-select") && has(c, "--ros-node") &&
+           has(c, "--ros-ns") && has(c, "--ros-signal-stem") &&
+           has(c, "--ros-particle-stem") && has(c, "--ros-qos") &&
+           has(c, "--ros-grouped") && has(c, "--ros-per-serial") &&
            has(c, "--paced") && has(c, "--rate"));
   }
   assert(complete_line("sim run --steps 10", 18, all).empty()); // numeric value
@@ -491,8 +496,13 @@ void test_completion() {
            has(c, "--emit-shm-select") && has(c, "--emit-udp-budget") &&
            has(c, "--emit-health") && has(c, "--forever") &&
            has(c, "--control-tcp") && has(c, "--control-uart") &&
-           has(c, "--emit-uart") && has(c, "--emit-uart-mode") &&
+           has(c, "--control-ros") && has(c, "--emit-uart") && has(c, "--emit-uart-mode") &&
            has(c, "--emit-uart-stride") && has(c, "--emit-uart-select") &&
+           has(c, "--emit-ros") && has(c, "--emit-ros-stride") &&
+           has(c, "--emit-ros-select") && has(c, "--ros-node") &&
+           has(c, "--ros-ns") && has(c, "--ros-signal-stem") &&
+           has(c, "--ros-particle-stem") && has(c, "--ros-qos") &&
+           has(c, "--ros-grouped") && has(c, "--ros-per-serial") &&
            has(c, "--paced") && has(c, "--rate") && has(c, "--plot") && has(c, "--sig-kind") &&
            has(c, "--sig-freq") && has(c, "--sig-quantity") && has(c, "--sig-count") &&
            has(c, "--sig-expr") && has(c, "--sig-table") && has(c, "--sig-lua") &&
@@ -518,6 +528,15 @@ void test_completion() {
     assert(complete_line("sig run --emit-uart-mode ", 25, all) == want);
     assert(complete_line("sim run --emit-uart-mode ", 25, all) == want);
   }
+  {
+    const std::vector<std::string> want{"latest", "reliable"};
+    assert(complete_line("sim run --ros-qos ", 18, all) == want);
+    assert(complete_line("sig run --ros-qos ", 18, all) == want);
+  }
+  assert(complete_line("sig run --ros-qos=l", 19, all) ==
+         std::vector<std::string>{"--ros-qos=latest"});
+  assert(complete_line("sim run --ros-qos=r", 19, all) ==
+         std::vector<std::string>{"--ros-qos=reliable"});
   {
     const auto c = complete_line("sim --", 6, all);
     assert(has(c, "--emit-uart") && has(c, "--emit-uart-mode") &&

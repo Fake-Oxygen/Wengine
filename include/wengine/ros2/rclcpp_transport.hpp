@@ -5,17 +5,20 @@
 // Included only when WENGINE_HAS_RCLCPP is defined (BUILD_ROS2=ON); the
 // core publisher header (ros2/publisher.hpp) stays ROS-free and this
 // header never leaks into it. Maps the transport-neutral fan-out onto
-// standard messages so no custom IDL is needed for the state-out half
-// (wengine_msgs/SignalBlock lands with ROS2-3):
+// standard messages plus the exact wengine_msgs/SignalBlock record:
 //   * grouped signals -> sensor_msgs::msg::JointState on
-//     `<ns>/<signal_topic_stem>` (header.stamp = sim_time, name
-//     `sig.<serial>.U`, position SI value; quantity in the suffix).
+//     `<ns>/<signal_stem>` (header.stamp = sim_time, name
+//     `sig.<serial>.U`, position SI value; quantity in the suffix) AND
+//     wengine_msgs::msg::SignalBlock on `<ns>/<signal_stem>/block`
+//     (step + sim_time + serial/value/quantity arrays — the exact
+//     record; see msg/SignalBlock.msg).
 //   * per-signal      -> single-entry JointState on
-//     `<ns>/<signal_topic_stem>/sig/<serial>`, publishers created lazily
+//     `<ns>/<signal_stem>/sig_<serial>`, publishers created lazily
 //     and retained (serial survival across despawn/respawn by
 //     construction; the publisher-side high-water gate bounds the set).
+//     No SignalBlock in per-serial mode.
 //   * particles       -> sensor_msgs::msg::PointCloud2 (x/y/vx/vy FLOAT64)
-//     on `<ns>/<particle_topic_stem>` via frame_from_snapshot.
+//     on `<ns>/<particle_stem>` via frame_from_snapshot.
 // QoS resolves from BridgeConfig::qos per D-ROS-5 (see ros_qos_for):
 // latest-state viewing = best-effort/keep-last-1, sample streaming =
 // reliable/keep-last-10, both transient-local off. Message staging
@@ -31,6 +34,7 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "wengine/ros2/publisher.hpp"
+#include "wengine_msgs/msg/signal_block.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -76,9 +80,12 @@ private:
   BridgeConfig config_;
   rclcpp::QoS qos_;
   JointStatePub grouped_pub_; // null in per-serial mode
+  using SignalBlockPub = rclcpp::Publisher<wengine_msgs::msg::SignalBlock>::SharedPtr;
+  SignalBlockPub block_pub_; // grouped exact record; null in per-serial mode
   std::map<std::uint64_t, JointStatePub> serial_pubs_; // retained per serial
   CloudPub particles_pub_;
   sensor_msgs::msg::JointState grouped_msg_; // reused staging (owned copy)
+  wengine_msgs::msg::SignalBlock block_msg_; // reused staging (owned copy)
   sensor_msgs::msg::JointState one_msg_; // reused staging (owned copy)
   sensor_msgs::msg::PointCloud2 particles_msg_; // reused staging (owned copy)
 };

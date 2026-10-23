@@ -7,6 +7,7 @@
 // (the sig.cpp chain shape: publisher <- Subset <- Stride) and lands on
 // standard topics with sim_time header stamps (docs/ros2.md):
 //   /wengine/signals            grouped JointState (or per-signal below)
+//   /wengine/signals/block      exact wengine_msgs/SignalBlock (grouped only)
 //   /wengine/signals/sig_<serial>
 //   /wengine/particles          PointCloud2 x/y/vx/vy
 // At step 250 the first source is despawned and a replacement spawned:

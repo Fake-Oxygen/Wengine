@@ -81,6 +81,10 @@ struct SimSpec {
       "        [--emit-udp-budget BYTES]\n"
       "        [--emit-uart <device[,baud]>] [--emit-uart-mode ascii|cobs]\n"
       "        [--emit-uart-stride N] [--emit-uart-select <s0,s1>]\n"
+      "        [--emit-ros] [--emit-ros-stride N] [--emit-ros-select <s0,s1>]\n"
+      "        [--ros-node NAME] [--ros-ns NS]\n"
+      "        [--ros-signal-stem STEM] [--ros-particle-stem STEM]\n"
+      "        [--ros-qos latest|reliable] [--ros-grouped] [--ros-per-serial]\n"
       "        [--emit-health]\n"
       "        [--paced] [--rate <Hz>]\n"
       "  sim run --steps 100 --particles 1   (projectile demo, all params named)\n"
@@ -127,6 +131,19 @@ struct SimSpec {
       "  sim: overdriven lines drop loudly (see docs/zephyr-hil.md for the\n"
       "  baud budget table — decimate fast runs). Per-output stride/select\n"
       "  work as on every transport; lines are unbounded (no 64-channel cap).\n"
+      "  --emit-ros publishes state to ROS2 topics (edge-only ISink, same\n"
+      "  seam as SHM/TCP; needs a ROS2 build — without -DBUILD_ROS2=ON\n"
+      "  the flag fails loudly instead of silently dropping). Grouped\n"
+      "  JointState on /<ns>/<signal-stem> (header.stamp = sim_time) plus\n"
+      "  the exact wengine_msgs/SignalBlock on /<ns>/<signal-stem>/block\n"
+      "  (step/sim_time/serial/value/quantity), per-serial JointStates\n"
+      "  with --ros-per-serial, PointCloud2 particles on\n"
+      "  /<ns>/<particle-stem>. --ros-node names the node, --ros-ns the\n"
+      "  topic namespace, --ros-qos selects latest (best-effort depth 1,\n"
+      "  default) or reliable (depth 10); --ros-grouped is the default\n"
+      "  layout and --ros-per-serial its mutually exclusive alternative.\n"
+      "  Stride/select work as on every transport (selections need solver\n"
+      "  'signal'; >64 sources need a fitting subset, like SHM/TCP/UDP).\n"
       "  --emit-health prints the per-cause live-output health report\n"
       "  (attempted/published/over-bound/backpressure/pending/disabled +\n"
       "  periodic stderr updates on long runs); default output stays concise.\n"
@@ -165,8 +182,12 @@ struct SigSpec {
       "        [--emit-udp-budget BYTES]\n"
       "        [--emit-uart <device[,baud]>] [--emit-uart-mode ascii|cobs]\n"
       "        [--emit-uart-stride N] [--emit-uart-select <s0,s1>]\n"
+      "        [--emit-ros] [--emit-ros-stride N] [--emit-ros-select <s0,s1>]\n"
+      "        [--ros-node NAME] [--ros-ns NS]\n"
+      "        [--ros-signal-stem STEM] [--ros-particle-stem STEM]\n"
+      "        [--ros-qos latest|reliable] [--ros-grouped] [--ros-per-serial]\n"
       "        [--emit-health]\n"
-      "        [--control-tcp <host:port>] [--control-uart]\n"
+      "        [--control-tcp <host:port>] [--control-uart] [--control-ros]\n"
       "        [--forever] [--paced] [--rate <Hz>] [--plot]\n"
       "        (run until Ctrl-C with --forever; --steps is ignored)\n"
       "  sig list --control-tcp <host:port>\n"
@@ -243,6 +264,19 @@ struct SigSpec {
       "  loudly — decimate fast runs (see docs/zephyr-hil.md for the baud\n"
       "  budget table). Stride/select work as on every transport; lines are\n"
       "  unbounded (no 64-channel cap).\n"
+      "  --emit-ros publishes state to ROS2 topics (edge-only ISink, same\n"
+      "  seam as SHM/TCP; needs a ROS2 build — without -DBUILD_ROS2=ON\n"
+      "  the flag fails loudly instead of silently dropping). Grouped\n"
+      "  JointState on /<ns>/<signal-stem> (header.stamp = sim_time) plus\n"
+      "  the exact wengine_msgs/SignalBlock on /<ns>/<signal-stem>/block\n"
+      "  (step/sim_time/serial/value/quantity), per-serial JointStates\n"
+      "  with --ros-per-serial, PointCloud2 particles on\n"
+      "  /<ns>/<particle-stem>. --ros-node names the node, --ros-ns the\n"
+      "  topic namespace, --ros-qos selects latest (best-effort depth 1,\n"
+      "  default) or reliable (depth 10); --ros-grouped is the default\n"
+      "  layout and --ros-per-serial its mutually exclusive alternative.\n"
+      "  Stride/select work as on every transport (>64 sources need a\n"
+      "  fitting subset, like SHM/TCP/UDP).\n"
       "  --emit-health prints the per-cause live-output health report\n"
       "  (attempted/published/over-bound/backpressure/pending/disabled +\n"
       "  periodic stderr updates on long/--forever runs); default output\n"
@@ -259,6 +293,14 @@ struct SigSpec {
       "  --control-uart (SIG-8, D4b-A) interleaves the same verbs on the\n"
       "  --emit-uart wire as control frames (`!line` in ascii mode,\n"
       "  COBS 'Q'/'R' frames in cobs mode), drained after the TCP slots.\n"
+      "  --control-ros serves the same verbs as ROS services\n"
+      "  (`wengine_msgs/srv/SigCommand` on `/<ns>/sig_add|set|start|stop|\n"
+      "  drop|list`; needs a ROS2 build, like --emit-ros): callbacks enqueue\n"
+      "  only and answer the enqueue verdict (`OK queued` / `ERR ...`),\n"
+      "  the driver drains at the step boundary in slot order (after UART)\n"
+      "  and `sig_list` serves the driver-refreshed census (stale by <1\n"
+      "  step). Services use --ros-node/--ros-ns for identity and need no\n"
+      "  --emit-ros (control and publish attach independently).\n"
       "Pacing (optional wall-clock mode, default off = fast batch): --paced\n"
       "  spaces fixed-dt steps against absolute steady-clock deadlines\n"
       "  (no drift, no skipped steps, dt unchanged); --rate sets wall steps\n"
@@ -280,8 +322,7 @@ struct SigSpec {
       "  --forever runs continuously until Ctrl-C.";
 
   static int run(ArgCursor &args, std::ostream &out);
-  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
-                       std::vector<std::string> &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
 struct LdoSpec {
@@ -304,8 +345,7 @@ struct LdoSpec {
       "  eff = VOUT*IOUT / (VIN*IIN), TJ = TA + Ptot * RthJA.";
 
   static int run(ArgCursor &args, std::ostream &out);
-  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
-                       std::vector<std::string> &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
 struct LedSpec {
@@ -324,8 +364,7 @@ struct LedSpec {
       "  Pres = headroom * IF', Pled = VF * IF', eff = VF / VS.";
 
   static int run(ArgCursor &args, std::ostream &out);
-  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
-                       std::vector<std::string> &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
 struct IcSpec {
@@ -340,8 +379,7 @@ struct IcSpec {
       "  from the datasheet); each chip dispatches its own subcommands.";
 
   static int run(ArgCursor &args, std::ostream &out);
-  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
-                       std::vector<std::string> &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
 } // namespace wengine::cli::commands

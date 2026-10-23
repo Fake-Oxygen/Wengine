@@ -21,7 +21,9 @@ namespace wengine::tui::batches::definitions {
   // --solver (field 0) is the profile selector and stays a plain field.
   // --gravity is projectile-only; UART + all -select options need the
   // signal solver; strides/modes/budgets need their output; --rate needs
-  // --paced. Nothing is strictly required: every option has a CLI default.
+  // --paced. ROS topics ride both solvers (particles for projectile,
+  // signals + particles for signal); only --emit-ros-select is
+  // signal-only. Nothing is strictly required: every option has a CLI default.
   const ArgSet kSteps = bit(1) | bit(2);
   const ArgSet kGravity = bit(3);
   const ArgSet kParticles = bit(4) | bit(5) | bit(6) | bit(7) | bit(8);
@@ -34,17 +36,22 @@ namespace wengine::tui::batches::definitions {
   const ArgSet kTcpOpts = bit(17);
   const ArgSet kUdp = bit(19);
   const ArgSet kUdpOpts = bit(20) | bit(22);
+  const ArgSet kRos = bit(30);
+  const ArgSet kRosOpts = bit(31) | bit(33) | bit(34) | bit(35) | bit(36) |
+                          bit(37) | bit(38) | bit(39);
   const ArgSet kPaced = bit(27);
   const ArgSet kHealth = bit(29);
   const ArgSet kProjectileActive =
       kSteps | kGravity | kParticles | kEmitEvery | kCsv | kCsvOpts | kShm |
-      kShmOpts | kTcp | kTcpOpts | kUdp | kUdpOpts | kPaced | bit(28) | kHealth;
+      kShmOpts | kTcp | kTcpOpts | kUdp | kUdpOpts | kRos | kRosOpts | kPaced | bit(28) | kHealth;
   const ArgSet kSignalActive =
       kSteps | kParticles | kEmitEvery | bit(10) | bit(11) | bit(12) | bit(13) |
       bit(14) | bit(15) | bit(16) | bit(17) | bit(18) | bit(19) | bit(20) |
-      bit(21) | bit(22) | bit(23) | bit(24) | bit(25) | bit(26) | kPaced |
+      bit(21) | bit(22) | bit(23) | bit(24) | bit(25) | bit(26) | bit(30) |
+      bit(31) | bit(32) | bit(33) | bit(34) | bit(35) | bit(36) | bit(37) |
+      bit(38) | bit(39) | kPaced |
       bit(28) | kHealth;
-  const ArgSet kAllSimMask = ArgSet::below(30) - ArgSet::below(1);
+  const ArgSet kAllSimMask = ArgSet::below(40) - ArgSet::below(1);
   const ArgSet kDefaultSelected = bit(1) | bit(4);
 
   return {
@@ -84,6 +91,16 @@ namespace wengine::tui::batches::definitions {
           {"--paced", "paced", "flag: 1 to enable wall-clock pacing", true},
           {"--rate", "rate", "wall steps/s, e.g. 1kHz (needs --paced)"},
           {"--emit-health", "health", "flag: 1 for live-output report", true},
+          {"--emit-ros", "ros out", "flag: 1 to publish to ROS2 topics", true},
+          {"--emit-ros-stride", "ros stride", "0=muted, N>=1"},
+          {"--emit-ros-select", "ros select", "serials e.g. 0 (signal only)"},
+          {"--ros-node", "ros node", "node name, e.g. wengine"},
+          {"--ros-ns", "ros ns", "topic namespace, e.g. wengine"},
+          {"--ros-signal-stem", "ros sig stem", "e.g. signals"},
+          {"--ros-particle-stem", "ros pts stem", "e.g. particles"},
+          {"--ros-qos", "ros qos", "Space: choose latest|reliable", false, {"latest", "reliable"}},
+          {"--ros-grouped", "ros grouped", "flag: 1 (default layout)", true},
+          {"--ros-per-serial", "ros per-serial", "flag: 1 (one topic per serial)", true},
       },
       {
           argument(1), argument(2), argument(3), argument(4), argument(5),
@@ -94,7 +111,10 @@ namespace wengine::tui::batches::definitions {
           argument(20, bit(19)), argument(21, bit(19)), argument(22, bit(19)),
           argument(23), argument(24, bit(23)), argument(25, bit(23)),
           argument(26, bit(23)), argument(27), argument(28, bit(27)),
-          argument(29),
+          argument(29), argument(30), argument(31, bit(30)),
+          argument(32, bit(30)), argument(33, bit(30)), argument(34, bit(30)),
+          argument(35, bit(30)), argument(36, bit(30)), argument(37, bit(30)),
+          argument(38, bit(30)), argument(39, bit(30)),
       },
       {
           profile("projectile", kProjectileActive, ArgSet{}, kDefaultSelected),

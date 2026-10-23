@@ -213,6 +213,9 @@ void test_batch_choices() {
     const auto uart = tui::batches::batch_field_choices(
         *sim, static_cast<std::size_t>(batch_field(*sim, "--emit-uart-mode")), v);
     assert(uart.size() == 2 && contains(uart, "ascii") && contains(uart, "cobs"));
+    const auto qos = tui::batches::batch_field_choices(
+        *sim, static_cast<std::size_t>(batch_field(*sim, "--ros-qos")), v);
+    assert(qos.size() == 2 && contains(qos, "latest") && contains(qos, "reliable"));
     // Numeric/path fields stay dialogs-free.
     assert(tui::batches::batch_field_choices(
                *sim, static_cast<std::size_t>(batch_field(*sim, "--steps")), v)
@@ -229,6 +232,9 @@ void test_batch_choices() {
     const auto uart = tui::batches::batch_field_choices(
         *sig, static_cast<std::size_t>(batch_field(*sig, "--emit-uart-mode")), v);
     assert(uart.size() == 2 && contains(uart, "ascii") && contains(uart, "cobs"));
+    const auto qos = tui::batches::batch_field_choices(
+        *sig, static_cast<std::size_t>(batch_field(*sig, "--ros-qos")), v);
+    assert(qos.size() == 2 && contains(qos, "latest") && contains(qos, "reliable"));
     assert(tui::batches::batch_field_choices(
                *sig, static_cast<std::size_t>(batch_field(*sig, "--sig-freq")), v)
                .empty());

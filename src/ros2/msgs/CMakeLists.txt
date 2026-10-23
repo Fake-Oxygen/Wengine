@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(wengine_msgs)
 
 # IDL package for the WEngine ROS2 bridge (ROS2-2: control services;
-# ROS2-3 adds the SignalBlock message + CLI wiring). Built only when the
+# ROS2-3: SignalBlock state message + CLI wiring). Built only when the
 # top-level BUILD_ROS2 option is ON (see ../../../CMakeLists.txt), so default
 # builds never require a ROS install. Plain CMake is enough: the spike
 # behind ROS2-2 proved configure + build + uninstalled runtime (service
@@ -13,6 +13,7 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SigCommand.srv"
+  "msg/SignalBlock.msg"
 )
 
 # Build-tree C++ typesupport target for consumers (the `wengine_msgs::`

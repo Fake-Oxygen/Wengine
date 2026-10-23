@@ -526,16 +526,22 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
  `wengine_signal_lua` (`STATIC`: `src/signal/lua_solver.cpp`, the Lua
  runtime TU) links `wengine_core` + `wengine_lua` (vendored interpreter).
  `wengine_ros2` (`STATIC`: `src/ros2/ros_publisher.cpp`, the transport-neutral
- ROS2 state-out ISink; `src/ros2/ros_control.cpp`, the rmw service TU, plus
- `src/ros2/msgs/` IDL for `wengine_msgs/srv/SigCommand` — rmw TUs only with
- `BUILD_ROS2=ON`) links `wengine_core` — engine headers stay ROS-free.
+ ROS2 state-out ISink; `src/ros2/ros_control.cpp` + `src/ros2/rclcpp_transport.cpp`,
+ the rmw TUs (grouped JointState + `wengine_msgs/SignalBlock` exact record +
+ per-serial topics + particles), plus `src/ros2/msgs/` IDL for
+ `wengine_msgs/srv/SigCommand` and `wengine_msgs/msg/SignalBlock` — rmw TUs
+ and IDL only with `BUILD_ROS2=ON`) links `wengine_core` — engine headers
+ stay ROS-free (`ros2/cli_options.hpp` owns the shared `--emit-ros` /
+ `--ros-*` CLI vocabulary: node/namespace/stem shapes, QoS text, BridgeConfig
+ builder).
  `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
  `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
  `src/cli/commands/i2c.cpp`, `src/cli/commands/ldo.cpp`, `src/cli/commands/led.cpp`,
  `src/cli/commands/sim.cpp`,
   `src/cli/commands/sig.cpp`, `src/cli/commands/ic.cpp`
  (+ `src/cli/commands/ic/<chip>.cpp` per IC part)) links `wengine_core`, `wengine_link_shm`,
-  `wengine_link_net`,
+  `wengine_link_net`, `wengine_ros2`
+ (transport-neutral ROS2 ISink; rmw only with `BUILD_ROS2=ON`),
  and `wengine_signal_lua` (for `sig run --sig-lua`);
 `PhysicsSimApp` links `wengine_cli` (+ `wengine_tui` when `BUILD_TUI` finds
  ncurses: `src/tui/` domain TUs under strict warnings + header-only
@@ -560,7 +566,9 @@ over Lua, shipped `examples/lua/` goldens, v5 round-trip + v4 fallback), `test_r
 1:N/N:1 subscriptions, mid-run reconfig, stride alignment, sum golden +
 operand rejections, dangling-operand failure, sink-failure isolation, v3
 round-trip + v2 fallback), `test_ros2_mapping` (topic/channel naming incl. the
-rmw digit rule, bridge config + publisher count, grouped SignalBlock layout,
+rmw digit rule, bridge config + publisher count, grouped SignalBlock layout +
+block topic, `--emit-ros`/`--ros-*` option vocabulary (QoS text, node/namespace/
+stem shapes, BridgeConfig builder),
 service verbs, quantity suffix), `test_ros2_publisher` (grouped + per-serial
 publish incl. despawn/respawn serial survival, over-bound/disconnect
 stickiness, transient backpressure, owned copies, stride/subset wiring,
@@ -599,10 +607,12 @@ version gate, lag accounting), `test_link_shm` (segment create/publish/
    telemetry-failure numerical isolation), `test_sim` also validates `--emit-shm` wiring,
     TCP/UDP endpoint syntax, per-output strides/selects (global+per-output
     intersection, full-rate CSV + decimated live output, capacity refusal),
+    `--emit-ros`/`--ros-*` flags (orphans, shapes, QoS, stride/select, capacity,
+    rebuild hint without ROS2 / live publish with ROS2),
     UDP budget wiring/diagnostics +
    `sig run` expression/table/lua goldens and usage errors (incl. sandbox
-   failure surfacing), `--control-tcp` flag/completion/shape errors,
-   step-synchronous control drive + summary,
+   failure surfacing), `--control-tcp`/`--control-ros` flag/completion/shape errors,
+   step-synchronous control drive + summary (incl. ROS service enqueue/drain),
 `test_signal_control` (control-plane verb parsing, add/set/start/stop/
   drop/list/hello/ping/select + table/lua refusals, idempotent
   start/stop, phase-exact pause/resume incl. stopped save/load/resume,

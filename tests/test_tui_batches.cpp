@@ -155,7 +155,11 @@ void test_keys_match_complete_vocab() {
                                "--emit-tcp", "--emit-tcp-stride", "--emit-tcp-select",
                                "--emit-udp", "--emit-udp-stride", "--emit-udp-select",
                                "--emit-udp-budget", "--emit-uart", "--emit-uart-mode",
-                               "--emit-uart-stride", "--emit-uart-select", "--paced",
+                               "--emit-uart-stride", "--emit-uart-select",
+                               "--emit-ros", "--emit-ros-stride", "--emit-ros-select",
+                               "--ros-node", "--ros-ns", "--ros-signal-stem",
+                               "--ros-particle-stem", "--ros-qos", "--ros-grouped",
+                               "--ros-per-serial", "--paced",
                                "--rate", "--emit-health"}) {
       assert(field_index(*sim, k) >= 0);
     }
@@ -172,7 +176,11 @@ void test_keys_match_complete_vocab() {
                                "--emit-tcp-stride", "--emit-tcp-select", "--emit-udp",
                                "--emit-udp-stride", "--emit-udp-select", "--emit-udp-budget",
                                "--emit-uart", "--emit-uart-mode", "--emit-uart-stride",
-                               "--emit-uart-select", "--control-tcp", "--control-uart",
+                               "--emit-uart-select", "--emit-ros", "--emit-ros-stride",
+                               "--emit-ros-select", "--ros-node", "--ros-ns",
+                               "--ros-signal-stem", "--ros-particle-stem", "--ros-qos",
+                               "--ros-grouped", "--ros-per-serial",
+                               "--control-tcp", "--control-uart", "--control-ros",
                                "--paced", "--rate", "--forever", "--emit-health",
                                "--plot"}) {
       assert(field_index(*sig, k) >= 0);
@@ -209,13 +217,15 @@ void test_registry_driven() {
   assert(qs.size() == 2 && qs[0] == "U" && qs[1] == "I");
   const auto modes = tui::batches::uart_modes();
   assert(modes.size() == 2 && modes[0] == "ascii" && modes[1] == "cobs");
+  const auto qos = tui::batches::ros_qos_modes();
+  assert(qos.size() == 2 && qos[0] == "latest" && qos[1] == "reliable");
 }
 
 void test_signal_argument_profiles() {
   const auto defs = tui::batches::batch_defs();
   const auto *sig = find_batch(defs, "sig");
   assert(sig != nullptr);
-  assert(sig->arguments.size() == 38);
+  assert(sig->arguments.size() == 49);
   assert(sig->profiles.size() == 12);
 
   const auto profile = [&](std::string_view name)
@@ -253,9 +263,15 @@ void test_signal_argument_profiles() {
   const auto *rate = argument("--rate");
   const auto *csv = argument("--emit-csv");
   const auto *csv_stride = argument("--emit-csv-stride");
+  const auto *emit_ros = argument("--emit-ros");
+  const auto *ros_stride = argument("--emit-ros-stride");
+  const auto *ros_node = argument("--ros-node");
+  const auto *ros_qos = argument("--ros-qos");
+  const auto *control_ros = argument("--control-ros");
   const auto *forever = argument("--forever");
   const auto *plot = argument("--plot");
   assert(freq && duty && seed && expr && paced && rate && csv && csv_stride &&
+         emit_ros && ros_stride && ros_node && ros_qos && control_ros &&
          forever && plot);
 
   assert(tui::batches::argument_state(*freq, sine->default_selected, *sine) ==
@@ -289,6 +305,27 @@ void test_signal_argument_profiles() {
   // never required, never kind-gated.
   assert(tui::batches::argument_state(*plot, sine->default_selected, *sine) ==
          tui::batches::ArgumentState::kAvailable);
+  // ROS publish layout decimates only behind --emit-ros; --ros-node serves
+  // either plane (topics and/or services), so it stays requirement-free;
+  // --control-ros is a bare flag like --control-tcp.
+  assert(tui::batches::argument_state(*emit_ros, sine->default_selected, *sine) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*ros_stride, sine->default_selected, *sine) ==
+         tui::batches::ArgumentState::kBlocked);
+  assert(tui::batches::argument_state(*ros_stride,
+                                      sine->default_selected | emit_ros->bit,
+                                      *sine) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*ros_node, sine->default_selected, *sine) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*control_ros, sine->default_selected, *sine) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*emit_ros, sum->default_selected, *sum) ==
+         tui::batches::ArgumentState::kAvailable);
+  // --ros-qos offers the shared latest|reliable vocabulary.
+  assert(sig->fields[ros_qos->field_index].choices.size() == 2 &&
+         sig->fields[ros_qos->field_index].choices[0] == "latest" &&
+         sig->fields[ros_qos->field_index].choices[1] == "reliable");
   auto async_values = blank(*sig);
   set(async_values, *sig, "--sig-kind", "sine");
   set(async_values, *sig, "--forever", "1");
@@ -313,7 +350,7 @@ void test_sim_argument_profiles() {
   const auto defs = tui::batches::batch_defs();
   const auto *sim = find_batch(defs, "sim");
   assert(sim != nullptr);
-  assert(sim->arguments.size() == 29);
+  assert(sim->arguments.size() == 39);
   assert(sim->profiles.size() == 3);
 
   const auto profile = [&](std::string_view name)
@@ -347,12 +384,17 @@ void test_sim_argument_profiles() {
   const auto *csv_select = argument("--emit-csv-select");
   const auto *csv_stride = argument("--emit-csv-stride");
   const auto *csv = argument("--emit-csv");
+  const auto *emit_ros = argument("--emit-ros");
+  const auto *ros_stride = argument("--emit-ros-stride");
+  const auto *ros_select = argument("--emit-ros-select");
+  const auto *ros_node = argument("--ros-node");
   const auto *paced = argument("--paced");
   const auto *rate = argument("--rate");
   const auto *steps = argument("--steps");
   const auto *particles = argument("--particles");
   assert(gravity && uart && uart_mode && csv_select && csv_stride && csv &&
-         paced && rate && steps && particles);
+         emit_ros && ros_stride && ros_select && ros_node && paced && rate &&
+         steps && particles);
 
   // --gravity is projectile-only; UART + all -select options are signal-only.
   assert(tui::batches::argument_state(*gravity, projectile->default_selected,
@@ -402,6 +444,37 @@ void test_sim_argument_profiles() {
   assert(tui::batches::argument_state(*uart_mode,
                                       signal->default_selected | uart->bit,
                                       *signal) ==
+         tui::batches::ArgumentState::kAvailable);
+
+  // ROS topics ride both solvers (particles for projectile); only the
+  // serial select is signal-only. Identity/layout options unlock behind
+  // --emit-ros, like every other per-output chain.
+  assert(tui::batches::argument_state(*emit_ros, projectile->default_selected,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*ros_stride, projectile->default_selected,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kBlocked);
+  assert(tui::batches::argument_state(*ros_stride,
+                                      projectile->default_selected | emit_ros->bit,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*ros_select, projectile->default_selected,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kInactive);
+  assert(tui::batches::argument_state(*ros_select, signal->default_selected,
+                                      *signal) ==
+         tui::batches::ArgumentState::kBlocked);
+  assert(tui::batches::argument_state(*ros_select,
+                                      signal->default_selected | emit_ros->bit,
+                                      *signal) ==
+         tui::batches::ArgumentState::kAvailable);
+  assert(tui::batches::argument_state(*ros_node, projectile->default_selected,
+                                      *projectile) ==
+         tui::batches::ArgumentState::kBlocked);
+  assert(tui::batches::argument_state(*ros_node,
+                                      projectile->default_selected | emit_ros->bit,
+                                      *projectile) ==
          tui::batches::ArgumentState::kAvailable);
 
   // Defaults cover the session prefills (solver=projectile, steps, particles).
@@ -466,6 +539,26 @@ void test_compose_shapes() {
     assert(tui::batches::compose_line(*sim, w) == "sim run --rate 1kHz");
     auto e = blank(*sim);
     assert(tui::batches::compose_line(*sim, e) == "sim run");
+  }
+  {
+    // ROS publish options compose in field order (no execution here: the
+    // CLI owns every verdict, including the non-ROS rebuild hint).
+    auto v = blank(*sim);
+    set(v, *sim, "--solver", "signal");
+    set(v, *sim, "--steps", "2");
+    set(v, *sim, "--emit-ros", "1");
+    set(v, *sim, "--ros-qos", "reliable");
+    assert(tui::batches::compose_line(*sim, v) ==
+           "sim run --solver signal --steps 2 --emit-ros --ros-qos reliable");
+  }
+  {
+    // ROS service control composes the bare flag (step-sync server).
+    auto v = blank(*sig);
+    set(v, *sig, "--sig-kind", "sine");
+    set(v, *sig, "--control-ros", "1");
+    set(v, *sig, "--ros-ns", "bench");
+    assert(tui::batches::compose_line(*sig, v) ==
+           "sig run --sig-kind sine --ros-ns bench --control-ros");
   }
   {
     // Paths with spaces quote to one argv token.

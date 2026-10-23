@@ -94,6 +94,12 @@ struct BatchDef {
   return {"ascii", "cobs"};
 }
 
+// ROS delivery classes for `--ros-qos` (D-ROS-5: latest-state viewing vs
+// ordered sample streaming).
+[[nodiscard]] inline std::vector<std::string> ros_qos_modes() {
+  return {"latest", "reliable"};
+}
+
 namespace detail {
 
 [[nodiscard]] inline std::string_view trim(std::string_view s) noexcept {

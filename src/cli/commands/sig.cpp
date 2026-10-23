@@ -14,6 +14,14 @@
 #include "wengine/link/shm_publisher.hpp"
 #include "wengine/link/socket_publisher.hpp"
 #include "wengine/link/uart_publisher.hpp"
+#include "wengine/ros2/cli_options.hpp"
+#include "wengine/ros2/control.hpp"
+#include "wengine/ros2/publisher.hpp"
+#ifdef WENGINE_HAS_RCLCPP
+#include "rclcpp/rclcpp.hpp"
+#include "wengine/ros2/rclcpp_transport.hpp"
+#include "wengine/ros2/ros_control.hpp"
+#endif
 #include "wengine/signal/lua.hpp"
 #include "wengine/signal/table.hpp"
 #include "wengine/signal/types.hpp"
@@ -77,7 +85,7 @@ bool combined_stop() noexcept {
   return sigint_requested() || cli::cancel_requested();
 }
 
-constexpr std::array<std::string_view, 43> kSigOptions{{
+constexpr std::array<std::string_view, 54> kSigOptions{{
     "--steps", "-n", "--dt", "--sig-kind", "--sig-freq", "--sig-amp", "--sig-offset",
     "--sig-phase", "--sig-duty", "--sig-seed", "--sig-quantity", "--sig-count",
     "--sig-expr", "--sig-table", "--sig-lua", "--sig-operands", "--emit-csv", "--emit-shm", "--emit-tcp",
@@ -85,7 +93,11 @@ constexpr std::array<std::string_view, 43> kSigOptions{{
     "--emit-tcp-stride", "--emit-udp-stride", "--emit-udp-budget", "--emit-csv-select",
     "--emit-shm-select", "--emit-tcp-select", "--emit-udp-select", "--emit-health",
     "--emit-uart", "--emit-uart-mode", "--emit-uart-stride", "--emit-uart-select",
-    "--control-tcp", "--control-uart", "--forever", "--paced", "--rate", "--plot", "--help", "-h",
+    "--emit-ros", "--emit-ros-stride", "--emit-ros-select",
+    "--ros-node", "--ros-ns", "--ros-signal-stem", "--ros-particle-stem",
+    "--ros-qos", "--ros-grouped", "--ros-per-serial",
+    "--control-tcp", "--control-uart", "--control-ros",
+    "--forever", "--paced", "--rate", "--plot", "--help", "-h",
 }};
 
 // Chunked live-output health (PHYSI-39): shared with sim run. Fast batches
@@ -191,6 +203,13 @@ struct SigCliOptions {
   std::optional<std::string_view> emit_tcp_select;
   std::optional<std::string_view> emit_udp_select;
   std::optional<std::string_view> emit_uart_select;
+  std::optional<std::string_view> emit_ros_stride;
+  std::optional<std::string_view> emit_ros_select;
+  std::optional<std::string_view> ros_node;
+  std::optional<std::string_view> ros_ns;
+  std::optional<std::string_view> ros_signal_stem;
+  std::optional<std::string_view> ros_particle_stem;
+  std::optional<std::string_view> ros_qos;
 };
 
 void take_sig_options(ArgCursor &args, SigCliOptions &o) {
@@ -229,6 +248,13 @@ void take_sig_options(ArgCursor &args, SigCliOptions &o) {
   o.emit_tcp_select = args.take_option({"--emit-tcp-select"});
   o.emit_udp_select = args.take_option({"--emit-udp-select"});
   o.emit_uart_select = args.take_option({"--emit-uart-select"});
+  o.emit_ros_stride = args.take_option({ros2::cli_options::kEmitRosStride});
+  o.emit_ros_select = args.take_option({ros2::cli_options::kEmitRosSelect});
+  o.ros_node = args.take_option({ros2::cli_options::kRosNode});
+  o.ros_ns = args.take_option({ros2::cli_options::kRosNs});
+  o.ros_signal_stem = args.take_option({ros2::cli_options::kRosSignalStem});
+  o.ros_particle_stem = args.take_option({ros2::cli_options::kRosParticleStem});
+  o.ros_qos = args.take_option({ros2::cli_options::kRosQos});
 }
 
 // True when any batch/transport value option was given: the per-source
@@ -239,7 +265,9 @@ void take_sig_options(ArgCursor &args, SigCliOptions &o) {
          o.emit_udp_budget || o.emit_csv_stride || o.emit_shm_stride ||
          o.emit_tcp_stride || o.emit_udp_stride || o.emit_uart_stride ||
          o.emit_csv_select || o.emit_shm_select || o.emit_tcp_select ||
-         o.emit_udp_select || o.emit_uart_select;
+         o.emit_udp_select || o.emit_uart_select || o.emit_ros_stride ||
+         o.emit_ros_select || o.ros_node || o.ros_ns || o.ros_signal_stem ||
+         o.ros_particle_stem || o.ros_qos;
 }
 
 int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_view> extra_pos, const SigCliOptions &o) {
@@ -255,6 +283,9 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   const bool forever = args.take_flag({"--forever"});
   const bool paced = args.take_flag({"--paced"});
   const bool emit_health = args.take_flag({"--emit-health"});
+  const bool emit_ros = args.take_flag({ros2::cli_options::kEmitRos});
+  const bool ros_grouped_flag = args.take_flag({ros2::cli_options::kRosGrouped});
+  const bool ros_per_serial_flag = args.take_flag({ros2::cli_options::kRosPerSerial});
   // Live plot window: in-process SDL2 2D view, independent of the GUI
   // backend and of the external Python receivers (see --emit-tcp). The
   // window observes emitted ticks only, like every other sink.
@@ -268,6 +299,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   std::optional<std::string_view> uart_device = o.emit_uart;
   std::optional<std::string_view> uart_mode_text = o.emit_uart_mode;
   const bool control_uart = args.take_flag({"--control-uart"});
+  const bool control_ros = args.take_flag({"--control-ros"});
   long long udp_budget = static_cast<long long>(link::kDefaultUdpPayloadBudget);
   bool udp_budget_given = false;
 
@@ -304,6 +336,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   cli::EmitOutputSampling tcp_sampling;
   cli::EmitOutputSampling udp_sampling;
   cli::EmitOutputSampling uart_sampling;
+  cli::EmitOutputSampling ros_sampling;
   auto take_stride = [&](std::optional<std::string_view> v, const char *what,
                          cli::EmitOutputSampling &slot) -> bool {
     if (v) {
@@ -336,7 +369,8 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
       !take_stride(o.emit_shm_stride, "shm stride", shm_sampling) ||
       !take_stride(o.emit_tcp_stride, "tcp stride", tcp_sampling) ||
       !take_stride(o.emit_udp_stride, "udp stride", udp_sampling) ||
-      !take_stride(o.emit_uart_stride, "uart stride", uart_sampling)) {
+      !take_stride(o.emit_uart_stride, "uart stride", uart_sampling) ||
+      !take_stride(o.emit_ros_stride, "ros stride", ros_sampling)) {
     return core::kExitUsage;
   }
   if (o.emit_udp_budget) {
@@ -355,7 +389,8 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
       !take_select(o.emit_shm_select, "shm selection", shm_sampling) ||
       !take_select(o.emit_tcp_select, "tcp selection", tcp_sampling) ||
       !take_select(o.emit_udp_select, "udp selection", udp_sampling) ||
-      !take_select(o.emit_uart_select, "uart selection", uart_sampling)) {
+      !take_select(o.emit_uart_select, "uart selection", uart_sampling) ||
+      !take_select(o.emit_ros_select, "ros selection", ros_sampling)) {
     return core::kExitUsage;
   }
 
@@ -632,6 +667,45 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   if (uart_sampling.select_given && !uart_device) {
     return usage_error(out, "--emit-uart-select needs --emit-uart");
   }
+  // ROS identity orphans (same never-silent rule as every other option):
+  // publish layout/decimation need --emit-ros; the node/namespace serve
+  // either plane (topics and/or services); topic stems and delivery class
+  // are publish-only.
+  if ((ros_sampling.stride_given || ros_sampling.select_given ||
+       ros_grouped_flag || ros_per_serial_flag) && !emit_ros) {
+    return usage_error(out, "--emit-ros-stride/select and --ros-grouped/per-serial need --emit-ros");
+  }
+  if ((o.ros_node || o.ros_ns) && !emit_ros && !control_ros) {
+    return usage_error(out, "--ros-node/ns needs --emit-ros or --control-ros");
+  }
+  if ((o.ros_signal_stem || o.ros_particle_stem || o.ros_qos) && !emit_ros) {
+    return usage_error(out, "--ros-signal-stem/particle-stem/qos needs --emit-ros");
+  }
+  if (ros_grouped_flag && ros_per_serial_flag) {
+    return usage_error(out, "--ros-grouped and --ros-per-serial are mutually exclusive");
+  }
+  if (o.ros_node && !ros2::cli_options::is_valid_ros_node(*o.ros_node)) {
+    return usage_error(out, "invalid ROS node name (want [A-Za-z_][A-Za-z0-9_]*)");
+  }
+  if (o.ros_ns && !ros2::cli_options::is_valid_ros_path(*o.ros_ns)) {
+    return usage_error(out, "invalid ROS namespace (want a/b segments, no leading slash)");
+  }
+  if (o.ros_signal_stem && !ros2::cli_options::is_valid_ros_path(*o.ros_signal_stem)) {
+    return usage_error(out, "invalid ROS signal stem (want a/b segments, no leading slash)");
+  }
+  if (o.ros_particle_stem && !ros2::cli_options::is_valid_ros_path(*o.ros_particle_stem)) {
+    return usage_error(out, "invalid ROS particle stem (want a/b segments, no leading slash)");
+  }
+  // Parsed + validated here so usage errors (exit 2) are identical in
+  // both builds; consumed only by the rmw transport below (ROS2=ON).
+  [[maybe_unused]] ros2::QosClass ros_qos = ros2::QosClass::kLatestState;
+  if (o.ros_qos) {
+    const auto q = ros2::cli_options::parse_ros_qos(*o.ros_qos);
+    if (!q.ok()) {
+      return usage_error(out, "unknown ROS QoS (want latest|reliable)");
+    }
+    ros_qos = q.value;
+  }
   // UART wire mode is explicit (never silent): ascii lines by default,
   // COBS frames on request. A mode without its device is a usage error.
   link::uart::UartMode uart_mode = link::uart::UartMode::kAscii;
@@ -678,7 +752,8 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     }
     // Unfiltered transports must fit the whole batch (1 + count <= 64).
     // UART is exempt: lines are unbounded (no 64-channel frame cap), so
-    // only the serial range below applies to it.
+    // only the serial range below applies to it. ROS grouped records
+    // honor the same 64-channel gate in the publisher.
     for (int k = 1; k < 4; ++k) {
       if (!requested[k] || outs[k]->select_given) {
         continue;
@@ -687,6 +762,30 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
         out << "Error: --emit-" << names[k] << " needs " << (n_live + 1)
             << " channels, transport holds " << link::kMaxChannels
             << " (subscribe with --emit-" << names[k] << "-select)\n";
+        out << SigSpec::kUsage << '\n';
+        return core::kExitUsage;
+      }
+    }
+    if (emit_ros && !ros_sampling.select_given && !cli::signal_channels_fit(n_live)) {
+      out << "Error: --emit-ros needs " << (n_live + 1)
+          << " channels, transport holds " << link::kMaxChannels
+          << " (subscribe with --emit-ros-select)\n";
+      out << SigSpec::kUsage << '\n';
+      return core::kExitUsage;
+    }
+    if (ros_sampling.select_given) {
+      for (std::uint64_t id : ros_sampling.serials) {
+        if (id >= static_cast<std::uint64_t>(n_live)) {
+          out << "Error: --emit-ros-select serial " << id
+              << " out of range (count=" << n_live << ", serials 0.." << (n_live == 0 ? 0 : n_live - 1)
+              << ")\n";
+          out << SigSpec::kUsage << '\n';
+          return core::kExitUsage;
+        }
+      }
+      if (emit_ros && !cli::signal_channels_fit(ros_sampling.serials.size())) {
+        out << "Error: --emit-ros-select needs " << (ros_sampling.serials.size() + 1)
+            << " channels, transport holds " << link::kMaxChannels << '\n';
         out << SigSpec::kUsage << '\n';
         return core::kExitUsage;
       }
@@ -789,6 +888,61 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     }
   }
 
+  // ROS state-out publisher (ROS2-3, edge-only ISink like every other
+  // transport — never in RunConfig). Without a ROS2 build the flag is
+  // parsed + validated above and fails loudly here instead of silently
+  // dropping (same rebuild-hint split as --plot without SDL2).
+  // BridgeConfig.stride stays 1: the StrideSink below owns decimation
+  // (a muted stride-0 must still succeed with zero publishes, which a
+  // zero BridgeConfig.stride would refuse at construction).
+#ifdef WENGINE_HAS_RCLCPP
+  std::shared_ptr<rclcpp::Node> ros_node;
+  std::optional<ros2::RclcppTransport> ros_transport;
+  std::optional<ros2::RosPublisher> ros_pub;
+  // One node serves both planes (topics and/or services); the publisher
+  // and the service set attach independently below.
+  if (emit_ros || control_ros) {
+    if (!ros2::cli_options::ensure_ros_initialized()) {
+      out << "Error: cannot initialize ROS node\n";
+      return core::kExitRuntime;
+    }
+    try {
+      // Root namespace (like examples/ros2_bridge.cpp): the bridge forms
+      // absolute topics/services itself (`/<ns>/...`, passed relative
+      // here), so `ros2 topic/service list` shows them verbatim.
+      ros_node = std::make_shared<rclcpp::Node>(
+          std::string(o.ros_node ? *o.ros_node : "wengine"));
+    } catch (...) {
+      out << "Error: cannot initialize ROS node\n";
+      return core::kExitRuntime;
+    }
+  }
+  if (emit_ros) {
+    ros2::BridgeConfig ros_cfg;
+    ros2::cli_options::make_bridge_config(
+        ros_cfg, o.ros_node ? *o.ros_node : "", o.ros_ns ? *o.ros_ns : "",
+        o.ros_signal_stem ? *o.ros_signal_stem : "",
+        o.ros_particle_stem ? *o.ros_particle_stem : "", ros_qos,
+        !ros_per_serial_flag);
+    ros_transport.emplace(*ros_node, ros_cfg);
+    ros_pub.emplace(ros_cfg, *ros_transport);
+    if (!ros_pub->ok()) {
+      out << "Error: ROS publish failed (" << ros2::signals_block_topic(ros_cfg)
+          << " unavailable)\n";
+      return core::kExitRuntime;
+    }
+  }
+#else
+  if (emit_ros) {
+    out << "Error: --emit-ros needs a ROS2 build (rebuild with -DBUILD_ROS2=ON)\n";
+    return core::kExitRuntime;
+  }
+  if (control_ros) {
+    out << "Error: --control-ros needs a ROS2 build (rebuild with -DBUILD_ROS2=ON)\n";
+    return core::kExitRuntime;
+  }
+#endif
+
   // Per-output sampling wrappers (PHYSI-34, edge-side only — Runner keeps
   // its single global emit_every gate; each output further selects via
   // StrideSink step%stride==0 and/or SignalSubsetSink serial allowlists).
@@ -803,11 +957,18 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   std::optional<emit::StrideSink> udp_stride;
   std::optional<emit::SignalSubsetSink> uart_subset;
   std::optional<emit::StrideSink> uart_stride;
+#ifdef WENGINE_HAS_RCLCPP
+  std::optional<emit::SignalSubsetSink> ros_subset;
+  std::optional<emit::StrideSink> ros_stride;
+#endif
   emit::ISink *csv_out = nullptr;
   emit::ISink *shm_out = nullptr;
   emit::ISink *tcp_out = nullptr;
   emit::ISink *udp_out = nullptr;
   emit::ISink *uart_out = nullptr;
+#ifdef WENGINE_HAS_RCLCPP
+  emit::ISink *ros_out = nullptr;
+#endif
   if (sig_csv) {
     csv_out = &*sig_csv;
     if (csv_sampling.select_given) {
@@ -868,6 +1029,20 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
       uart_out = &*uart_stride;
     }
   }
+#ifdef WENGINE_HAS_RCLCPP
+  if (ros_pub) {
+    ros_out = &*ros_pub;
+    if (ros_sampling.select_given) {
+      ros_subset.emplace(*ros_out);
+      ros_subset->set_subscription(ros_sampling.serials);
+      ros_out = &*ros_subset;
+    }
+    if (ros_sampling.stride_given && ros_sampling.stride != 1) {
+      ros_stride.emplace(*ros_out, ros_sampling.stride);
+      ros_out = &*ros_stride;
+    }
+  }
+#endif
 
   // Lua sources evaluate in an extra solver that steps before SignalSolver
   // (custom-source contract — see solvers/run.hpp).
@@ -932,7 +1107,7 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   };
 
   world::State s;
-  std::array<emit::ISink *, 6> sink_arr{};
+  std::array<emit::ISink *, 7> sink_arr{};
   std::size_t n_sinks = 0;
   if (csv_out) {
     sink_arr[n_sinks++] = csv_out;
@@ -949,6 +1124,11 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   if (uart_out) {
     sink_arr[n_sinks++] = uart_out;
   }
+#ifdef WENGINE_HAS_RCLCPP
+  if (ros_out) {
+    sink_arr[n_sinks++] = ros_out;
+  }
+#endif
   if (plot) {
     sink_arr[n_sinks++] = &plot_feed;
   }
@@ -980,8 +1160,24 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
       return core::kExitRuntime;
     }
   }
-  const bool has_control = ctl.has_value() || uctl.has_value();
-  solvers::ControlBus ctl_bus(ctl ? ctl->run_id() : (uctl ? uctl->run_id() : 0));
+  std::uint64_t control_run_id = 0;
+  if (ctl) {
+    control_run_id = ctl->run_id();
+  } else if (uctl) {
+    control_run_id = uctl->run_id();
+  }
+#ifdef WENGINE_HAS_RCLCPP
+  else if (control_ros) {
+    control_run_id =
+        static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  }
+#endif
+  const bool has_control = ctl.has_value() || uctl.has_value()
+#ifdef WENGINE_HAS_RCLCPP
+                           || control_ros
+#endif
+      ;
+  solvers::ControlBus ctl_bus(control_run_id);
   ctl_bus.add_channel(); // channel 0: local CLI (reserved, first in drain order)
   if (ctl) {
     for (std::uint32_t i = 0; i < ctl->max_clients(); ++i) {
@@ -992,6 +1188,25 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   if (uctl) {
     uart_channel = ctl_bus.add_channel(); // UART channel: after TCP slots
   }
+#ifdef WENGINE_HAS_RCLCPP
+  // ROS service control (ROS2-6): the six SigCommand services callbacks
+  // enqueue only (same vocabulary as TCP/UART); the driver drains at the
+  // step boundary in slot order. sig_list serves the driver-refreshed
+  // census cache below (stale by <1 step, like the bridge).
+  std::optional<ros2::RosControlService> ros_ctl;
+  ros2::control::CensusCache ros_census;
+  bool ros_spin_dead = false;
+  if (control_ros) {
+    // ros_node is guaranteed here (created when emit_ros || control_ros).
+    const std::string_view ros_ns = o.ros_ns ? *o.ros_ns : "wengine";
+    ros_ctl.emplace(*ros_node, ros_ns, ctl_bus, &ros_census);
+    if (!ros_ctl->ok()) {
+      out << "Error: ROS control services failed on '/" << ros_ns << "'\n";
+      return core::kExitRuntime;
+    }
+    ros2::control::refresh_census(run.state(), run.state().step_index, ros_census);
+  }
+#endif
   std::vector<link::ControlSlotLines> ctl_polled;
   std::vector<std::string> uctl_lines;
   auto ctl_service = [&] {
@@ -1012,12 +1227,30 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
         ctl_bus.enqueue(uart_channel, std::move(ln));
       }
     }
+#ifdef WENGINE_HAS_RCLCPP
+    // ROS callbacks run here, on the driver thread: they only enqueue
+    // (same contract as the TCP poll above), so nothing reenters the
+    // Runner and no state is touched. A dead context ends the run loudly
+    // below instead of stepping blind.
+    if (ros_ctl && ros_node && !ros_spin_dead) {
+      try {
+        rclcpp::spin_some(ros_node);
+      } catch (...) {
+        ros_spin_dead = true;
+      }
+    }
+#endif
     ctl_bus.drain(run.state(), run.state().step_index);
     if (ctl) {
       for (std::uint32_t c = 1; c < ctl_bus.channel_count(); ++c) {
         if (uctl && c == uart_channel) {
           continue; // UART channel answers over the serial wire below
         }
+#ifdef WENGINE_HAS_RCLCPP
+        if (ros_ctl && c == ros_ctl->channel()) {
+          continue; // ROS services answer the enqueue verdict at call time
+        }
+#endif
         for (auto &r : ctl_bus.take_responses(c)) {
           ctl->push_response(c - 1, r);
         }
@@ -1030,6 +1263,14 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
       }
       uctl->flush();
     }
+#ifdef WENGINE_HAS_RCLCPP
+    if (ros_ctl) {
+      // Service responses were already sent at enqueue time (the bridge
+      // contract); the execution outbox is driver-side accounting only.
+      (void)ctl_bus.take_responses(ros_ctl->channel());
+      ros2::control::refresh_census(run.state(), run.state().step_index, ros_census);
+    }
+#endif
   };
   // Paced waits only buffer arrivals (poll) and flush answers; the drain
   // stays in before_chunk so commands still apply at exact step starts.
@@ -1053,6 +1294,15 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
       }
       uctl->flush();
     }
+#ifdef WENGINE_HAS_RCLCPP
+    if (ros_ctl && ros_node && !ros_spin_dead) {
+      try {
+        rclcpp::spin_some(ros_node);
+      } catch (...) {
+        ros_spin_dead = true;
+      }
+    }
+#endif
   };
   using SignalHandler = void (*)(int);
   SignalHandler previous_sigint = nullptr;
@@ -1069,7 +1319,11 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   solvers::paced::Stats paced_stats;
   const std::uint64_t total_steps = cfg.steps;
   const link::uart::UartPublisher *uart_live = uart ? &*uart : nullptr;
+#ifdef WENGINE_HAS_RCLCPP
+  const bool has_live = shm || tcp || udp || uart || ros_pub;
+#else
   const bool has_live = shm || tcp || udp || uart;
+#endif
   const double sample_rate_hz =
       (dt > 0.0 && emit_every > 0)
           ? 1.0 / (dt * static_cast<double>(emit_every))
@@ -1106,7 +1360,13 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
       cli::progress_update(d);
     };
     // Window close stops paced runs like Ctrl-C (chunk granularity: 1 step).
-    auto paced_stop = [&] { return combined_stop() || plot_quit; };
+    auto paced_stop = [&] {
+      return combined_stop() || plot_quit
+#ifdef WENGINE_HAS_RCLCPP
+             || ros_spin_dead
+#endif
+          ;
+    };
     st = solvers::paced::run_paced<solvers::paced::SteadyClock>(run, total_steps, rate_hz, 1, epoch, paced_stop, idle, paced_stats, before_chunk);
     done = paced_stats.steps_done;
     cli::progress_update(done);
@@ -1116,7 +1376,11 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     // async worker stops here at a step boundary via the global cancel atom.
     done = 0;
     while (done < total_steps) {
-      if (cli::cancel_requested() || (forever && sigint_requested()) || plot_quit) {
+      if (cli::cancel_requested() || (forever && sigint_requested()) || plot_quit
+#ifdef WENGINE_HAS_RCLCPP
+          || ros_spin_dead
+#endif
+      ) {
         break;
       }
       ctl_service();
@@ -1200,6 +1464,12 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
   if (tcp) {
     tcp_finish = tcp->finish(link::kTcpFinishTimeoutMs);
   }
+#ifdef WENGINE_HAS_RCLCPP
+  if (ros_spin_dead) {
+    out << "Error: ROS spin failed (control services unavailable)\n";
+    return core::kExitRuntime;
+  }
+#endif
   if (!st.ok()) {
     out << "Error: simulation step failed (partial step state is not a completed tick)\n";
     if (lua_solver && !lua_solver->last_error().empty()) {
@@ -1380,6 +1650,39 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
     }
     out << ")\n";
   }
+#ifdef WENGINE_HAS_RCLCPP
+  if (ros_pub) {
+    const ros2::BridgeConfig &bcfg = ros_pub->config();
+    if (!ros_pub->ok()) {
+      out << "Error: ROS publish failed on '" << ros2::signals_block_topic(bcfg) << "' ("
+          << link::format_publisher_health(ros_pub->stats(), ros_pub->status(), 0, 0, 0, 0)
+          << ")\n";
+      return core::kExitRuntime;
+    }
+    out << "ros: " << ros2::grouped_signals_topic(bcfg);
+    if (bcfg.grouped_signals) {
+      out << " + " << ros2::signals_block_topic(bcfg);
+    }
+    out << " (grouped=" << (bcfg.grouped_signals ? "yes" : "no")
+        << ", qos=" << ros2::cli_options::qos_name(bcfg.qos) << ", "
+        << ros_pub->stats().published << " frames";
+    if (emit_health) {
+      out << ", " << link::format_publisher_health(ros_pub->stats(), ros_pub->status(), 0, 0, 0, 0);
+    }
+    if (ros_sampling.select_given) {
+      out << ", select=" << cli::format_emit_select(ros_sampling.serials);
+      if (ros_subset) {
+        out << " matched=" << ros_subset->matched() << " dropped=" << ros_subset->dropped()
+            << " forwarded_rows=" << ros_subset->forwarded_rows();
+      }
+    }
+    if (ros_stride) {
+      out << ", stride=" << ros_stride->stride() << " matched=" << ros_stride->matched()
+          << " dropped=" << ros_stride->dropped();
+    }
+    out << ")\n";
+  }
+#endif
   if (ctl) {
     ctl->flush();
     out << "control: " << ctl->endpoint() << " (applied=" << ctl_bus.applied()
@@ -1393,6 +1696,15 @@ int run_batch(ArgCursor &args, std::ostream &out, std::span<const std::string_vi
         << " responses=" << uctl->responses_tx()
         << " dropped=" << uctl->responses_dropped() << ")\n";
   }
+#ifdef WENGINE_HAS_RCLCPP
+  if (ros_ctl) {
+    out << "control-ros: /" << (o.ros_ns ? *o.ros_ns : "wengine")
+        << " (services=" << ros_ctl->service_count()
+        << " enqueued=" << ros_ctl->enqueued() << " refused=" << ros_ctl->refused()
+        << " applied=" << ctl_bus.applied() << " readonly=" << ctl_bus.readonly()
+        << " rejected=" << ctl_bus.rejected() << ")\n";
+  }
+#endif
   if (plot) {
     out << "plot: live window (" << plot_win.samples() << " samples" << (plot_quit ? ", closed by user" : "") << ")\n";
   }
@@ -1861,6 +2173,25 @@ void SigSpec::complete(std::span<const std::string_view> prior_args, std::string
     for (std::string_view m : {"ascii", "cobs"}) {
       if (m.substr(0, partial.size()) == partial) {
         out.emplace_back(m);
+      }
+    }
+    return;
+  }
+  // Values for a preceding "--ros-qos".
+  if (!prior_args.empty() && prior_args.back() == ros2::cli_options::kRosQos) {
+    for (std::string_view q : {ros2::cli_options::kQosLatest, ros2::cli_options::kQosReliable}) {
+      if (q.substr(0, partial.size()) == partial) {
+        out.emplace_back(q);
+      }
+    }
+    return;
+  }
+  constexpr std::string_view kRosQosEq = "--ros-qos=";
+  if (partial.substr(0, kRosQosEq.size()) == kRosQosEq) {
+    const std::string_view sub = partial.substr(kRosQosEq.size());
+    for (std::string_view q : {ros2::cli_options::kQosLatest, ros2::cli_options::kQosReliable}) {
+      if (q.substr(0, sub.size()) == sub) {
+        out.emplace_back(std::string{kRosQosEq} + std::string{q});
       }
     }
     return;

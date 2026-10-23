@@ -606,6 +606,115 @@ void test_cli_per_output_sampling() {
   }
 }
 
+void test_cli_ros() {
+  // ROS2-3 batch flags: same validation discipline as every other emit
+  // (usage errors exit 2, never silently ignored). Build-independent:
+  // shapes/orphans/solver scoping fail identically with and without ROS.
+  assert(run_sim("run --steps 2 --emit-ros-stride 2").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros-select 0").first == 2);
+  assert(run_sim("run --steps 2 --ros-node foo").first == 2);
+  assert(run_sim("run --steps 2 --ros-ns foo").first == 2);
+  assert(run_sim("run --steps 2 --ros-qos latest").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros --ros-grouped --ros-per-serial").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros --ros-qos bogus").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros --ros-qos=latest=").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros --ros-node 3bad").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros --ros-node 'has space'").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros --ros-ns /abs").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros --ros-ns a//b").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros --ros-signal-stem 9lives").first == 2);
+  assert(run_sim("run --steps 2 --emit-ros --ros-particle-stem pts/").first == 2);
+  // Selections need solver 'signal' (stable serials exist only there).
+  assert(run_sim("run --steps 2 --emit-ros-select 0").first == 2);
+  // sim signal runs one default sine (serial 0 only).
+  assert(run_sim("run --solver signal --steps 2 --emit-ros --emit-ros-select 5").first == 2);
+  // Over-capacity projectile batch refuses fast (1024 items, like SHM/UDP).
+  assert(run_sim("run --steps 2 --particles 2000 --emit-ros").first == 2);
+  // Bad QoS through the sig batch path too, plus orphan/select/range/grouped.
+  assert(run_sig("run --steps 2 --emit-ros-stride 2").first == 2);
+  assert(run_sig("run --steps 2 --emit-ros-select 0").first == 2);
+  assert(run_sig("run --steps 2 --ros-qos latest").first == 2);
+  assert(run_sig("run --sig-kind dc --steps 2 --emit-ros --ros-qos bogus").first == 2);
+  assert(run_sig("run --sig-kind dc --steps 2 --emit-ros --ros-node 3bad").first == 2);
+  assert(run_sig("run --sig-kind dc --steps 2 --emit-ros --ros-grouped --ros-per-serial").first == 2);
+  assert(run_sig("run --sig-kind dc --sig-count 2 --steps 2 --emit-ros --emit-ros-select 5").first == 2);
+  assert(run_sig("run --sig-kind dc --sig-count 70 --steps 2 --emit-ros").first == 2);
+  {
+    const auto [rc, s] =
+        run_sig("run --sig-kind dc --sig-count 70 --steps 2 --emit-ros --emit-ros-select 0,1");
+    assert(rc != 2); // fitting subset passes validation (publish verdict below)
+  }
+  // Batch/transport options never leak into the per-source family.
+  assert(run_sig("list --control-tcp 127.0.0.1:1 --emit-ros").first == 2);
+  assert(run_sig("list --control-tcp 127.0.0.1:1 --ros-qos latest").first == 2);
+  assert(run_sig("add --control-tcp 127.0.0.1:1 --ros-node foo").first == 2);
+  assert(run_sig("list --control-tcp 127.0.0.1:1 --control-ros").first == 2);
+  // --control-ros: same step-synchronous plane over services (ROS2-6).
+  // Publish layout/decimation stay publish-only, even with control set.
+  assert(run_sig("run --sig-kind dc --steps 2 --control-ros --ros-ns /abs").first == 2);
+  assert(run_sig("run --sig-kind dc --steps 2 --control-ros --ros-node 3bad").first == 2);
+  assert(run_sig("run --sig-kind dc --steps 2 --control-ros --ros-signal-stem foo").first == 2);
+  assert(run_sig("run --sig-kind dc --steps 2 --control-ros --ros-grouped").first == 2);
+  // Usage text advertises the new flags on both commands.
+  {
+    const auto [rc, s] = run_sim("--help");
+    assert(rc == 0 && s.find("--emit-ros") != std::string::npos &&
+           s.find("--ros-qos latest|reliable") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sig("--help");
+    assert(rc == 0 && s.find("--emit-ros") != std::string::npos &&
+           s.find("--ros-per-serial") != std::string::npos);
+  }
+#ifdef WENGINE_HAS_RCLCPP
+  // Live publish (ROS build): best-effort topics, no daemon needed.
+  {
+    const auto [rc, s] = run_sig("run --sig-kind dc --sig-offset 1V --steps 3 --emit-ros");
+    assert(rc == 0);
+    assert(s.find("ros: /wengine/signals + /wengine/signals/block") != std::string::npos);
+    assert(s.find("qos=latest") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sig(
+        "run --sig-kind dc --sig-count 2 --steps 4 --emit-ros --emit-ros-select 1 "
+        "--emit-ros-stride 2 --ros-per-serial --ros-qos reliable --ros-ns bench");
+    assert(rc == 0);
+    assert(s.find("ros: /bench/signals (") != std::string::npos);
+    assert(s.find("grouped=no") != std::string::npos);
+    assert(s.find("qos=reliable") != std::string::npos);
+    assert(s.find("select=1") != std::string::npos && s.find("stride=2") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sim("run --steps 2 --particles 1 --emit-ros");
+    assert(rc == 0);
+    assert(s.find("ros: /wengine/signals") != std::string::npos);
+  }
+  {
+    // Service control plane without publishing: services construct,
+    // the step loop drains, and the summary reports the census-driven
+    // counts (live service calls are HIL, like the bridge).
+    const auto [rc, s] = run_sig("run --sig-kind dc --steps 2 --control-ros");
+    assert(rc == 0);
+    assert(s.find("control-ros: /wengine (services=6") != std::string::npos);
+    assert(s.find("enqueued=0 refused=0") != std::string::npos);
+  }
+#else
+  // No ROS build: parsed + validated above, then a loud rebuild hint.
+  {
+    const auto [rc, s] = run_sig("run --sig-kind dc --steps 2 --emit-ros");
+    assert(rc == 1 && s.find("needs a ROS2 build") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sim("run --steps 2 --emit-ros");
+    assert(rc == 1 && s.find("needs a ROS2 build") != std::string::npos);
+  }
+  {
+    const auto [rc, s] = run_sig("run --sig-kind dc --steps 2 --control-ros");
+    assert(rc == 1 && s.find("--control-ros needs a ROS2 build") != std::string::npos);
+  }
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -619,6 +728,7 @@ int main() {
   test_cli_errors();
   test_cli_signal();
   test_cli_per_output_sampling();
+  test_cli_ros();
   std::cout << "test_sim: OK\n";
   return 0;
 }

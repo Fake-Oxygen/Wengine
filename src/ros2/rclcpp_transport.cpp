@@ -1,8 +1,9 @@
 // rclcpp transport for the ROS2 state-out publisher (rmw TU).
 //
 // Built only with BUILD_ROS2=ON (see CMakeLists.txt). Owns the rmw calls
-// the core TU deliberately avoids: JointState grouped/per-serial topics
-// plus PointCloud2 particles, QoS per D-ROS-5, sim_time header stamps.
+// the core TU deliberately avoids: JointState grouped/per-serial topics,
+// the exact wengine_msgs/SignalBlock record (grouped mode), plus
+// PointCloud2 particles, QoS per D-ROS-5, sim_time header stamps.
 // Publish calls are synchronous copies into DDS (non-blocking on
 // readers); reuse of the member staging messages after publish returns
 // is safe, and no Snapshot reference crosses this TU.
@@ -33,10 +34,12 @@ RclcppTransport::RclcppTransport(rclcpp::Node &node, const BridgeConfig &cfg) : 
   try {
     if (config_.grouped_signals) {
       grouped_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>(grouped_signals_topic(config_).substr(1), qos_);
+      block_pub_ = node_->create_publisher<wengine_msgs::msg::SignalBlock>(signals_block_topic(config_).substr(1), qos_);
     }
     particles_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(particles_topic(config_).substr(1), qos_);
   } catch (...) {
     grouped_pub_.reset();
+    block_pub_.reset();
     particles_pub_.reset();
     serial_pubs_.clear();
   }
@@ -101,7 +104,7 @@ TransportOutcome RclcppTransport::ensure_serial_pub(std::uint64_t serial, JointS
 }
 
 TransportOutcome RclcppTransport::publish_grouped(const SignalBlock &block, const link::Frame &particles) noexcept {
-  if (!grouped_pub_ || !particles_pub_) {
+  if (!grouped_pub_ || !block_pub_ || !particles_pub_) {
     return TransportOutcome::kDead;
   }
   try {
@@ -120,6 +123,15 @@ TransportOutcome RclcppTransport::publish_grouped(const SignalBlock &block, cons
       grouped_msg_.position.push_back(block.value[k]);
     }
     grouped_pub_->publish(grouped_msg_);
+    // Exact record alongside the RViz view: same payload with serial and
+    // quantity code arrays (see msg/SignalBlock.msg). No header stamp —
+    // sim_time carries the engine clock, never wall time.
+    block_msg_.step = block.step;
+    block_msg_.sim_time = block.sim_time;
+    block_msg_.serial.assign(block.serial.begin(), block.serial.end());
+    block_msg_.value.assign(block.value.begin(), block.value.end());
+    block_msg_.quantity.assign(block.quantity.begin(), block.quantity.end());
+    block_pub_->publish(block_msg_);
     fill_particles_msg(particles);
     particles_pub_->publish(particles_msg_);
     return TransportOutcome::kAccepted;
