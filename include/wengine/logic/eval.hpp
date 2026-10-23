@@ -1,13 +1,13 @@
 #pragma once
 
-// Combinational topology + scalar solve (LOGIC-2).
+// Combinational topology + scalar solve + bit-parallel word eval (LOGIC-2/3).
 //
 // Topology compiles once per mutation (dirty flag): Kahn's algorithm over
 // slot order -> deterministic level order, cycle check included.
 // Steady-state `solve` never re-sorts and never allocates: two fixed
 // stack arrays (resolved dangling inputs + per-gate outputs), caller-owned
-// spans for block I/O. Bit-parallel word eval arrives in LOGIC-3 against
-// the same level order.
+// spans for block I/O. Bit-parallel word eval runs against the same level
+// order (see below).
 //
 // Gate semantics (v1, zero-delay):
 //   AND/OR/NAND/NOR over 2..8 inputs; NOT/BUF exactly 1; XOR is odd parity
@@ -235,6 +235,235 @@ namespace wengine::logic {
   }
   if (out_cursor != block_outputs.size()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  return core::Status::success();
+}
+
+// Bit-parallel truth eval (LOGIC-3): 64 assignments per uint64_t word.
+//
+// Row convention (shared with scalar `solve` and the future `truth`
+// verb): truth row r drives block input j with bit (r>>j)&1, where j is
+// the derived interface order (slot order, then input index). Word w
+// covers rows [w*64, w*64+63]; lane b holds row w*64+b as bit b.
+// `input_column_word` materializes one input's word procedurally, so
+// slices stay valid for any input count (bench nets exceed full-truth
+// enumeration; only slices are ever evaluated).
+//
+// `eval_block_word` evaluates one 64-row slice over the compiled level
+// order: each gate is one branchless word op (&|^|~). Ignored dangling
+// inputs tie to word 0 (same rule as scalar kLow). The last partial word
+// (rows < 64, i.e. fewer than 6 block inputs) is zero-masked on outputs
+// so don't-care lanes never leak. Steady state allocates nothing:
+// `gate_scratch` (kMaxGates words) and `block_outputs` (exactly
+// block_output_count words) are caller-owned, same pattern as
+// `fill_snapshot`. No SIMD intrinsics: scalar words carry the speedup
+// and stay portable; vectorize only on a measured hot path.
+
+inline constexpr std::size_t kBitWordSize = 64;
+inline constexpr std::size_t kBitScratchWords = kMaxGates;
+
+// Full-truth word count for n block inputs: ceil(2^n / 64). Returns 0
+// when n >= 31 (2^n rows exceed sane streaming; slice eval stays valid,
+// full enumeration is the caller's refusal, like `truth --limit`).
+[[nodiscard]] constexpr std::size_t bit_words_for_inputs(std::size_t n_inputs) noexcept {
+  if (n_inputs >= 31) {
+    return 0;
+  }
+  const auto rows = static_cast<std::size_t>(1ULL << n_inputs);
+  return (rows + (kBitWordSize - 1)) / kBitWordSize;
+}
+
+// Procedural input column for block input `input_pos` over word
+// `word_index`. For positions < 6 the 64-row tile is word-independent
+// (base w*64 is a multiple of 2^(pos+1)); for positions >= 6 the whole
+// word is constant (2^pos rows per bit value covers the tile).
+[[nodiscard]] constexpr std::uint64_t input_column_word(std::size_t input_pos, std::uint64_t word_index) noexcept {
+  if (input_pos == 0) {
+    return 0xAAAAAAAAAAAAAAAAULL;
+  }
+  if (input_pos == 1) {
+    return 0xCCCCCCCCCCCCCCCCULL;
+  }
+  if (input_pos == 2) {
+    return 0xF0F0F0F0F0F0F0F0ULL;
+  }
+  if (input_pos == 3) {
+    return 0xFF00FF00FF00FF00ULL;
+  }
+  if (input_pos == 4) {
+    return 0xFFFF0000FFFF0000ULL;
+  }
+  if (input_pos == 5) {
+    return 0xFFFFFFFF00000000ULL;
+  }
+  const auto shift = static_cast<unsigned>(input_pos - 6);
+  const std::uint64_t bit = (shift >= 64) ? 0ULL : ((word_index >> shift) & 1ULL);
+  return (bit != 0ULL) ? ~static_cast<std::uint64_t>(0ULL) : static_cast<std::uint64_t>(0ULL);
+}
+
+// Evaluate one 64-row slice starting at row word_index*64.
+// gate_scratch must hold >= kMaxGates words; block_outputs must hold
+// exactly block_output_count(nl) words. Fails loudly on bad sizes,
+// out-of-range slices (when n_inputs < 31), or topology errors.
+[[nodiscard]] inline core::Status eval_block_word(Netlist &nl, std::uint64_t word_index,
+                                                 std::span<std::uint64_t> gate_scratch,
+                                                 std::span<std::uint64_t> block_outputs) noexcept {
+  core::Status st = ensure_topology(nl);
+  if (!st.ok()) {
+    return st;
+  }
+  if (gate_scratch.size() < kMaxGates) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  // Dangling-input -> block position map (slot order, then input index:
+  // same order scalar `solve` consumes). kNoDriver = wired/ignored.
+  std::uint16_t in_pos[kMaxGates * kMaxInputs];
+  for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
+    in_pos[i] = kNoDriver;
+  }
+  std::size_t n_inputs = 0;
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      if (g.drivers[i] != kNoDriver) {
+        continue;
+      }
+      if ((g.ignored_mask & (1u << i)) != 0) {
+        continue;
+      }
+      in_pos[static_cast<std::size_t>(s) * kMaxInputs + i] = static_cast<std::uint16_t>(n_inputs);
+      ++n_inputs;
+    }
+  }
+  std::size_t n_outputs = 0;
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live || g.output_fanout != 0 || g.ignore_output) {
+      continue;
+    }
+    ++n_outputs;
+  }
+  if (block_outputs.size() != n_outputs) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (n_inputs < 31) {
+    const std::size_t need = bit_words_for_inputs(n_inputs);
+    if (word_index >= static_cast<std::uint64_t>(need)) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+  }
+  for (std::uint16_t oi = 0; oi < nl.topo_size; ++oi) {
+    const std::uint16_t s = nl.topo_order[oi];
+    const Gate &g = nl.gates[s];
+    std::uint64_t acc = 0;
+    switch (g.kind) {
+    case GateKind::kAnd:
+    case GateKind::kNand:
+      acc = ~static_cast<std::uint64_t>(0ULL);
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        std::uint64_t v = 0;
+        const std::uint16_t drv = g.drivers[i];
+        if (drv != kNoDriver) {
+          v = gate_scratch[drv];
+        } else if ((g.ignored_mask & (1u << i)) != 0) {
+          v = 0;
+        } else {
+          const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs + i]);
+          v = input_column_word(p, word_index);
+        }
+        acc &= v;
+      }
+      if (g.kind == GateKind::kNand) {
+        acc = ~acc;
+      }
+      break;
+    case GateKind::kOr:
+    case GateKind::kNor:
+      acc = 0;
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        std::uint64_t v = 0;
+        const std::uint16_t drv = g.drivers[i];
+        if (drv != kNoDriver) {
+          v = gate_scratch[drv];
+        } else if ((g.ignored_mask & (1u << i)) != 0) {
+          v = 0;
+        } else {
+          const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs + i]);
+          v = input_column_word(p, word_index);
+        }
+        acc |= v;
+      }
+      if (g.kind == GateKind::kNor) {
+        acc = ~acc;
+      }
+      break;
+    case GateKind::kXor:
+    case GateKind::kXnor:
+      acc = 0;
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        std::uint64_t v = 0;
+        const std::uint16_t drv = g.drivers[i];
+        if (drv != kNoDriver) {
+          v = gate_scratch[drv];
+        } else if ((g.ignored_mask & (1u << i)) != 0) {
+          v = 0;
+        } else {
+          const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs + i]);
+          v = input_column_word(p, word_index);
+        }
+        acc ^= v;
+      }
+      if (g.kind == GateKind::kXnor) {
+        acc = ~acc;
+      }
+      break;
+    case GateKind::kNot: {
+      std::uint64_t v = 0;
+      const std::uint16_t drv = g.drivers[0];
+      if (drv != kNoDriver) {
+        v = gate_scratch[drv];
+      } else if ((g.ignored_mask & 1u) != 0) {
+        v = 0;
+      } else {
+        const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs]);
+        v = input_column_word(p, word_index);
+      }
+      acc = ~v;
+      break;
+    }
+    case GateKind::kBuf: {
+      const std::uint16_t drv = g.drivers[0];
+      if (drv != kNoDriver) {
+        acc = gate_scratch[drv];
+      } else if ((g.ignored_mask & 1u) != 0) {
+        acc = 0;
+      } else {
+        const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs]);
+        acc = input_column_word(p, word_index);
+      }
+      break;
+    }
+    }
+    gate_scratch[s] = acc;
+  }
+
+  std::size_t out_cursor = 0;
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live || g.output_fanout != 0 || g.ignore_output) {
+      continue;
+    }
+    block_outputs[out_cursor++] = gate_scratch[s];
+  }
+  if (n_inputs < 6) {
+    const auto rows = static_cast<std::uint64_t>(1ULL << n_inputs);
+    const std::uint64_t mask = (rows >= 64) ? ~static_cast<std::uint64_t>(0ULL) : (static_cast<std::uint64_t>(1ULL << rows) - 1ULL);
+    for (std::size_t i = 0; i < n_outputs; ++i) {
+      block_outputs[i] &= mask;
+    }
   }
   return core::Status::success();
 }

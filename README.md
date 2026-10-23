@@ -44,6 +44,7 @@ ctest --test-dir build --output-on-failure
 ./build/bench_i2c
 ./build/bench_projectile
 ./build/bench_signal
+./build/bench_logic
 ```
 
 Benchmarks use runtime-generated (opaque) inputs so the `constexpr`
@@ -663,7 +664,8 @@ headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`:
 launch/run/complete/recall/quit, history sharing, choice-dialog open/cancel,
 non-TTY + extra-args shapes). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_signal`
-(ns/source-step over a live Runner + SignalSolver, opaque params), `bench_signal_scale`
+(ns/source-step over a live Runner + SignalSolver, opaque params), `bench_logic`
+(ns/gate-word over a live Netlist, opaque width/depth/words args), `bench_signal_scale`
 (dense-vs-sparse bytes + ns/step, find_serial/fan-in slopes, subscriber
 pairs, custom-source churn, separated native/Lua/snapshot/filter/serial
 costs with crossover points; args select live, gap, steps, sums, fan-in,
@@ -813,7 +815,7 @@ apps/cli/main.cpp  apps/gui/main.cpp (thin assembly: args, backend
   panel); switching sources clears the shared history (one clock per view).
   Startup layout is 1600x900: sim + live views
   open, calculators and plots collapsed one click away.
-benchmarks/bench_{ohm,s0,i2c,projectile,signal,signal_scale}.cpp
+benchmarks/bench_{ohm,s0,i2c,projectile,signal,signal_scale,logic}.cpp
 examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   + link_bridge.cpp (CSV<->bus replay bridge: play/record, built with CLI)
   + link_fastread.cpp (minimum-loss subscriber: no per-frame print, reused

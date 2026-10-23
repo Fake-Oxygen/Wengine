@@ -9,6 +9,7 @@
 #include <iostream>
 #include <span>
 #include <string_view>
+#include <vector>
 
 using namespace wengine;
 using wengine::logic::BlockPin;
@@ -515,7 +516,199 @@ void test_noexcept_pins() {
                                       std::span<LogicValue>(no_out.data(), 0))));
   static_assert(noexcept(logic::block_input_count(nl)));
   static_assert(noexcept(logic::reset_netlist(nl)));
+  static_assert(noexcept(logic::bit_words_for_inputs(0)));
+  static_assert(noexcept(logic::input_column_word(0, 0)));
+  std::array<std::uint64_t, logic::kMaxGates> scratch{};
+  static_assert(noexcept(logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), scratch.size()),
+                                                std::span<std::uint64_t>())));
   assert(logic::ensure_topology(nl).ok());
+}
+
+// Full bit-parallel == scalar sweep for one netlist: every truth row is
+// solved both ways (scalar `solve` per row, word slice per 64 rows) and
+// every output bit must agree. Caller builds small goldens (n <= 10 so
+// full enumeration stays cheap); the mapping under test is the shared
+// row convention row r -> input j = (r>>j)&1.
+void check_bit_matches_scalar(Netlist &nl) {
+  const std::size_t nin = logic::block_input_count(nl);
+  const std::size_t nout = logic::block_output_count(nl);
+  assert(nin <= 10);
+  const std::uint64_t rows = static_cast<std::uint64_t>(1ULL << nin);
+  const std::size_t need = logic::bit_words_for_inputs(nin);
+  assert(need == ((static_cast<std::size_t>(rows) + 63) / 64));
+  std::vector<std::uint64_t> scratch(logic::kMaxGates, 0);
+  std::vector<std::uint64_t> words(nout == 0 ? 1 : nout, 0);
+  std::vector<LogicValue> scalar_in(nin, kL);
+  std::vector<LogicValue> scalar_out(nout == 0 ? 1 : nout, kL);
+  std::vector<LogicValue> want(nout, kL);
+  for (std::size_t w = 0; w < need; ++w) {
+    std::span<std::uint64_t> out_span(words.data(), nout);
+    assert(logic::eval_block_word(nl, static_cast<std::uint64_t>(w),
+                                  std::span<std::uint64_t>(scratch.data(), scratch.size()),
+                                  out_span)
+               .ok());
+    for (std::uint64_t b = 0; b < 64; ++b) {
+      const std::uint64_t row = static_cast<std::uint64_t>(w) * 64 + b;
+      if (row >= rows) {
+        // Don't-care lanes past the last row must read zero.
+        for (std::size_t o = 0; o < nout; ++o) {
+          assert(((words[o] >> b) & 1ULL) == 0ULL);
+        }
+        continue;
+      }
+      for (std::size_t j = 0; j < nin; ++j) {
+        scalar_in[j] = (((row >> j) & 1ULL) != 0ULL) ? kH : kL;
+      }
+      std::span<const LogicValue> in_span(scalar_in.data(), nin);
+      std::span<LogicValue> out_ref(scalar_out.data(), nout);
+      assert(logic::solve(nl, in_span, out_ref).ok());
+      for (std::size_t o = 0; o < nout; ++o) {
+        const bool bit = (((words[o] >> b) & 1ULL) != 0ULL);
+        const bool ref = (scalar_out[o] == kH);
+        assert(bit == ref);
+      }
+      (void)want;
+    }
+  }
+}
+
+void test_bit_columns() {
+  assert(logic::bit_words_for_inputs(0) == 1);
+  assert(logic::bit_words_for_inputs(1) == 1);
+  assert(logic::bit_words_for_inputs(6) == 1);
+  assert(logic::bit_words_for_inputs(7) == 2);
+  assert(logic::bit_words_for_inputs(8) == 4);
+  assert(logic::bit_words_for_inputs(16) == 1024);
+  assert(logic::bit_words_for_inputs(31) == 0);
+  assert(logic::bit_words_for_inputs(100) == 0);
+  assert(logic::input_column_word(0, 0) == 0xAAAAAAAAAAAAAAAAULL);
+  assert(logic::input_column_word(1, 99) == 0xCCCCCCCCCCCCCCCCULL);
+  assert(logic::input_column_word(2, 7) == 0xF0F0F0F0F0F0F0F0ULL);
+  assert(logic::input_column_word(5, 123) == 0xFFFFFFFF00000000ULL);
+  assert(logic::input_column_word(6, 0) == 0ULL);
+  assert(logic::input_column_word(6, 1) == 0xFFFFFFFFFFFFFFFFULL);
+  // Column definition vs the row convention, both regimes (tiled < 6,
+  // constant >= 6), over several slices and lanes.
+  const std::size_t positions[8] = {0, 1, 2, 3, 5, 6, 7, 13};
+  const std::uint64_t slices[5] = {0, 1, 2, 5, 12345};
+  for (std::size_t pi = 0; pi < 8; ++pi) {
+    const std::size_t pos = positions[pi];
+    for (std::size_t wi = 0; wi < 5; ++wi) {
+      const std::uint64_t word = logic::input_column_word(pos, slices[wi]);
+      for (std::uint64_t b = 0; b < 64; ++b) {
+        const std::uint64_t row = slices[wi] * 64 + b;
+        const bool bit = (((word >> b) & 1ULL) != 0ULL);
+        const bool ref = (((row >> pos) & 1ULL) != 0ULL);
+        assert(bit == ref);
+      }
+    }
+  }
+}
+
+void test_bit_matches_scalar_goldens() {
+  // One AND2 (2 inputs, 1 partial word + mask).
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+    check_bit_matches_scalar(nl);
+  }
+  // NAND chain AND1.Y -> NOT1.1 (2 inputs).
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+    assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    check_bit_matches_scalar(nl);
+  }
+  // Fan-out AND1.Y -> NOT1.1 + BUF1.1 (2 inputs, 2 outputs).
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+    assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
+    assert(logic::add_gate(nl, GateKind::kBuf, 1).ok());
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    assert(logic::wire(nl, 0, 2, 0).ok());
+    check_bit_matches_scalar(nl);
+  }
+  // XOR cascade parity (3 inputs, 8 rows).
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kXor, 2).ok());
+    assert(logic::add_gate(nl, GateKind::kXor, 2).ok());
+    assert(logic::wire(nl, 0, 1, 0).ok());
+    check_bit_matches_scalar(nl);
+  }
+  // All 8 combinational kinds at fan-in 8 (256 rows, 4 words) plus
+  // NOT/BUF single-input slices. Exhaustive here, not sampled.
+  {
+    const GateKind kinds[6] = {GateKind::kAnd, GateKind::kOr, GateKind::kNand,
+                               GateKind::kNor, GateKind::kXor, GateKind::kXnor};
+    for (std::size_t k = 0; k < 6; ++k) {
+      Netlist nl;
+      assert(logic::add_gate(nl, kinds[k], 8).ok());
+      check_bit_matches_scalar(nl);
+    }
+    Netlist nn;
+    assert(logic::add_gate(nn, GateKind::kNot, 1).ok());
+    check_bit_matches_scalar(nn);
+    Netlist nb;
+    assert(logic::add_gate(nb, GateKind::kBuf, 1).ok());
+    check_bit_matches_scalar(nb);
+  }
+  // Ignored dangling inputs tie LOW in both paths (AND3 + BUF1 with two
+  // AND inputs ignored: 2 block inputs, tie-off visible in words).
+  {
+    Netlist nl;
+    assert(logic::add_gate(nl, GateKind::kAnd, 3).ok());
+    assert(logic::add_gate(nl, GateKind::kBuf, 1).ok());
+    auto p2 = logic::parse_pin(nl, "AND1.2");
+    auto p3 = logic::parse_pin(nl, "AND1.3");
+    assert(p2.ok() && p3.ok());
+    assert(logic::ignore_pin(nl, p2.value).ok());
+    assert(logic::ignore_pin(nl, p3.value).ok());
+    check_bit_matches_scalar(nl);
+  }
+  // Empty netlist: one (empty) assignment, no outputs.
+  {
+    Netlist nl;
+    std::vector<std::uint64_t> scratch(logic::kMaxGates, 0);
+    std::span<std::uint64_t> empty_out;
+    assert(logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), scratch.size()),
+                                  empty_out)
+               .ok());
+  }
+}
+
+void test_bit_arg_errors() {
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
+  std::vector<std::uint64_t> scratch(logic::kMaxGates, 0);
+  std::vector<std::uint64_t> out(1, 0);
+  // Bad scratch / output arity fails loudly.
+  {
+    std::span<std::uint64_t> tiny(scratch.data(), 8);
+    assert(!logic::eval_block_word(nl, 0, tiny, std::span<std::uint64_t>(out.data(), out.size()))
+                .ok());
+  }
+  {
+    std::span<std::uint64_t> no_out;
+    assert(!logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), scratch.size()),
+                                   no_out)
+                .ok());
+  }
+  // Slice past the truth (2 inputs = 4 rows = word 0 only) is loud.
+  assert(!logic::eval_block_word(nl, 1, std::span<std::uint64_t>(scratch.data(), scratch.size()),
+                                 std::span<std::uint64_t>(out.data(), out.size()))
+              .ok());
+  // Empty netlist with a non-empty output span is loud too.
+  {
+    Netlist empty;
+    std::span<std::uint64_t> one_out(out.data(), 1);
+    assert(!logic::eval_block_word(empty, 0,
+                                   std::span<std::uint64_t>(scratch.data(), scratch.size()),
+                                   one_out)
+                .ok());
+  }
 }
 
 } // namespace
@@ -537,6 +730,9 @@ int main() {
   test_ignore_use_iface();
   test_reset();
   test_noexcept_pins();
+  test_bit_columns();
+  test_bit_matches_scalar_goldens();
+  test_bit_arg_errors();
   std::cout << "test_logic: OK\n";
   return 0;
 }

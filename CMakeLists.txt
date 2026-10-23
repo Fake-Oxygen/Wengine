@@ -836,4 +836,7 @@ if(BUILD_BENCHMARKS)
 
     add_executable(bench_tcp_worker benchmarks/bench_tcp_worker.cpp)
     target_link_libraries(bench_tcp_worker PRIVATE wengine_core wengine_link_net)
+
+    add_executable(bench_logic benchmarks/bench_logic.cpp)
+    target_link_libraries(bench_logic PRIVATE wengine_core)
 endif()
