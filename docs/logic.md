@@ -91,6 +91,21 @@ both raster paths consume it without changing it.
   dangling outputs become the block's inputs/outputs in slot order,
   minus pins marked `ignore`. `ignore <pin>` / `use <pin>` toggles the
   mark. `list` shows gates + wires + derived interface + ignored pins.
+- Tied inputs (input-input shorts as first-class nets): `tie A.1 B.2`
+  merges two dangling input pins into one net, `untie A.1` removes one
+  pin from its class. Equivalence classes are stored as a star in
+  `Netlist::tie_rep` (0 == singleton, else leader+1); the canonical rep
+  is the lowest (slot, input) and enumeration is slot order, so the
+  interface counts one block input per class (leaders only). Both pins
+  must dangle and be non-ignored — tying (or untying) wired/ignored/
+  output pins, or tying a pin to itself, fails loudly; tying is
+  idempotent within a class. `wire`/`ignore` on a tied pin fail loudly
+  (untie first). `remove` detaches the gate's pins (survivors re-elect
+  the lowest survivor), `reset` clears every class, and `list` shows one
+  `A.1 = B.2` line per group. Standard patterns like NAND-with-pinned-
+  together-inputs (NOT via NAND(a,a), AND via double inversion) are
+  therefore directly usable: the tied truth table matches the replicated
+  untied truth (each tied column fans out to its members).
 
 ## 5. Evaluation (perf core)
 
@@ -107,6 +122,10 @@ both raster paths consume it without changing it.
 - `NOT`/`BUF` fold into the word op (no extra pass). `XOR` with >2
   inputs is defined as odd-parity (documented; matches 74-series cascade
   semantics only for 2 inputs — the usage text says so).
+- Tied inputs share one column: scalar `solve` feeds the class leader's
+  value to every member pin, and bit-parallel eval materializes one
+  input-column word per class (members read the leader's word), so both
+  paths stay bit-exact under the same row convention.
 - Benchmark before optimizing further: `bench_logic`
   (ns/gate-word over a live Netlist, opaque depth/width args). SIMD
   intrinsics only on measured hot paths, never speculative.
@@ -133,6 +152,15 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   duplicated pins `[c,c]`). The `optimize` verb prints a loud
   before→after interface report whenever pins change; re-run `truth`
   on the new pins and compare replicated assignments via `solve`.
+- Ties through the optimizer: O0/O1 preserve classes whose pins survive
+  (input-dropping rebuilds classes around shifted indices, De Morgan
+  fusion copies each source pin's class to its fused counterpart,
+  constant-collapse detaches the folded gate's pins with survivor
+  re-election, DCE detaches via `remove_gate`). The O2 fresh build drops
+  ties (each fresh dangling pin starts singleton) and reports the pin
+  change through the same loud interface report — re-tie post-hoc with
+  `tie`. The optimizer never auto-ties: O2 output for untied nets is
+  unchanged.
 
 ## 7. Truth table
 
@@ -194,25 +222,31 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   real YAML (comments, quoting, multiline, anchors later) beats a
   canonical-subset parser users will fight; the submodule pin +
   from-source build keeps it auditable and warning-clean.
-- Schema `version: 1` header; loader exact-matches with a loud
-  found-version refusal (same rule as link wire versions; V2 bumps with
-  a fallback loader, §12). Sections:
+- Schema `version: 2` header (v1 files without `ties:` load via a
+  fallback loader as untied workspaces); the loader accepts 1..2 with a
+  loud found-version refusal otherwise (same rule as link wire versions;
+  V3 bumps with a fallback loader, §12). Sections:
   `gates: [{id: AND1, kind: and, inputs: 2, ignore: [2]}]`,
-  `wires: [{from: AND2.Y, to: NOR1.1}]`, `meta: {created, tool}`.
-  Strict in v1: unknown keys/sections are loud errors (never silently
+  `wires: [{from: AND2.Y, to: NOR1.1}]`,
+  `ties: [{a: NAND1.1, b: NAND1.2}]` (one entry per non-leader tied
+  member: `a` = class leader, `b` = member, ordered by `b` in slot
+  order, so the bytes are canonical), `meta: {created, tool}`.
+  Strict: unknown keys/sections are loud errors (never silently
   ignored) — forward-compatible sections arrive as versioned schema
   bumps, not silent tolerance. `save`/`load` round-trip is byte-identical
   (pinned test). Runnable example workspaces live in `examples/logic/`
-  (`nand_pair`, `fanout`, `parity3`, `tieoff` — each header shows its run
-  command and expected output); `test_logic_yaml` loads every file,
-  checks its hand-derived goldens, and pins save/load/save stability.
+  (`nand_pair`, `fanout`, `parity3`, `tieoff`, `tied_demorgan` — each
+  header shows its run command and expected output); `test_logic_yaml`
+  loads every file, checks its hand-derived goldens, and pins
+  save/load/save stability.
 
 ## 10. Module verb list (v1)
 
 ```text
 add <KIND> [--inputs N]     list [--wires] [--iface]   wire <FROM.Y> <TO.i>
 unwire <TO.i>               remove <GATE>              ignore <PIN> / use <PIN>
-reset [--force]             solve [--in bits] [--from pin=0|1 ...]
+tie <A.i> <B.j>             untie <PIN.i>              reset [--force]
+solve [--in bits] [--from pin=0|1 ...]
 truth [--csv p] [--limit N] optimize [--to nand|nor] [--level O0|O1|O2]
 draw [--out f.bmp]          save <f.yaml> / load <f.yaml>
 export --truth t --schema s [--bmp b]   help [verb]   back

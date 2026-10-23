@@ -108,6 +108,12 @@ struct WireRow {
   std::size_t line = 1;
 };
 
+struct TieRow {
+  std::string a;
+  std::string b;
+  std::size_t line = 1;
+};
+
 [[nodiscard]] bool check_gate_map(const YAML::Node &g, GateRow &row, std::string &err) {
   constexpr const char *kWant[6] = {"id", "kind", "inputs", "ignore", "ignore_output", "delay_ps"};
   for (auto it = g.begin(); it != g.end(); ++it) {
@@ -260,6 +266,30 @@ struct WireRow {
   return true;
 }
 
+[[nodiscard]] bool check_tie_map(const YAML::Node &t, TieRow &row, std::string &err) {
+  for (auto it = t.begin(); it != t.end(); ++it) {
+    const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
+    if (key != "a" && key != "b") {
+      err = at_line(it->first, "tie fields must read 'a' then 'b'");
+      return false;
+    }
+  }
+  const YAML::Node a = t["a"];
+  const YAML::Node b = t["b"];
+  if (!a || !a.IsDefined() || !b || !b.IsDefined()) {
+    err = at_line(t, "tie entry needs 2 fields (a, b)");
+    return false;
+  }
+  if (!a.IsScalar() || a.Scalar().empty() || !b.IsScalar() || b.Scalar().empty()) {
+    err = at_line(t, "empty tie pin");
+    return false;
+  }
+  row.a = a.Scalar();
+  row.b = b.Scalar();
+  row.line = line_of(t);
+  return true;
+}
+
 [[nodiscard]] bool load_impl(const std::string &text, Netlist &out, std::string &err) {
   if (text.find_first_not_of(" \t\r\n#") == std::string::npos) {
     // Cheap empty/whitespace fast path; comment-only files fall through
@@ -272,7 +302,7 @@ struct WireRow {
       }
     }
     if (only_ws) {
-      err = "empty workspace (want 'version: 1' first)";
+      err = "empty workspace (want 'version: 2' first)";
       return false;
     }
   }
@@ -289,26 +319,27 @@ struct WireRow {
     return false;
   }
   if (!root || !root.IsDefined() || root.IsNull()) {
-    err = "empty workspace (want 'version: 1' first)";
+    err = "empty workspace (want 'version: 2' first)";
     return false;
   }
   if (!root.IsMap()) {
-    err = at_line(root, "workspace root must read 'version: 1' first");
+    err = at_line(root, "workspace root must read 'version: 2' first");
     return false;
   }
   for (auto it = root.begin(); it != root.end(); ++it) {
     const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
-    if (key != "version" && key != "gates" && key != "wires" && key != "meta") {
-      err = at_line(it->first, "unknown workspace key '" + key + "' (want version|gates|wires|meta)");
+    if (key != "version" && key != "gates" && key != "wires" && key != "ties" && key != "meta") {
+      err = at_line(it->first, "unknown workspace key '" + key + "' (want version|gates|wires|ties|meta)");
       return false;
     }
   }
   const YAML::Node version = root["version"];
   const YAML::Node gates = root["gates"];
   const YAML::Node wires = root["wires"];
+  const YAML::Node ties = root["ties"];
   const YAML::Node meta = root["meta"];
   if (!version || !version.IsDefined()) {
-    err = "first line must read 'version: 1'";
+    err = "first line must read 'version: 2'";
     return false;
   }
   if (!gates || !gates.IsDefined()) {
@@ -333,8 +364,16 @@ struct WireRow {
       err = at_line(version, "bad workspace version");
       return false;
     }
-    if (v != static_cast<std::uint64_t>(kWorkspaceVersion)) {
-      err = at_line(version, "unsupported workspace version " + std::to_string(v) + " (want 1)");
+    if (v != 1 && v != static_cast<std::uint64_t>(kWorkspaceVersion)) {
+      err = at_line(version, "unsupported workspace version " + std::to_string(v) + " (want 2)");
+      return false;
+    }
+    if (v == 1 && ties && ties.IsDefined()) {
+      err = at_line(ties, "version 1 workspaces must not carry 'ties:' (want version 2)");
+      return false;
+    }
+    if (v == static_cast<std::uint64_t>(kWorkspaceVersion) && (!ties || !ties.IsDefined())) {
+      err = "want 'ties:' section";
       return false;
     }
   }
@@ -344,6 +383,10 @@ struct WireRow {
   }
   if (!wires.IsSequence() && !wires.IsNull()) {
     err = at_line(wires, "'wires:' must read a sequence");
+    return false;
+  }
+  if (ties && ties.IsDefined() && !ties.IsSequence() && !ties.IsNull()) {
+    err = at_line(ties, "'ties:' must read a sequence");
     return false;
   }
   if (!meta.IsMap()) {
@@ -365,6 +408,7 @@ struct WireRow {
 
   std::vector<GateRow> gate_rows;
   std::vector<WireRow> wire_rows;
+  std::vector<TieRow> tie_rows;
   if (gates.IsSequence()) {
     gate_rows.reserve(gates.size());
     for (std::size_t i = 0; i < gates.size(); ++i) {
@@ -393,6 +437,21 @@ struct WireRow {
         return false;
       }
       wire_rows.push_back(std::move(row));
+    }
+  }
+  if (ties && ties.IsDefined() && ties.IsSequence()) {
+    tie_rows.reserve(ties.size());
+    for (std::size_t i = 0; i < ties.size(); ++i) {
+      const YAML::Node t = ties[i];
+      if (!t.IsMap()) {
+        err = at_line(t, "tie entry must read '{a: ..., b: ...}'");
+        return false;
+      }
+      TieRow row;
+      if (!check_tie_map(t, row, err)) {
+        return false;
+      }
+      tie_rows.push_back(std::move(row));
     }
   }
   if (gate_rows.size() > kMaxGates) {
@@ -470,6 +529,50 @@ struct WireRow {
     dst.drivers[to.value.input] = from.value.slot;
     ++tmp.gates[from.value.slot].output_fanout;
   }
+  for (const TieRow &t : tie_rows) {
+    const std::string at = "line " + std::to_string(t.line) + ": ";
+    const auto a = parse_pin(tmp, t.a);
+    if (!a.ok()) {
+      if (a.error == std::string_view("unknown gate")) {
+        err = at + "unknown gate in tie pin '" + t.a + "'";
+      } else {
+        err = at + "bad tie pin '" + t.a + "'";
+      }
+      return false;
+    }
+    const auto b = parse_pin(tmp, t.b);
+    if (!b.ok()) {
+      if (b.error == std::string_view("unknown gate")) {
+        err = at + "unknown gate in tie pin '" + t.b + "'";
+      } else {
+        err = at + "bad tie pin '" + t.b + "'";
+      }
+      return false;
+    }
+    if (a.value.is_output || b.value.is_output) {
+      err = at + "tie needs two input pins (got '" + t.a + "' + '" + t.b + "')";
+      return false;
+    }
+    if (a.value.slot == b.value.slot && a.value.input == b.value.input) {
+      err = at + "tie needs two distinct pins (got '" + t.a + "' twice)";
+      return false;
+    }
+    const Gate &ga = tmp.gates[a.value.slot];
+    const Gate &gb = tmp.gates[b.value.slot];
+    if (ga.drivers[a.value.input] != kNoDriver || gb.drivers[b.value.input] != kNoDriver) {
+      err = at + "tie needs dangling pins (unwire first)";
+      return false;
+    }
+    if (((ga.ignored_mask & static_cast<std::uint8_t>(1u << a.value.input)) != 0) ||
+        ((gb.ignored_mask & static_cast<std::uint8_t>(1u << b.value.input)) != 0)) {
+      err = at + "tie needs non-ignored pins (use first)";
+      return false;
+    }
+    if (!tie_pins(tmp, a.value, b.value).ok()) {
+      err = at + "bad tie '" + t.a + "' + '" + t.b + "'";
+      return false;
+    }
+  }
   tmp.dirty = true;
   tmp.topo_size = 0;
   if (!ensure_topology(tmp).ok()) {
@@ -483,7 +586,7 @@ struct WireRow {
 } // namespace
 
 void save_text(const Netlist &nl, std::string &out) {
-  out += "version: 1\n";
+  out += "version: 2\n";
   out += "gates:\n";
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     const Gate &g = nl.gates[s];
@@ -528,6 +631,38 @@ void save_text(const Netlist &nl, std::string &out) {
       out += "  - {from: ";
       out += pin_text(nl, drv, true, 0);
       out += ", to: ";
+      out += pin_text(nl, s, false, i);
+      out += "}\n";
+    }
+  }
+  out += "ties:\n";
+  // Canonical: one entry per non-leader tied member (a = leader, b = member),
+  // ordered by b in slot order so save/load round-trips byte-identically.
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      if (g.drivers[i] != kNoDriver) {
+        continue;
+      }
+      if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
+        continue;
+      }
+      const std::size_t flat = tie_flat(s, i);
+      if (nl.tie_rep[flat] == 0) {
+        continue;
+      }
+      const std::size_t leader = tie_leader_flat(nl, flat);
+      if (leader == flat) {
+        continue;
+      }
+      const auto lslot = static_cast<std::uint16_t>(leader / kMaxInputs);
+      const auto linput = static_cast<std::uint8_t>(leader % kMaxInputs);
+      out += "  - {a: ";
+      out += pin_text(nl, lslot, false, linput);
+      out += ", b: ";
       out += pin_text(nl, s, false, i);
       out += "}\n";
     }

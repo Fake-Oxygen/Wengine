@@ -679,8 +679,9 @@ void test_history() {
 }
 
 void test_logic_session() {
-  // Module registry shape (LOGIC-8: full v1 verb set, 17 specs).
-  static_assert(logic::LogicRegistry::all().size() == 17);
+  // Module registry shape (LOGIC-8: full v1 verb set, 17 specs;
+  // LOGIC-14: + tie/untie, 19 specs).
+  static_assert(logic::LogicRegistry::all().size() == 19);
   static_assert(logic::LogicRegistry::find("help") != nullptr);
   static_assert(logic::LogicRegistry::find("back") != nullptr);
   static_assert(logic::LogicRegistry::find("add") != nullptr);
@@ -690,6 +691,8 @@ void test_logic_session() {
   static_assert(logic::LogicRegistry::find("remove") != nullptr);
   static_assert(logic::LogicRegistry::find("ignore") != nullptr);
   static_assert(logic::LogicRegistry::find("use") != nullptr);
+  static_assert(logic::LogicRegistry::find("tie") != nullptr);
+  static_assert(logic::LogicRegistry::find("untie") != nullptr);
   static_assert(logic::LogicRegistry::find("reset") != nullptr);
   static_assert(logic::LogicRegistry::find("solve") != nullptr);
   static_assert(logic::LogicRegistry::find("truth") != nullptr);
@@ -787,16 +790,16 @@ void test_logic_session() {
     assert(has(verbs, "help") && has(verbs, "back"));
     assert(has(verbs, "add") && has(verbs, "list") && has(verbs, "wire") &&
            has(verbs, "unwire") && has(verbs, "remove") && has(verbs, "ignore") &&
-           has(verbs, "use") && has(verbs, "reset") && has(verbs, "solve") &&
+           has(verbs, "use") && has(verbs, "tie") && has(verbs, "untie") && has(verbs, "reset") && has(verbs, "solve") &&
            has(verbs, "truth") && has(verbs, "optimize") && has(verbs, "draw") &&
            has(verbs, "save") && has(verbs, "load") && has(verbs, "export"));
-    assert(verbs.size() == 17);
+    assert(verbs.size() == 19);
     assert(!has(verbs, "ohm") && !has(verbs, "--help")); // flags need a '-' prefix
     const std::vector<std::string> want_dash_help{"--help"};
     assert(complete_line("logic --h", 9, all) == want_dash_help);
     const std::vector<std::string> want_help{"help"};
     assert(complete_line("logic h", 7, all) == want_help);
-    assert(complete_line("logic help ", 11, all).size() == 17); // every verb
+    assert(complete_line("logic help ", 11, all).size() == 19); // every verb
     // Session help lists module verbs only (never top-level commands).
     {
       std::ostringstream help_out;
@@ -1138,8 +1141,9 @@ void test_logic_verbs() {
       assert(s.find("saved 2 gates 1 wires") != std::string::npos);
     }
     const std::string before = read_file(y1);
-    assert(before.find("version: 1\n") == 0);
+    assert(before.find("version: 2\n") == 0);
     assert(before.find("AND1") != std::string::npos);
+    assert(before.find("ties:\n") != std::string::npos);
     assert(run("logic reset").first == 0);
     {
       auto [rc, s] = run(std::string("logic load ") + y1);
@@ -1164,11 +1168,11 @@ void test_logic_verbs() {
       {
         std::ofstream f(bad, std::ios::binary | std::ios::trunc);
         assert(!!f);
-        f << "version: 2\ngates:\nwires:\nmeta:\n  tool: x\n";
+        f << "version: 3\ngates:\nwires:\nties:\nmeta:\n  tool: x\n";
       }
       auto [brc, bs] = run(std::string("logic load ") + bad);
       assert(brc == 1);
-      assert(bs.find("unsupported workspace version 2 (want 1)") != std::string::npos);
+      assert(bs.find("unsupported workspace version 3 (want 2)") != std::string::npos);
       assert(bs.find("line 1:") != std::string::npos); // loud with line number
       auto [rc, s] = run("logic list");
       assert(rc == 0);
@@ -1281,6 +1285,137 @@ void test_logic_verbs() {
     assert(run("logic wire AND1.Y NOT1.1").first == 0);
   }
 
+  // LOGIC-14: tie/untie input-input shorts as first-class nets.
+  {
+    assert(run("logic reset").first == 0);
+    assert(run("logic add NAND").first == 0);
+    {
+      auto [rc, s] = run("logic tie NAND1.1 NAND1.2");
+      assert(rc == 0);
+      assert(s.find("tied NAND1.1 = NAND1.2") != std::string::npos);
+    }
+    assert(run("logic tie NAND1.1 NAND1.2").first == 0); // idempotent
+    {
+      auto [rc, s] = run("logic list --iface");
+      assert(rc == 0);
+      assert(s.find("inputs (1):") != std::string::npos); // one per class
+      assert(s.find("ties (1):") != std::string::npos);
+      assert(s.find("NAND1.1 = NAND1.2") != std::string::npos);
+    }
+    // Tied NAND(a,a) == NOT(a): scalar goldens.
+    {
+      auto [rc, s] = run("logic solve --in 0");
+      assert(rc == 0);
+      assert(s.find("NAND1.Y=1") != std::string::npos);
+    }
+    {
+      auto [rc, s] = run("logic solve --in 1");
+      assert(rc == 0);
+      assert(s.find("NAND1.Y=0") != std::string::npos);
+    }
+    // Tied member spelling resolves to the same column.
+    {
+      auto [rc, s] = run("logic solve --from NAND1.2=1");
+      assert(rc == 0);
+      assert(s.find("NAND1.Y=0") != std::string::npos);
+    }
+    // Tied truth == replicated untied truth (2 rows, leader header).
+    {
+      auto [rc, s] = run("logic truth");
+      assert(rc == 0);
+      assert(s.find("NAND1.1 | NAND1.Y") != std::string::npos);
+      assert(s.find("2 of ") == std::string::npos); // no truncation: 2 rows
+    }
+    {
+      auto [rc, s] = run("logic untie NAND1.2");
+      assert(rc == 0);
+      assert(s.find("untied NAND1.2") != std::string::npos);
+    }
+    {
+      auto [rc, s] = run("logic list --iface");
+      assert(rc == 0);
+      assert(s.find("inputs (2):") != std::string::npos);
+      assert(s.find("ties (0):") != std::string::npos);
+    }
+    // Discipline: stray args, self-tie, outputs, untied untie all exit 2.
+    assert(run("logic tie NAND1.1").first == 2);
+    assert(run("logic tie NAND1.1 NAND1.2 extra").first == 2);
+    assert(run("logic tie NAND1.1 NAND1.1").first == 2);
+    assert(run("logic tie NAND1.Y NAND1.1").first == 2);
+    assert(run("logic tie NOPE.1 NAND1.1").first == 2);
+    assert(run("logic untie NAND1.1").first == 2); // not tied anymore
+    assert(run("logic untie").first == 2);
+    assert(run("logic untie NAND1.1 extra").first == 2);
+    assert(run("logic untie NAND1.Y").first == 2);
+    // Tied pins refuse wire/ignore loudly (exit 2); untie restores them.
+    assert(run("logic tie NAND1.1 NAND1.2").first == 0);
+    assert(run("logic wire NOT1.Y NAND1.1").first == 2); // unknown gate anyway
+    assert(run("logic add NOT").first == 0);
+    assert(run("logic wire NOT1.Y NAND1.1").first == 2); // tied destination
+    assert(run("logic ignore NAND1.1").first == 2); // tied
+    assert(run("logic untie NAND1.1").first == 0);
+    assert(run("logic wire NOT1.Y NAND1.1").first == 0); // untied: wiring works
+    // Rebuild cleanly: reset, wire, then tie on wired fails.
+    assert(run("logic reset").first == 0);
+    assert(run("logic add NAND").first == 0);
+    assert(run("logic add NOT").first == 0);
+    assert(run("logic wire NAND1.Y NOT1.1").first == 0);
+    assert(run("logic tie NAND1.1 NAND1.2").first == 0);
+    assert(run("logic tie NAND1.1 NOT1.1").first == 2); // wired
+    assert(run("logic untie NOT1.1").first == 2); // wired
+    assert(run("logic ignore NOT1.1").first == 0); // wired ignore is allowed (mark only)
+    assert(run("logic use NOT1.1").first == 0);
+    // save/load round-trip incl. ties is byte-identical.
+    {
+      const std::string t1 = "/tmp/opencode/logic_tie_a.yaml";
+      const std::string t2 = "/tmp/opencode/logic_tie_b.yaml";
+      std::remove(t1.c_str());
+      std::remove(t2.c_str());
+      assert(run(std::string("logic save ") + t1).first == 0);
+      const std::string before = read_file(t1);
+      assert(before.find("{a: NAND1.1, b: NAND1.2}") != std::string::npos);
+      assert(run("logic reset").first == 0);
+      assert(run(std::string("logic load ") + t1).first == 0);
+      {
+        auto [rc, s] = run("logic list --iface");
+        assert(rc == 0);
+        assert(s.find("ties (1):") != std::string::npos);
+        assert(s.find("inputs (1):") != std::string::npos);
+      }
+      assert(run(std::string("logic save ") + t2).first == 0);
+      assert(read_file(t2) == before);
+      std::remove(t1.c_str());
+      std::remove(t2.c_str());
+    }
+    // v1 files (no ties:) still load via the fallback path.
+    {
+      const std::string v1 = "/tmp/opencode/logic_tie_v1.yaml";
+      {
+        std::ofstream f(v1, std::ios::binary | std::ios::trunc);
+        assert(!!f);
+        f << "version: 1\n"
+             "gates:\n"
+             "  - {id: NAND1, kind: nand, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
+             "wires:\n"
+             "meta:\n"
+             "  tool: wengine-logic\n";
+      }
+      assert(run("logic reset").first == 0);
+      assert(run(std::string("logic load ") + v1).first == 0);
+      {
+        auto [rc, s] = run("logic list --iface");
+        assert(rc == 0);
+        assert(s.find("inputs (2):") != std::string::npos);
+        assert(s.find("ties (0):") != std::string::npos);
+      }
+      std::remove(v1.c_str());
+    }
+    assert(run("logic reset").first == 0);
+    assert(run("logic add AND").first == 0);
+    assert(run("logic add NOT").first == 0);
+    assert(run("logic wire AND1.Y NOT1.1").first == 0);
+  }
+
   // draw: SDL window is manual-only (no automation tooling); headless CI
   // covers the --out BMP path (SDL_SaveBMP onto a surface, no display).
   assert(run("logic draw extra").first == 2);
@@ -1382,6 +1517,8 @@ void test_logic_verbs() {
   assert(run("logic back extra").first == 2);
   assert(run("logic ignore").first == 2);
   assert(run("logic use").first == 2);
+  assert(run("logic tie").first == 2);
+  assert(run("logic untie").first == 2);
   assert(run("logic reset extra").first == 2);
   assert(run("logic reset --force").first == 0);
   logic::reset_logic_workspace();
@@ -1412,8 +1549,10 @@ void test_logic_completion() {
   assert(complete_line("logic a", 7, all) == want_a);
   const std::vector<std::string> want_s{"solve", "save"};
   assert(complete_line("logic s", 7, all) == want_s);
-  const std::vector<std::string> want_u{"unwire", "use"};
+  const std::vector<std::string> want_u{"unwire", "use", "untie"};
   assert(complete_line("logic u", 7, all) == want_u);
+  const std::vector<std::string> want_t{"tie", "truth"};
+  assert(complete_line("logic t", 7, all) == want_t);
 
   // --level / --to values, space and = forms.
   {

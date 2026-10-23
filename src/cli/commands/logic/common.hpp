@@ -62,8 +62,9 @@ void complete_from_value(const wengine::logic::Netlist &nl, std::string_view val
 
 namespace yaml {
 
-// Strict v1 loader (see logic/yaml_store.hpp): exact `version: 1` gate,
-// all of gates/wires/meta present, unknown keys are errors. Builds into
+// Strict v2 loader (see logic/yaml_store.hpp): `version: 1..2` gate (v1
+// loads untied via fallback), all of gates/wires/ties(v2)/meta present,
+// unknown keys are errors. Builds into
 // `out` (slot order == file order); `out` is untouched on failure.
 bool load_text(const std::string &text, wengine::logic::Netlist &out, std::string &err);
 

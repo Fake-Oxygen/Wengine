@@ -51,6 +51,11 @@ bool netlists_equal(const logic::Netlist &a, const logic::Netlist &b) {
       return false;
     }
   }
+  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+    if (a.tie_rep[f] != b.tie_rep[f]) {
+      return false;
+    }
+  }
   for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
     const logic::Gate &x = a.gates[s];
     const logic::Gate &y = b.gates[s];
@@ -74,12 +79,13 @@ void test_canonical_bytes() {
   std::string text;
   logic::yaml::save_text(nl, text);
   const std::string want =
-      "version: 1\n"
+      "version: 2\n"
       "gates:\n"
       "  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
       "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
       "wires:\n"
       "  - {from: AND1.Y, to: NOT1.1}\n"
+      "ties:\n"
       "meta:\n"
       "  tool: wengine-logic\n";
   assert(text == want);
@@ -89,7 +95,7 @@ void test_empty_round_trip() {
   logic::Netlist nl;
   std::string text;
   logic::yaml::save_text(nl, text);
-  assert(text == "version: 1\ngates:\nwires:\nmeta:\n  tool: wengine-logic\n");
+  assert(text == "version: 2\ngates:\nwires:\nties:\nmeta:\n  tool: wengine-logic\n");
   logic::Netlist back;
   std::string err;
   assert(logic::yaml::load_text(text, back, err));
@@ -142,7 +148,7 @@ void test_yaml_superset_tolerance() {
   logic::yaml::save_text(want, canonical);
   const std::string edited =
       "# a user comment up top\n"
-      "version: 1  # trailing comment\n"
+      "version: 2  # trailing comment\n"
       "gates:\n"
       "  - id: \"AND1\"\n" // quoted id
       "    kind: and\n"
@@ -154,6 +160,7 @@ void test_yaml_superset_tolerance() {
       "wires:  # block header comment\n"
       "  - from: AND1.Y\n" // block-style wire
       "    to: NOT1.1\n"
+      "ties:\n"
       "meta:\n"
       "  tool: wengine-logic\n";
   logic::Netlist back;
@@ -166,14 +173,71 @@ void test_yaml_superset_tolerance() {
 }
 
 void test_foreign_version_refusal() {
-  const std::string text = "version: 2\ngates:\nwires:\nmeta:\n  tool: x\n";
+  const std::string text = "version: 3\ngates:\nwires:\nties:\nmeta:\n  tool: x\n";
   logic::Netlist nl = make_pair(); // sentinel: must be untouched
   const logic::Netlist before = nl;
   std::string err;
   assert(!logic::yaml::load_text(text, nl, err));
-  assert(contains(err, "unsupported workspace version 2 (want 1)"));
+  assert(contains(err, "unsupported workspace version 3 (want 2)"));
   assert(contains(err, "line 1:"));
   assert(netlists_equal(nl, before)); // atomic: untouched on failure
+}
+
+void test_v1_fallback_loads_untied() {
+  // v1 files (no `ties:` section) load as untied workspaces and re-save
+  // to canonical v2 bytes.
+  const std::string v1 =
+      "version: 1\n"
+      "gates:\n"
+      "  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
+      "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+      "wires:\n"
+      "  - {from: AND1.Y, to: NOT1.1}\n"
+      "meta:\n"
+      "  tool: wengine-logic\n";
+  logic::Netlist nl;
+  std::string err;
+  assert(logic::yaml::load_text(v1, nl, err));
+  assert(nl.live_count == 2);
+  assert(logic::block_input_count(nl) == 2);
+  assert(logic::tie_group_count(nl) == 0);
+  const logic::Netlist want = make_pair();
+  assert(netlists_equal(nl, want));
+  std::string canonical;
+  logic::yaml::save_text(want, canonical);
+  std::string again;
+  logic::yaml::save_text(nl, again);
+  assert(again == canonical);
+  assert(contains(again, "version: 2\n"));
+}
+
+void test_tie_round_trip() {
+  // Ties persist byte-identically: NAND1.1 = NAND1.2 survives save/load.
+  logic::Netlist nl;
+  assert(logic::add_gate(nl, logic::GateKind::kNand, 2).ok());
+  assert(logic::tie_text(nl, "NAND1.1", "NAND1.2").ok());
+  assert(logic::block_input_count(nl) == 1);
+  std::string text;
+  logic::yaml::save_text(nl, text);
+  assert(contains(text, "version: 2\n"));
+  assert(contains(text, "{a: NAND1.1, b: NAND1.2}"));
+  logic::Netlist back;
+  std::string err;
+  assert(logic::yaml::load_text(text, back, err));
+  assert(netlists_equal(nl, back));
+  std::string again;
+  logic::yaml::save_text(back, again);
+  assert(again == text); // byte-identical
+  // Tied NAND(a,a) == NOT(a) over the surviving 1-input interface.
+  for (int b = 0; b < 2; ++b) {
+    std::vector<logic::LogicValue> in{static_cast<logic::LogicValue>(b)};
+    std::vector<logic::LogicValue> out{kL};
+    assert(logic::solve(back, std::span<const logic::LogicValue>(in.data(), in.size()),
+                        std::span<logic::LogicValue>(out.data(), out.size()))
+                .ok());
+    const logic::LogicValue want = (b != 0) ? kL : kH;
+    assert(out[0] == want);
+  }
 }
 
 void test_malformed_line_numbers() {
@@ -357,6 +421,38 @@ void test_examples() {
     check_solve(nl, {kH}, {kH}); // AND(1, tied-0) = 0, NOT(0) = 1
     check_stable(nl);
   }
+  // tied_demorgan.yaml: De Morgan mirror over tied-input inverters (two
+  // 2-member tie groups + one transitive 3-member group, 6 gates,
+  // 6 block inputs, 4 outputs). Exhaustive over all 64 rows against the
+  // hand-derived goldens: NAND1.Y = ~(a&b), OR1.Y = ~c|~d (== NAND(c,d)
+  // on every row), XOR1.Y = 0, AND1.Y = E&e.
+  {
+    logic::Netlist nl;
+    std::string err;
+    assert(logic::yaml::load_text(load("tied_demorgan"), nl, err));
+    assert(nl.live_count == 6);
+    assert(logic::block_input_count(nl) == 6);
+    assert(logic::block_output_count(nl) == 4);
+    assert(logic::tie_group_count(nl) == 3);
+    for (std::uint32_t row = 0; row < 64; ++row) {
+      std::vector<logic::LogicValue> in(6, kL);
+      for (std::size_t j = 0; j < 6; ++j) {
+        in[j] = (((row >> j) & 1u) != 0u) ? kH : kL;
+      }
+      const bool a = (in[0] == kH);
+      const bool b = (in[1] == kH);
+      const bool c = (in[2] == kH);
+      const bool d = (in[3] == kH);
+      const bool e_class = (in[4] == kH);
+      const bool e_plain = (in[5] == kH);
+      const logic::LogicValue nand_ab = !(a && b) ? kH : kL;
+      const logic::LogicValue or_mirror = (!c || !d) ? kH : kL;
+      const logic::LogicValue xor_zero = kL; // XOR(E, E) == 0
+      const logic::LogicValue and_out = (e_class && e_plain) ? kH : kL;
+      check_solve(nl, in, {nand_ab, or_mirror, xor_zero, and_out});
+    }
+    check_stable(nl);
+  }
 }
 
 } // namespace
@@ -367,6 +463,8 @@ int main() {
   test_round_trip_ignore_fanin_delay();
   test_yaml_superset_tolerance();
   test_foreign_version_refusal();
+  test_v1_fallback_loads_untied();
+  test_tie_round_trip();
   test_malformed_line_numbers();
   test_examples();
   std::cout << "test_logic_yaml: OK\n";

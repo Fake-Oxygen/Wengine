@@ -1,0 +1,47 @@
+# tied_demorgan.yaml: De Morgan mirror over tied-input inverters.
+#
+# The motivating LOGIC-14 pattern: NOT via NAND(x,x) with the two inputs
+# tied to one net, so a single block input drives both pins. NAND2 inverts
+# c, NAND3 inverts d (two 2-member tie groups), and OR1 recombines them:
+# OR(~c, ~d) == NAND(c, d) by De Morgan, so the OR1.Y column must match a
+# plain NAND over (c, d) on every row — compare against nand_pair.yaml.
+# A third, transitive tie group shorts XOR1.1 = XOR1.2 = AND1.1 (one net
+# E with three members): XOR(E, E) is always 0 (even parity), while
+# AND1 computes E & e over its remaining plain input AND1.2.
+#
+# Block inputs in slot order (one per tie class): NAND1.1=a, NAND1.2=b,
+# NAND2.1=c, NAND3.1=d, XOR1.1=E, AND1.2=e (6 inputs, 64 rows).
+# Block outputs in slot order: NAND1.Y=~(a&b), OR1.Y=~c|~d, XOR1.Y=0,
+# AND1.Y=E&e. Levels: NAND1/NAND2/NAND3/XOR1 = 0, OR1/AND1 = 1.
+#
+# Run:
+#   printf 'logic load examples/logic/tied_demorgan.yaml\nlogic list --iface\nlogic truth --limit 4\nlogic solve --from XOR1.2=1 --from AND1.2=1\nexit\n' | ./build/PhysicsSimApp
+# Expect: `inputs (6)` with one entry per tie class plus `ties (3)` listing
+#   `NAND2.1 = NAND2.2`, `NAND3.1 = NAND3.2`, and
+#   `XOR1.1 = XOR1.2 = AND1.1`; the truth header reads
+#   `NAND1.1 | NAND1.2 | NAND2.1 | NAND3.1 | XOR1.1 | AND1.2 | NAND1.Y |
+#   OR1.Y | XOR1.Y | AND1.Y` with row 0 (`0...0`) giving `1 | 1 | 0 | 0`;
+#   the solve (E=1 via its tied member XOR1.2, e=1, rest default 0) echoes
+#   `in: 000011 ...` and prints NAND1.Y=1, OR1.Y=1, XOR1.Y=0, AND1.Y=1.
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 2
+gates:
+  - {id: NAND1, kind: nand, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: NAND2, kind: nand, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: NAND3, kind: nand, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: OR1, kind: or, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: XOR1, kind: xor, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+wires:
+  - {from: NAND2.Y, to: OR1.1}
+  - {from: NAND3.Y, to: OR1.2}
+ties:
+  - {a: NAND2.1, b: NAND2.2}
+  - {a: NAND3.1, b: NAND3.2}
+  - {a: XOR1.1, b: XOR1.2}
+  - {a: XOR1.1, b: AND1.1}
+meta:
+  tool: wengine-logic

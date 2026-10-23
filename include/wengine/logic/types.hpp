@@ -106,9 +106,21 @@ struct Gate {
 
 // Fixed-capacity SoA-ish pool: slots recycle, counters don't.
 // Mutation marks `dirty` (topology must be recompiled before eval).
+//
+// Tied inputs (LOGIC-14): input-input shorts as first-class nets. Only
+// dangling (unwired, non-ignored) input pins may be tied. Equivalence
+// classes are stored as a star: `tie_rep[flat] == 0` means singleton
+// (untied); otherwise it holds `leader_flat + 1` where leader_flat is
+// the class canonical rep (lowest slot/input wins, slot-order
+// enumeration). Zero-initialization is the all-singleton state by
+// construction, so `Netlist{}` starts untied and `reset_netlist` clears
+// to zero. Interface derivation counts one block input per class
+// (leaders only); scalar and bit-parallel eval feed/share one value per
+// class.
 struct Netlist {
   std::array<Gate, kMaxGates> gates{};
   std::array<std::uint32_t, 8> next_counter{1, 1, 1, 1, 1, 1, 1, 1}; // per GateKind ordinal, first id is 1
+  std::array<std::uint16_t, kMaxGates * kMaxInputs> tie_rep{};
   std::uint16_t live_count = 0;
   bool dirty = true;
   std::array<std::uint16_t, kMaxGates> topo_order{};

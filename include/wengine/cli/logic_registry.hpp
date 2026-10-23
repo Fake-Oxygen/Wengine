@@ -80,7 +80,8 @@ struct LogicListSpec {
       "  list\n"
       "  list --wires --iface\n"
       "Shows gates (NAME KIND inputs=N fanout=F) + wires (FROM.Y -> TO.i)\n"
-      "+ derived block interface (dangling pins in slot order) + ignored pins.\n"
+      "+ derived block interface (one input per tie class, slot-order leaders)\n"
+      "+ ignored pins + tie groups (A.1 = B.2 per class).\n"
       "With no flags all sections print; flags select sections (gates always print).";
 
   static int run(ArgCursor &args, std::ostream &out);
@@ -143,6 +144,36 @@ struct LogicUseSpec {
       "use <PIN>\n"
       "  use AND1.2\n"
       "Re-exposes a previously ignored pin to the derived block interface. Idempotent.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
+struct LogicTieSpec {
+  static constexpr std::string_view kName = "tie";
+  static constexpr std::string_view kDescription = "Tie two dangling input pins to the same net";
+  static constexpr std::string_view kUsage =
+      "tie <A.i> <B.j>\n"
+      "  tie NAND1.1 NAND1.2\n"
+      "Ties two dangling input pins to one block input (lowest slot/input\n"
+      "is the canonical rep; interface counts one input per class; both\n"
+      "pins share one value in solve/truth). Both pins must dangle and be\n"
+      "non-ignored; wired/ignored/output pins fail loudly. Idempotent\n"
+      "within a class. Use `untie` to split, `list` to show tie groups.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
+struct LogicUntieSpec {
+  static constexpr std::string_view kName = "untie";
+  static constexpr std::string_view kDescription = "Remove one input pin from its tie group";
+  static constexpr std::string_view kUsage =
+      "untie <PIN.i>\n"
+      "  untie NAND1.1\n"
+      "Removes one input pin from its tie class (remaining members stay\n"
+      "tied around the lowest survivor; a 2-pin group dissolves). Untied,\n"
+      "wired, ignored, or output pins fail loudly.";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
@@ -235,7 +266,7 @@ struct LogicSaveSpec {
   static constexpr std::string_view kUsage =
       "save <file.yaml>\n"
       "  save work.yaml\n"
-      "Writes the versioned workspace (version: 1) in canonical form; round-trips\n"
+      "Writes the versioned workspace (version: 2) in canonical form; round-trips\n"
       "byte-identically through `load`.";
 
   static int run(ArgCursor &args, std::ostream &out);
@@ -248,7 +279,7 @@ struct LogicLoadSpec {
   static constexpr std::string_view kUsage =
       "load <file.yaml>\n"
       "  load work.yaml\n"
-      "Replaces the workspace; version must be 1 (loud otherwise); unknown\n"
+      "Replaces the workspace; version must be 1..2 (v1 loads untied; loud otherwise); unknown\n"
       "keys/sections are errors. Fails atomically (the workspace is kept on error).";
 
   static int run(ArgCursor &args, std::ostream &out);
@@ -272,8 +303,8 @@ struct LogicExportSpec {
 // Append new verb specs here; names stay unique via the compile-time validation.
 using LogicRegistry = Registry<LogicHelpSpec, LogicBackSpec, LogicAddSpec, LogicListSpec,
                                LogicWireSpec, LogicUnwireSpec, LogicRemoveSpec,
-                               LogicIgnoreSpec, LogicUseSpec, LogicResetSpec,
-                               LogicSolveSpec, LogicTruthSpec, LogicOptimizeSpec,
+                               LogicIgnoreSpec, LogicUseSpec, LogicTieSpec, LogicUntieSpec,
+                               LogicResetSpec, LogicSolveSpec, LogicTruthSpec, LogicOptimizeSpec,
                                LogicDrawSpec, LogicSaveSpec, LogicLoadSpec,
                                LogicExportSpec>;
 

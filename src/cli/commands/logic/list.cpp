@@ -121,6 +121,55 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
     for (const std::string &p : ignored) {
       out << "  " << p << '\n';
     }
+    // Tie groups: one line per class (>= 2 members), members in slot
+    // order joined by " = " (canonical leader first by construction).
+    std::vector<std::string> tie_lines;
+    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+      const auto &g = nl.gates[s];
+      if (!g.live) {
+        continue;
+      }
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        if (g.drivers[i] != wengine::logic::kNoDriver) {
+          continue;
+        }
+        if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
+          continue;
+        }
+        const std::size_t flat = static_cast<std::size_t>(s) * wengine::logic::kMaxInputs + i;
+        if (wengine::logic::tie_leader_flat(nl, flat) != flat) {
+          continue;
+        }
+        if (nl.tie_rep[flat] == 0) {
+          continue;
+        }
+        std::string line;
+        for (std::uint16_t t = 0; t < kMaxGates; ++t) {
+          const auto &og = nl.gates[t];
+          if (!og.live) {
+            continue;
+          }
+          for (std::uint8_t j = 0; j < og.input_count; ++j) {
+            const std::size_t f = static_cast<std::size_t>(t) * wengine::logic::kMaxInputs + j;
+            if (wengine::logic::tie_leader_flat(nl, f) != flat) {
+              continue;
+            }
+            if (!line.empty()) {
+              line += " = ";
+            }
+            line += support::pin_text(nl, t, false, j);
+          }
+        }
+        tie_lines.push_back(line);
+      }
+    }
+    out << "ties (" << tie_lines.size() << "):\n";
+    if (tie_lines.empty()) {
+      out << "  (none)\n";
+    }
+    for (const std::string &line : tie_lines) {
+      out << "  " << line << '\n';
+    }
   }
   return core::kExitOk;
 }

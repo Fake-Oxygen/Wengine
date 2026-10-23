@@ -290,6 +290,12 @@ target_include_directories(wengine_yaml SYSTEM PUBLIC
 target_include_directories(wengine_yaml PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/external/yaml-cpp/src
 )
+# yaml-cpp 0.8.0 predates GCC 15's header hygiene (emitterutils.cpp uses
+# uint16_t without <cstdint>, relying on transitive includes older
+# libstdc++ provided). Force the header without touching upstream.
+target_compile_options(wengine_yaml PRIVATE
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-include cstdint>
+)
 
 # Versioned workspace store: the single TU allowed to know yaml-cpp exists.
 # Engine headers stay yaml-free (see logic/yaml_store.hpp); strict warnings
@@ -352,8 +358,10 @@ if(BUILD_CLI)
         src/cli/commands/logic/reset.cpp
         src/cli/commands/logic/save.cpp
         src/cli/commands/logic/solve.cpp
+        src/cli/commands/logic/tie.cpp
         src/cli/commands/logic/truth.cpp
         src/cli/commands/logic/unwire.cpp
+        src/cli/commands/logic/untie.cpp
         src/cli/commands/logic/use.cpp
         src/cli/commands/logic/wire.cpp
         src/cli/commands/ic/ap63205.cpp

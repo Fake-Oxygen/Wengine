@@ -729,6 +729,11 @@ bool netlists_equal(const Netlist &a, const Netlist &b) {
       return false;
     }
   }
+  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+    if (a.tie_rep[f] != b.tie_rep[f]) {
+      return false;
+    }
+  }
   for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
     const logic::Gate &x = a.gates[s];
     const logic::Gate &y = b.gates[s];
@@ -1399,6 +1404,169 @@ void test_optimize_noexcept() {
   static_assert(noexcept(logic::optimize(nl, opts)));
   assert(logic::optimize(nl, opts).ok()); // empty net optimizes to empty
 }
+
+// ---- LOGIC-14 tied inputs ------------------------------------------------
+// Input-input shorts as first-class nets: one block input per class,
+// canonical leader = lowest (slot, input), scalar feeds one value to all
+// members, bit-parallel shares one column word.
+
+void test_tie_basic_iface() {
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kNand, 2).ok()); // NAND1 @0
+  assert(logic::block_input_count(nl) == 2);
+  assert(logic::tie_text(nl, "NAND1.1", "NAND1.2").ok());
+  assert(logic::is_tied(nl, 0, 0) && logic::is_tied(nl, 0, 1));
+  assert(logic::is_tie_leader(nl, 0, 0) && !logic::is_tie_leader(nl, 0, 1));
+  assert(logic::block_input_count(nl) == 1); // one per class
+  assert(logic::tie_group_count(nl) == 1);
+  assert(logic::tie_pair_count(nl) == 1);
+  // Idempotent re-tie.
+  assert(logic::tie_text(nl, "NAND1.1", "NAND1.2").ok());
+  assert(logic::tie_text(nl, "NAND1.2", "NAND1.1").ok());
+  assert(logic::block_input_count(nl) == 1);
+  // Untie dissolves the pair back to singletons.
+  auto p = logic::parse_pin(nl, "NAND1.2");
+  assert(p.ok());
+  assert(logic::untie_pin(nl, p.value).ok());
+  assert(!logic::is_tied(nl, 0, 0) && !logic::is_tied(nl, 0, 1));
+  assert(logic::block_input_count(nl) == 2);
+  assert(logic::tie_group_count(nl) == 0);
+}
+
+void test_tie_nand_is_not() {
+  // Tied NAND(a,a) == NOT(a): scalar goldens vs hand-derived reference.
+  Netlist tied;
+  assert(logic::add_gate(tied, GateKind::kNand, 2).ok());
+  assert(logic::tie_text(tied, "NAND1.1", "NAND1.2").ok());
+  Netlist ref;
+  assert(logic::add_gate(ref, GateKind::kNot, 1).ok());
+  for (int b = 0; b < 2; ++b) {
+    const LogicValue v = (b != 0) ? kH : kL;
+    const LogicValue want = (b != 0) ? kL : kH; // NOT
+    std::array<LogicValue, 1> in{v};
+    std::array<LogicValue, 1> got{kL};
+    std::array<LogicValue, 1> want_out{want};
+    assert(logic::solve(tied, std::span<const LogicValue>(in.data(), 1),
+                        std::span<LogicValue>(got.data(), 1))
+                .ok());
+    assert(got[0] == want);
+    std::array<LogicValue, 1> ref_out{kL};
+    assert(logic::solve(ref, std::span<const LogicValue>(in.data(), 1),
+                        std::span<LogicValue>(ref_out.data(), 1))
+                .ok());
+    assert(got[0] == ref_out[0]);
+  }
+}
+
+void test_tie_replicated_truth() {
+  // Tied-block truth == replicated untied truth: AND(a,a) over 1 input
+  // matches AND(a,b) over 2 inputs whenever b == a.
+  Netlist tied;
+  assert(logic::add_gate(tied, GateKind::kAnd, 2).ok());
+  assert(logic::tie_text(tied, "AND1.1", "AND1.2").ok());
+  Netlist plain;
+  assert(logic::add_gate(plain, GateKind::kAnd, 2).ok());
+  for (int b = 0; b < 2; ++b) {
+    const LogicValue v = (b != 0) ? kH : kL;
+    std::array<LogicValue, 1> in_t{v};
+    std::array<LogicValue, 1> out_t{kL};
+    assert(logic::solve(tied, std::span<const LogicValue>(in_t.data(), 1),
+                        std::span<LogicValue>(out_t.data(), 1))
+                .ok());
+    std::array<LogicValue, 2> in_p{v, v};
+    std::array<LogicValue, 1> out_p{kL};
+    assert(logic::solve(plain, std::span<const LogicValue>(in_p.data(), 2),
+                        std::span<LogicValue>(out_p.data(), 1))
+                .ok());
+    assert(out_t[0] == out_p[0]);
+    assert(out_t[0] == v); // AND(a,a) == a
+  }
+  // Bit-parallel agrees with scalar over the tied interface.
+  check_bit_matches_scalar(tied);
+}
+
+void test_tie_validation() {
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok()); // AND1 @0
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok()); // NOT1 @1
+  // Outputs never tie.
+  assert(!logic::tie_text(nl, "AND1.Y", "AND1.1").ok());
+  assert(!logic::tie_text(nl, "AND1.1", "AND1.Y").ok());
+  // Self-tie is loud; unknown pins are loud.
+  assert(!logic::tie_text(nl, "AND1.1", "AND1.1").ok());
+  assert(!logic::tie_text(nl, "AND1.1", "NOPE.1").ok());
+  assert(!logic::untie_text(nl, "AND1.Y").ok());
+  // Untie of a singleton is loud.
+  assert(!logic::untie_text(nl, "AND1.1").ok());
+  // Wired pins refuse tie/untie.
+  assert(logic::wire(nl, 0, 1, 0).ok());
+  assert(logic::tie_text(nl, "AND1.1", "AND1.2").ok()); // dangling pair still ties
+  assert(logic::block_input_count(nl) == 1); // AND1.1+AND1.2 share one column (NOT1.1 wired)
+  // NOT1.1 is wired: tie/untie involving it fails.
+  assert(!logic::tie_text(nl, "NOT1.1", "AND1.1").ok());
+  assert(!logic::untie_text(nl, "NOT1.1").ok());
+  // Wire on a tied destination fails (untie first).
+  assert(!logic::wire_text(nl, "NOT1.Y", "AND1.1").ok());
+  // Ignored pins refuse tie/untie; tied pins refuse ignore.
+  auto p = logic::parse_pin(nl, "AND1.2");
+  assert(p.ok());
+  assert(logic::untie_pin(nl, p.value).ok()); // dissolve AND1.1=AND1.2 first
+  assert(logic::ignore_pin(nl, p.value).ok());
+  assert(!logic::tie_text(nl, "AND1.1", "AND1.2").ok()); // ignored
+  assert(!logic::untie_text(nl, "AND1.2").ok()); // ignored
+  auto q = logic::parse_pin(nl, "AND1.1");
+  assert(q.ok());
+  assert(logic::use_pin(nl, p.value).ok());
+  assert(logic::tie_text(nl, "AND1.1", "AND1.2").ok());
+  assert(!logic::ignore_pin(nl, q.value).ok()); // tied
+}
+
+void test_tie_transitive_and_remove() {
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok()); // AND1 @0
+  assert(logic::add_gate(nl, GateKind::kOr, 2).ok()); // OR1 @1
+  assert(logic::add_gate(nl, GateKind::kNot, 1).ok()); // NOT1 @2
+  // Transitive merge: {AND1.1, OR1.1} + {OR1.1, NOT1.1} = 3-member class.
+  assert(logic::tie_text(nl, "AND1.1", "OR1.1").ok());
+  assert(logic::tie_text(nl, "OR1.1", "NOT1.1").ok());
+  assert(logic::block_input_count(nl) == 3); // 5 dangling pins, 3 merged into 1 class
+  assert(logic::tie_group_count(nl) == 1);
+  assert(logic::tie_group_size(nl, 0, 0) == 3);
+  // Leader is the lowest pin (AND1.1).
+  assert(logic::is_tie_leader(nl, 0, 0));
+  // Untie the leader: the survivors re-elect OR1.1.
+  auto lead = logic::parse_pin(nl, "AND1.1");
+  assert(lead.ok());
+  assert(logic::untie_pin(nl, lead.value).ok());
+  assert(!logic::is_tied(nl, 0, 0));
+  assert(logic::is_tie_leader(nl, 1, 0));
+  assert(logic::tie_group_size(nl, 1, 0) == 2);
+  assert(logic::block_input_count(nl) == 4);
+  // Removing a gate detaches its pins; survivors stay tied.
+  assert(logic::remove_gate_by_name(nl, "OR1").ok());
+  assert(logic::block_input_count(nl) == 3); // AND1.1, AND1.2, NOT1.1 (NOT1.1 singleton now)
+  assert(logic::tie_group_count(nl) == 0);
+  // Reset clears every class.
+  assert(logic::tie_text(nl, "AND1.1", "AND1.2").ok());
+  assert(logic::tie_group_count(nl) == 1);
+  logic::reset_netlist(nl);
+  assert(logic::tie_group_count(nl) == 0);
+  assert(logic::block_input_count(nl) == 0);
+}
+
+void test_tie_survives_o0() {
+  // O0 preserves ties when pins survive: NAND(a,a) stays 1 gate / 1 input.
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kNand, 2).ok());
+  assert(logic::tie_text(nl, "NAND1.1", "NAND1.2").ok());
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(nl, o0);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert(logic::block_input_count(opt) == 1);
+  assert(logic::tie_group_count(opt) == 1);
+  check_bit_matches_scalar(opt);
+}
 } // namespace
 
 int main() {
@@ -1437,6 +1605,12 @@ int main() {
   test_optimize_sampled_large();
   test_optimize_report();
   test_optimize_noexcept();
+  test_tie_basic_iface();
+  test_tie_nand_is_not();
+  test_tie_replicated_truth();
+  test_tie_validation();
+  test_tie_transitive_and_remove();
+  test_tie_survives_o0();
   std::cout << "test_logic: OK\n";
   return 0;
 }

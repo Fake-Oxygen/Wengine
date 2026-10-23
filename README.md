@@ -141,9 +141,13 @@ REPL commands: `help [cmd]`, `exit`/`quit`, plus registered commands
 (`ohm`, `s0`, `i2c`, `ldo`, `led`, `sim`, `sig`, `ic`, `logic`).
 `logic` enters a module sub-shell (`[logic]> `, `back` leaves;
 `logic <verb>` also works one-shot) — the reusable session pattern
-future modules follow (see `docs/logic.md`). Runnable workspaces live in
-`examples/logic/` (`nand_pair`, `fanout`, `parity3`, `tieoff` — each header
-shows its run command).
+future modules follow (see `docs/logic.md`). Verbs cover add/list/wire/
+unwire/remove/ignore/use/tie/untie/reset/solve/truth/optimize/draw/
+save/load/export; `tie A.1 B.2` shorts two dangling inputs to one net
+(canonical lowest-pin rep, one block input per class) so NAND(a,a)
+inversion is first-class. Runnable workspaces live in
+`examples/logic/` (`nand_pair`, `fanout`, `parity3`, `tieoff`,
+`tied_demorgan` — each header shows its run command).
 `--help`/`-h` also print help. Return codes: `0` ok, `1`
 runtime/unknown-command error, `2` argument/usage error, `-1` internal exit
 signal (REPL loop only).
@@ -530,9 +534,10 @@ core `src/*.cpp` only, no contrib graphbuilder, `SYSTEM` includes) plus
 `wengine_logic_yaml` (`STATIC`: `src/logic/yaml_store.cpp`, the single TU
 allowed to know yaml-cpp exists, strict warnings) — engine headers stay
 yaml-free (see `logic/yaml_store.hpp`), so existing tests keep linking
-`wengine_core` alone. Strict v1 schema (`version: 1`, gates/wires/meta;
+`wengine_core` alone. Strict v2 schema (`version: 2`, gates/wires/ties/meta;
 unknown keys are loud errors with `line N:` diagnostics, never silent
-tolerance) and the exact-match version gate (loud found-version refusal)
+tolerance), the 1..2 version gate (v1 files load untied via a fallback
+loader; loud found-version refusal otherwise)
 are locked in `docs/logic.md` sec. 9. No fifth third-party dep without
 its own decision record.
 

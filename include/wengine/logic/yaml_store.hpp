@@ -8,20 +8,27 @@
 // alone. The single TU allowed to know yaml-cpp exists is
 // `src/logic/yaml_store.cpp` (same seam as `src/signal/lua_solver.cpp`).
 //
-// Schema v1 (strict, see docs/logic.md sec. 9):
-//   version: 1
+// Schema v2 (strict, see docs/logic.md sec. 9):
+//   version: 2
 //   gates:
 //     - {id: AND1, kind: and, inputs: 2, ignore: [2],
 //        ignore_output: false, delay_ps: 0}
 //   wires:
 //     - {from: AND1.Y, to: NOT1.1}
+//   ties:
+//     - {a: NAND1.1, b: NAND1.2}
 //   meta:
 //     tool: wengine-logic
+// `ties` lists one entry per non-leader tied member (a = class leader,
+// b = member, both dangling inputs), ordered by b in slot order, so the
+// bytes are canonical and deterministic. v1 files (version: 1 without
+// `ties`) load via the fallback path as untied workspaces.
 // Unknown keys/sections are loud errors (never silent tolerance); the
-// version gate exact-matches with a loud found-version refusal. `save`
-// emits one canonical byte layout; `load` accepts the YAML superset
-// (comments, quoting, block vs flow style, multiline) and re-saving yields
-// the canonical bytes, so save/load round-trips byte-identically.
+// version gate accepts 1..2 with a loud found-version refusal otherwise.
+// `save` emits one canonical v2 byte layout; `load` accepts the YAML
+// superset (comments, quoting, block vs flow style, multiline) and
+// re-saving yields the canonical bytes, so save/load round-trips
+// byte-identically.
 
 #include "wengine/logic/netlist.hpp"
 
@@ -29,9 +36,9 @@
 
 namespace wengine::logic::yaml {
 
-// Pinned workspace version (exact-match gate; V2 arrives with a fallback
-// loader per docs/logic.md sec. 12, never silent tolerance).
-inline constexpr int kWorkspaceVersion = 1;
+// Pinned workspace version (v2 current; v1 loads via the fallback path
+// per docs/logic.md sec. 12, never silent tolerance).
+inline constexpr int kWorkspaceVersion = 2;
 inline constexpr const char *kToolName = "wengine-logic";
 
 // Canonical save: appends the exact `save`/`export --schema` bytes

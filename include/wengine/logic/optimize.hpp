@@ -126,6 +126,84 @@ inline void recount_fanout(Netlist &nl) noexcept {
   }
 }
 
+// Detach every tied pin of slot `s` from its class (used when a gate is
+// collapsed to a constant: the varying tied pins disappear, outside
+// survivors re-elect). Leaves slot `s` with no tie entries.
+inline void detach_slot_ties(Netlist &nl, std::uint16_t s) noexcept {
+  if (s >= kMaxGates || !nl.gates[s].live) {
+    return;
+  }
+  const std::uint8_t n = nl.gates[s].input_count;
+  // Group-wise: one rebuild per distinct original leader.
+  std::size_t leaders[kMaxInputs];
+  std::size_t n_leaders = 0;
+  {
+    std::size_t seen[kMaxInputs];
+    std::size_t n_seen = 0;
+    for (std::uint8_t i = 0; i < n; ++i) {
+      const std::size_t flat = tie_flat(s, i);
+      if (nl.tie_rep[flat] == 0) {
+        continue;
+      }
+      const std::size_t l = tie_leader_flat(nl, flat);
+      bool have = false;
+      for (std::size_t k = 0; k < n_seen; ++k) {
+        if (seen[k] == l) {
+          have = true;
+          break;
+        }
+      }
+      if (!have) {
+        seen[n_seen++] = l;
+        leaders[n_leaders++] = l;
+      }
+    }
+  }
+  for (std::size_t li = 0; li < n_leaders; ++li) {
+    const std::size_t l = leaders[li];
+    std::size_t survivors[kMaxGates * kMaxInputs];
+    std::size_t n_surv = 0;
+    for (std::uint16_t t = 0; t < kMaxGates; ++t) {
+      if (t == s) {
+        continue;
+      }
+      const Gate &o = nl.gates[t];
+      if (!o.live) {
+        continue;
+      }
+      for (std::uint8_t j = 0; j < o.input_count; ++j) {
+        const std::size_t f = tie_flat(t, j);
+        if (tie_leader_flat(nl, f) == l) {
+          survivors[n_surv++] = f;
+        }
+      }
+    }
+    // Clear the whole class (this slot + survivors), then re-star survivors.
+    for (std::uint8_t i = 0; i < n; ++i) {
+      nl.tie_rep[tie_flat(s, i)] = 0;
+    }
+    for (std::size_t k = 0; k < n_surv; ++k) {
+      // Clear first (in case survivors shared the class with this slot,
+      // their reps still point at the old leader which may live in s).
+      nl.tie_rep[survivors[k]] = 0;
+    }
+    if (n_surv > 1) {
+      std::size_t nl_leader = survivors[0];
+      for (std::size_t k = 1; k < n_surv; ++k) {
+        if (survivors[k] < nl_leader) {
+          nl_leader = survivors[k];
+        }
+      }
+      for (std::size_t k = 0; k < n_surv; ++k) {
+        nl.tie_rep[survivors[k]] = static_cast<std::uint16_t>(nl_leader + 1u);
+      }
+    }
+  }
+  for (std::uint8_t i = 0; i < kMaxInputs; ++i) {
+    nl.tie_rep[tie_flat(s, i)] = 0;
+  }
+}
+
 // Fresh per-kind counter after an in-place kind change: display names stay
 // unique (resolve_gate returns the first slot match, so duplicates would be
 // ambiguous). Deterministic: sweep order is fixed.
@@ -303,11 +381,14 @@ inline bool bypass_pass(Netlist &nl) noexcept {
 // Single remainders become BUF (AND/OR/XOR) or NOT (NAND/NOR/XNOR). An
 // all-constant gate is left alone (label-only; the caller collapses roots
 // and DCE removes the rest). Remaining inputs are all varying, so the gate
-// relabels to V.
+// relabels to V. Tied pins are always varying (dangling, non-ignored), so
+// dropped pins are untied — but kept tied pins shift indices, so their
+// classes re-elect around the new flats (outside members follow).
 inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Constness *ic, bool drop_any, Constness drop_c, bool flip) noexcept {
   Gate &g = nl.gates[s];
   std::uint16_t kept_drv[kMaxInputs];
   std::uint8_t kept_ign[kMaxInputs];
+  std::uint8_t kept_orig[kMaxInputs];
   std::uint8_t n = 0;
   std::uint8_t c1_dropped = 0;
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
@@ -320,11 +401,22 @@ inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Co
     }
     kept_drv[n] = g.drivers[i];
     kept_ign[n] = ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) ? 1u : 0u;
+    kept_orig[n] = i;
     ++n;
   }
   if (n == 0 || n == g.input_count) {
     return false;
   }
+  // Capture original tie leaders for kept pins before mutating indices.
+  std::size_t orig_leader[kMaxInputs];
+  bool orig_tied[kMaxInputs];
+  const std::uint8_t old_n = g.input_count;
+  for (std::uint8_t k = 0; k < n; ++k) {
+    const std::size_t of = tie_flat(s, kept_orig[k]);
+    orig_leader[k] = tie_leader_flat(nl, of);
+    orig_tied[k] = (nl.tie_rep[of] != 0);
+  }
+  (void)old_n;
   for (std::uint8_t i = 0; i < n; ++i) {
     g.drivers[i] = kept_drv[i];
   }
@@ -339,6 +431,64 @@ inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Co
   }
   g.ignored_mask = mask;
   g.input_count = n;
+  // Rebuild ties for kept pins (indices may have shifted): clear this
+  // gate's tie entries, then re-star each original class around its new
+  // minimum (kept new flats + outside survivors still pointing at the old
+  // leader). Singletons stay singleton.
+  for (std::size_t i = 0; i < kMaxInputs; ++i) {
+    nl.tie_rep[tie_flat(s, static_cast<std::uint8_t>(i))] = 0;
+  }
+  for (std::uint8_t k = 0; k < n; ++k) {
+    if (!orig_tied[k]) {
+      continue;
+    }
+    const std::size_t orig = orig_leader[k];
+    // Skip if this class was already rebuilt (another kept pin shared it).
+    bool done = false;
+    for (std::uint8_t j = 0; j < k; ++j) {
+      if (orig_tied[j] && orig_leader[j] == orig) {
+        done = true;
+        break;
+      }
+    }
+    if (done) {
+      continue;
+    }
+    std::size_t survivors[kMaxGates * kMaxInputs];
+    std::size_t n_surv = 0;
+    for (std::uint8_t j = 0; j < n; ++j) {
+      if (orig_tied[j] && orig_leader[j] == orig) {
+        survivors[n_surv++] = tie_flat(s, j);
+      }
+    }
+    for (std::uint16_t t = 0; t < kMaxGates; ++t) {
+      if (t == s) {
+        continue;
+      }
+      const Gate &o = nl.gates[t];
+      if (!o.live) {
+        continue;
+      }
+      for (std::uint8_t j = 0; j < o.input_count; ++j) {
+        const std::size_t f = tie_flat(t, j);
+        if (tie_leader_flat(nl, f) == orig) {
+          survivors[n_surv++] = f;
+        }
+      }
+    }
+    if (n_surv > 1) {
+      std::size_t nl_leader = survivors[0];
+      for (std::size_t q = 1; q < n_surv; ++q) {
+        if (survivors[q] < nl_leader) {
+          nl_leader = survivors[q];
+        }
+      }
+      for (std::size_t q = 0; q < n_surv; ++q) {
+        nl.tie_rep[survivors[q]] = static_cast<std::uint16_t>(nl_leader + 1u);
+      }
+    }
+    // n_surv == 1 stays singleton (already 0).
+  }
   GateKind base = g.kind;
   if (flip && ((c1_dropped % 2u) != 0u)) {
     base = (base == GateKind::kXor) ? GateKind::kXnor : GateKind::kXor;
@@ -447,6 +597,7 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
       const bool canonical = g.kind == GateKind::kAnd && g.input_count == 2 && g.ignored_mask == 0x03u &&
                              g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
       if (!canonical) {
+        detail::detach_slot_ties(nl, s);
         if (g.kind != GateKind::kAnd) {
           retag(nl, s, GateKind::kAnd);
         }
@@ -464,6 +615,7 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
                              g.ignored_mask == 0x03u && g.drivers[0] == kNoDriver &&
                              g.drivers[1] == kNoDriver;
       if (!canonical) {
+        detail::detach_slot_ties(nl, s);
         if (g.kind != GateKind::kNand) {
           retag(nl, s, GateKind::kNand);
         }
@@ -549,6 +701,24 @@ inline bool fusion_sweep(Netlist &nl) noexcept {
       g.ignored_mask = src.ignored_mask;
       for (std::size_t i = 0; i < kMaxInputs; ++i) {
         g.drivers[i] = src.drivers[i];
+      }
+      // Preserve input-input ties: each dangling dest pin joins its src
+      // counterpart's class (internal + outside ties follow; the src gate
+      // goes away via later DCE, leaving the fused pins tied).
+      for (std::uint8_t i = 0; i < src.input_count; ++i) {
+        if (src.drivers[i] != kNoDriver) {
+          continue;
+        }
+        if ((src.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
+          continue;
+        }
+        const std::size_t src_flat = tie_flat(h, i);
+        if (nl.tie_rep[src_flat] == 0) {
+          continue;
+        }
+        PinRef dst_pin{.slot = s, .is_output = false, .input = i};
+        PinRef src_pin{.slot = h, .is_output = false, .input = i};
+        (void)tie_pins(nl, dst_pin, src_pin);
       }
       retag(nl, s, nk);
       changed = true;

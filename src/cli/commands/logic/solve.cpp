@@ -68,9 +68,19 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
     if (!pin.ok() || pin.value.is_output) {
       return cli::usage_error(out, std::string("solve: bad block input pin '") + std::string(pin_text_arg) + "'", kUsage);
     }
+    // Tied members resolve to their class leader (one column per class).
+    std::uint16_t eff_slot = pin.value.slot;
+    std::uint8_t eff_input = pin.value.input;
+    {
+      const std::size_t flat =
+          static_cast<std::size_t>(pin.value.slot) * wengine::logic::kMaxInputs + pin.value.input;
+      const std::size_t leader = wengine::logic::tie_leader_flat(nl, flat);
+      eff_slot = static_cast<std::uint16_t>(leader / wengine::logic::kMaxInputs);
+      eff_input = static_cast<std::uint8_t>(leader % wengine::logic::kMaxInputs);
+    }
     std::size_t pos = nin;
     for (std::size_t j = 0; j < nin; ++j) {
-      if (in_pins[j].slot == pin.value.slot && in_pins[j].input == pin.value.input) {
+      if (in_pins[j].slot == eff_slot && in_pins[j].input == eff_input) {
         pos = j;
         break;
       }
