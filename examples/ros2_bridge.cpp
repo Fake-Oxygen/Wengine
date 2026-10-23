@@ -28,10 +28,13 @@
 #include "wengine/ros2/config.hpp"
 #include "wengine/ros2/publisher.hpp"
 #include "wengine/ros2/rclcpp_transport.hpp"
+#include "wengine/ros2/ros_control.hpp"
 #include "wengine/solvers/projectile.hpp"
 #include "wengine/solvers/signal.hpp"
+#include "wengine/solvers/signal_control.hpp"
 #include "wengine/world/state.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -149,7 +152,38 @@ int main(int argc, char **argv) {
   }
   run.add_sink(*head);
 
+  // Control-in half (ROS2-2): one bus channel for the six services.
+  // Callbacks enqueue only; the driver drains at the step boundary in
+  // slot order, then steps exactly once — service timing never perturbs
+  // dt/order (same path as the TCP/UART control servers).
+  const std::uint64_t run_id =
+      static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  wengine::solvers::ControlBus bus(run_id);
+  wengine::ros2::control::CensusCache census;
+  wengine::ros2::RosControlService control(*node, "wengine", bus, &census);
+  if (!control.ok()) {
+    std::printf("ros2_bridge: control services failed to construct\n");
+    return 1;
+  }
+  wengine::ros2::control::refresh_census(run.state(), run.state().step_index, census);
+  std::uint64_t bus_applied = 0;
+  std::uint64_t bus_readonly = 0;
+  std::uint64_t bus_rejected = 0;
+
   for (std::uint64_t k = 0; k < steps; ++k) {
+    // Service callbacks run here, on the driver thread: they only
+    // enqueue, so nothing reenters the Runner and no state is touched.
+    // A SIGTERM/SIGINT shutdown (rclcpp::ok() false, or spin_some
+    // throwing once the context is gone) ends the run with a summary,
+    // never an exception out of main.
+    if (!rclcpp::ok()) {
+      break;
+    }
+    try {
+      rclcpp::spin_some(node);
+    } catch (...) {
+      break;
+    }
     if (k == 250) {
       // Despawn/respawn mid-run: serial 0 goes silent, the replacement
       // (new serial) appears on its own topic; grouped mode keeps a
@@ -163,12 +197,20 @@ int main(int argc, char **argv) {
         return 1;
       }
     }
+    // Step boundary: drain service lines first, then step exactly once.
+    const wengine::solvers::DrainStats ds = bus.drain(run.state(), run.state().step_index);
+    bus_applied += ds.applied;
+    bus_readonly += ds.readonly;
+    bus_rejected += ds.rejected;
+    // Service responses were already sent at enqueue time (enqueue
+    // verdicts); the execution outbox is driver-side accounting only.
+    (void)bus.take_responses(control.channel());
+    wengine::ros2::control::refresh_census(run.state(), run.state().step_index, census);
     const wengine::core::Status st = run.run(1);
     if (!st.ok()) {
       std::printf("ros2_bridge: step failed\n");
       return 1;
     }
-    rclcpp::spin_some(node);
     if (!publisher.ok()) {
       std::printf("ros2_bridge: publisher went sticky\n");
       return 1;
@@ -176,14 +218,19 @@ int main(int argc, char **argv) {
   }
   const wengine::link::PublisherStats &stats = publisher.stats();
   std::printf("ros2_bridge: attempted=%llu published=%llu over_bound=%llu backpressure=%llu "
-              "disabled=%llu bytes=%llu serial_pubs=%zu\n",
+              "disabled=%llu bytes=%llu serial_pubs=%zu services=%zu enqueued=%llu refused=%llu "
+              "bus applied=%llu readonly=%llu rejected=%llu\n",
               static_cast<unsigned long long>(stats.attempted),
               static_cast<unsigned long long>(stats.published),
               static_cast<unsigned long long>(stats.dropped_over_bound),
               static_cast<unsigned long long>(stats.dropped_send),
               static_cast<unsigned long long>(stats.disabled_after_error),
               static_cast<unsigned long long>(stats.bytes_accepted),
-              transport.serial_publisher_count());
+              transport.serial_publisher_count(), control.service_count(),
+              static_cast<unsigned long long>(control.enqueued()),
+              static_cast<unsigned long long>(control.refused()), static_cast<unsigned long long>(bus_applied),
+              static_cast<unsigned long long>(bus_readonly),
+              static_cast<unsigned long long>(bus_rejected));
   rclcpp::shutdown();
   return 0;
 }

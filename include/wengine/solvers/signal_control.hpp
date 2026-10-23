@@ -47,7 +47,6 @@
 #include "wengine/signal/types.hpp"
 #include "wengine/world/state.hpp"
 
-#include <cstdio>
 #include <deque>
 #include <string>
 #include <string_view>
@@ -97,16 +96,6 @@ namespace control_detail {
   return p;
 }
 
-[[nodiscard]] inline std::string fmt_f64(double v) {
-  char buf[32];
-  // %.17g round-trips IEEE doubles exactly (same guarantee as the CSV log).
-  const int n = std::snprintf(buf, sizeof(buf), "%.17g", v);
-  if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(buf)) {
-    return "0";
-  }
-  return std::string(buf, static_cast<std::size_t>(n));
-}
-
 } // namespace control_detail
 
 // Apply one parsed command to `s`. Responses append to `outbox`; applied
@@ -150,16 +139,10 @@ inline void apply_command(world::State &s, const signal::control::Command &cmd,
       const std::string_view kind_name =
           (kind_idx < signal::kKindNames.size()) ? signal::kKindNames[kind_idx] : "?";
       const auto qty = static_cast<signal::QuantityId>(s.signals.quantity[i]);
-      std::string src = "SRC " + std::to_string(s.signals.serial[i]) + " " +
-                        std::string(kind_name) + " " + std::string(signal::quantity_suffix(qty)) +
-                        " " + control_detail::fmt_f64(s.signals.freq[i]) + " " +
-                        control_detail::fmt_f64(s.signals.amp[i]) + " " +
-                        control_detail::fmt_f64(s.signals.offset[i]) + " " +
-                        control_detail::fmt_f64(s.signals.phase[i]) + " " +
-                        control_detail::fmt_f64(s.signals.duty[i]) + " " +
-                        std::to_string(s.signals.seed[i]) + " " +
-                        std::to_string(static_cast<unsigned>(s.signals.running[i]));
-      outbox.push_back(std::move(src));
+      outbox.push_back(sc::format_src_row(
+          s.signals.serial[i], kind_name, signal::quantity_suffix(qty), s.signals.freq[i],
+          s.signals.amp[i], s.signals.offset[i], s.signals.phase[i], s.signals.duty[i],
+          s.signals.seed[i], s.signals.running[i] != 0));
     }
     return;
   }

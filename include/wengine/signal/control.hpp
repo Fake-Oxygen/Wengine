@@ -62,6 +62,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -160,6 +161,35 @@ enum class Param : std::uint8_t {
     return "internal";
   }
   return "internal";
+}
+
+namespace detail {
+
+// %.17g round-trips IEEE doubles exactly (same guarantee as the CSV log).
+[[nodiscard]] inline std::string fmt_f64(double v) {
+  char buf[32];
+  const int n = std::snprintf(buf, sizeof(buf), "%.17g", v);
+  if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(buf)) {
+    return "0";
+  }
+  return std::string(buf, static_cast<std::size_t>(n));
+}
+
+} // namespace detail
+
+// One SRC census row, shared by the LIST apply path (solvers/) and edge
+// census caches (single formatter, never two — a byte-equality test locks
+// this): "SRC <serial> <kind> <qty> <freq> <amp> <offset> <phase> <duty>
+// <seed> <running>" with exact doubles.
+[[nodiscard]] inline std::string format_src_row(std::uint64_t serial, std::string_view kind_name,
+                                               std::string_view qty_suffix, double freq, double amp,
+                                               double offset, double phase, double duty,
+                                               std::uint64_t seed, bool running) {
+  return "SRC " + std::to_string(serial) + " " + std::string(kind_name) + " " +
+         std::string(qty_suffix) + " " + detail::fmt_f64(freq) + " " + detail::fmt_f64(amp) +
+         " " + detail::fmt_f64(offset) + " " + detail::fmt_f64(phase) + " " +
+         detail::fmt_f64(duty) + " " + std::to_string(seed) + " " +
+         (running ? "1" : "0");
 }
 
 // Parsed command. Views (`client`, `expr`) borrow the queued line: the

@@ -692,6 +692,11 @@ re-investigated without a reason:
   defines `si_value` as a macro: never use `si_value` as an identifier
   in engine headers (ROS2-1 renamed the `stamp()` parameter to
   `value_si`). Any TU combining ROS headers with engine headers hits it.
+* rosidl `.srv` comments become IDL verbatim strings: keep them ASCII
+  (non-ASCII breaks the adapter) and never put `\n` or a raw newline
+  inside a quoted example (the adapter expands `\n` into a real break,
+  which the IDL parser rejects). `rosidl_get_typesupport_target`, not the
+  `wengine_msgs::` namespaced targets, links build-tree consumers.
 * ThreadSanitizer on this host (WSL2): GCC 13 `libtsan` cannot start —
   `FATAL: unexpected memory mapping` even for hello-world (ASAN is fine,
   `-no-pie` does not help). Run TSAN builds with Clang

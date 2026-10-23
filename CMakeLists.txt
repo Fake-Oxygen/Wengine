@@ -164,9 +164,16 @@ target_compile_options(wengine_ros2 PRIVATE
 if(BUILD_ROS2)
     find_package(rclcpp REQUIRED)
     find_package(sensor_msgs REQUIRED)
-    target_sources(wengine_ros2 PRIVATE src/ros2/rclcpp_transport.cpp)
+    # wengine_msgs IDL package (introduced with ROS2-2 for the SigCommand
+    # service; ROS2-3 extends it with the SignalBlock message). Built as a
+    # subdirectory of src/ros2 so no ROS2 sources live in the top dir, and
+    # only when the top-level BUILD_ROS2 option is ON (see above), so
+    # default builds never require a ROS install.
+    add_subdirectory(src/ros2/msgs)
+    target_sources(wengine_ros2 PRIVATE src/ros2/rclcpp_transport.cpp src/ros2/ros_control.cpp)
     target_compile_definitions(wengine_ros2 PUBLIC WENGINE_HAS_RCLCPP=1)
-    target_link_libraries(wengine_ros2 PUBLIC rclcpp::rclcpp sensor_msgs::sensor_msgs)
+    target_link_libraries(wengine_ros2 PUBLIC rclcpp::rclcpp sensor_msgs::sensor_msgs
+        "${WENGINE_MSGS_CPP_TYPESUPPORT}")
     add_executable(ros2_bridge examples/ros2_bridge.cpp)
     target_link_libraries(ros2_bridge PRIVATE wengine_ros2)
     target_compile_options(ros2_bridge PRIVATE
@@ -527,6 +534,12 @@ if(BUILD_TESTS)
     add_executable(test_ros2_publisher tests/test_ros2_publisher.cpp)
     target_link_libraries(test_ros2_publisher PRIVATE wengine_ros2)
     add_test(NAME ros2_publisher COMMAND test_ros2_publisher)
+
+    # ROS2 control plane: service vocabulary + step-boundary drain, no
+    # rclcpp (the rmw services are covered by live HIL instead).
+    add_executable(test_ros2_control tests/test_ros2_control.cpp)
+    target_link_libraries(test_ros2_control PRIVATE wengine_core)
+    add_test(NAME ros2_control COMMAND test_ros2_control)
 
     # Lua scripting source: isolated runtime + sandbox pin tests.
     add_executable(test_lua tests/test_lua.cpp)

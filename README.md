@@ -526,8 +526,9 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
  `wengine_signal_lua` (`STATIC`: `src/signal/lua_solver.cpp`, the Lua
  runtime TU) links `wengine_core` + `wengine_lua` (vendored interpreter).
  `wengine_ros2` (`STATIC`: `src/ros2/ros_publisher.cpp`, the transport-neutral
- ROS2 state-out ISink; plus `src/ros2/rclcpp_transport.cpp`, the rmw TU, only
- with `BUILD_ROS2=ON`) links `wengine_core` — engine headers stay ROS-free.
+ ROS2 state-out ISink; `src/ros2/ros_control.cpp`, the rmw service TU, plus
+ `src/ros2/msgs/` IDL for `wengine_msgs/srv/SigCommand` — rmw TUs only with
+ `BUILD_ROS2=ON`) links `wengine_core` — engine headers stay ROS-free.
  `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
  `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
  `src/cli/commands/i2c.cpp`, `src/cli/commands/ldo.cpp`, `src/cli/commands/led.cpp`,
@@ -564,6 +565,8 @@ service verbs, quantity suffix), `test_ros2_publisher` (grouped + per-serial
 publish incl. despawn/respawn serial survival, over-bound/disconnect
 stickiness, transient backpressure, owned copies, stride/subset wiring,
 serial backstop; the rmw TU is covered by live `ros2_bridge` HIL instead),
+`test_ros2_control` (service vocabulary + step-boundary drain + census
+byte-equality; rmw services covered by live `ros2 service call` HIL instead),
 `test_world`, `test_emit`, `test_snapshot_reuse`
 (warmed fixed-population capture/emission performs zero allocations,
 bounded cold growth, retained-copy independence, subset-scratch reuse),

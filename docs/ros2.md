@@ -5,12 +5,17 @@ Status: ROS2-1 landed the state-out half — `include/wengine/ros2/publisher.hpp
 as `wengine_ros2`) + `rclcpp_transport.{hpp,cpp}` (rmw TU, `BUILD_ROS2=ON`
 only) + live `examples/ros2_bridge.cpp` (grouped + per-serial JointState,
 PointCloud2 particles, sim_time stamps, QoS per D-ROS-5, stride/subset
-wiring). `include/wengine/ros2/*` stays ROS-free vocabulary
-(config/naming/verb mapping, topic helpers); no `rclcpp` is included or
-linked unless `BUILD_ROS2=ON`. Unit tests (`test_ros2_mapping`,
-`test_ros2_publisher`) cover the pure mapping + publisher without a ROS
-install; the rmw TU is covered by live HIL (`ros2_bridge` + `ros2 topic
-echo`), not by ctest.
+wiring). ROS2-2 landed the control-in half — `src/ros2/msgs/` (`wengine_msgs`
+IDL package with `srv/SigCommand`, built as a subdirectory only with
+`BUILD_ROS2=ON`) + `ros_control.{hpp,cpp}` (six uniform services over the
+one text-line envelope) + the bridge's ControlBus drain at the step
+boundary with a cached LIST census. `include/wengine/ros2/*` stays ROS-free
+vocabulary (config/naming/verb mapping, topic helpers, service contract);
+no `rclcpp` is included or linked unless `BUILD_ROS2=ON`. Unit tests
+(`test_ros2_mapping`, `test_ros2_publisher`, `test_ros2_control`) cover the
+pure mapping + publisher + service vocabulary without a ROS install; the
+rmw TUs are covered by live HIL (`ros2_bridge` + `ros2 topic echo` /
+`ros2 service call`), not by ctest.
 
 ## Why no redesign is needed
 
@@ -72,14 +77,20 @@ headers stay ROS-free (the rmw TU replaces the platform, like
   topic segments must not start with a digit).
 - Particles: `sensor_msgs/PointCloud2` (x/y/vx/vy FLOAT64) on
   `/<ns>/<particle_topic_stem>` via `frame_from_snapshot` items.
-- Services: `sig_add/sig_set/sig_start/sig_stop/sig_drop/sig_list`
-  (see `ros2/control.hpp`); table/Lua ADD rejected as `not_implemented`.
-  (Planned with ROS2-2; the custom `wengine_msgs/SignalBlock` IDL for
-  serials+quantities follows with ROS2-3.)
+- Services: `wengine_msgs/srv/SigCommand` (`string line` in, `bool ok` +
+  `string message` + `int32 code` out) on `/<ns>/sig_add|set|start|stop|drop`
+  (request carries arguments only, e.g. `sine freq 1 amp 3.3` — the service
+  name fixes the verb) and `/<ns>/sig_list` (empty request, answers the
+  driver-refreshed census cache, stale by <1 step). Callbacks enqueue only
+  and answer the enqueue verdict (`OK queued` / `ERR <code> <detail>`);
+  execution happens at the next step-boundary drain. Table/Lua ADD is
+  refused as `not_implemented`. (Landed with ROS2-2; the custom
+  `wengine_msgs/SignalBlock` message for serials+quantities follows with
+  ROS2-3.)
 
 ## What is NOT in this task (follow-ups under the same epic)
 
-Services (ROS2-2), `wengine_msgs` IDL + `sim run`/`sig run --emit-ros` flags
+`wengine_msgs` SignalBlock message + `sim run`/`sig run --emit-ros` flags
 (ROS2-3), lifecycle/time-sync/bag notes (ROS2-4), CI parity/HIL tests (ROS2-5),
 security/SROS. Those are Plane follow-ups (parent + subtasks filed under the
 signals epic).

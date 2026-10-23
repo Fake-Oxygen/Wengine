@@ -1,0 +1,32 @@
+# Uniform text-protocol command envelope for the six control services
+# (sig_add/set/start/stop/drop/list). One service type for the whole
+# family - like the TCP/UART text lines, one command language everywhere.
+#
+# Request carries the ARGUMENTS only (no verb; the service name fixes the
+# verb, so mismatch is impossible by construction):
+#   sig_add   "sine freq 1 amp 3.3"
+#   sig_set   "3 AMP 1.5"
+#   sig_start "3" / sig_stop "3" / sig_drop "3"
+#   sig_list  "" (empty; LIST takes no arguments)
+# Full line = "<VERB> <args>", parsed by the same signal/control.hpp
+# parser the TCP/UART servers use. Payloads are SI doubles only; unit
+# suffixes (3.3V) are a frontend concern and never reach this service.
+# Table/Lua ADD is refused as not_implemented (bulk payloads ride batch
+# paths, never a service call).
+#
+# Response mirrors the protocol vocabulary plus the numeric StatusCode:
+#   ok=true   message "OK queued" (enqueue accepted; execution happens at
+#             the next step boundary) or the cached census for sig_list
+#             ("OK list" verdict plus SRC rows), code 0.
+#   ok=false  message "ERR <code> <detail>" (shape errors, unknown-verb
+#             guards, table/lua refusal, dead bus), code mirrors
+#             core::StatusCode (1 invalid_argument, 2 out_of_range,
+#             3 not_implemented, 4 internal).
+# Service callbacks enqueue only and never block: execution results
+# surface in the driver log + the next LIST census, never in a stale
+# response. See docs/ros2.md D-ROS-6.
+string line
+---
+bool ok
+string message
+int32 code
