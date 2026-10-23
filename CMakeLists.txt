@@ -674,6 +674,12 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic_seq_kinds PRIVATE wengine_core)
     add_test(NAME logic_seq_kinds COMMAND test_logic_seq_kinds)
 
+    # LOGIC-V2-SEQ2 sequential state pool beside Netlist: header-only,
+    # links wengine_core alone like test_logic.
+    add_executable(test_logic_seq_state tests/test_logic_seq_state.cpp)
+    target_link_libraries(test_logic_seq_state PRIVATE wengine_core)
+    add_test(NAME logic_seq_state COMMAND test_logic_seq_state)
+
     # LOGIC-6 workspace store: yaml-cpp seam TU + yaml-free header. Links
     # wengine_logic_yaml only (never wengine_cli); test_logic above stays
     # on wengine_core alone by design.

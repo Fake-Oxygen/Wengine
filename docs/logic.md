@@ -284,7 +284,9 @@ append-only, schema bumps carry fallback loaders.
   sequential kinds append at ≥16, pinned: `DFF`=16 (D+CLK,
   edge-triggered), `DLATCH`=17 (D+EN, level-sensitive) — never
   renumber, never reuse persisted bytes. Clocked state lives in a **parallel pool beside
-  the netlist** (same pattern as `Signals` beside `Particles`), stepped
+  the netlist** (`logic::SeqState` in `seq_state.hpp`: per-slot Q + valid +
+  never-reused serials, synced by `init_seq_state`, cleared by `reset_seq_state` —
+  same pattern as `Signals` beside `Particles`), stepped
   by a `SequentialSolver::step(state, dt)` behind the existing
   `ISolver` seam — the combinational evaluator is untouched, and
   `RunConfig` gains one nested section struct per AGENTS.md §8.
