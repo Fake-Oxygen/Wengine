@@ -69,6 +69,10 @@ namespace wengine::logic {
     return is_high(inputs[0]) ? LogicValue::kLow : LogicValue::kHigh;
   case GateKind::kBuf:
     return is_high(inputs[0]) ? LogicValue::kHigh : LogicValue::kLow;
+  case GateKind::kDff:
+  case GateKind::kDlatch:
+    break; // SEQ4 owns sequential stepping; combinational eval never sees
+           // these (creation is guarded until SEQ2). Falls to kLow below.
   }
   return LogicValue::kLow;
 }
@@ -495,6 +499,10 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
       }
       break;
     }
+    case GateKind::kDff:
+    case GateKind::kDlatch:
+      break; // SEQ4 owns sequential stepping; combinational word eval never
+             // sees these (creation is guarded until SEQ2). acc stays 0.
     }
     gate_scratch[s] = acc;
   }

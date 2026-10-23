@@ -90,6 +90,9 @@ struct BlockPin {
   if (k == GateKind::kNot || k == GateKind::kBuf) {
     return n == 1;
   }
+  if (k == GateKind::kDff || k == GateKind::kDlatch) {
+    return n == 2; // D+CLK (DFF) / D+EN (DLATCH)
+  }
   return n >= 2 && n <= kMaxInputs;
 }
 
@@ -97,6 +100,7 @@ struct BlockPin {
   if (k == GateKind::kNot || k == GateKind::kBuf) {
     return 1;
   }
+  // Combinational 2..8 default 2; DFF/DLATCH take exactly 2 (D + CLK/EN).
   return 2;
 }
 
@@ -143,38 +147,64 @@ namespace detail {
 } // namespace detail
 
 // Case-insensitive ("and", "AND", "And" all match). Exact full match.
+// Sequential kinds (DFF/DLATCH) parse here (SEQ1 vocabulary); creation
+// stays rejected by add_gate until SEQ2 provides the state pool.
 [[nodiscard]] inline core::Result<GateKind> parse_gate_kind(std::string_view text) noexcept {
   if (text.empty()) {
     return core::Result<GateKind>::failure("bad gate kind: empty");
   }
-  // Upper-compare against each known name.
-  constexpr std::string_view kNames[8] = {"AND", "OR", "NAND", "NOR", "XOR", "XNOR", "NOT", "BUF"};
-  for (std::uint8_t i = 0; i < 8; ++i) {
-    if (text.size() != kNames[i].size()) {
+  // Append-only table: keep every known (name, kind) pair here so the
+  // persisted byte values (DFF=16, DLATCH=17) never shift.
+  struct KindEntry {
+    std::string_view name;
+    GateKind kind;
+  };
+  constexpr KindEntry kKinds[] = {
+      {"AND", GateKind::kAnd},
+      {"OR", GateKind::kOr},
+      {"NAND", GateKind::kNand},
+      {"NOR", GateKind::kNor},
+      {"XOR", GateKind::kXor},
+      {"XNOR", GateKind::kXnor},
+      {"NOT", GateKind::kNot},
+      {"BUF", GateKind::kBuf},
+      {"DFF", GateKind::kDff},
+      {"DLATCH", GateKind::kDlatch},
+  };
+  for (const KindEntry &e : kKinds) {
+    if (text.size() != e.name.size()) {
       continue;
     }
     bool same = true;
     for (std::size_t j = 0; j < text.size(); ++j) {
-      if (detail::to_upper(text[j]) != kNames[i][j]) {
+      if (detail::to_upper(text[j]) != e.name[j]) {
         same = false;
         break;
       }
     }
     if (same) {
-      return core::Result<GateKind>::success(static_cast<GateKind>(i));
+      return core::Result<GateKind>::success(e.kind);
     }
   }
-  return core::Result<GateKind>::failure("bad gate kind: want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF");
+  return core::Result<GateKind>::failure("bad gate kind: want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH");
 }
 
-// Find a live gate by display name (e.g. "AND1", case-insensitive kind).
-// Linear slot-order scan: deterministic, first (only) match wins.
+// Find a live gate by display name (e.g. "AND1", "DFF1", case-insensitive
+// kind). Linear slot-order scan: deterministic, first (only) match wins.
+// Covers sequential kinds (DFF/DLATCH) so names resolve once SEQ2 allows
+// creating them; no Netlist shape change (ordinals compare by value).
 [[nodiscard]] inline core::Result<std::uint16_t> resolve_gate(const Netlist &nl, std::string_view name) noexcept {
   if (name.empty()) {
     return core::Result<std::uint16_t>::failure("bad gate name: empty");
   }
-  for (std::uint8_t o = 0; o < 8; ++o) {
-    const std::string_view kind_name = gate_kind_name(static_cast<GateKind>(o));
+  constexpr GateKind kAllKinds[] = {
+      GateKind::kAnd, GateKind::kOr, GateKind::kNand, GateKind::kNor,
+      GateKind::kXor, GateKind::kXnor, GateKind::kNot, GateKind::kBuf,
+      GateKind::kDff, GateKind::kDlatch,
+  };
+  for (GateKind kind : kAllKinds) {
+    const std::uint8_t o = kind_ordinal(kind);
+    const std::string_view kind_name = gate_kind_name(kind);
     if (!detail::starts_with_ci(name, kind_name)) {
       continue;
     }
@@ -246,6 +276,9 @@ namespace detail {
   }
   const std::uint8_t ord = kind_ordinal(kind);
   if (ord >= 8) {
+    // SEQ1 vocabulary only: DFF/DLATCH parse + validate fan-in, but no
+    // Netlist slot may hold them yet (next_counter covers ordinals 0..7;
+    // SEQ2 adds the parallel state pool + creation path). Loud until then.
     return core::Result<std::uint16_t>::failure("bad gate kind");
   }
   if (nl.next_counter[ord] == 0) {

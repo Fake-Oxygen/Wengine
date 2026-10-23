@@ -150,15 +150,21 @@ struct TieRow {
   }
   row.id = id.Scalar();
   if (!kind.IsScalar()) {
-    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF)");
+    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH)");
     return false;
   }
   const auto parsed_kind = parse_gate_kind(kind.Scalar());
   if (!parsed_kind.ok()) {
-    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF)");
+    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH)");
     return false;
   }
   row.kind = parsed_kind.value;
+  if (kind_ordinal(row.kind) >= 8) {
+    // SEQ1 vocabulary only: sequential gates parse, but v2 workspaces hold
+    // combinational gates only (schema v3 + SEQ2 state pool arrive later).
+    err = at_line(kind, "sequential gates need schema v3 (DFF/DLATCH not yet supported)");
+    return false;
+  }
   if (!inputs.IsScalar()) {
     err = at_line(inputs, "bad input count (want 1..8)");
     return false;

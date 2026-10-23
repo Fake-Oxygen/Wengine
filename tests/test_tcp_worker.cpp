@@ -410,16 +410,16 @@ void test_stalled_sibling_isolation() {
   cfg_a.endpoint = endpoint_for(port_a);
   cfg_a.domain = "signal";
   cfg_a.mode = link::TcpWorkerMode::kOrdered;
-  // Small relative to the 63-block burst, but sized past the pinned
-  // kernel buffers (worker's 256 KiB send buffer + the 8 KiB effective
-  // receive window pinned below): the worker stalls on full buffers
-  // after ~15 blocks at any producer speed, the queue stays full, and
-  // the rest drops loudly — volumetric, never timing-dependent. (A
-  // 4-slot default queue holds ~72 KiB, inside the send buffer alone,
-  // so an -O3 burst over before the buffers fill and finish() wrongly
-  // succeeds.)
-  cfg_a.queue.max_slots = 32;
-  cfg_a.queue.max_bytes = link::sample::kBlockMaxBytes * 32;
+  // Small relative to the 63-block burst, but sized so the stall still
+  // overflows by volume, never by timing: the kernel doubles the worker's
+  // 256 KiB SO_SNDBUF (512 KiB effective) while the pinned 4 KiB receive
+  // window stays 8 KiB effective, so the stalled peer absorbs ~30 blocks
+  // before EAGAIN; the worker holds 1 more in pending. An 8-slot queue
+  // (30 + 1 + 8 = 39 < 63) therefore overflows with 20+ drops of margin
+  // against kernel accounting slack — a 32-slot queue would land exactly
+  // on the absorb boundary (31 + 1 + 31 = 63) and drop nothing.
+  cfg_a.queue.max_slots = 8;
+  cfg_a.queue.max_bytes = link::sample::kBlockMaxBytes * 8;
   link::TcpBlockWorker worker_a(cfg_a);
   assert(worker_a.ok());
   link::TcpWorkerConfig cfg_b;

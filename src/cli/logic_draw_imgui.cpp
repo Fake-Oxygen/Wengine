@@ -121,8 +121,7 @@ void stroke_smooth(ImDrawList *dl, const ImVec2 *pts, int n, bool closed, ImU32 
 
 [[nodiscard]] ImVec2 qbez_pt(ImVec2 a, ImVec2 c, ImVec2 b, float t) noexcept {
   const float u = 1.0f - t;
-  return ImVec2(u * u * a.x + 2.0f * u * t * c.x + t * t * b.x,
-                u * u * a.y + 2.0f * u * t * c.y + t * t * b.y);
+  return ImVec2(u * u * a.x + 2.0f * u * t * c.x + t * t * b.x, u * u * a.y + 2.0f * u * t * c.y + t * t * b.y);
 }
 
 void draw_gate_body(Scene &s, const wengine::logic::Gate &g, float x, float y, float w, float h) {
@@ -133,8 +132,7 @@ void draw_gate_body(Scene &s, const wengine::logic::Gate &g, float x, float y, f
   constexpr float kPad = 4.0f;
   const float mid = y + h * 0.5f;
   const float lx = x + kLead;
-  const bool inverted =
-      (g.kind == GateKind::kNot || g.kind == GateKind::kNand || g.kind == GateKind::kNor || g.kind == GateKind::kXnor);
+  const bool inverted = (g.kind == GateKind::kNot || g.kind == GateKind::kNand || g.kind == GateKind::kNor || g.kind == GateKind::kXnor);
   const float tip_x = inverted ? (x + w - kLead - 4.0f) : (x + w - 2.0f);
   const bool xor_extra = (g.kind == GateKind::kXor || g.kind == GateKind::kXnor);
   const float shift = xor_extra ? 7.0f : 0.0f;
@@ -227,6 +225,9 @@ void draw_gate_body(Scene &s, const wengine::logic::Gate &g, float x, float y, f
     }
     break;
   }
+  case GateKind::kDff:
+  case GateKind::kDlatch:
+    break; // SEQ12 owns flop/latch symbols; nothing drawn until then.
   } // switch
   // Input stubs land on the symbol border, drawn AFTER the body so the
   // concave OR/XOR back (whose convex fill slightly overfills) can never

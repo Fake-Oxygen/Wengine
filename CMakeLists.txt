@@ -668,6 +668,12 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic PRIVATE wengine_core)
     add_test(NAME logic COMMAND test_logic)
 
+    # LOGIC-V2-SEQ1 sequential kind vocabulary (DFF/DLATCH): parsing +
+    # fan-in + names only, links wengine_core alone like test_logic.
+    add_executable(test_logic_seq_kinds tests/test_logic_seq_kinds.cpp)
+    target_link_libraries(test_logic_seq_kinds PRIVATE wengine_core)
+    add_test(NAME logic_seq_kinds COMMAND test_logic_seq_kinds)
+
     # LOGIC-6 workspace store: yaml-cpp seam TU + yaml-free header. Links
     # wengine_logic_yaml only (never wengine_cli); test_logic above stays
     # on wengine_core alone by design.

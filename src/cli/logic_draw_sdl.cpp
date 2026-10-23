@@ -246,6 +246,9 @@ void draw_gate_body(SDL_Renderer *ren, const wengine::logic::Gate &g, int x, int
     }
     break;
   }
+  case GateKind::kDff:
+  case GateKind::kDlatch:
+    break; // SEQ12 owns flop/latch symbols; nothing drawn until then.
   }
 }
 

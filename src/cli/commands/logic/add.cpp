@@ -28,14 +28,19 @@ int LogicAddSpec::run(ArgCursor &args, std::ostream &out) {
   std::optional<std::string_view> inputs_text = args.take_option({"--inputs"});
   std::optional<std::string_view> kind_text = args.next_positional();
   if (!kind_text) {
-    return cli::usage_error(out, "add needs a gate kind (AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF)", kUsage);
+    return cli::usage_error(out, "add needs a gate kind (AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH)", kUsage);
   }
   if (args.has_remaining()) {
     return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
   const auto kind = wengine::logic::parse_gate_kind(*kind_text);
   if (!kind.ok()) {
-    return cli::usage_error(out, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF)", kUsage);
+    return cli::usage_error(out, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH)", kUsage);
+  }
+  if (wengine::logic::kind_ordinal(kind.value) >= 8) {
+    // SEQ1 vocabulary only: DFF/DLATCH parse + validate fan-in, but the
+    // Netlist holds combinational gates only until SEQ2 (state pool).
+    return cli::usage_error(out, "sequential gates need SEQ2 (DFF/DLATCH not yet addable)", kUsage);
   }
   std::uint8_t inputs = wengine::logic::default_fanin(kind.value);
   if (inputs_text) {
@@ -90,8 +95,13 @@ void LogicAddSpec::complete(std::span<const std::string_view> prior_args, std::s
   if (have_kind) {
     return; // kind given: only --inputs may follow
   }
-  for (std::uint8_t o = 0; o < 8; ++o) {
-    const std::string_view k = wengine::logic::gate_kind_name(static_cast<GateKind>(o));
+  constexpr GateKind kCompleteKinds[] = {
+      GateKind::kAnd, GateKind::kOr, GateKind::kNand, GateKind::kNor,
+      GateKind::kXor, GateKind::kXnor, GateKind::kNot, GateKind::kBuf,
+      GateKind::kDff, GateKind::kDlatch,
+  };
+  for (GateKind kind : kCompleteKinds) {
+    const std::string_view k = wengine::logic::gate_kind_name(kind);
     if (k.substr(0, partial.size()) == partial) {
       out.emplace_back(k);
     }

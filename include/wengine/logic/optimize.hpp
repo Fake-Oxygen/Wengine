@@ -274,6 +274,9 @@ inline void classify(const Netlist &nl, Constness *label) noexcept {
     case GateKind::kBuf:
       out = any_c0 ? Constness::kC0 : (any_c1 ? Constness::kC1 : Constness::kV);
       break;
+    case GateKind::kDff:
+    case GateKind::kDlatch:
+      break; // SEQ11 owns optimizer preservation; classify stays kV until then.
     }
     label[s] = out;
   }
@@ -510,6 +513,10 @@ inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Co
     case GateKind::kBuf:
       want = base;
       break;
+    case GateKind::kDff:
+    case GateKind::kDlatch:
+      want = base; // SEQ11 owns optimizer preservation; no reduction until then.
+      break;
     }
   }
   if (want != g.kind) {
@@ -582,6 +589,9 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
     case GateKind::kNot:
     case GateKind::kBuf:
       break; // label-only; users/DCE/collapse handle the rest
+    case GateKind::kDff:
+    case GateKind::kDlatch:
+      break; // SEQ11 owns optimizer preservation; no folding until then.
     }
   }
   // Collapse constant roots in place (same slot: outputs stay positional).
@@ -692,6 +702,9 @@ inline bool fusion_sweep(Netlist &nl) noexcept {
       case GateKind::kNot:
       case GateKind::kBuf:
         break; // handled above; unreachable here
+      case GateKind::kDff:
+      case GateKind::kDlatch:
+        break; // SEQ11 owns optimizer preservation; no bubble-push until then.
       }
       if (nk == GateKind::kNot) {
         continue;
@@ -983,6 +996,9 @@ inline std::uint16_t emit_gate(ConvertCtx &ctx, const Netlist &src, std::uint16_
     }
     return emit_not_fresh(ctx, acc);
   }
+  case GateKind::kDff:
+  case GateKind::kDlatch:
+    break; // SEQ11 owns optimizer preservation; O2 conversion refuses loudly.
   }
   return kNoDriver; // unreachable (all kinds handled); defensive
 }

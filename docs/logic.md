@@ -74,8 +74,12 @@ both raster paths consume it without changing it.
 ## 4. Netlist model (engine)
 
 - `GateKind`: `AND OR NAND NOR XOR XNOR NOT BUF` (append-only enum;
-  `XNOR` = `NOT(XOR)` internally, `BUF` needed as an optimizer output).
-- `kMaxInputs = 8`. `NOT`/`BUF` take exactly 1 input; the rest 2..8.
+  `XNOR` = `NOT(XOR)` internally, `BUF` needed as an optimizer output)
+  plus V2 sequential `DFF` (=16, edge-triggered D+CLK) and `DLATCH`
+  (=17, level-sensitive D+EN), each exactly 2 inputs (SEQ1 vocabulary;
+  creation/stepping arrive in SEQ2+).
+- `kMaxInputs = 8`. `NOT`/`BUF` take exactly 1 input; `DFF`/`DLATCH`
+  take exactly 2; the rest 2..8.
 - Identity: per-kind monotonic counters, never reused
   (`AND1, AND2, …`, `NOT5, …`), slots recycle — same convention as
   signal serials (AGENTS.md §8). Display names use kind+counter;
@@ -277,8 +281,9 @@ append-only, schema bumps carry fallback loaders.
   wired-OR / tri-state resolution later replaces one function body;
   the `drivers[]` arrays and `wire` verb already store fan-in lists.
 - **Sequential / clocks.** `GateKind` values 0..7 are combinational;
-  sequential kinds (`DFF`, `LATCH`, …) append at ≥16 (never renumber —
-  persisted bytes). Clocked state lives in a **parallel pool beside
+  sequential kinds append at ≥16, pinned: `DFF`=16 (D+CLK,
+  edge-triggered), `DLATCH`=17 (D+EN, level-sensitive) — never
+  renumber, never reuse persisted bytes. Clocked state lives in a **parallel pool beside
   the netlist** (same pattern as `Signals` beside `Particles`), stepped
   by a `SequentialSolver::step(state, dt)` behind the existing
   `ISolver` seam — the combinational evaluator is untouched, and

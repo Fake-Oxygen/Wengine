@@ -31,6 +31,11 @@ enum class GateKind : std::uint8_t {
   kXnor = 5,
   kNot = 6,
   kBuf = 7,
+  // V2 sequential (LOGIC-V2-SEQ1): DFF = edge-triggered D + CLK,
+  // DLATCH = level-sensitive D + EN. Both take exactly 2 inputs
+  // (valid_fanin). No eval/state change in SEQ1 — vocabulary only.
+  kDff = 16,
+  kDlatch = 17,
 };
 
 // Net value. V1 produces/consumes only kLow/kHigh; kHighZ/kUnknown exist
@@ -78,6 +83,10 @@ inline constexpr std::size_t kMaxGates = 1024; // slot cap, loud on overflow
     return "NOT";
   case GateKind::kBuf:
     return "BUF";
+  case GateKind::kDff:
+    return "DFF";
+  case GateKind::kDlatch:
+    return "DLATCH";
   }
   return "?";
 }
