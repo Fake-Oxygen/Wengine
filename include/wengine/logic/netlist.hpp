@@ -104,6 +104,14 @@ struct BlockPin {
   return 2;
 }
 
+// Sequential kinds own clocked state (see seq_state.hpp); combinational
+// gates never appear in the state pool. Explicit (not `ordinal >= 16`) so
+// future appended kinds stay stateless until their own task wires them —
+// never silently DFF-shaped.
+[[nodiscard]] constexpr bool is_sequential_kind(GateKind k) noexcept {
+  return k == GateKind::kDff || k == GateKind::kDlatch;
+}
+
 namespace detail {
 [[nodiscard]] constexpr char to_upper(char c) noexcept {
   if (c >= 'a' && c <= 'z') {
@@ -473,6 +481,52 @@ namespace detail {
   }
   return false;
 }
+
+// Sequential-aware reachability (LOGIC-V2-SEQ3): same DFS as `reaches`,
+// but edges into sequential-gate inputs are excluded from the cycle edge
+// set — flop Q outputs break loops (state updates only on clock edges, so
+// no combinational path continues through a flop). Edges OUT of flops
+// (Q -> comb) still count: traversal expands FROM sequential gates, it
+// just never steps INTO one. On netlists without sequential gates the
+// skip is vacuous, so this is exactly `reaches`.
+[[nodiscard]] inline bool reaches_seq(const Netlist &nl, std::uint16_t from, std::uint16_t to) noexcept {
+  if (from == to) {
+    return true;
+  }
+  bool seen[kMaxGates] = {};
+  std::uint16_t stack[kMaxGates];
+  std::size_t top = 0;
+  stack[top++] = from;
+  seen[from] = true;
+  while (top > 0) {
+    const std::uint16_t cur = stack[--top];
+    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+      const Gate &g = nl.gates[s];
+      if (!g.live) {
+        continue;
+      }
+      if (is_sequential_kind(g.kind)) {
+        continue; // Q-boundary: no cycle path continues through a flop
+      }
+      bool uses_cur = false;
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        if (g.drivers[i] == cur) {
+          uses_cur = true;
+          break;
+        }
+      }
+      if (!uses_cur || seen[s]) {
+        continue;
+      }
+      if (s == to) {
+        return true;
+      }
+      seen[s] = true;
+      stack[top++] = s;
+    }
+  }
+  return false;
+}
 } // namespace detail
 
 // Single-driver wire: exactly one wire per destination input. Occupied
@@ -496,7 +550,7 @@ namespace detail {
   if (nl.tie_rep[tie_flat(to_slot, to_input)] != 0) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
   }
-  if (detail::reaches(nl, to_slot, from_slot)) {
+  if (detail::reaches_seq(nl, to_slot, from_slot)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // cycle
   }
   to.drivers[to_input] = from_slot;

@@ -290,6 +290,10 @@ append-only, schema bumps carry fallback loaders.
   by a `SequentialSolver::step(state, dt)` behind the existing
   `ISolver` seam — the combinational evaluator is untouched, and
   `RunConfig` gains one nested section struct per AGENTS.md §8.
+  Cycle validation is flop-aware: `validate_sequential` runs Kahn over
+  combinational edges only (drivers into DFF.D/CLK excluded, Q outputs
+  break loops), and `wire()` / the `wire` verb take that path whenever
+  sequential gates are present (pure-comb netlists keep the old path).
 - **Timing / delay.** Every gate already stores `propagation_delay_ps`
   (default 0; v1 eval is zero-delay, loader stores any value). Delay
   simulation later reads the field — no schema or struct change, only

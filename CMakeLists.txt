@@ -680,6 +680,12 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic_seq_state PRIVATE wengine_core)
     add_test(NAME logic_seq_state COMMAND test_logic_seq_state)
 
+    # LOGIC-V2-SEQ3 sequential cycle validation: header-only,
+    # links wengine_core alone like test_logic.
+    add_executable(test_logic_seq_cycles tests/test_logic_seq_cycles.cpp)
+    target_link_libraries(test_logic_seq_cycles PRIVATE wengine_core)
+    add_test(NAME logic_seq_cycles COMMAND test_logic_seq_cycles)
+
     # LOGIC-6 workspace store: yaml-cpp seam TU + yaml-free header. Links
     # wengine_logic_yaml only (never wengine_cli); test_logic above stays
     # on wengine_core alone by design.

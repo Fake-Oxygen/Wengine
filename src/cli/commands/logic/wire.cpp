@@ -4,6 +4,7 @@
 #include "wengine/cli/status.hpp"
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/seq_state.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -49,7 +50,25 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
   if (nl.tie_rep[wengine::logic::tie_flat(to.value.slot, to.value.input)] != 0) {
     return cli::usage_error(out, "input is tied (untie it first)", kUsage);
   }
-  if (wengine::logic::detail::reaches(nl, to.value.slot, from.value.slot)) {
+  if (wengine::logic::has_sequential_gates(nl)) {
+    // Sequential netlist (LOGIC-V2-SEQ3): flop Q outputs break loops, so
+    // the comb-only reachability check would false-positive on legal
+    // feedback (DFF Q -> comb -> D). Tentatively wire, validate the whole
+    // graph over comb edges only, then revert: wire_pins() below stays the
+    // single mutation path (its internal reaches_seq agrees with the
+    // validator — both are exact single-edge cycle tests). Dormant until
+    // YAML v3 (SEQ10) introduces sequential gates; add/load reject them.
+    wengine::logic::Gate &dst_gate = nl.gates[to.value.slot];
+    wengine::logic::Gate &src_gate = nl.gates[from.value.slot];
+    dst_gate.drivers[to.value.input] = from.value.slot;
+    ++src_gate.output_fanout;
+    const bool acyclic = wengine::logic::validate_sequential(nl).ok();
+    dst_gate.drivers[to.value.input] = wengine::logic::kNoDriver;
+    --src_gate.output_fanout;
+    if (!acyclic) {
+      return cli::usage_error(out, "wire would close a combinational cycle", kUsage);
+    }
+  } else if (wengine::logic::detail::reaches(nl, to.value.slot, from.value.slot)) {
     return cli::usage_error(out, "wire would close a combinational cycle", kUsage);
   }
   const core::Status st = wengine::logic::wire_pins(nl, from.value, to.value);
