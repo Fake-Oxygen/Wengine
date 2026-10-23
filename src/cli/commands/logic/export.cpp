@@ -1,9 +1,11 @@
 #include "common.hpp"
 
+#include "wengine/cli/logic_draw.hpp"
 #include "wengine/cli/logic_registry.hpp"
 #include "wengine/cli/status.hpp"
 #include "wengine/core/status.hpp"
 #include "wengine/logic/eval.hpp"
+#include "wengine/logic/layout.hpp"
 #include "wengine/logic/netlist.hpp"
 
 #include <cstddef>
@@ -20,6 +22,7 @@ namespace wengine::cli::logic {
 
 using wengine::logic::BlockPin;
 using wengine::logic::Netlist;
+using wengine::logic::Schematic;
 
 int LogicExportSpec::run(ArgCursor &args, std::ostream &out) {
   if (args.take_flag({"--help", "-h"})) {
@@ -78,12 +81,15 @@ int LogicExportSpec::run(ArgCursor &args, std::ostream &out) {
     if (!wengine::logic::ensure_topology(nl).ok()) {
       return cli::runtime_error(out, "export: topology error");
     }
-    const support::Schematic sc = support::layout_schematic(nl);
+    const Schematic sc = wengine::logic::layout_schematic(nl);
     int w = 0;
     int h = 0;
     std::string err;
-    if (!support::write_bmp(std::string(*bmp_path), nl, sc, w, h, err)) {
-      return cli::runtime_error(out, "export: " + err);
+    if (!logic_draw::write_bmp(std::string(*bmp_path), nl, sc, w, h, err)) {
+      if (!logic_draw::supported()) {
+        return cli::runtime_error(out, "export: needs an SDL2 build (rebuild with SDL2 available)");
+      }
+      return cli::runtime_error(out, std::string("export: ") + err);
     }
     out << "bmp: " << w << "x" << h << " -> '" << *bmp_path << "'\n";
   }

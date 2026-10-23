@@ -7,18 +7,27 @@
 // round-trip (ignore marks + fan-in + delay), foreign-version refusal,
 // and loud `line N:` diagnostics for malformed workspaces.
 
+#include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/types.hpp"
 #include "wengine/logic/yaml_store.hpp"
 
 #include <cassert>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
+#include <span>
+#include <sstream>
 #include <string>
+#include <string_view>
+#include <vector>
 
 using namespace wengine;
 
 namespace {
+
+constexpr logic::LogicValue kL = logic::LogicValue::kLow;
+constexpr logic::LogicValue kH = logic::LogicValue::kHigh;
 
 bool contains(const std::string &hay, const std::string &needle) {
   return hay.find(needle) != std::string::npos;
@@ -257,6 +266,99 @@ void test_malformed_line_numbers() {
   }
 }
 
+void test_examples() {
+  // Shipped examples stay loadable and keep their documented goldens.
+  // Same fixture-directory recipe as test_lua (absolute source dir at
+  // configure time, relative fallback for ad-hoc builds). A missing
+  // file fails loudly with its path rather than silently skipping.
+#ifdef WENGINE_LOGIC_EXAMPLE_DIR
+  constexpr std::string_view kDir = WENGINE_LOGIC_EXAMPLE_DIR;
+#else
+  constexpr std::string_view kDir = "../examples/logic";
+#endif
+  const auto load = [&](const char *name) {
+    const std::string path = std::string(kDir) + "/" + name + ".yaml";
+    std::ifstream in(path);
+    if (!in) {
+      std::cerr << "test_logic_yaml: missing fixture: " << path << "\n";
+    }
+    assert(static_cast<bool>(in));
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    std::string text = buf.str();
+    if (text.empty()) {
+      std::cerr << "test_logic_yaml: empty fixture: " << path << "\n";
+    }
+    assert(!text.empty());
+    return text;
+  };
+  const auto check_solve = [](logic::Netlist &nl, std::vector<logic::LogicValue> in,
+                              std::vector<logic::LogicValue> want) {
+    assert(logic::block_input_count(nl) == in.size());
+    assert(logic::block_output_count(nl) == want.size());
+    std::vector<logic::LogicValue> out(want.size(), kL);
+    assert(logic::solve(nl, std::span<const logic::LogicValue>(in.data(), in.size()),
+                        std::span<logic::LogicValue>(out.data(), out.size()))
+               .ok());
+    assert(out == want);
+  };
+  const auto check_stable = [](logic::Netlist &nl) {
+    // Comment headers mean the file bytes differ from the first save;
+    // stability (save -> load -> save identical) is what must hold.
+    std::string a;
+    logic::yaml::save_text(nl, a);
+    logic::Netlist back;
+    std::string err;
+    assert(logic::yaml::load_text(a, back, err));
+    std::string b;
+    logic::yaml::save_text(back, b);
+    assert(a == b);
+  };
+  // nand_pair.yaml: NOT(AND(a, b)).
+  {
+    logic::Netlist nl;
+    std::string err;
+    assert(logic::yaml::load_text(load("nand_pair"), nl, err));
+    assert(nl.live_count == 2);
+    check_solve(nl, {kH, kH}, {kL});
+    check_solve(nl, {kL, kL}, {kH});
+    check_stable(nl);
+  }
+  // fanout.yaml: AND1.Y drives NOT1.1 and BUF1.1 (slot-ordered outputs).
+  {
+    logic::Netlist nl;
+    std::string err;
+    assert(logic::yaml::load_text(load("fanout"), nl, err));
+    assert(nl.live_count == 3);
+    check_solve(nl, {kH, kH}, {kL, kH});
+    check_solve(nl, {kL, kL}, {kH, kL});
+    check_stable(nl);
+  }
+  // parity3.yaml: XOR cascade, odd parity over three block inputs.
+  {
+    logic::Netlist nl;
+    std::string err;
+    assert(logic::yaml::load_text(load("parity3"), nl, err));
+    assert(nl.live_count == 2);
+    check_solve(nl, {kH, kH, kH}, {kH});
+    check_solve(nl, {kH, kH, kL}, {kL});
+    check_solve(nl, {kL, kL, kL}, {kL});
+    check_stable(nl);
+  }
+  // tieoff.yaml: AND1.2 ignored (tied 0) plus stored delays.
+  {
+    logic::Netlist nl;
+    std::string err;
+    assert(logic::yaml::load_text(load("tieoff"), nl, err));
+    assert(nl.live_count == 2);
+    assert(nl.gates[0].ignored_mask == (1u << 1));
+    assert(nl.gates[0].propagation_delay_ps == 1500);
+    assert(nl.gates[1].propagation_delay_ps == 250);
+    check_solve(nl, {kH}, {kH}); // AND(1, tied-0) = 0, NOT(0) = 1
+    check_stable(nl);
+  }
+}
+
 } // namespace
 
 int main() {
@@ -266,6 +368,7 @@ int main() {
   test_yaml_superset_tolerance();
   test_foreign_version_refusal();
   test_malformed_line_numbers();
+  test_examples();
   std::cout << "test_logic_yaml: OK\n";
   return 0;
 }

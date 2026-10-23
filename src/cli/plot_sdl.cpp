@@ -7,6 +7,8 @@
 
 #include "wengine/cli/plot.hpp"
 
+#include "sdl_gfx.hpp"
+
 #ifdef WENGINE_HAVE_SDL2
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -54,96 +56,10 @@ constexpr unsigned char kPalette[8][3] = {
 
 using SeriesVec = std::vector<PlotSeries>;
 
-// Embedded 5x7 bitmap font for axis tick values + titles: keeps the
-// plotter dependency-free (no SDL_ttf, no runtime font file to locate).
-// Covers only what the axes print: digits, ".", "-", "+", "e" float
-// spellings ("%.3g"), and the title alphabet. Unknown chars render
-// blank (advance only), never fail.
-struct GlyphDef {
-  char ch;
-  const char *rows[7];
-};
-
-constexpr GlyphDef kGlyphs[] = {
-    {'0', {".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."}},
-    {'1', {"..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."}},
-    {'2', {".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"}},
-    {'3', {".###.", "#...#", "....#", "...#.", "....#", "#...#", ".###."}},
-    {'4', {"...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."}},
-    {'5', {"#####", "#....", "####.", "....#", "....#", "#...#", ".###."}},
-    {'6', {"..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."}},
-    {'7', {"#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."}},
-    {'8', {".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."}},
-    {'9', {".###.", "#...#", "#...#", ".####", "....#", "#...#", ".###."}},
-    {'.', {".....", ".....", ".....", ".....", ".....", ".##..", ".##.."}},
-    {'-', {".....", ".....", ".....", "#####", ".....", ".....", "....."}},
-    {'+', {".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."}},
-    {'e', {".....", ".....", ".###.", "#...#", "####.", "#....", ".###."}},
-    {' ', {".....", ".....", ".....", ".....", ".....", ".....", "....."}},
-    {'(', {"...#.", "..#..", ".#...", ".#...", ".#...", "..#..", "...#."}},
-    {')', {".#...", "..#..", "...#.", "...#.", "...#.", "..#..", ".#..."}},
-    {'S', {".####", "#....", "#....", ".###.", "....#", "....#", "####."}},
-    {'i', {"..#..", ".....", ".##..", "..#..", "..#..", "..#..", ".###."}},
-    {'m', {".....", ".....", "#.#.#", "##.##", "#.#.#", "#.#.#", "#.#.#"}},
-    {'u', {".....", ".....", "#...#", "#...#", "#...#", "#...#", ".###."}},
-    {'l', {".##..", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."}},
-    {'a', {".....", ".....", ".###.", "....#", ".####", "#...#", ".###."}},
-    {'t', {"..#..", "..#..", ".###.", "..#..", "..#..", "..#..", ".###."}},
-    {'o', {".....", ".....", ".###.", "#...#", "#...#", "#...#", ".###."}},
-    {'n', {".....", ".....", ".##..", "#..#.", "#...#", "#...#", "#...#"}},
-    {'V', {"#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."}},
-    {'I', {".###.", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."}},
-    {'s', {".....", ".....", ".####", "#....", ".###.", "....#", "####."}},
-    {'r', {".....", ".....", "#.##.", "##..#", "#....", "#....", "#...."}},
-};
-
-[[nodiscard]] const GlyphDef *find_glyph(char c) noexcept {
-  for (const auto &g : kGlyphs) {
-    if (g.ch == c) {
-      return &g;
-    }
-  }
-  return nullptr;
-}
-
-void draw_char(SDL_Renderer *ren, char c, int x, int y, int scale, unsigned char r, unsigned char g, unsigned char b) noexcept {
-  const GlyphDef *gl = find_glyph(c);
-  if (gl == nullptr || scale < 1) {
-    return;
-  }
-  (void)SDL_SetRenderDrawColor(ren, r, g, b, 255);
-  for (int row = 0; row < 7; ++row) {
-    const char *bits = gl->rows[row];
-    for (int col = 0; col < 5; ++col) {
-      if (bits[col] == '#') {
-        const SDL_Rect rc{x + col * scale, y + row * scale, scale, scale};
-        (void)SDL_RenderFillRect(ren, &rc);
-      }
-    }
-  }
-}
-
-[[nodiscard]] int text_width(const char *s, int scale) noexcept {
-  if (s == nullptr || scale < 1) {
-    return 0;
-  }
-  const std::size_t n = std::strlen(s);
-  if (n == 0) {
-    return 0;
-  }
-  return static_cast<int>(n) * 6 * scale - scale;
-}
-
-void draw_text(SDL_Renderer *ren, const char *s, int x, int y, int scale, unsigned char r, unsigned char g, unsigned char b) noexcept {
-  if (s == nullptr) {
-    return;
-  }
-  int cx = x;
-  for (const char *p = s; *p != '\0'; ++p) {
-    draw_char(ren, *p, cx, y, scale, r, g, b);
-    cx += 6 * scale;
-  }
-}
+// Bitmap font + text drawing live in the shared src-local header
+// (src/cli/sdl_gfx.hpp); the plot window keeps its own palette + frame
+// code only. gfx:: glyph shapes for the plot alphabet are verbatim the
+// originals, so rendered pixels are unchanged.
 
 void draw_frame(SDL_Renderer *ren, const SeriesVec &series, std::uint64_t samples) noexcept {
   int w = 960;
@@ -262,19 +178,19 @@ void draw_frame(SDL_Renderer *ren, const SeriesVec &series, std::uint64_t sample
   for (int k = 0; k <= 4; ++k) {
     const double v = vmin + (vmax - vmin) * static_cast<double>(k) / 4.0;
     (void)std::snprintf(buf, sizeof buf, "%.3g", v);
-    const int tw = text_width(buf, 1);
-    draw_text(ren, buf, static_cast<int>(ml) - 8 - tw, static_cast<int>(map_y(v)) - 3, 1, 150, 156, 170);
+    const int tw = gfx::text_width(buf, 1);
+    gfx::draw_text(ren, buf, static_cast<int>(ml) - 8 - tw, static_cast<int>(map_y(v)) - 3, 1, 150, 156, 170);
   }
   for (int k = 0; k <= 4; ++k) {
     const double t = tmin + (tmax - tmin) * static_cast<double>(k) / 4.0;
     (void)std::snprintf(buf, sizeof buf, "%.3g", t);
-    const int tw = text_width(buf, 1);
-    draw_text(ren, buf, static_cast<int>(map_x(t)) - tw / 2, static_cast<int>(dh - mb) + 6, 1, 150, 156, 170);
+    const int tw = gfx::text_width(buf, 1);
+    gfx::draw_text(ren, buf, static_cast<int>(map_x(t)) - tw / 2, static_cast<int>(dh - mb) + 6, 1, 150, 156, 170);
   }
-  draw_text(ren, "Value (SI units)", 8, 4, 2, 236, 240, 241);
+  gfx::draw_text(ren, "Value (SI units)", 8, 4, 2, 236, 240, 241);
   const char *xtitle = "Simulation time (s)";
-  const int xw = text_width(xtitle, 2);
-  draw_text(ren, xtitle, (w - xw) / 2, h - 20, 2, 236, 240, 241);
+  const int xw = gfx::text_width(xtitle, 2);
+  gfx::draw_text(ren, xtitle, (w - xw) / 2, h - 20, 2, 236, 240, 241);
 
   // Legend (only when several sources share the window): color swatch +
   // "s<serial>" per live series, top-right inside the plot area. Capped
@@ -302,7 +218,7 @@ void draw_frame(SDL_Renderer *ren, const SeriesVec &series, std::uint64_t sample
     int leg_w = 0;
     auto leg_measure = [&](std::uint64_t id) {
       (void)std::snprintf(leg, sizeof leg, "s%llu", static_cast<unsigned long long>(id));
-      const int tw = text_width(leg, 1);
+      const int tw = gfx::text_width(leg, 1);
       if (tw > leg_w) {
         leg_w = tw;
       }
@@ -317,7 +233,7 @@ void draw_frame(SDL_Renderer *ren, const SeriesVec &series, std::uint64_t sample
     }
     if (hidden > 0) {
       (void)std::snprintf(leg, sizeof leg, "+%llu more", static_cast<unsigned long long>(hidden));
-      const int tw = text_width(leg, 1);
+      const int tw = gfx::text_width(leg, 1);
       if (tw > leg_w) {
         leg_w = tw;
       }
@@ -346,7 +262,7 @@ void draw_frame(SDL_Renderer *ren, const SeriesVec &series, std::uint64_t sample
         const SDL_Rect swatch{bx + lpad, ry, sw, 7};
         (void)SDL_RenderFillRect(ren, &swatch);
         (void)std::snprintf(leg, sizeof leg, "s%llu", static_cast<unsigned long long>(s.serial));
-        draw_text(ren, leg, bx + lpad + sw + 6, ry, 1, 236, 240, 241);
+        gfx::draw_text(ren, leg, bx + lpad + sw + 6, ry, 1, 236, 240, 241);
         ++row;
       }
       ++lcolor;
@@ -354,7 +270,7 @@ void draw_frame(SDL_Renderer *ren, const SeriesVec &series, std::uint64_t sample
     if (hidden > 0) {
       const int ry = by + lpad + static_cast<int>(shown) * row_h + 2;
       (void)std::snprintf(leg, sizeof leg, "+%llu more", static_cast<unsigned long long>(hidden));
-      draw_text(ren, leg, bx + lpad + sw + 6, ry, 1, 150, 156, 170);
+      gfx::draw_text(ren, leg, bx + lpad + sw + 6, ry, 1, 150, 156, 170);
     }
   }
 

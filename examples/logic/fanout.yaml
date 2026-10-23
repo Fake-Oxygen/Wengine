@@ -1,0 +1,27 @@
+# fanout.yaml: one AND1.Y driving two sinks (NOT1.1 and BUF1.1).
+#
+# Unlimited fan-out with the single-driver rule intact: each destination
+# input still has exactly one wire. AND1 sits at level 0; NOT1 and BUF1
+# share level 1. Block inputs are AND1.1, AND1.2; block outputs are
+# NOT1.Y (= NOT(AND)) and BUF1.Y (= AND), in slot order.
+#
+# Run:
+#   printf 'logic load examples/logic/fanout.yaml\nlogic list --wires\nlogic solve --from AND1.1=1 --from AND1.2=1\nexit\n' | ./build/PhysicsSimApp
+# Expect: `gates (3)` with AND1 fanout=2 plus the two
+#   `AND1.Y -> ...` wires; the solve echoes `in: 11 ...` and prints
+#   NOT1.Y=0 and BUF1.Y=1 (`--from AND1.1=0 --from AND1.2=0` gives
+#   NOT1.Y=1 and BUF1.Y=0).
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: BUF1, kind: buf, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+wires:
+  - {from: AND1.Y, to: NOT1.1}
+  - {from: AND1.Y, to: BUF1.1}
+meta:
+  tool: wengine-logic

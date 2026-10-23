@@ -69,24 +69,10 @@ bool load_text(const std::string &text, wengine::logic::Netlist &out, std::strin
 
 } // namespace yaml
 
-// Layered schematic (pure layout over the compiled topology).
-struct Placed {
-  std::uint16_t slot = 0;
-  int level = 0;
-  int x = 0;
-  int y = 0;
-};
-
-struct Schematic {
-  std::vector<Placed> gates;
-  int levels = 0;
-  int width = 0;
-  int height = 0;
-};
-
-Schematic layout_schematic(wengine::logic::Netlist &nl);
-void draw_ascii(std::ostream &os, const wengine::logic::Netlist &nl, const Schematic &sc);
-bool write_bmp(const std::string &path, const wengine::logic::Netlist &nl, const Schematic &sc, int &w_out, int &h_out, std::string &err);
+// Layered schematic geometry lives in the header-only engine header
+// `wengine/logic/layout.hpp` (pure, SDL-free, unit-tested without SDL);
+// rasterization (SDL2 window + SDL_SaveBMP) lives in the edge TU
+// `src/cli/logic_draw_sdl.cpp` behind `wengine/cli/logic_draw.hpp`.
 [[nodiscard]] bool has_bmp_suffix(std::string_view path) noexcept;
 
 } // namespace wengine::cli::logic::support

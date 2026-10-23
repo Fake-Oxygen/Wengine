@@ -214,13 +214,16 @@ struct LogicOptimizeSpec {
 
 struct LogicDrawSpec {
   static constexpr std::string_view kName = "draw";
-  static constexpr std::string_view kDescription = "Draw the layered schematic (ASCII + optional BMP)";
+  static constexpr std::string_view kDescription = "Draw the layered schematic (ImGui canvas + BMP)";
   static constexpr std::string_view kUsage =
       "draw [--out <file.bmp>]\n"
       "  draw\n"
       "  draw --out schematic.bmp\n"
-      "Prints the layered ASCII schematic (one column per topo level) and,\n"
-      "with --out, writes a BMP file (hand-rolled writer, no display needed).";
+      "Opens an interactive schematic canvas (Dear ImGui over SDL2:\n"
+      "wheel zooms, middle-drag pans, F fits, R resets, Esc closes;\n"
+      "ANSI gate symbols, Manhattan wires) or, with --out, writes a BMP\n"
+      "file via SDL_SaveBMP (no display needed). Needs an SDL2 build;\n"
+      "the window additionally needs the vendored imgui submodule.";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
@@ -259,7 +262,8 @@ struct LogicExportSpec {
       "export --truth <t.csv> --schema <s.yaml> [--bmp <b.bmp>]\n"
       "  export --truth t.csv --schema s.yaml\n"
       "One command, three artifacts: truth table CSV + workspace schema YAML\n"
-      "+ optional BMP schematic. Loud per-artifact counts.";
+      "+ optional BMP schematic (SDL_SaveBMP, no display needed).\n"
+      "Loud per-artifact counts; the schema re-imports via `load`.";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);

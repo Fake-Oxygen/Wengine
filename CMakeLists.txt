@@ -330,6 +330,7 @@ if(BUILD_CLI)
         src/cli/line_reader.cpp
         src/cli/complete.cpp
         src/cli/plot_sdl.cpp
+        src/cli/logic_draw_sdl.cpp
         src/cli/commands/ohm.cpp
         src/cli/commands/s0.cpp
         src/cli/commands/i2c.cpp
@@ -381,6 +382,35 @@ if(BUILD_CLI)
         message(STATUS "WEngine live plot enabled (SDL2 --plot)")
     else()
         message(STATUS "WEngine live plot disabled (SDL2 not found: --plot reports a hint)")
+    endif()
+
+    # Interactive `logic draw` canvas: Dear ImGui over the SDL2 2D
+    # renderer (GPU-AA vectors + TTF text + zoom/pan, no Vulkan needed —
+    # imgui_impl_sdlrenderer2 needs SDL2 only). Vendored imgui, SYSTEM
+    # includes, no project warning flags — same treatment as
+    # wengine_imgui. Only when SDL2 + the imgui submodule are both
+    # present; otherwise `draw` reports a rebuild hint (the BMP export
+    # keeps its SDL-only software path either way).
+    if(TARGET SDL2::SDL2 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/imgui.h")
+        add_library(wengine_imgui_sdl STATIC
+            external/imgui/imgui.cpp
+            external/imgui/imgui_draw.cpp
+            external/imgui/imgui_tables.cpp
+            external/imgui/imgui_widgets.cpp
+            external/imgui/backends/imgui_impl_sdl2.cpp
+            external/imgui/backends/imgui_impl_sdlrenderer2.cpp
+        )
+        target_include_directories(wengine_imgui_sdl SYSTEM PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/imgui>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/backends>
+        )
+        target_link_libraries(wengine_imgui_sdl PUBLIC SDL2::SDL2)
+        target_link_libraries(wengine_cli PRIVATE wengine_imgui_sdl)
+        target_compile_definitions(wengine_cli PRIVATE WENGINE_HAVE_IMGUI_DRAW=1)
+        target_sources(wengine_cli PRIVATE src/cli/logic_draw_imgui.cpp)
+        message(STATUS "WEngine schematic canvas enabled (ImGui draw)")
+    else()
+        message(STATUS "WEngine schematic canvas disabled (needs SDL2 + imgui submodule: draw reports a hint)")
     endif()
 
     add_executable(PhysicsSimApp apps/cli/main.cpp)
@@ -635,7 +665,18 @@ if(BUILD_TESTS)
     # on wengine_core alone by design.
     add_executable(test_logic_yaml tests/test_logic_yaml.cpp)
     target_link_libraries(test_logic_yaml PRIVATE wengine_logic_yaml)
+    # Fixture path: absolute source directory so out-of-tree builds
+    # (-B /tmp/..., including paths with spaces) load the shipped
+    # logic examples instead of assuming build/ sits inside the repo.
+    target_compile_definitions(test_logic_yaml PRIVATE
+        "WENGINE_LOGIC_EXAMPLE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/examples/logic\"")
     add_test(NAME logic_yaml COMMAND test_logic_yaml)
+
+    # LOGIC-7 schematic layout: pure header-only geometry (no SDL), links
+    # wengine_core alone like test_logic.
+    add_executable(test_logic_layout tests/test_logic_layout.cpp)
+    target_link_libraries(test_logic_layout PRIVATE wengine_core)
+    add_test(NAME logic_layout COMMAND test_logic_layout)
 
     # ROS2 scaffolding: pure mapping/naming/verb vocabulary, no rclcpp.
     add_executable(test_ros2_mapping tests/test_ros2_mapping.cpp)

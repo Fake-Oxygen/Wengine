@@ -1,0 +1,22 @@
+# nand_pair.yaml: NOT(AND(a, b)) — the minimal wired pair.
+#
+# AND1 feeds NOT1, so the single block output is the NAND of the two block
+# inputs. Good first file: one wire, one level, two gates.
+#
+# Run:
+#   printf 'logic load examples/logic/nand_pair.yaml\nlogic truth\nlogic solve --from AND1.1=1 --from AND1.2=1\nexit\n' | ./build/PhysicsSimApp
+# Expect: 4-row truth table (header AND1.1 | AND1.2 | NOT1.Y) ending in
+#   `1 | 1 | 0`; the solve echoes `in: 11 ...` and prints NOT1.Y=0
+#   (every other input row gives 1).
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+wires:
+  - {from: AND1.Y, to: NOT1.1}
+meta:
+  tool: wengine-logic

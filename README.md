@@ -141,7 +141,9 @@ REPL commands: `help [cmd]`, `exit`/`quit`, plus registered commands
 (`ohm`, `s0`, `i2c`, `ldo`, `led`, `sim`, `sig`, `ic`, `logic`).
 `logic` enters a module sub-shell (`[logic]> `, `back` leaves;
 `logic <verb>` also works one-shot) — the reusable session pattern
-future modules follow (see `docs/logic.md`).
+future modules follow (see `docs/logic.md`). Runnable workspaces live in
+`examples/logic/` (`nand_pair`, `fanout`, `parity3`, `tieoff` — each header
+shows its run command).
 `--help`/`-h` also print help. Return codes: `0` ok, `1`
 runtime/unknown-command error, `2` argument/usage error, `-1` internal exit
 signal (REPL loop only).
@@ -567,7 +569,10 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
   `wengine_link_net`, `wengine_ros2`
  (transport-neutral ROS2 ISink; rmw only with `BUILD_ROS2=ON`),
  and `wengine_signal_lua` (for `sig run --sig-lua`)
- + `wengine_logic_yaml` (for `logic save`/`load`/`export --schema`);
+ + `wengine_logic_yaml` (for `logic save`/`load`/`export --schema`)
+ + `wengine_imgui_sdl` (for `logic draw`: the vendored imgui over the SDL2
+ 2D renderer — GPU-anti-aliased vectors + embedded DejaVu Sans subset for
+ labels + zoom/pan; no Vulkan in the CLI, no new third-party dep);
 `PhysicsSimApp` links `wengine_cli` (+ `wengine_tui` when `BUILD_TUI` finds
  ncurses: `src/tui/` domain TUs under strict warnings + header-only
  `wengine/tui/exec.hpp`; no engine changes). Tests: `test_ohm_law`, `test_math_units`
@@ -846,7 +851,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,tmc22xx,sim,solver_registry,signal,logic,logic_yaml,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_choice,tui_async,tui_views}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,tmc22xx,sim,solver_registry,signal,logic,logic_layout,logic_yaml,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_choice,tui_async,tui_views}.cpp
 plus the headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`).
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)

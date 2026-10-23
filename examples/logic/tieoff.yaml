@@ -1,0 +1,25 @@
+# tieoff.yaml: a tied-off input plus stored (zero-delay) timing data.
+#
+# AND1.2 is marked ignored, so it drops out of the block interface and
+# ties to 0 during eval: the block has one input left (AND1.1) and the
+# AND gate folds to constant-0 under `optimize`. The delay_ps values are
+# stored verbatim (v1 eval is zero-delay regardless; a later timing
+# simulation would honor them — see docs/logic.md sec. 12).
+#
+# Run:
+#   printf 'logic load examples/logic/tieoff.yaml\nlogic list --iface\nlogic solve --from AND1.1=1\nexit\n' | ./build/PhysicsSimApp
+# Expect: `inputs (1)` lists only AND1.1 (AND1.2 is ignored), `outputs
+#   (1)` lists NOT1.Y; the solve echoes `in: 1 ...` and prints NOT1.Y=1
+#   (AND(1, tied-0) = 0, NOT(0) = 1).
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: AND1, kind: and, inputs: 2, ignore: [2], ignore_output: false, delay_ps: 1500}
+  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 250}
+wires:
+  - {from: AND1.Y, to: NOT1.1}
+meta:
+  tool: wengine-logic

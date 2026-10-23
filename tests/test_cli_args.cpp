@@ -4,10 +4,14 @@
 #include "wengine/cli/logic_registry.hpp"
 #include "wengine/cli/shell.hpp"
 #include "wengine/cli/subshell.hpp"
+#include "wengine/logic/eval.hpp"
+#include "wengine/logic/layout.hpp"
 
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -1277,14 +1281,8 @@ void test_logic_verbs() {
     assert(run("logic wire AND1.Y NOT1.1").first == 0);
   }
 
-  // draw: ASCII schematic + BMP export.
-  {
-    auto [rc, s] = run("logic draw");
-    assert(rc == 0);
-    assert(s.find("schematic (gates=2, levels=2):") != std::string::npos);
-    assert(s.find("L0: AND1") != std::string::npos);
-    assert(s.find("L1: NOT1") != std::string::npos);
-  }
+  // draw: SDL window is manual-only (no automation tooling); headless CI
+  // covers the --out BMP path (SDL_SaveBMP onto a surface, no display).
   assert(run("logic draw extra").first == 2);
   assert(run("logic draw --out /tmp/opencode/x.txt").first == 2); // needs .bmp
   {
@@ -1292,34 +1290,87 @@ void test_logic_verbs() {
     std::remove(bmp.c_str());
     auto [rc, s] = run(std::string("logic draw --out ") + bmp);
     assert(rc == 0);
-    assert(s.find("drew 2 gates") != std::string::npos);
+    assert(s.find("drew 2 gates (2 levels)") != std::string::npos);
+    // Byte-pinned BMP: 'BM' magic + dimensions == 2x layout canvas
+    // (raster scale lives in the edge TU; layout stays 1x units).
+    wengine::logic::Netlist &ws = logic::workspace();
+    assert(wengine::logic::ensure_topology(ws).ok());
+    const wengine::logic::Schematic sc = wengine::logic::layout_schematic(ws);
+    assert(s.find("(" + std::to_string(sc.width * 2) + "x" + std::to_string(sc.height * 2) + ")") !=
+           std::string::npos);
     std::ifstream f(bmp, std::ios::binary);
     assert(!!f);
     char magic[2] = {};
     f.read(magic, 2);
     assert(f.gcount() == 2 && magic[0] == 'B' && magic[1] == 'M');
+    auto rd32le = [&]() {
+      unsigned char b[4] = {};
+      f.read(reinterpret_cast<char *>(b), 4);
+      assert(f.gcount() == 4);
+      return static_cast<std::uint32_t>(b[0]) | (static_cast<std::uint32_t>(b[1]) << 8) |
+             (static_cast<std::uint32_t>(b[2]) << 16) | (static_cast<std::uint32_t>(b[3]) << 24);
+    };
+    f.seekg(18);
+    const std::uint32_t bw = rd32le();
+    const std::uint32_t bh = rd32le();
+    assert(bw == static_cast<std::uint32_t>(sc.width * 2) && bh == static_cast<std::uint32_t>(sc.height * 2));
     std::remove(bmp.c_str());
   }
 
-  // export: one command, three artifacts.
+  // export: one command, three artifacts (byte-pinned + re-import equality).
   {
     const std::string t = "/tmp/opencode/logic_exp_t.csv";
     const std::string sc = "/tmp/opencode/logic_exp_s.yaml";
     const std::string b = "/tmp/opencode/logic_exp_b.bmp";
+    const std::string s2 = "/tmp/opencode/logic_exp_s2.yaml";
     std::remove(t.c_str());
     std::remove(sc.c_str());
     std::remove(b.c_str());
+    std::remove(s2.c_str());
     auto [rc, s] = run(std::string("logic export --truth ") + t + " --schema " + sc + " --bmp " + b);
     assert(rc == 0);
     assert(s.find("truth: 4 rows") != std::string::npos);
     assert(s.find("schema: 2 gates 1 wires") != std::string::npos);
     assert(s.find("bmp: ") != std::string::npos);
+    // Truth CSV is byte-pinned (AND1.1, AND1.2 in; NOT1.Y out).
+    {
+      std::ifstream f(t, std::ios::binary);
+      assert(!!f);
+      std::ostringstream body;
+      body << f.rdbuf();
+      assert(body.str() == "AND1.1,AND1.2,NOT1.Y\n0,0,1\n1,0,1\n0,1,1\n1,1,0\n");
+    }
+    // Schema from export == schema from save (same canonical writer) and
+    // re-imports through `load` (round-trip equality: gates + wire back).
+    {
+      auto [src, ss] = run(std::string("logic save ") + s2);
+      assert(src == 0);
+      assert(ss.find("saved 2 gates 1 wires") != std::string::npos);
+      std::ifstream a(sc, std::ios::binary);
+      std::ifstream q(s2, std::ios::binary);
+      assert(!!a && !!q);
+      std::ostringstream sa;
+      sa << a.rdbuf();
+      std::ostringstream sq;
+      sq << q.rdbuf();
+      assert(!sa.str().empty() && sa.str() == sq.str());
+    }
+    assert(run("logic reset").first == 0);
+    auto [lrc, ls] = run(std::string("logic load ") + sc);
+    assert(lrc == 0);
+    auto [crc, cs] = run("logic list --wires");
+    assert(crc == 0);
+    assert(cs.find("AND1") != std::string::npos && cs.find("NOT1") != std::string::npos);
+    assert(cs.find("AND1.Y -> NOT1.1") != std::string::npos);
     std::remove(t.c_str());
     std::remove(sc.c_str());
     std::remove(b.c_str());
+    std::remove(s2.c_str());
   }
   assert(run("logic export --truth /tmp/opencode/a.csv").first == 2); // missing schema
   assert(run("logic export --schema /tmp/opencode/a.yaml").first == 2);
+  assert(run("logic export --truth /tmp/opencode/a.csv --schema /tmp/opencode/a.yaml --bmp /tmp/opencode/a.txt")
+             .first == 2); // --bmp needs .bmp
 
   // help/back leftovers + stray discipline.
   {

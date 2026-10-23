@@ -1,0 +1,26 @@
+# parity3.yaml: 3-input odd parity as an XOR cascade (XOR1.Y -> XOR2.1).
+#
+# XOR with >2 inputs is odd-parity by definition (see docs/logic.md sec. 5),
+# so a 2-wide XOR cascade computes the 3-input parity bit-by-bit, exactly
+# like 74-series parts do for two inputs. Block inputs in slot order are
+# XOR1.1, XOR1.2, XOR2.2 (XOR2.1 is wired); the single block output is
+# XOR2.Y. Levels: XOR1 = 0, XOR2 = 1.
+#
+# Run:
+#   printf 'logic load examples/logic/parity3.yaml\nlogic truth\nlogic solve --from XOR1.1=1 --from XOR1.2=1 --from XOR2.2=1\nexit\n' | ./build/PhysicsSimApp
+# Expect: 8-row truth table (header XOR1.1 | XOR1.2 | XOR2.2 | XOR2.Y);
+#   the solve echoes `in: 111 ...` and prints XOR2.Y=1 (three highs =
+#   odd). With `--from XOR1.1=1 --from XOR1.2=1 --from XOR2.2=0` the
+#   output is 0.
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: XOR1, kind: xor, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: XOR2, kind: xor, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+wires:
+  - {from: XOR1.Y, to: XOR2.1}
+meta:
+  tool: wengine-logic

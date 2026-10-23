@@ -8,7 +8,8 @@ Status: draft scaffold (2026-10-23). No behavior wired yet; see Plane epic
 - In-process `logic` module: add/list/wire/reset logic gates, solve the
   combinational block, print/stream its truth table, optimize it
   (De Morgan → NAND-only + constant folding + dead-gate elimination),
-  draw it (SDL2 software window, `--out bmp` file export), and
+  draw it (interactive ImGui canvas with zoom/pan, `--out bmp` file
+  export), and
   save/restore the workspace as versioned YAML.
 - Generic reusable sub-shell framework (`cli/subshell.hpp`): `logic` is
   the first consumer, future modules reuse it unchanged.
@@ -35,11 +36,13 @@ logic -> units? (no: pure bits, no dimensions), core/status (Status/Result only)
 cli   -> logic, core   (adapter only)
 ```
 
-Engine stays header-only (`INTERFACE`, like solvers). Only the SDL2 draw
-TU (`src/cli/logic_draw_sdl.cpp`) and the YAML file I/O TU are `.cpp` —
-same justification as `src/link/*.cpp` (syscalls / display calls cannot
-live in headers). Layout math (layered columns + Manhattan wires) is a
-pure header function with a unit test; the SDL TU only rasterizes it.
+Engine stays header-only (`INTERFACE`, like solvers). Only the raster
+TUs (`src/cli/logic_draw_sdl.cpp` for the headless BMP export,
+`src/cli/logic_draw_imgui.cpp` for the interactive canvas) and the YAML
+file I/O TU are `.cpp` — same justification as `src/link/*.cpp`
+(syscalls / display calls cannot live in headers). Layout math (layered
+columns + Manhattan wires) is a pure header function with a unit test;
+both raster paths consume it without changing it.
 
 ## 3. CLI sub-shell contract (generic, reused by future modules)
 
@@ -149,15 +152,32 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
 
 - `draw [--out schematic.bmp]`: layered topological layout (inputs left,
   outputs right, one column per level, deterministic pure function) +
-  Manhattan wires, rendered in a standalone SDL2 software window —
-  independent of `WEngineGui`, same pattern as `sig run --plot`
-  (`cli/plot.hpp`: unsupported/no-display fails loudly with a rebuild
-  hint). File export writes BMP via `SDL_SaveBMP` (zero new deps);
-  PNG/JPG only via a later single-header writer task if a real consumer
-  needs it — do not vendor image codecs for v1.
+  Manhattan wires. Two backends share the layout: the interactive window
+  is a Dear ImGui canvas over the SDL2 2D renderer (GPU-anti-aliased
+  vectors, embedded TTF labels, wheel-zoom + middle-drag pan, F fits,
+  R resets to 1:1, Esc closes; close == stop, like `sig run --plot`
+  — unsupported/no-display fails loudly with a rebuild hint), while
+  file export stays on the SDL software surface + `SDL_SaveBMP`
+  (headless-safe, byte-deterministic; PNG/JPG only via a later
+  single-header writer task if a real consumer needs it — do not vendor
+  image codecs for v1). The canvas is independent of `WEngineGui`: it
+  uses the vendored imgui `sdlrenderer2` backend (SDL2 only, no Vulkan),
+  and the TTF is an embedded DejaVu Sans subset (Bitstream Vera license,
+  see below) so no runtime font file is ever located.
 - `export --truth t.csv --schema s.yaml [--bmp s.bmp]`: one command,
   three artifacts, loud per-artifact counts. `import`/workspace restore
   is `load <file.yaml>` (round-trip byte-identity pinned by test).
+
+- **Decision: embedded DejaVu Sans subset for canvas labels** (`src/cli/
+  fonts/schematic_font.hpp`, generated — do not hand-edit): the ImGui
+  canvas needs real vector text (pixel fonts do not survive zoom), and
+  a runtime font-file lookup would be a new failure mode plus
+  byte-fragile BMPs across machines. The subset (U+0020–00FF, hinting
+  kept, ~57 KB → ~240 KB C array) is generated from the system
+  DejaVuSans.ttf with fontTools (`pyftsubset --unicodes="U+0020-007F,
+  U+00A0-00FF"`), loaded via `AddFontFromMemoryTTF`. DejaVu changes are
+  in the public domain; Bitstream's copyright + permission notices ship
+  with any copy (see the header + this section).
 
 ## 9. YAML workspace (vendored yaml-cpp — 4th third-party dep)
 
@@ -182,7 +202,10 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   Strict in v1: unknown keys/sections are loud errors (never silently
   ignored) — forward-compatible sections arrive as versioned schema
   bumps, not silent tolerance. `save`/`load` round-trip is byte-identical
-  (pinned test).
+  (pinned test). Runnable example workspaces live in `examples/logic/`
+  (`nand_pair`, `fanout`, `parity3`, `tieoff` — each header shows its run
+  command and expected output); `test_logic_yaml` loads every file,
+  checks its hand-derived goldens, and pins save/load/save stability.
 
 ## 10. Module verb list (v1)
 
