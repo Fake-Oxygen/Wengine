@@ -171,8 +171,173 @@ ros2 topic echo /wengine/signals/block
 prefer the build-tree dir above, which is always fresh after building.
 `test_sim`'s live-publish checks get this path from CTest automatically.)
 
+## QoS matrix (ROS2-4, pinned)
+
+Two delivery classes, no per-topic tuning. Pinned in code
+(`ros2/publisher.hpp`: `qos_is_reliable`/`qos_depth`/`qos_reliability_name`/
+`qos_durability_name`/`qos_history_name`, covered by `test_ros2_lifecycle`)
+and resolved to rmw profiles in one place only (`ros_qos_for` in
+`ros2/rclcpp_transport.hpp`, never in headers):
+
+| `--ros-qos` | Class | Reliability | History | Depth | Durability | Overflow policy | Guarantee |
+|---|---|---|---|---|---|---|---|
+| `latest` (default) | Latest-state viewing (delivery class A) | best-effort | keep-last | 1 | volatile | Writer drops oldest; readers take latest | Live viewing only. No replay, no catch-up. |
+| `reliable` | Ordered bounded sample streaming (delivery class B) | reliable | keep-last | 10 | volatile, bounded | Backpressure counted (`dropped_send`), never silent; slow readers still lose beyond the bound | Bounded jitter only. Never a zero-loss promise to an arbitrarily slow receiver. |
+
+Durability is volatile on both classes by pin: late joiners miss earlier
+ticks (no transient-local replay). Complete recording (class C) stays in
+the CSV/block recorder (driver-paced, row counts + footer as proof) —
+never a topic promise. See `docs/delivery.md` for the shared three-class
+model; the table above is its ROS projection.
+
+QoS compatibility note: a reliable subscriber requesting from a
+best-effort (`latest`) publisher is a DDS mismatch and no data flows.
+Configure recorders/dashboards that consume the `latest` class with a
+matching best-effort subscription profile (same depth 1); the `reliable`
+class pairs with reliable subscribers up to its depth-10 bound.
+
+## Clocks (ROS2-4: four rates plus waveform frequency)
+
+Independent quantities — do not conflate them (same split as
+`docs/delivery.md` sec. 2):
+
+1. Simulation clock: fixed numerical `dt` (`RunnerConfig::dt`),
+   `step_index` / `sim_time`. `run(N)` advances exactly N steps; nothing
+   wall-paced. Determinism lives here only.
+2. Emitted sample rate: `1 / (dt * emit_every)`, further decimated per
+   output by `--emit-ros-stride N` (`StrideSink`, step-aligned) and
+   filtered by `--emit-ros-select` (serial allowlist, rows only — every
+   tick still flows so lag accounting stays exact). Decimation changes
+   sampled bandwidth and may alias a waveform; it reduces packet overhead
+   without preserving skipped samples.
+3. Wall-clock packet rate: how fast the rmw layer actually emits
+   (frames/s, bytes/s). Set by driver pacing (`--paced`/`--rate`),
+   transport capacity, and peer readiness — not by `dt`.
+4. UI refresh rate: RViz / plot redraw (e.g. 30–60 Hz) over a bounded
+   history. Display coalescing is counted separately from transport gaps.
+
+Waveform frequency (`--sig-freq`, e.g. 1 kHz sine) is none of the above:
+it is the physical signal being simulated. Sampling it at `dt = 0.1 ms`
+(10 kHz sample rate) vs. streaming it over a 1 kHz packet budget vs.
+drawing it at 60 Hz are three separate choices; undersampling aliases
+regardless of transport.
+
+## Counters (ROS2-4: lag/drop vocabulary, observable)
+
+Counts are per edge object, monotonic within a run, same vocabulary as
+`docs/delivery.md` sec. 5. The ROS path exposes every cause:
+
+- Generated: snapshots taken by `Runner` (step-gated by `emit_every`).
+- Decimated (intentional, not loss): `StrideSink` stride skips (`0` =
+  muted) + `SignalSubsetSink` serial filtering (`matched`/`dropped`/
+  `forwarded_rows`). Shown in the `ros:` summary line with
+  `--emit-health` (`select=... matched=... dropped=...
+  forwarded_rows=...`, `stride=... matched=... dropped=...`).
+- Over-bound (loud refusal): `dropped_over_bound`, sticky `kOutOfRange`
+  (signal rows > 64, particle items > 1024, per-serial high-water
+  backstop). Never silently truncated; later snapshots count
+  `disabled_after_error`.
+- Backpressure (transient, counted, non-sticky): `dropped_send` (DDS
+  queue full at publish). Dead peer is sticky `kInternal`.
+- Published (local acceptance): `published` + `bytes_accepted`.
+  Formatted by the shared `link::format_publisher_health` line
+  (`attempted/published_local/over_bound/queue_full/backpressure/
+  pending_blocked/pending/abandoned/disabled/bytes/status`), with the
+  standing note: local acceptance only — remote receipt is unknown
+  without a receiver report.
+- Received/observed: `SignalBlock.step` + `sim_time` gaps on the
+  subscriber side (`ros2 topic echo /<ns>/<stem>/block` shows one
+  `step` per emitted tick; a skipped step is a drop, whatever the
+  cause). JointState carries the same `sim_time` in `header.stamp`.
+- Recorded: CSV/block recorder row counts + footer (completeness proof).
+- Rendered: display-side eviction (RViz/plot history), never transport loss.
+
+Observable surfaces: the `ros:` summary line on stdout (`frames` +
+`qos` + `layout` + stride/select counters, full health with
+`--emit-health`; publish failures always loud with or without the flag),
+the `ros2_bridge` exit summary (`attempted/published/over_bound/
+backpressure/disabled/bytes/serial_pubs/services/enqueued/refused/bus
+applied/readonly/rejected`), and the `SignalBlock.step` sequence on the
+wire. `output_accounting_ok` closes the books in tests
+(`test_ros2_publisher`, `test_ros2_lifecycle`).
+
+## Lifecycle node (ROS2-4)
+
+The bridge follows the managed-lifecycle graph. The graph itself is
+ROS-free (`ros2/lifecycle.hpp`: `LifecycleState` Unconfigured / Inactive
+/ Active / Finalized, `can_request`/`next_state`, `Lifecycle::request`
++ `can_publish` + latched `use_sim_time`, covered by
+`test_ros2_lifecycle`); the rmw TU maps each edge 1:1 onto
+`rclcpp_lifecycle::LifecycleNode` callbacks
+(`on_configure`/`on_activate`/`on_deactivate`/`on_cleanup`/`on_shutdown`):
+
+```text
+Unconfigured --configure--> Inactive --activate--> Active
+Active --deactivate--> Inactive --cleanup--> Unconfigured
+<any non-final> --shutdown--> Finalized
+```
+
+- Publish/emit gate: `Active` only (`can_publish`). Topics/services are
+  created on configure (Inactive) and torn down on cleanup/shutdown;
+  data flows only while Active. The batch commands (`sig run` /
+  `sim run --emit-ros`) and `ros2_bridge` follow the same gating with a
+  plain node: publish only while stepping (the Active equivalent), never
+  before the first step or after the run ends.
+- Every transition returns accepted/rejected with the state unchanged on
+  rejection (illegal edges: activate from Unconfigured, any request from
+  Finalized). Same loud-refusal discipline as the control plane — never
+  a silent skip.
+- Services follow the same gate: callbacks enqueue only and the driver
+  drains at the step boundary in slot order (ROS2-2 contract, unchanged);
+  draining happens while Active.
+
+## Sim-time sync (ROS2-4)
+
+Header stamps carry the engine clock, never wall time (D-ROS-7):
+`Snapshot::sim_time` -> `header.stamp` via `sim_time_to_stamp`
+(JointState grouped + per-serial, PointCloud2 particles); the exact
+`SignalBlock` record carries `step` + `sim_time` doubles with no header
+stamp. Non-finite/negative sim_time (never produced by the Runner)
+stamps zero.
+
+`use_sim_time` is a latched parameter (`Lifecycle::set_use_sim_time`,
+settable only in Unconfigured/Inactive — refused while Active or after
+Finalized, mirroring the ROS parameter). When true, downstream nodes
+interpret stamps against the ROS `/clock`; the engine still never
+subscribes to `/clock` to step physics — sim `dt` stays authoritative
+and wall time never perturbs determinism. The sync check is stamp
+equality (`lifecycle::stamps_match_sim_time`: the stamp must equal
+`sim_time_to_stamp(sim_time)` on every tick), pinned in
+`test_ros2_lifecycle`. A wall-sourced stamp fails the check instead of
+drifting silently.
+
+## Bag recording (ROS2-4 notes)
+
+`ros2 bag` is a class-C consumer with class-A/B limits: it records what
+its subscriptions receive, so the per-class guarantees above apply
+unchanged (volatile durability means a late `record` start misses
+earlier ticks; the `latest` class keeps depth 1 per topic; the exact
+per-tick record is `SignalBlock`, not the RViz JointState view).
+
+- Record the grouped pair together (`/<ns>/<stem>` JointState for
+  viewing + `/<ns>/<stem>/block` SignalBlock for exact replay) plus
+  `/<ns>/<particle_stem>` when particles run. Per-serial mode records
+  one topic per live serial (retained across despawn/respawn; new
+  serials appear as new topics).
+- Match the subscription QoS to the topic class (best-effort/depth-1
+  for `latest`, reliable/bounded for `reliable`) via a QoS override;
+  otherwise the recorder connects with an incompatible profile and the
+  loss looks like silence.
+- The bag is output replay, never a restart checkpoint (same rule as
+  CSV in `docs/delivery.md` sec. 6): restarting from a bag replays
+  observed output; authoritative restart state is the versioned binary
+  checkpoint (`world/serialize.hpp`).
+- Completeness still needs a class-C proof: compare the recorded
+  `SignalBlock.step` sequence against the run's step budget (gaps are
+  drops by whatever cause, counted per the vocabulary above); the CSV
+  recorder's row counts + footer remain the durable completeness proof.
+
 ## What is NOT in this task (follow-ups under the same epic)
 
-Lifecycle/time-sync/bag notes (ROS2-4), CI parity/HIL tests (ROS2-5),
-security/SROS. Those are Plane follow-ups (parent + subtasks filed under the
-signals epic).
+CI parity/HIL tests (ROS2-5), security/SROS. Those are Plane follow-ups
+(parent + subtasks filed under the signals epic).

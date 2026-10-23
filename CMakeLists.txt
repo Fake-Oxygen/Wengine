@@ -550,6 +550,12 @@ if(BUILD_TESTS)
     target_link_libraries(test_ros2_control PRIVATE wengine_core)
     add_test(NAME ros2_control COMMAND test_ros2_control)
 
+    # ROS2-4 QoS/clock/delivery policy + lifecycle: pinned matrix, stamp
+    # sync, observable counters, transition graph — no rclcpp.
+    add_executable(test_ros2_lifecycle tests/test_ros2_lifecycle.cpp)
+    target_link_libraries(test_ros2_lifecycle PRIVATE wengine_core wengine_ros2)
+    add_test(NAME ros2_lifecycle COMMAND test_ros2_lifecycle)
+
     # Lua scripting source: isolated runtime + sandbox pin tests.
     add_executable(test_lua tests/test_lua.cpp)
     target_link_libraries(test_lua PRIVATE wengine_signal_lua)

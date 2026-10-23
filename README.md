@@ -533,7 +533,7 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
  and IDL only with `BUILD_ROS2=ON`) links `wengine_core` — engine headers
  stay ROS-free (`ros2/cli_options.hpp` owns the shared `--emit-ros` /
  `--ros-*` CLI vocabulary: node/namespace/stem shapes, QoS text, BridgeConfig
- builder).
+ builder; `ros2/lifecycle.hpp` owns the lifecycle/sim-time policy).
  `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
  `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
  `src/cli/commands/i2c.cpp`, `src/cli/commands/ldo.cpp`, `src/cli/commands/led.cpp`,
@@ -575,6 +575,8 @@ stickiness, transient backpressure, owned copies, stride/subset wiring,
 serial backstop; the rmw TU is covered by live `ros2_bridge` HIL instead),
 `test_ros2_control` (service vocabulary + step-boundary drain + census
 byte-equality; rmw services covered by live `ros2 service call` HIL instead),
+`test_ros2_lifecycle` (ROS2-4: pinned QoS matrix, stamp/clock separation,
+observable counters, lifecycle transition graph + sim-time sync; no rclcpp),
 `test_world`, `test_emit`, `test_snapshot_reuse`
 (warmed fixed-population capture/emission performs zero allocations,
 bounded cold growth, retained-copy independence, subset-scratch reuse),

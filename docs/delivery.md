@@ -83,6 +83,31 @@ separate planned task.
 - Live display output keeps its own stride/coalescing policy (class A)
   alongside a full-rate recorder (class C).
 
+### ROS projection (ROS2-4)
+
+The ROS2 bridge (`docs/ros2.md`) is the same three classes over DDS,
+with the QoS matrix pinned in `ros2/publisher.hpp` and resolved to rmw
+profiles in `ros2/rclcpp_transport.hpp` only:
+
+- Class A (live viewing) = `--ros-qos latest`: best-effort, keep-last
+  depth 1, durability volatile. Writer drops oldest; readers take
+  latest. RViz/JointState consumption.
+- Class B (ordered bounded streaming) = `--ros-qos reliable`:
+  reliable, keep-last depth 10, durability volatile, bounded.
+  Backpressure counted (`dropped_send`), never a zero-loss promise to
+  arbitrarily slow readers. `SignalBlock` sample streaming.
+- Class C (complete recording) is never a topic: CSV/block recorder
+  (driver-paced/backpressured or loud failure), `ros2 bag` as a
+  record-what-you-receive consumer with the same A/B limits (volatile
+  durability, depth bounds; see `docs/ros2.md` bag notes).
+
+Durability is volatile on both topic classes: late joiners miss earlier
+ticks. Lag accounting on the subscriber side uses `SignalBlock.step` /
+`sim_time` gaps with the same `LagStats` vocabulary as SHM/sockets.
+The managed-lifecycle graph (`ros2/lifecycle.hpp`, Active-only publish
+gate) and the sim-time stamp rule (`header.stamp = sim_time`, wall time
+never drives physics) are part of the same policy.
+
 ## 2. Clocks (four rates plus waveform frequency)
 
 These are independent quantities; do not conflate them.
@@ -208,6 +233,14 @@ across threads without external sync.
 Local socket acceptance (`published_local`, formerly `sent` in benches)
 is not remote receipt. Remote receipt
 is unknown unless a receiver reports it via its own `LagStats`.
+
+ROS path reuse (ROS2-4): `RosPublisher` carries the same
+`PublisherStats` (attempted / published / over_bound / backpressure /
+disabled / bytes_accepted, closed by `output_accounting_ok`) through
+the shared `format_publisher_health` line; stride/subset decimation
+stays in the edge wrappers (`matched`/`dropped`/`forwarded_rows`) and
+shows in the `ros:` summary with `--emit-health`. Subscriber-side loss
+is read off `SignalBlock.step` gaps.
 
 ## 6. CSV is output replay, not a restart checkpoint
 

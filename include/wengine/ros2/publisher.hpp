@@ -70,6 +70,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace wengine::ros2 {
@@ -86,12 +87,38 @@ inline constexpr std::size_t kMaxRosSerialTopics = 1024;
 // QoS intent for the edge TU (resolved to rmw profiles in the rclcpp TU
 // only, never here): latest-state viewing is best-effort, sample
 // streaming is reliable. Depths are the keep-last history sizes.
+//
+// Pinned QoS matrix (ROS2-4, see docs/ros2.md + docs/delivery.md):
+//   * latest (kLatestState):  reliability best_effort, history keep_last,
+//     depth 1, durability volatile. Writer drops oldest; readers take
+//     latest (class A: live viewing).
+//   * reliable (kSampleStream): reliability reliable, history keep_last,
+//     depth 10, durability volatile, bounded. Backpressure is counted,
+//     never a zero-loss promise to arbitrarily slow readers (class B:
+//     ordered bounded streaming).
+// Durability is volatile on both classes by pin: late joiners miss earlier
+// ticks (no transient-local replay); complete capture stays in the
+// CSV/block recorder, never a topic promise (class C).
 [[nodiscard]] inline constexpr bool qos_is_reliable(QosClass q) noexcept {
   return q == QosClass::kSampleStream;
 }
 
 [[nodiscard]] inline constexpr std::size_t qos_depth(QosClass q) noexcept {
   return q == QosClass::kSampleStream ? 10 : 1;
+}
+
+[[nodiscard]] inline constexpr std::string_view qos_reliability_name(QosClass q) noexcept {
+  return qos_is_reliable(q) ? "reliable" : "best_effort";
+}
+
+[[nodiscard]] inline constexpr std::string_view qos_durability_name(QosClass q) noexcept {
+  (void)q;
+  return "volatile";
+}
+
+[[nodiscard]] inline constexpr std::string_view qos_history_name(QosClass q) noexcept {
+  (void)q;
+  return "keep_last";
 }
 
 // Absolute topic names (leading '/'): the bridge node spins in the root
