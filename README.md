@@ -525,6 +525,9 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
   `wengine_core`.
  `wengine_signal_lua` (`STATIC`: `src/signal/lua_solver.cpp`, the Lua
  runtime TU) links `wengine_core` + `wengine_lua` (vendored interpreter).
+ `wengine_ros2` (`STATIC`: `src/ros2/ros_publisher.cpp`, the transport-neutral
+ ROS2 state-out ISink; plus `src/ros2/rclcpp_transport.cpp`, the rmw TU, only
+ with `BUILD_ROS2=ON`) links `wengine_core` — engine headers stay ROS-free.
  `wengine_cli` (`STATIC`: `src/cli/shell.cpp`,
  `src/cli/commands/ohm.cpp`, `src/cli/commands/s0.cpp`,
  `src/cli/commands/i2c.cpp`, `src/cli/commands/ldo.cpp`, `src/cli/commands/led.cpp`,
@@ -555,7 +558,13 @@ determinism + save/load/continue purity, headless extras + rejections, sum
 over Lua, shipped `examples/lua/` goldens, v5 round-trip + v4 fallback), `test_routing` (serial stability,
 1:N/N:1 subscriptions, mid-run reconfig, stride alignment, sum golden +
 operand rejections, dangling-operand failure, sink-failure isolation, v3
-round-trip + v2 fallback), `test_world`, `test_emit`, `test_snapshot_reuse`
+round-trip + v2 fallback), `test_ros2_mapping` (topic/channel naming incl. the
+rmw digit rule, bridge config + publisher count, grouped SignalBlock layout,
+service verbs, quantity suffix), `test_ros2_publisher` (grouped + per-serial
+publish incl. despawn/respawn serial survival, over-bound/disconnect
+stickiness, transient backpressure, owned copies, stride/subset wiring,
+serial backstop; the rmw TU is covered by live `ros2_bridge` HIL instead),
+`test_world`, `test_emit`, `test_snapshot_reuse`
 (warmed fixed-population capture/emission performs zero allocations,
 bounded cold growth, retained-copy independence, subset-scratch reuse),
 `test_link_protocol` (solver-agnostic items/channels wire frame, particle

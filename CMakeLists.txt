@@ -138,18 +138,37 @@ target_compile_options(wengine_link_net PRIVATE
 )
 
 # ------------------------------------------------------------------
-# ROS2 bridge (scaffolding, D-ROS-1): edge-only, OFF by default so all
-# builds stay ROS-free. Headers in include/wengine/ros2/* are ROS-free
-# vocabulary (config/naming/verb mapping, header-only, covered by
-# test_ros2_mapping without rclcpp). The rclcpp TU + example below are the
+# ROS2 bridge (scaffolding + state-out publisher, D-ROS-1): edge-only, OFF
+# by default so all builds stay ROS-free. Headers in
+# include/wengine/ros2/* are ROS-free vocabulary (config/naming/verb
+# mapping, topic helpers, transport-neutral publisher, header-only,
+# covered by test_ros2_mapping + test_ros2_publisher without rclcpp).
+# src/ros2/ros_publisher.cpp is the matching ROS-free TU (always built).
+# The rclcpp TU (src/ros2/rclcpp_transport.cpp) + example below are the
 # only places that may include ROS headers (same seam as src/link/*.cpp
 # owning POSIX syscalls while link headers stay platform-free).
 # ------------------------------------------------------------------
+add_library(wengine_ros2 STATIC
+    src/ros2/ros_publisher.cpp
+)
+target_include_directories(wengine_ros2 PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(wengine_ros2 PUBLIC wengine_core)
+target_compile_options(wengine_ros2 PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+)
 if(BUILD_ROS2)
     find_package(rclcpp REQUIRED)
-    find_package(std_msgs REQUIRED)
+    find_package(sensor_msgs REQUIRED)
+    target_sources(wengine_ros2 PRIVATE src/ros2/rclcpp_transport.cpp)
+    target_compile_definitions(wengine_ros2 PUBLIC WENGINE_HAS_RCLCPP=1)
+    target_link_libraries(wengine_ros2 PUBLIC rclcpp::rclcpp sensor_msgs::sensor_msgs)
     add_executable(ros2_bridge examples/ros2_bridge.cpp)
-    target_link_libraries(ros2_bridge PRIVATE wengine_core rclcpp::rclcpp)
+    target_link_libraries(ros2_bridge PRIVATE wengine_ros2)
     target_compile_options(ros2_bridge PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
         $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
@@ -502,6 +521,12 @@ if(BUILD_TESTS)
     add_executable(test_ros2_mapping tests/test_ros2_mapping.cpp)
     target_link_libraries(test_ros2_mapping PRIVATE wengine_core)
     add_test(NAME ros2_mapping COMMAND test_ros2_mapping)
+
+    # ROS2 state-out publisher: transport-neutral ISink half, fake
+    # transport, no rclcpp (the rmw TU is covered by live HIL instead).
+    add_executable(test_ros2_publisher tests/test_ros2_publisher.cpp)
+    target_link_libraries(test_ros2_publisher PRIVATE wengine_ros2)
+    add_test(NAME ros2_publisher COMMAND test_ros2_publisher)
 
     # Lua scripting source: isolated runtime + sandbox pin tests.
     add_executable(test_lua tests/test_lua.cpp)

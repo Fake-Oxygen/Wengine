@@ -688,6 +688,10 @@ re-investigated without a reason:
   arguments (braces do not protect them). Multi-element container
   comparisons in tests need a named expected value, never an inline
   braced list.
+* glibc `signal.h` (pulled in by `rclcpp/rclcpp.hpp` via `<csignal>)
+  defines `si_value` as a macro: never use `si_value` as an identifier
+  in engine headers (ROS2-1 renamed the `stamp()` parameter to
+  `value_si`). Any TU combining ROS headers with engine headers hits it.
 * ThreadSanitizer on this host (WSL2): GCC 13 `libtsan` cannot start —
   `FATAL: unexpected memory mapping` even for hello-world (ASAN is fine,
   `-no-pie` does not help). Run TSAN builds with Clang

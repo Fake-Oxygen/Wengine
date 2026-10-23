@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 namespace wengine::ros2 {
 
@@ -46,6 +47,11 @@ struct BridgeConfig {
   // slot order) when true; one topic per serial otherwise. Default grouped:
   // fewer publishers, stable subscription set across despawn/respawn.
   bool grouped_signals = true;
+  // Optional serial allowlist for SignalSubsetSink wiring at the edge.
+  // Empty (default) publishes every live source; non-empty forwards only
+  // the listed serials (ticks still flow every step so lag accounting
+  // stays exact — only rows are filtered, never ticks).
+  std::vector<std::uint64_t> select_serials{};
 };
 
 [[nodiscard]] inline constexpr bool is_valid_config(const BridgeConfig &c) noexcept {

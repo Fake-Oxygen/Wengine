@@ -20,9 +20,9 @@ using wengine::ros2::topic_for_channel;
 using wengine::ros2::topic_for_serial;
 
 void test_topics() {
-  assert(topic_for_serial("wengine/signals", 3) == "wengine/signals/sig/3");
-  assert(topic_for_channel("wengine", "sig.3.U") == "wengine/sig/3/U");
-  assert(sanitize_channel("sig.3.U") == "sig/3/U");
+  assert(topic_for_serial("wengine/signals", 3) == "wengine/signals/sig_3");
+  assert(topic_for_channel("wengine", "sig.3.U") == "wengine/sig/s3/U");
+  assert(sanitize_channel("sig.3.U") == "sig/s3/U");
   assert(sanitize_channel("p0.x") == "p0/x");
 }
 

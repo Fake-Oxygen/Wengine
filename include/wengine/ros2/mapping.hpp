@@ -10,16 +10,19 @@
 // Conventions (see docs/ros2.md):
 //   * Serials, never slot indices, address signals (slots recycle, serials
 //     don't — same rule as CSV sig_id and Frame channels `sig.<serial>.U`).
+//     Topic segments must not start with a digit (rmw rule), so per-signal
+//     topics are `<stem>/sig_<serial>` and channel-derived topics take an
+//     `s` prefix on digit-leading segments (see sanitize_channel).
 //   * Values cross in SI doubles + quantity tag (zero-cost hot path);
 //     dimensional safety lives at parse/display edges (signal/types.hpp).
 //   * sim_time (double, seconds) maps to the message header stamp; the ROS
 //     wall clock is never the simulation clock.
-//   * Message choice (resolved at the edge, not here):
-//       grouped signals -> Float64MultiArray (values in slot order) +
-//                          Int64MultiArray-ish serial layout, or a custom
-//                          wengine_msgs/SignalBlock for serials+quantities.
-//       per-signal topic -> Float64Stamped (one publisher per serial).
-//       particles        -> PointCloud-ish / Float64MultiArray via
+//   * Message choice, std_msgs-only until the custom SignalBlock IDL
+//     lands (ROS2-3); resolved at the edge, not here:
+//       grouped signals -> sensor_msgs/JointState (header.stamp = sim_time,
+//                          name `sig.<serial>.U`, position SI value).
+//       per-signal topic -> single-entry JointState on the serial topic.
+//       particles        -> sensor_msgs/PointCloud2 x/y/vx/vy FLOAT64 via
 //                          frame_from_snapshot items (views stay on Frame).
 
 #include "wengine/link/frame.hpp"
@@ -34,24 +37,37 @@
 
 namespace wengine::ros2 {
 
-// ROS topic segments allow [A-Za-z0-9_/]; Frame channels contain dots
-// (`sig.3.U`). Sanitized form replaces '.' with '/' so `sig.3.U` becomes
-// `<stem>/sig/3/U`. Pure string transform, no allocation policy beyond the
-// returned string (config edge only, never the sim hot path).
+// ROS topic segments allow [A-Za-z0-9_/] but must not start with a digit
+// (rmw refuses `sig/3` — "topic name token must not start with a number").
+// Frame channels contain digits (`sig.3.U`), so the sanitized form
+// replaces '.' with '/' AND prefixes digit-leading segments with 's':
+// `sig.3.U` becomes `<stem>/sig/s3/U`, `p0.x` stays `<stem>/p0/x`.
+// Pure string transform, config edge only, never the sim hot path.
 [[nodiscard]] inline std::string sanitize_channel(std::string_view channel) {
   std::string out;
-  out.reserve(channel.size());
+  out.reserve(channel.size() + 4);
+  bool segment_start = true;
   for (char c : channel) {
-    out.push_back(c == '.' ? '/' : c);
+    if (c == '.') {
+      out.push_back('/');
+      segment_start = true;
+      continue;
+    }
+    if (segment_start && c >= '0' && c <= '9') {
+      out.push_back('s');
+    }
+    segment_start = false;
+    out.push_back(c);
   }
   return out;
 }
 
-// Per-signal topic for one serial: `<stem>/sig/<serial>`.
-// Serial-addressed, so despawn/respawn never reuses a live subscription.
+// Per-signal topic for one serial: `<stem>/sig_<serial>` (flat, valid by
+// construction — see the digit rule above). Serial-addressed, so
+// despawn/respawn never reuses a live subscription.
 [[nodiscard]] inline std::string topic_for_serial(std::string_view stem, std::uint64_t serial) {
   std::string out(stem);
-  out += "/sig/";
+  out += "/sig_";
   out += std::to_string(serial);
   return out;
 }

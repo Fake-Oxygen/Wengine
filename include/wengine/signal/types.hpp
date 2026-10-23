@@ -127,11 +127,11 @@ static_assert(std::is_same_v<DimensionForT<QuantityId::kCurrent>, units::Electri
 using StampedValue =
     std::variant<units::Value<units::ElectricPotential>, units::Value<units::ElectricCurrent>>;
 
-[[nodiscard]] inline StampedValue stamp(QuantityId q, double si_value) {
+[[nodiscard]] inline StampedValue stamp(QuantityId q, double value_si) {
   if (q == QuantityId::kCurrent) {
-    return StampedValue{units::Value<units::ElectricCurrent>{si_value}};
+    return StampedValue{units::Value<units::ElectricCurrent>{value_si}};
   }
-  return StampedValue{units::Value<units::ElectricPotential>{si_value}};
+  return StampedValue{units::Value<units::ElectricPotential>{value_si}};
 }
 
 struct SignalParams {
