@@ -94,9 +94,19 @@ void test_parity_full_matrix() {
       {"ic nopechip spec", 2, "Available ICs"},
       {"ic ap63205 bogusop --vin 12V", 2, "Error"},
       {"ic ap63205 spec extra", 2, "Error"},
+      // logic session entry (one-shot verbs; bare `logic` requests the
+      // session — code 100 with no output; the REPL/session loop owns
+      // the entry banner, and --tui session entry stays a LOGIC-9 item).
+      {"logic help", 0, "Logic session commands"},
+      {"logic back", 2, "no session is active"},
+      {"logic nope", 2, "unknown logic command"},
+      {"logic back extra", 2, "Error"},
+      {"logic --help", 0, "Session verbs"},
+      {"logic", 100, ""},
       // Builtins + help + unknown.
       {"help", 0, "Available commands"},
       {"help ohm", 0, "Usage"},
+      {"help logic", 0, "[logic]>"},
       {"help nope", 1, "Unknown command"},
       {"nopecmd", 1, "Unknown command"},
   };
@@ -176,7 +186,8 @@ void test_complete_parity_full() {
       {"sim run --solver ", 17}, {"sim run --solver=p", 18}, {"sig ", 4},
       {"sig l", 5},     {"sig s", 5},    {"sig --", 6},  {"sig run --sig-kind ", 19},
       {"sig run --sig-kind=s", 20}, {"sig run --sig-quantity ", 23}, {"ic ", 3},
-      {"ic --", 5},     {"ic ap", 5},
+      {"ic --", 5},     {"ic ap", 5},      {"logic ", 6},
+      {"logic h", 7},   {"logic help ", 11},
   };
   for (const auto &p : probes) {
     const std::string buf(p.buf);

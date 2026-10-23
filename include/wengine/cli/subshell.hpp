@@ -30,7 +30,9 @@
 
 #include <cstddef>
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace wengine::cli {
 
@@ -39,11 +41,18 @@ namespace wengine::cli {
 // and from -1 (quit): tells Shell to push the module session.
 inline constexpr int kEnterSubShell = 100;
 
+// Returned by a module session-control verb (e.g. `back`): tells the
+// session loop to pop back to the outer shell. In a one-shot
+// (`logic back`) the entry spec maps it to a usage error with a hint,
+// so this code never escapes to the process boundary either.
+inline constexpr int kExitSubShell = 101;
+
 // Maximum session nesting (1 = no sub-shell inside a sub-shell;
 // deeper requests print a loud error instead of recursing).
 inline constexpr std::size_t kMaxSubShellDepth = 1;
 
 struct SubShellConfig {
+  std::string_view name;   // e.g. "logic" (used in diagnostics)
   std::string_view prompt; // e.g. "[logic]> "
   std::span<const CommandDef> commands; // module registry only
   std::string_view exit_hint; // e.g. "back - leave the logic session"
@@ -66,6 +75,39 @@ struct SubShellConfig {
     }
   }
   return nullptr;
+}
+
+// Complete one module-verb argument line (the entry spec's `complete`:
+// no prior tokens -> verb names plus --help/-h; a known verb first ->
+// delegate to that verb's own `complete` with the verb stripped).
+// Template over any CommandSpec registry (same shape as
+// ic::complete over IcRegistry); future module entries reuse this
+// instead of growing per-module plumbing.
+template <typename R>
+void complete_verbs(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out) {
+  if (prior_args.empty()) {
+    if (!partial.empty() && partial.front() == '-') {
+      constexpr std::string_view kHelp = "--help";
+      if (kHelp.substr(0, partial.size()) == partial) {
+        out.emplace_back(kHelp);
+      }
+      constexpr std::string_view kShort = "-h";
+      if (kShort.substr(0, partial.size()) == partial) {
+        out.emplace_back(kShort);
+      }
+      return;
+    }
+    for (const auto &c : R::all()) {
+      if (c.name.substr(0, partial.size()) == partial) {
+        out.emplace_back(c.name);
+      }
+    }
+    return;
+  }
+  const CommandDef *def = R::find(prior_args[0]);
+  if (def != nullptr && def->complete != nullptr) {
+    def->complete(prior_args.subspan(1), partial, out);
+  }
 }
 
 } // namespace wengine::cli

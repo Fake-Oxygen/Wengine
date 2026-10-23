@@ -1,7 +1,9 @@
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/command_registry.hpp"
 #include "wengine/cli/complete.hpp"
+#include "wengine/cli/logic_registry.hpp"
 #include "wengine/cli/shell.hpp"
+#include "wengine/cli/subshell.hpp"
 
 #include <array>
 #include <cassert>
@@ -107,8 +109,9 @@ void test_registry_compile_time() {
   static_assert(CliRegistry::find("sim") != nullptr);
   static_assert(CliRegistry::find("sig") != nullptr);
   static_assert(CliRegistry::find("ic") != nullptr);
+  static_assert(CliRegistry::find("logic") != nullptr);
   static_assert(CliRegistry::find("nope") == nullptr);
-  static_assert(CliRegistry::all().size() == 8);
+  static_assert(CliRegistry::all().size() == 9);
   static_assert(!CliRegistry::all()[0].usage.empty());
   static_assert(CliRegistry::find("ohm")->complete != nullptr);
   static_assert(CliRegistry::find("s0")->complete != nullptr);
@@ -118,6 +121,7 @@ void test_registry_compile_time() {
   static_assert(CliRegistry::find("sim")->complete != nullptr);
   static_assert(CliRegistry::find("sig")->complete != nullptr);
   static_assert(CliRegistry::find("ic")->complete != nullptr);
+  static_assert(CliRegistry::find("logic")->complete != nullptr);
   assert(CliRegistry::find("ohm")->run != nullptr);
   assert(CliRegistry::find("s0")->run != nullptr);
   assert(CliRegistry::find("i2c")->run != nullptr);
@@ -126,6 +130,7 @@ void test_registry_compile_time() {
   assert(CliRegistry::find("sim")->run != nullptr);
   assert(CliRegistry::find("sig")->run != nullptr);
   assert(CliRegistry::find("ic")->run != nullptr);
+  assert(CliRegistry::find("logic")->run != nullptr);
 }
 
 void test_ohm_handler() {
@@ -357,14 +362,15 @@ void test_completion() {
     const auto c = complete_line("", 0, all);
     assert(has(c, "ohm") && has(c, "s0") && has(c, "i2c") && has(c, "ldo") &&
            has(c, "led") && has(c, "sim") && has(c, "sig") && has(c, "ic") &&
-           has(c, "help") && has(c, "exit") && has(c, "quit"));
+           has(c, "logic") && has(c, "help") && has(c, "exit") && has(c, "quit"));
   }
   assert(complete_line("o", 1, all) == std::vector<std::string>{"ohm"});
   {
-    // Registry order defines candidate order: ldo before led.
-    const std::vector<std::string> want{"ldo", "led"};
+    // Registry order defines candidate order: ldo, led, then logic.
+    const std::vector<std::string> want{"ldo", "led", "logic"};
     assert(complete_line("l", 1, all) == want);
   }
+  assert(complete_line("log", 3, all) == std::vector<std::string>{"logic"});
   assert(complete_line("ld", 2, all) == std::vector<std::string>{"ldo"});
   assert(complete_line("le", 2, all) == std::vector<std::string>{"led"});
   {
@@ -667,6 +673,107 @@ void test_history() {
   assert(!reader.read_line("> ", eof_in, out));
 }
 
+void test_logic_session() {
+  // Module registry shape (LOGIC-1: help + back; LOGIC-8 appends verbs).
+  static_assert(logic::LogicRegistry::all().size() == 2);
+  static_assert(logic::LogicRegistry::find("help") != nullptr);
+  static_assert(logic::LogicRegistry::find("back") != nullptr);
+  static_assert(logic::LogicRegistry::find("wire") == nullptr);
+
+  Shell sh;
+  sh.set_history_file("");
+  std::ostringstream out;
+
+  // Bare `logic` requests the session without printing (the session loop
+  // owns the entry banner).
+  {
+    std::ostringstream silent;
+    assert(sh.execute("logic", silent) == kEnterSubShell);
+    assert(silent.str().empty());
+    assert(sh.has_pending_session());
+  }
+  // One-shot `logic help` == session `help`: same verb, same text.
+  {
+    std::ostringstream one_shot, direct;
+    assert(sh.execute("logic help", one_shot) == 0);
+    const std::span<const std::string_view> no_args{};
+    ArgCursor cur{no_args};
+    assert(logic::LogicHelpSpec::run(cur, direct) == 0);
+    assert(one_shot.str() == direct.str());
+    assert(one_shot.str().find("back - Leave the logic session") != std::string::npos);
+  }
+  // Session-control one-shot is a loud usage error, never silent.
+  assert(sh.execute("logic back", out) == 2);
+  assert(out.str().find("no session is active") != std::string::npos);
+  assert(sh.execute("logic nope", out) == 2);
+  assert(out.str().find("unknown logic command") != std::string::npos);
+  assert(sh.execute("logic back extra", out) == 2);
+  assert(sh.execute("logic --help", out) == 0);
+  assert(out.str().find("Session verbs") != std::string::npos);
+  assert(sh.execute("help logic", out) == 0);
+  assert(out.str().find("[logic]>") != std::string::npos);
+
+  // Full REPL drive over plain streams: prompt swap, session help, back
+  // returns to the top level, then quit.
+  {
+    Shell repl;
+    repl.set_history_file("");
+    std::istringstream in("logic\nhelp\nback\nexit\n");
+    std::ostringstream session_out;
+    repl.run(in, session_out);
+    const std::string s = session_out.str();
+    assert(s.find("Entering logic session") != std::string::npos);
+    assert(s.find("[logic]> ") != std::string::npos);
+    assert(s.find("Logic session commands") != std::string::npos);
+    assert(s.find("Leaving logic session.") != std::string::npos);
+    assert(!repl.has_pending_session());
+  }
+  // `exit` inside the session leaves it (only the outer loop quits).
+  {
+    Shell repl;
+    repl.set_history_file("");
+    std::istringstream in("logic\nexit\nexit\n");
+    std::ostringstream session_out;
+    repl.run(in, session_out);
+    const std::string s = session_out.str();
+    assert(s.find("Entering logic session") != std::string::npos);
+    assert(s.find("Leaving logic session.") != std::string::npos);
+  }
+
+  // Scoped completion: module registry sees only module verbs (+ session
+  // builtins via complete_line), never top-level commands.
+  {
+    const auto mod = logic::LogicRegistry::all();
+    auto has = [](const std::vector<std::string> &v, std::string_view word) {
+      for (const auto &e : v) {
+        if (e == word) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const auto c = complete_line("", 0, mod);
+    assert(has(c, "help") && has(c, "back") && has(c, "exit") && has(c, "quit"));
+    assert(!has(c, "ohm") && !has(c, "sim") && !has(c, "logic"));
+    assert(complete_line("b", 1, mod) == std::vector<std::string>{"back"});
+    // Registry names shadow builtins: the session `help` verb lists once
+    // (complete_names dedupes; the registry entry wins).
+    const std::vector<std::string> want_h{"help"};
+    assert(complete_line("h", 1, mod) == want_h);
+    assert(complete_line("zzz", 3, mod).empty());
+    // Entry completion: verbs plus --help, then per-verb delegation.
+    const auto all = CliRegistry::all();
+    const auto verbs = complete_line("logic ", 6, all);
+    assert(has(verbs, "help") && has(verbs, "back"));
+    assert(!has(verbs, "ohm") && !has(verbs, "--help")); // flags need a '-' prefix
+    const std::vector<std::string> want_dash_help{"--help"};
+    assert(complete_line("logic --h", 9, all) == want_dash_help);
+    const std::vector<std::string> want_help{"help"};
+    assert(complete_line("logic h", 7, all) == want_help);
+    assert(complete_line("logic help ", 11, all).size() == 2); // help|back
+  }
+}
+
 } // namespace
 
 int main() {
@@ -684,6 +791,7 @@ int main() {
   test_shell_run_fallback();
   test_shell_headless();
   test_history();
+  test_logic_session();
   std::cout << "test_cli_args: OK\n";
   return 0;
 }

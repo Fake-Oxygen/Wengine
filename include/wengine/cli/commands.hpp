@@ -382,4 +382,18 @@ struct IcSpec {
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
+struct LogicSpec {
+  static constexpr std::string_view kName = "logic";
+  static constexpr std::string_view kDescription = "Logic-gate workspace (sub-shell session)";
+  static constexpr std::string_view kUsage =
+      "logic                 (enter the logic session: prompt becomes [logic]> )\n"
+      "logic <verb> [args]  (one-shot, no session entered)\n"
+      "logic --help         (this text plus the verb list)\n"
+      "Session verbs (LOGIC-1: help, back; solver verbs arrive with LOGIC-8):\n"
+      "  help [verb]   back   (exit/quit also leave the session)";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
 } // namespace wengine::cli::commands

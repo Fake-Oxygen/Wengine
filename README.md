@@ -137,7 +137,10 @@ is the command result (`0` ok, `1` runtime/check failure, `2` usage error;
 `exit`/`quit` map to `0`). With no arguments the interactive REPL starts.
 
 REPL commands: `help [cmd]`, `exit`/`quit`, plus registered commands
-(`ohm`, `s0`, `i2c`, `ldo`, `led`, `sim`, `sig`, `ic`).
+(`ohm`, `s0`, `i2c`, `ldo`, `led`, `sim`, `sig`, `ic`, `logic`).
+`logic` enters a module sub-shell (`[logic]> `, `back` leaves;
+`logic <verb>` also works one-shot) — the reusable session pattern
+future modules follow (see `docs/logic.md`).
 `--help`/`-h` also print help. Return codes: `0` ok, `1`
 runtime/unknown-command error, `2` argument/usage error, `-1` internal exit
 signal (REPL loop only).

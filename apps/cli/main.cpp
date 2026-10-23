@@ -1,4 +1,5 @@
 #include "wengine/cli/shell.hpp"
+#include "wengine/cli/subshell.hpp"
 #ifdef WENGINE_HAVE_TUI
 #include "wengine/tui/run.hpp"
 #endif
@@ -34,7 +35,21 @@ int main(int argc, char **argv) {
       args.emplace_back(argv[i]);
     }
     const int rc = shell.execute_argv(args, std::cout);
-    return rc == -1 ? 0 : rc;
+    if (rc == -1) {
+      return 0; // exit/quit
+    }
+    if (rc == wengine::cli::kEnterSubShell) {
+      // Bare module entry (e.g. `PhysicsSimApp logic`): run the session
+      // on stdin so pipes work like the REPL
+      // (`printf 'help\nback\n' | PhysicsSimApp logic`).
+      if (!shell.has_pending_session()) {
+        std::cerr << "Error: module session requested but none registered\n";
+        return 1;
+      }
+      shell.run_pending_session(std::cin, std::cout);
+      return 0;
+    }
+    return rc;
   }
 
   shell.run(std::cin, std::cout);

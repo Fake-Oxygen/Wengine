@@ -21,8 +21,7 @@ namespace wengine::cli {
 
 // ------------------------------------------------------------------ History
 
-History::History(std::size_t max_entries) noexcept
-    : max_entries_(max_entries == 0 ? 1 : max_entries) {}
+History::History(std::size_t max_entries) noexcept : max_entries_(max_entries == 0 ? 1 : max_entries) {}
 
 bool History::add(std::string_view line) {
   if (line.empty()) {
@@ -77,8 +76,7 @@ core::Status History::save(std::string_view path) const noexcept {
   return core::Status::success();
 }
 
-core::Status History::append_to_file(std::string_view path,
-                                     std::string_view line) const noexcept {
+core::Status History::append_to_file(std::string_view path, std::string_view line) const noexcept {
   std::ofstream f{std::string{path}, std::ios::app};
   if (!f) {
     return {core::StatusCode::kInternal};
@@ -92,7 +90,7 @@ core::Status History::append_to_file(std::string_view path,
 
 // ---------------------------------------------------------------- LineReader
 
-LineReader::LineReader() : history_path_(default_history_path()) {}
+LineReader::LineReader() : history_path_(default_history_path()), complete_commands_(CliRegistry::all()) {}
 
 LineReader::~LineReader() = default;
 
@@ -125,8 +123,7 @@ void LineReader::ensure_history_loaded() {
   history_.load(history_path_);
 }
 
-std::optional<std::string> LineReader::read_plain(std::string_view prompt, std::istream &in,
-                                                  std::ostream &out) {
+std::optional<std::string> LineReader::read_plain(std::string_view prompt, std::istream &in, std::ostream &out) {
   out << prompt << std::flush;
   std::string line;
   if (!std::getline(in, line)) {
@@ -138,8 +135,7 @@ std::optional<std::string> LineReader::read_plain(std::string_view prompt, std::
   return line;
 }
 
-std::optional<std::string> LineReader::read_line(std::string_view prompt, std::istream &in,
-                                                 std::ostream &out) {
+std::optional<std::string> LineReader::read_line(std::string_view prompt, std::istream &in, std::ostream &out) {
 #if defined(__unix__) || defined(__APPLE__)
   if (&in == &std::cin && ::isatty(STDIN_FILENO)) {
     return read_tty(prompt, out);
@@ -455,7 +451,7 @@ std::optional<std::string> LineReader::read_tty(std::string_view prompt, std::os
       while (tok_start > 0 && buf[tok_start - 1] != ' ' && buf[tok_start - 1] != '\t') {
         --tok_start;
       }
-      auto cands = complete_line(buf, cursor, CliRegistry::all());
+      auto cands = complete_line(buf, cursor, complete_commands_);
       if (cands.empty()) {
         continue;
       }

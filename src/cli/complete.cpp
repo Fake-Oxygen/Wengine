@@ -4,15 +4,27 @@ namespace wengine::cli {
 
 namespace {
 
-void complete_names(std::string_view partial, std::span<const CommandDef> cmds,
-                    std::vector<std::string> &out) {
+void complete_names(std::string_view partial, std::span<const CommandDef> cmds, std::vector<std::string> &out) {
   for (const auto &c : cmds) {
     if (c.name.substr(0, partial.size()) == partial) {
       out.emplace_back(c.name);
     }
   }
+  // Builtins complete alongside the registry, but a registry entry with
+  // the same name wins: candidates never contain duplicates (module
+  // registries legitimately own `help`, which would otherwise list twice).
   for (std::string_view b : kBuiltinCommands) {
-    if (b.substr(0, partial.size()) == partial) {
+    if (b.substr(0, partial.size()) != partial) {
+      continue;
+    }
+    bool already = false;
+    for (const auto &e : out) {
+      if (e == b) {
+        already = true;
+        break;
+      }
+    }
+    if (!already) {
       out.emplace_back(b);
     }
   }

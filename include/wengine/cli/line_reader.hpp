@@ -14,8 +14,10 @@
 // (absence, not failure).
 
 #include "wengine/core/status.hpp"
+#include "wengine/cli/command.hpp"
 #include <iosfwd>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -71,16 +73,22 @@ public:
 
   [[nodiscard]] History &history() noexcept { return history_; }
 
+  // Command set used for Tab completion (defaults to the top-level
+  // registry; module sessions swap in their own registry while active
+  // and restore this on exit). The span must outlive the reader —
+  // registries are static, so this holds by construction.
+  void set_complete_commands(std::span<const CommandDef> cmds) noexcept { complete_commands_ = cmds; }
+
   // Read one line. Returns nullopt on EOF (Ctrl-D on empty line / closed
   // stdin). Uses raw-mode editing on TTYs, plain getline otherwise.
   // `in` other than stdin always uses the plain path (keeps tests/pipes).
-  std::optional<std::string> read_line(std::string_view prompt, std::istream &in,
-                                       std::ostream &out);
+  std::optional<std::string> read_line(std::string_view prompt, std::istream &in, std::ostream &out);
 
 private:
   History history_;
   std::string history_path_;
   bool history_loaded_{false};
+  std::span<const CommandDef> complete_commands_{};
 
   void ensure_history_loaded();
   std::optional<std::string> read_plain(std::string_view prompt, std::istream &in,

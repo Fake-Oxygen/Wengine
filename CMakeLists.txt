@@ -268,6 +268,7 @@ if(BUILD_CLI)
         src/cli/commands/sim.cpp
         src/cli/commands/sig.cpp
         src/cli/commands/ic.cpp
+        src/cli/commands/logic.cpp
         src/cli/commands/ic/ap63205.cpp
         src/cli/commands/ic/ina219.cpp
         src/cli/commands/ic/tmc22xx.cpp
@@ -478,6 +479,12 @@ if(BUILD_TESTS)
             COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/tests/tui_pty_smoke.py
                     --bin $<TARGET_FILE:PhysicsSimApp>)
         set_tests_properties(tui_pty_smoke PROPERTIES TIMEOUT 120)
+        # LOGIC-1 session proof: prompt swap + scoped Tab + back, on a real
+        # PTY (raw-mode editing never engages on pipes).
+        add_test(NAME logic_pty_smoke
+            COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/tests/logic_pty_smoke.py
+                    --bin $<TARGET_FILE:PhysicsSimApp>)
+        set_tests_properties(logic_pty_smoke PROPERTIES TIMEOUT 120)
     endif()
 
     add_executable(test_s0 tests/test_s0.cpp)
