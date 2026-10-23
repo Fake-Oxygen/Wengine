@@ -84,8 +84,9 @@ inline constexpr std::size_t kMaxGates = 1024; // slot cap, loud on overflow
 
 // One gate slot. `live` false => free-list entry. `counter` is the
 // per-kind monotonic id (display: AND<counter>); `input_count` the
-// configured fan-in; `ignored_inputs` bitmask (bit i => input i+1
-// excluded from the derived block interface); `drivers` holds the
+// configured fan-in; `ignored_mask` bitmask (bit i => input i+1
+// excluded from the derived block interface) plus `ignore_output` for
+// dangling outputs; `drivers` holds the
 // source slot index per input, kNoDriver when unwired.
 inline constexpr std::uint16_t kNoDriver = 0xFFFF;
 
@@ -95,6 +96,7 @@ struct Gate {
   std::uint32_t counter = 0; // per-kind, never reused
   std::uint8_t input_count = 2;
   std::uint8_t ignored_mask = 0; // bit i => input (i+1) ignored
+  bool ignore_output = false; // dangling output excluded from iface
   std::uint16_t output_fanout = 0; // derived, for list/iface
   std::uint64_t propagation_delay_ps = 0; // V2 timing hook (§12): stored
                                           // now, honored later; v1 eval is
@@ -106,9 +108,12 @@ struct Gate {
 // Mutation marks `dirty` (topology must be recompiled before eval).
 struct Netlist {
   std::array<Gate, kMaxGates> gates{};
-  std::array<std::uint32_t, 8> next_counter{}; // per GateKind ordinal
+  std::array<std::uint32_t, 8> next_counter{1, 1, 1, 1, 1, 1, 1, 1}; // per GateKind ordinal, first id is 1
   std::uint16_t live_count = 0;
   bool dirty = true;
+  std::array<std::uint16_t, kMaxGates> topo_order{};
+  std::array<std::uint16_t, kMaxGates> topo_level{};
+  std::uint16_t topo_size = 0;
 };
 
 } // namespace wengine::logic

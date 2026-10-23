@@ -244,9 +244,15 @@ target_compile_options(wengine_signal_lua PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
 )
 
+add_library(wengine_logic INTERFACE)
+target_include_directories(wengine_logic INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
 add_library(wengine_core INTERFACE)
 target_link_libraries(wengine_core INTERFACE
-    wengine_glm wengine_units wengine_signal wengine_solvers wengine_world wengine_emit wengine_link
+    wengine_glm wengine_units wengine_signal wengine_solvers wengine_world wengine_emit wengine_link wengine_logic
 )
 add_library(wengine::core ALIAS wengine_core)
 
@@ -539,6 +545,10 @@ if(BUILD_TESTS)
     add_executable(test_signal tests/test_signal.cpp)
     target_link_libraries(test_signal PRIVATE wengine_core)
     add_test(NAME signal COMMAND test_signal)
+
+    add_executable(test_logic tests/test_logic.cpp)
+    target_link_libraries(test_logic PRIVATE wengine_core)
+    add_test(NAME logic COMMAND test_logic)
 
     # ROS2 scaffolding: pure mapping/naming/verb vocabulary, no rclcpp.
     add_executable(test_ros2_mapping tests/test_ros2_mapping.cpp)
