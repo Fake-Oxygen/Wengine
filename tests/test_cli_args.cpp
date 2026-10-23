@@ -968,13 +968,45 @@ void test_logic_verbs() {
   assert(run("logic solve --from NOT1.Y=1").first == 2); // not a block input
   assert(run("logic solve extra").first == 2);
 
-  // truth: full table, --limit slice, --csv file, terminal cap refusal.
+  // truth: pretty terminal table, --limit slice, --csv file, terminal cap refusal.
   {
     auto [rc, s] = run("logic truth");
     assert(rc == 0);
-    assert(s.find("AND1.1,AND1.2,NOT1.Y") != std::string::npos);
-    assert(s.find("\n1,1,0\n") != std::string::npos);
-    assert(s.find("\n0,0,1\n") != std::string::npos);
+    // Pretty terminal table (never raw CSV on the terminal).
+    assert(s.find("AND1.1 | AND1.2 | NOT1.Y") != std::string::npos);
+    assert(s.find("-+-") != std::string::npos);
+    assert(s.find(',') == std::string::npos);
+    // Independent brute-force reference: NAND over rows in slot order.
+    std::vector<std::string> lines;
+    {
+      std::istringstream rows(s);
+      std::string line;
+      while (std::getline(rows, line)) {
+        lines.push_back(line);
+      }
+    }
+    assert(lines.size() == 6); // header + separator + 4 rows (no truncation footer)
+    assert(lines[0] == "AND1.1 | AND1.2 | NOT1.Y");
+    assert(lines[1] == "-------+--------+-------");
+    for (std::size_t r = 0; r < 4; ++r) {
+      const char a = ((r & 1u) != 0u) ? '1' : '0';
+      const char b = ((r & 2u) != 0u) ? '1' : '0';
+      const char want = (a == '1' && b == '1') ? '0' : '1'; // NAND
+      std::istringstream cells(lines[2 + r]);
+      std::string cell;
+      std::vector<char> bits;
+      while (std::getline(cells, cell, '|')) {
+        std::string t;
+        for (char ch : cell) {
+          if (ch != ' ' && ch != '\t' && ch != '\r') {
+            t += ch;
+          }
+        }
+        assert(t.size() == 1 && (t[0] == '0' || t[0] == '1'));
+        bits.push_back(t[0]);
+      }
+      assert(bits.size() == 3 && bits[0] == a && bits[1] == b && bits[2] == want);
+    }
   }
   {
     auto [rc, s] = run("logic truth --limit 2");
@@ -985,7 +1017,8 @@ void test_logic_verbs() {
         ++newlines;
       }
     }
-    assert(newlines == 3); // header + 2 rows
+    assert(newlines == 5); // header + separator + 2 rows + truncation footer
+    assert(s.find("2 of 4 rows shown") != std::string::npos);
   }
   assert(run("logic truth extra").first == 2);
   assert(run("logic truth --limit 0").first == 2);
@@ -1005,7 +1038,11 @@ void test_logic_verbs() {
     for (int i = 0; i < 9; ++i) {
       assert(run("logic add AND").first == 0);
     }
-    assert(run("logic truth").first == 2); // 18 inputs: needs --limit/--csv
+    {
+      auto [rc, s] = run("logic truth");
+      assert(rc == 2); // 18 inputs: needs --limit/--csv
+      assert(s.find("need --limit or --csv") != std::string::npos);
+    }
     assert(run("logic truth --limit 4").first == 0);
     assert(run("logic reset").first == 0);
   }
@@ -1018,6 +1055,10 @@ void test_logic_verbs() {
     auto [rc, s] = run("logic optimize --level O1");
     assert(rc == 0);
     assert(s.find("2 -> 1 gates") != std::string::npos);
+    // Fusion renames pins: the interface report says so loudly.
+    assert(s.find("2 inputs [AND1.1 AND1.2] -> 2 inputs [NAND1.1 NAND1.2]") != std::string::npos);
+    assert(s.find("1 outputs [NOT1.Y] -> 1 outputs [NAND1.Y]") != std::string::npos);
+    assert(s.find("pin replication") != std::string::npos);
   }
   {
     auto [rc, s] = run("logic list");
@@ -1031,6 +1072,50 @@ void test_logic_verbs() {
     auto [rc, s] = run("logic optimize --level O2 --to nor");
     assert(rc == 0);
     assert(s.find("to=nor") != std::string::npos);
+  }
+
+  // optimize interface report: OR(AND(0,b),c) == c, but O2 yields
+  // AND(x,y) over duplicated pins [c,c] — equivalent under pin
+  // replication, never row-for-row. The verb must say so loudly.
+  {
+    assert(run("logic reset").first == 0);
+    assert(run("logic add AND").first == 0);
+    assert(run("logic add OR").first == 0);
+    assert(run("logic wire AND1.Y OR1.1").first == 0);
+    assert(run("logic ignore AND1.1").first == 0);
+    {
+      auto [rc, s] = run("logic optimize --level O0");
+      assert(rc == 0);
+      assert(s.find("2 -> 1 gates") != std::string::npos);
+      assert(s.find("2 inputs [AND1.2 OR1.2] -> 1 inputs [BUF1.1]") != std::string::npos);
+      assert(s.find("1 outputs [OR1.Y] -> 1 outputs [BUF1.Y]") != std::string::npos);
+    }
+    assert(run("logic reset").first == 0);
+    assert(run("logic add AND").first == 0);
+    assert(run("logic add OR").first == 0);
+    assert(run("logic wire AND1.Y OR1.1").first == 0);
+    assert(run("logic ignore AND1.1").first == 0);
+    {
+      auto [rc, s] = run("logic optimize --level O2");
+      assert(rc == 0);
+      assert(s.find("2 -> 2 gates") != std::string::npos);
+      assert(s.find("2 inputs [AND1.2 OR1.2] -> 2 inputs [NAND1.1 NAND1.2]") != std::string::npos);
+      assert(s.find("1 outputs [OR1.Y] -> 1 outputs [NAND2.Y]") != std::string::npos);
+      assert(s.find("pin replication") != std::string::npos);
+    }
+    // Replicated assignments agree with the pre-optimize function
+    // (out = OR1.2 = c): (0,0) -> 0 and (1,1) -> 1.
+    {
+      auto [rc, s] = run("logic solve --in 00");
+      assert(rc == 0);
+      assert(s.find("NAND2.Y=0") != std::string::npos);
+    }
+    {
+      auto [rc, s] = run("logic solve --in 11");
+      assert(rc == 0);
+      assert(s.find("NAND2.Y=1") != std::string::npos);
+    }
+    assert(run("logic reset").first == 0);
   }
 
   // save / load round-trip is byte-identical; load is atomic.

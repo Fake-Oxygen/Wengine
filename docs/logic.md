@@ -123,13 +123,24 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
 - Optimizer is pure: `optimize(netlist, opts) -> Netlist` (new object,
   input untouched). Loud on overflow (>existing slot cap); never
   silently drops gates.
+- Interface caveat: folding drops dead pins, O2 duplicates pins for
+  inversion (`NAND(a,a)` is NOT), and gates are renamed — so the
+  post-optimize truth table matches the old one under pin replication,
+  not row-for-row (e.g. `OR(AND(0,b),c)` ≡ `c` becomes `AND(x,y)` over
+  duplicated pins `[c,c]`). The `optimize` verb prints a loud
+  before→after interface report whenever pins change; re-run `truth`
+  on the new pins and compare replicated assignments via `solve`.
 
 ## 7. Truth table
 
-- `truth [--csv path] [--limit N]`: streams rows in input-slot order,
-  `0/1` columns, header `in...,out...`. Default cap: block inputs ≤ 16
-  (65 536 rows); larger needs explicit `--limit`/`--csv` (refuse loudly,
-  never print millions of rows to the terminal). Bit-exact vs `solve`.
+- `truth [--csv path] [--limit N]`: streams rows in input-slot order.
+  The terminal prints a pretty aligned table (`A | B | Y` header,
+  `-+-` separator, centered bits, truncation footer naming shown/total
+  counts); `--csv` writes raw `0/1` CSV (header `in...,out...`) to a
+  file plus a one-line `wrote N rows` summary. Default cap: block
+  inputs ≤ 16 (65 536 rows); larger needs explicit `--limit`/`--csv`
+  (refuse loudly, never print millions of rows to the terminal).
+  Bit-exact vs `solve` (same word evaluator, same row convention).
 - `solve [--in <bits>] [--from <pin>=<0|1> ...]`: single-assignment eval;
   unset block inputs default `0` loudly (the command echoes the assumed
   vector). Exit 0 with `Y=...` lines.

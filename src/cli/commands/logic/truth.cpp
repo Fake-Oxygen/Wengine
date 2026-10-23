@@ -76,7 +76,7 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
     out << "wrote " << rows << " rows to '" << *csv_path << "' (" << nin << " inputs, " << out_pins.size() << " outputs)\n";
     return core::kExitOk;
   }
-  const core::Status st = support::write_truth_csv(nl, rows, in_pins, out_pins, out);
+  const core::Status st = support::write_truth_pretty(nl, rows, huge ? rows : total, in_pins, out_pins, out);
   if (!st.ok()) {
     return cli::runtime_error(out, "truth failed");
   }

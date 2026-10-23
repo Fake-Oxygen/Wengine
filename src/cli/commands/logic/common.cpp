@@ -196,6 +196,89 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
   return core::Status::success();
 }
 
+core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t total_rows,
+                                const std::vector<BlockPin> &in_pins, const std::vector<BlockPin> &out_pins,
+                                std::ostream &os) {
+  const std::size_t nin = in_pins.size();
+  const std::size_t nout = out_pins.size();
+  const std::size_t ncols = nin + nout;
+  if (ncols == 0) {
+    os << "(empty block: no interface pins, 1 row)\n";
+    if (!os) {
+      return core::Status::failure(core::StatusCode::kInternal);
+    }
+    return core::Status::success();
+  }
+  std::vector<std::string> headers;
+  headers.reserve(ncols);
+  for (const BlockPin &p : in_pins) {
+    headers.push_back(pin_text(nl, p.slot, false, p.input));
+  }
+  for (const BlockPin &p : out_pins) {
+    headers.push_back(pin_text(nl, p.slot, true, 0));
+  }
+  std::vector<std::size_t> widths;
+  widths.reserve(ncols);
+  for (const std::string &h : headers) {
+    widths.push_back(h.size());
+  }
+  for (std::size_t i = 0; i < ncols; ++i) {
+    if (i != 0) {
+      os << " | ";
+    }
+    os << headers[i];
+  }
+  os << '\n';
+  for (std::size_t i = 0; i < ncols; ++i) {
+    if (i != 0) {
+      os << "-+-";
+    }
+    os << std::string(widths[i], '-');
+  }
+  os << '\n';
+  if (!os) {
+    return core::Status::failure(core::StatusCode::kInternal);
+  }
+  std::vector<std::uint64_t> scratch(kMaxGates, 0);
+  std::vector<std::uint64_t> words(nout == 0 ? 1 : nout, 0);
+  const std::uint64_t nwords = (rows + 63ULL) / 64ULL;
+  for (std::uint64_t w = 0; w < nwords; ++w) {
+    std::span<std::uint64_t> out_span = nout == 0 ? std::span<std::uint64_t>{} : std::span<std::uint64_t>{words.data(), nout};
+    const core::Status st = wengine::logic::eval_block_word(nl, w, std::span<std::uint64_t>{scratch.data(), scratch.size()}, out_span);
+    if (!st.ok()) {
+      return st;
+    }
+    for (std::uint64_t b = 0; b < 64; ++b) {
+      const std::uint64_t row = w * 64ULL + b;
+      if (row >= rows) {
+        break;
+      }
+      for (std::size_t c = 0; c < ncols; ++c) {
+        if (c != 0) {
+          os << " | ";
+        }
+        const char bit = (c < nin) ? ((((row >> c) & 1ULL) != 0ULL) ? '1' : '0')
+                                   : ((((words[c - nin] >> b) & 1ULL) != 0ULL) ? '1' : '0');
+        const std::size_t width = widths[c];
+        const std::size_t left = (width - 1) / 2;
+        const std::size_t right = width - 1 - left;
+        os << std::string(left, ' ') << bit << std::string(right, ' ');
+      }
+      os << '\n';
+      if (!os) {
+        return core::Status::failure(core::StatusCode::kInternal);
+      }
+    }
+  }
+  if (rows < total_rows) {
+    os << '(' << rows << " of " << total_rows << " rows shown; use --limit N or --csv <path> for more)\n";
+    if (!os) {
+      return core::Status::failure(core::StatusCode::kInternal);
+    }
+  }
+  return core::Status::success();
+}
+
 void save_yaml(std::ostream &os, const Netlist &nl) {
   os << "version: 1\n";
   os << "gates:\n";

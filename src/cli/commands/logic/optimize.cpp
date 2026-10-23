@@ -15,7 +15,25 @@
 
 namespace wengine::cli::logic {
 
+using wengine::logic::BlockPin;
 using wengine::logic::Netlist;
+
+namespace {
+
+// Space-joined display names of an interface pin list (slot order,
+// deterministic). Empty stays empty (the caller brackets it).
+[[nodiscard]] std::string join_pins(const Netlist &nl, const std::vector<BlockPin> &pins, bool is_output) {
+  std::string text;
+  for (const BlockPin &p : pins) {
+    if (!text.empty()) {
+      text += ' ';
+    }
+    text += support::pin_text(nl, p.slot, is_output, p.input);
+  }
+  return text;
+}
+
+} // namespace
 
 int LogicOptimizeSpec::run(ArgCursor &args, std::ostream &out) {
   if (args.take_flag({"--help", "-h"})) {
@@ -48,12 +66,26 @@ int LogicOptimizeSpec::run(ArgCursor &args, std::ostream &out) {
     opts.target = target.value;
   }
   Netlist &nl = workspace();
+  // Snapshot the pre-optimize interface: folding drops dead pins, O2
+  // duplicates pins for inversion (NAND(a,a) = NOT a), and gates are
+  // renamed — so the new truth table only matches the old one under pin
+  // replication. Any interface change is reported loudly below.
+  std::vector<BlockPin> before_in;
+  std::vector<BlockPin> before_out;
+  support::interface_pins(nl, before_in, before_out);
+  const std::string before_in_text = join_pins(nl, before_in, false);
+  const std::string before_out_text = join_pins(nl, before_out, true);
   const std::uint16_t before = nl.live_count;
   auto r = wengine::logic::optimize(nl, opts);
   if (!r.ok()) {
     return cli::runtime_error(out, std::string("optimize failed (") + std::string(r.error) + ")");
   }
   nl = r.value;
+  std::vector<BlockPin> after_in;
+  std::vector<BlockPin> after_out;
+  support::interface_pins(nl, after_in, after_out);
+  const std::string after_in_text = join_pins(nl, after_in, false);
+  const std::string after_out_text = join_pins(nl, after_out, true);
   out << "optimize: " << before << " -> " << nl.live_count << " gates (level=";
   switch (opts.level) {
   case wengine::logic::OptLevel::kO0:
@@ -70,6 +102,14 @@ int LogicOptimizeSpec::run(ArgCursor &args, std::ostream &out) {
     out << " to=" << (opts.target == wengine::logic::OptTarget::kNand ? "nand" : "nor");
   }
   out << ")\n";
+  if (before_in_text != after_in_text || before_out_text != after_out_text) {
+    out << "interface: " << before_in.size() << " inputs [" << before_in_text << "] -> " << after_in.size()
+        << " inputs [" << after_in_text << "]\n";
+    out << "interface: " << before_out.size() << " outputs [" << before_out_text << "] -> " << after_out.size()
+        << " outputs [" << after_out_text << "]\n";
+    out << "note: interface changed (folding drops dead pins, O2 duplicates pins for inversion); re-run truth on "
+           "the new pins and compare under pin replication, not row-for-row.\n";
+  }
   return core::kExitOk;
 }
 

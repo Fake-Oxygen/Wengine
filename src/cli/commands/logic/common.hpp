@@ -42,6 +42,15 @@ core::Status write_truth_csv(wengine::logic::Netlist &nl, std::uint64_t rows,
                              const std::vector<wengine::logic::BlockPin> &in_pins,
                              const std::vector<wengine::logic::BlockPin> &out_pins, std::ostream &os);
 
+// Pretty terminal table over the same bit-parallel evaluator (same rows,
+// same row convention as write_truth_csv; bit-exact vs solve). Column
+// widths derive from the pin names; bits are centered. When rows < total
+// (a --limit truncation) a loud footer names the shown/total counts.
+// --csv files stay raw CSV via write_truth_csv; the terminal never is.
+core::Status write_truth_pretty(wengine::logic::Netlist &nl, std::uint64_t rows, std::uint64_t total_rows,
+                                const std::vector<wengine::logic::BlockPin> &in_pins,
+                                const std::vector<wengine::logic::BlockPin> &out_pins, std::ostream &os);
+
 // Canonical YAML workspace (byte-identical save/load round-trip).
 void save_yaml(std::ostream &os, const wengine::logic::Netlist &nl);
 

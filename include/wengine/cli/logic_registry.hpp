@@ -183,7 +183,8 @@ struct LogicTruthSpec {
       "  truth\n"
       "  truth --limit 8\n"
       "  truth --csv out.csv\n"
-      "Rows in interface order; header is input pins then output pins (0/1 CSV).\n"
+      "Rows in interface order, input pins then output pins. The terminal\n"
+      "prints a pretty aligned table; --csv writes raw 0/1 CSV to a file.\n"
       "Default cap: block inputs <= 16 (65536 rows); larger needs explicit\n"
       "--limit/--csv, and >= 31 inputs always needs --limit.";
 
@@ -202,7 +203,10 @@ struct LogicOptimizeSpec {
       "O0 folds constants + bypasses BUF/double-negation + DCE (never grows);\n"
       "O1 adds De Morgan bubble-push fusion; O2 converts fully to --to\n"
       "(default nand, only read at O2; --to without O2 is an error).\n"
-      "The workspace is replaced; before/after gate counts print.";
+      "The workspace is replaced; before/after gate counts print, plus a\n"
+      "loud interface report when pins change (folding drops dead pins,\n"
+      "O2 duplicates pins for inversion: compare truth tables under pin\n"
+      "replication, not row-for-row).";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
