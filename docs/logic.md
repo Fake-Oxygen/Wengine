@@ -162,7 +162,7 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
 ## 9. YAML workspace (vendored yaml-cpp — 4th third-party dep)
 
 - **Decision: yaml-cpp as a git submodule under `external/yaml-cpp`
-  (pinned release tag, MIT), following the exact `external/lua` path:**
+  (pinned 0.8.0, MIT), following the exact `external/lua` path:**
   `wengine_yaml` (`STATIC`, no project warning flags, `SYSTEM`
   includes) plus one runtime TU `src/logic/yaml_store.cpp` — the
   single TU allowed to know yaml-cpp exists (same seam as

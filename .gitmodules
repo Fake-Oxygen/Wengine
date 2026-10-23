@@ -7,3 +7,6 @@
 [submodule "external/lua"]
 	path = external/lua
 	url = https://github.com/lua/lua.git
+[submodule "external/yaml-cpp"]
+	path = external/yaml-cpp
+	url = https://github.com/jbeder/yaml-cpp.git

@@ -1162,7 +1162,10 @@ void test_logic_verbs() {
         assert(!!f);
         f << "version: 2\ngates:\nwires:\nmeta:\n  tool: x\n";
       }
-      assert(run(std::string("logic load ") + bad).first == 1);
+      auto [brc, bs] = run(std::string("logic load ") + bad);
+      assert(brc == 1);
+      assert(bs.find("unsupported workspace version 2 (want 1)") != std::string::npos);
+      assert(bs.find("line 1:") != std::string::npos); // loud with line number
       auto [rc, s] = run("logic list");
       assert(rc == 0);
       assert(s.find("AND1") != std::string::npos); // workspace kept
@@ -1170,6 +1173,108 @@ void test_logic_verbs() {
     }
     std::remove(y1.c_str());
     std::remove(y2.c_str());
+  }
+
+  // LOGIC-6: yaml-cpp store through the verbs — ignore marks round-trip
+  // byte-identically, user-edited YAML (comments/quoting/block style)
+  // loads, malformed files fail loudly with line numbers.
+  {
+    assert(run("logic reset").first == 0);
+    assert(run("logic add AND --inputs 3").first == 0);
+    assert(run("logic add NOT").first == 0);
+    assert(run("logic wire AND1.Y NOT1.1").first == 0);
+    assert(run("logic ignore AND1.2").first == 0);
+    const std::string y1 = "/tmp/opencode/logic_ws_c.yaml";
+    const std::string y2 = "/tmp/opencode/logic_ws_d.yaml";
+    std::remove(y1.c_str());
+    std::remove(y2.c_str());
+    assert(run(std::string("logic save ") + y1).first == 0);
+    const std::string before = read_file(y1);
+    assert(before.find("ignore: [2]") != std::string::npos);
+    assert(run("logic reset").first == 0);
+    assert(run(std::string("logic load ") + y1).first == 0);
+    assert(run(std::string("logic save ") + y2).first == 0);
+    assert(read_file(y2) == before); // byte-identical incl. ignore marks
+    {
+      auto [rc, s] = run("logic list");
+      assert(rc == 0);
+      assert(s.find("ignored=2") != std::string::npos);
+    }
+    // User-edited form: full-line comment, quoted id, block-style gate.
+    {
+      const std::string edit = "/tmp/opencode/logic_ws_edit.yaml";
+      {
+        std::ofstream f(edit, std::ios::binary | std::ios::trunc);
+        assert(!!f);
+        f << "# user note\n"
+             "version: 1\n"
+             "gates:\n"
+             "  - id: \"AND1\"\n"
+             "    kind: and\n"
+             "    inputs: 3\n"
+             "    ignore: [2]\n"
+             "    ignore_output: false\n"
+             "    delay_ps: 0\n"
+             "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+             "wires:\n"
+             "  - {from: AND1.Y, to: NOT1.1}\n"
+             "meta:\n"
+             "  tool: wengine-logic\n";
+      }
+      assert(run(std::string("logic load ") + edit).first == 0);
+      const std::string y3 = "/tmp/opencode/logic_ws_e.yaml";
+      std::remove(y3.c_str());
+      assert(run(std::string("logic save ") + y3).first == 0);
+      assert(read_file(y3) == before); // canonicalizes to the same bytes
+      std::remove(edit.c_str());
+      std::remove(y3.c_str());
+    }
+    // Malformed files: loud `line N:` diagnostics, workspace kept.
+    {
+      const std::string dup = "/tmp/opencode/logic_ws_dup.yaml";
+      {
+        std::ofstream f(dup, std::ios::binary | std::ios::trunc);
+        assert(!!f);
+        f << "version: 1\n"
+             "gates:\n"
+             "  - {id: AND1, kind: and, inputs: 3, ignore: [2], ignore_output: false, delay_ps: 0}\n"
+             "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+             "wires:\n"
+             "  - {from: AND1.Y, to: NOT1.1}\n"
+             "  - {from: AND1.Y, to: NOT1.1}\n"
+             "meta:\n"
+             "  tool: wengine-logic\n";
+      }
+      auto [rc, s] = run(std::string("logic load ") + dup);
+      assert(rc == 1);
+      assert(s.find("line 7:") != std::string::npos);
+      assert(s.find("input already wired 'NOT1.1'") != std::string::npos);
+      std::remove(dup.c_str());
+    }
+    {
+      const std::string unk = "/tmp/opencode/logic_ws_unk.yaml";
+      {
+        std::ofstream f(unk, std::ios::binary | std::ios::trunc);
+        assert(!!f);
+        f << "version: 1\ngates:\n  - {id: AND1, kind: frobnicate, inputs: 2, ignore: [], "
+             "ignore_output: false, delay_ps: 0}\nwires:\nmeta:\n  tool: wengine-logic\n";
+      }
+      auto [rc, s] = run(std::string("logic load ") + unk);
+      assert(rc == 1);
+      assert(s.find("line 3:") != std::string::npos);
+      assert(s.find("bad gate kind") != std::string::npos);
+      std::remove(unk.c_str());
+    }
+    auto [rc, s] = run("logic list");
+    assert(rc == 0);
+    assert(s.find("AND1") != std::string::npos); // kept through failures
+    std::remove(y1.c_str());
+    std::remove(y2.c_str());
+    // Restore the wired pair the following draw/export blocks expect.
+    assert(run("logic reset").first == 0);
+    assert(run("logic add AND").first == 0);
+    assert(run("logic add NOT").first == 0);
+    assert(run("logic wire AND1.Y NOT1.1").first == 0);
   }
 
   // draw: ASCII schematic + BMP export.

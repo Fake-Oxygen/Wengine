@@ -244,6 +244,70 @@ target_compile_options(wengine_signal_lua PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
 )
 
+# Logic workspace YAML (LOGIC-6): yaml-cpp (external/yaml-cpp submodule,
+# pinned 0.8.0, MIT) — the engine's fourth third-party dep (decision
+# record: docs/logic.md sec. 9 + README dependency policy). Parser +
+# emitter core only (src/*.cpp); contrib graphbuilder never compiles.
+# ------------------------------------------------------------------
+# Vendored library, no project warning flags (third-party, like imgui/lua).
+set(WENGINE_YAML_SOURCES
+    external/yaml-cpp/src/binary.cpp
+    external/yaml-cpp/src/convert.cpp
+    external/yaml-cpp/src/depthguard.cpp
+    external/yaml-cpp/src/directives.cpp
+    external/yaml-cpp/src/emit.cpp
+    external/yaml-cpp/src/emitfromevents.cpp
+    external/yaml-cpp/src/emitter.cpp
+    external/yaml-cpp/src/emitterstate.cpp
+    external/yaml-cpp/src/emitterutils.cpp
+    external/yaml-cpp/src/exceptions.cpp
+    external/yaml-cpp/src/exp.cpp
+    external/yaml-cpp/src/memory.cpp
+    external/yaml-cpp/src/nodebuilder.cpp
+    external/yaml-cpp/src/node.cpp
+    external/yaml-cpp/src/node_data.cpp
+    external/yaml-cpp/src/nodeevents.cpp
+    external/yaml-cpp/src/null.cpp
+    external/yaml-cpp/src/ostream_wrapper.cpp
+    external/yaml-cpp/src/parse.cpp
+    external/yaml-cpp/src/parser.cpp
+    external/yaml-cpp/src/regex_yaml.cpp
+    external/yaml-cpp/src/scanner.cpp
+    external/yaml-cpp/src/scanscalar.cpp
+    external/yaml-cpp/src/scantag.cpp
+    external/yaml-cpp/src/scantoken.cpp
+    external/yaml-cpp/src/simplekey.cpp
+    external/yaml-cpp/src/singledocparser.cpp
+    external/yaml-cpp/src/stream.cpp
+    external/yaml-cpp/src/tag.cpp
+)
+add_library(wengine_yaml STATIC ${WENGINE_YAML_SOURCES})
+target_include_directories(wengine_yaml SYSTEM PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/yaml-cpp/include>
+    $<INSTALL_INTERFACE:include>
+)
+# Private scanner/parser headers live beside the sources (never public).
+target_include_directories(wengine_yaml PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/yaml-cpp/src
+)
+
+# Versioned workspace store: the single TU allowed to know yaml-cpp exists.
+# Engine headers stay yaml-free (see logic/yaml_store.hpp); strict warnings
+# like wengine_cli.
+add_library(wengine_logic_yaml STATIC
+    src/logic/yaml_store.cpp
+)
+target_include_directories(wengine_logic_yaml PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(wengine_logic_yaml PUBLIC wengine_core wengine_yaml)
+target_compile_options(wengine_logic_yaml PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor>
+)
+
 add_library(wengine_logic INTERFACE)
 target_include_directories(wengine_logic INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -299,7 +363,7 @@ if(BUILD_CLI)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     )
-    target_link_libraries(wengine_cli PUBLIC wengine_core wengine_link_shm wengine_link_net wengine_signal_lua wengine_ros2)
+    target_link_libraries(wengine_cli PUBLIC wengine_core wengine_link_shm wengine_link_net wengine_signal_lua wengine_ros2 wengine_logic_yaml)
 
     target_compile_options(wengine_cli PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
@@ -565,6 +629,13 @@ if(BUILD_TESTS)
     add_executable(test_logic tests/test_logic.cpp)
     target_link_libraries(test_logic PRIVATE wengine_core)
     add_test(NAME logic COMMAND test_logic)
+
+    # LOGIC-6 workspace store: yaml-cpp seam TU + yaml-free header. Links
+    # wengine_logic_yaml only (never wengine_cli); test_logic above stays
+    # on wengine_core alone by design.
+    add_executable(test_logic_yaml tests/test_logic_yaml.cpp)
+    target_link_libraries(test_logic_yaml PRIVATE wengine_logic_yaml)
+    add_test(NAME logic_yaml COMMAND test_logic_yaml)
 
     # ROS2 scaffolding: pure mapping/naming/verb vocabulary, no rclcpp.
     add_executable(test_ros2_mapping tests/test_ros2_mapping.cpp)

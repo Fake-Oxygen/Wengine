@@ -517,6 +517,23 @@ instruction-count budget; every failure is a loud step Status) and the
 5.4.9 pin (asserted in code and test) are locked in `docs/signals.md`
 sec. 7. No fourth third-party dep without its own decision record.
 
+Logic workspace YAML decision (LOGIC-6, 2026-10-23): yaml-cpp
+(`external/yaml-cpp` submodule, pinned 0.8.0, MIT) — the authorized
+fourth third-party dep. Rationale: workspaces are user-edited artifacts,
+so real YAML (comments, quoting, multiline, block vs flow style) beats a
+canonical-subset parser users will fight; the submodule pin + from-source
+build keeps it auditable and warning-clean. Vendored + built from source
+(no system headers needed): `wengine_yaml` (`STATIC`, parser + emitter
+core `src/*.cpp` only, no contrib graphbuilder, `SYSTEM` includes) plus
+`wengine_logic_yaml` (`STATIC`: `src/logic/yaml_store.cpp`, the single TU
+allowed to know yaml-cpp exists, strict warnings) — engine headers stay
+yaml-free (see `logic/yaml_store.hpp`), so existing tests keep linking
+`wengine_core` alone. Strict v1 schema (`version: 1`, gates/wires/meta;
+unknown keys are loud errors with `line N:` diagnostics, never silent
+tolerance) and the exact-match version gate (loud found-version refusal)
+are locked in `docs/logic.md` sec. 9. No fifth third-party dep without
+its own decision record.
+
 CMake targets mirror this: `wengine_glm` (third-party import), `wengine_units`,
 `wengine_solvers`, `wengine_world`, `wengine_emit`, `wengine_link` (link wire
 protocol, header-only, OS-free) (all `INTERFACE`) combine
@@ -529,6 +546,9 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
   `wengine_core`.
  `wengine_signal_lua` (`STATIC`: `src/signal/lua_solver.cpp`, the Lua
  runtime TU) links `wengine_core` + `wengine_lua` (vendored interpreter).
+ `wengine_logic_yaml` (`STATIC`: `src/logic/yaml_store.cpp`, the YAML
+ workspace store TU) links `wengine_core` + `wengine_yaml` (vendored
+ yaml-cpp).
  `wengine_ros2` (`STATIC`: `src/ros2/ros_publisher.cpp`, the transport-neutral
  ROS2 state-out ISink; `src/ros2/ros_control.cpp` + `src/ros2/rclcpp_transport.cpp`,
  the rmw TUs (grouped JointState + `wengine_msgs/SignalBlock` exact record +
@@ -546,7 +566,8 @@ protocol, header-only, OS-free) (all `INTERFACE`) combine
  (+ `src/cli/commands/ic/<chip>.cpp` per IC part)) links `wengine_core`, `wengine_link_shm`,
   `wengine_link_net`, `wengine_ros2`
  (transport-neutral ROS2 ISink; rmw only with `BUILD_ROS2=ON`),
- and `wengine_signal_lua` (for `sig run --sig-lua`);
+ and `wengine_signal_lua` (for `sig run --sig-lua`)
+ + `wengine_logic_yaml` (for `logic save`/`load`/`export --schema`);
 `PhysicsSimApp` links `wengine_cli` (+ `wengine_tui` when `BUILD_TUI` finds
  ncurses: `src/tui/` domain TUs under strict warnings + header-only
  `wengine/tui/exec.hpp`; no engine changes). Tests: `test_ohm_law`, `test_math_units`
@@ -825,9 +846,11 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,tmc22xx,sim,solver_registry,signal,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_choice,tui_async,tui_views}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,tmc22xx,sim,solver_registry,signal,logic,logic_yaml,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_choice,tui_async,tui_views}.cpp
 plus the headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`).
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
 external/imgui/ (git submodule, pinned v1.91.9b — GUI-only second dep, see policy above)
+external/lua/ (git submodule, pinned v5.4.9 — third dep, see policy above)
+external/yaml-cpp/ (git submodule, pinned 0.8.0 — fourth dep, see policy above)
 ```
