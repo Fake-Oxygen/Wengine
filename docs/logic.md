@@ -1,0 +1,239 @@
+# Logic-gate module (`logic`) — design guidelines
+
+Status: draft scaffold (2026-10-23). No behavior wired yet; see Plane epic
+`logic-gates` (parent) + LOGIC-* children for build order.
+
+## 1. What ships in v1
+
+- In-process `logic` module: add/list/wire/reset logic gates, solve the
+  combinational block, print/stream its truth table, optimize it
+  (De Morgan → NAND-only + constant folding + dead-gate elimination),
+  draw it (SDL2 software window, `--out bmp` file export), and
+  save/restore the workspace as versioned YAML.
+- Generic reusable sub-shell framework (`cli/subshell.hpp`): `logic` is
+  the first consumer, future modules reuse it unchanged.
+- CLI-only in v1. Every feature is reachable from the CLI (REPL +
+  headless one-shot). GUI arrives later against the same engine headers.
+
+## 2. Architecture
+
+```text
+include/wengine/logic/types.hpp    GateKind, LogicValue, Netlist (SoA, header-only)
+include/wengine/logic/eval.hpp     topological order + bit-parallel combinational eval
+include/wengine/logic/optimize.hpp De Morgan / NAND-only / fold / DCE (pure, returns new Netlist)
+include/wengine/logic/truth.hpp    bounded truth-table streaming (never unbounded print)
+src/logic/yaml_store.cpp           versioned workspace save/load (the ONE TU allowed
+                                   to know yaml-cpp exists; engine headers stay yaml-free)
+include/wengine/cli/subshell.hpp   generic module sub-shell (prompt, dispatch, scoped completion)
+src/cli/commands/logic.cpp         LogicSpec + module registry wiring (thin adapter, owns iostream)
+```
+
+Dependency direction (extends AGENTS.md §4, never reversed):
+
+```text
+logic -> units? (no: pure bits, no dimensions), core/status (Status/Result only)
+cli   -> logic, core   (adapter only)
+```
+
+Engine stays header-only (`INTERFACE`, like solvers). Only the SDL2 draw
+TU (`src/cli/logic_draw_sdl.cpp`) and the YAML file I/O TU are `.cpp` —
+same justification as `src/link/*.cpp` (syscalls / display calls cannot
+live in headers). Layout math (layered columns + Manhattan wires) is a
+pure header function with a unit test; the SDL TU only rasterizes it.
+
+## 3. CLI sub-shell contract (generic, reused by future modules)
+
+- Top-level `logic` command has **two modes**:
+  - Bare `logic` in the REPL → enters the module session: prompt becomes
+    `[logic]> `, only the module registry completes, `help` lists only
+    module verbs. `back` (plus `exit`/`quit` inside the session) leaves
+    the session; only the outer `exit` quits the app.
+  - `logic <verb> [args...]` headless / piped → one-shot dispatch to the
+    **same** module registry, no session entered. This keeps scripts,
+    pipes, `--tui` parity, and tests working without a TTY.
+- Implementation: `cli/subshell.hpp` owns a `SubShell` runner
+  (prompt string + `span<const CommandDef>` + session state pointer).
+  `Shell` owns a session stack; module entry is handled in `Shell`
+  (like `help`/`exit` builtins), **not** inside `Spec::run`, because
+  `run(ArgCursor&, ostream&)` has no `istream` access. `Spec::run` with
+  empty args returns a dedicated `kEnterSubShell` request code the Shell
+  interprets — no signature change to the `Registry` concept.
+- Completion scoping: inside the session, `complete_line` is called with
+  the **module** registry, never `CliRegistry`. Pinned by a test
+  (`complete_line("[logic] ...", module_registry)` == session behavior).
+- TUI: no TUI changes needed — one-shot `logic <verb>` lines execute via
+  the existing `Shell::execute` path byte-identically (same rule as all
+  commands). Interactive session entry under `--tui` is rejected loudly
+  until a TUI session-pane task is scheduled (do not block v1 on it).
+- Determinism: session vs one-shot dispatch is a pure routing choice;
+  engine results are identical either way (same Netlist → same eval).
+
+## 4. Netlist model (engine)
+
+- `GateKind`: `AND OR NAND NOR XOR XNOR NOT BUF` (append-only enum;
+  `XNOR` = `NOT(XOR)` internally, `BUF` needed as an optimizer output).
+- `kMaxInputs = 8`. `NOT`/`BUF` take exactly 1 input; the rest 2..8.
+- Identity: per-kind monotonic counters, never reused
+  (`AND1, AND2, …`, `NOT5, …`), slots recycle — same convention as
+  signal serials (AGENTS.md §8). Display names use kind+counter;
+  internals use dense slot indices.
+- Pins: `<NAME>.Y` (output) or `<NAME>.<1..k>` (input), e.g. `AND2.Y`,
+  `NOR1.1`. Parsing is a pure `parse_pin(text) -> Result<PinRef>`.
+- Wires: single-driver rule (one wire per destination input, like real
+  hardware); re-wiring an occupied input is a loud usage error, never a
+  silent overwrite. Fan-out is unlimited (one output → many inputs).
+  Cycles are rejected at `wire` time via incremental DFS (combinational
+  only in v1; sequential/clocked gates are a follow-up epic, not v1).
+- Block interface: derived on demand, never stored — dangling inputs and
+  dangling outputs become the block's inputs/outputs in slot order,
+  minus pins marked `ignore`. `ignore <pin>` / `use <pin>` toggles the
+  mark. `list` shows gates + wires + derived interface + ignored pins.
+
+## 5. Evaluation (perf core)
+
+- Topology compiled once per mutation (`wire`/`add`/`remove` dirty flag):
+  Kahn's algorithm over slot order → deterministic level order, cycle
+  check included. Steady-state `solve` never re-sorts.
+- Bit-parallel truth evaluation: pack up to 64 input assignments into one
+  `uint64_t` word per net; each gate is one branchless word op
+  (`& | ^ ~`) over the whole column. Cost is
+  `O(gates × 2^n / 64)` word-ops, allocation-free after warmup
+  (caller-owned scratch, same pattern as `fill_snapshot`).
+  Scalar single-assignment `solve` reuses the same level order with a
+  small stack array (no heap).
+- `NOT`/`BUF` fold into the word op (no extra pass). `XOR` with >2
+  inputs is defined as odd-parity (documented; matches 74-series cascade
+  semantics only for 2 inputs — the usage text says so).
+- Benchmark before optimizing further: `bench_logic`
+  (ns/gate-word over a live Netlist, opaque depth/width args). SIMD
+  intrinsics only on measured hot paths, never speculative.
+
+## 6. Optimize
+
+Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
+
+- O0: constant folding (`AND(x,0)→0`) + double-negation + identity
+  (`AND(x,1)→x`, `OR(x,0)→x`) + dead-gate elimination (unreachable from
+  any block output). Always safe, always on.
+- O1: De Morgan push (`NOT(AND)→NAND`, `NOT(OR)→NOR`, bubble pushing) —
+  canonical form, still mixed gates.
+- O2 (`--to nand`): full NAND-only (or `--to nor`) conversion via De
+  Morgan + duality. Gate count may grow; the report prints
+  before/after counts so the trade-off is visible, never hidden.
+- Optimizer is pure: `optimize(netlist, opts) -> Netlist` (new object,
+  input untouched). Loud on overflow (>existing slot cap); never
+  silently drops gates.
+
+## 7. Truth table
+
+- `truth [--csv path] [--limit N]`: streams rows in input-slot order,
+  `0/1` columns, header `in...,out...`. Default cap: block inputs ≤ 16
+  (65 536 rows); larger needs explicit `--limit`/`--csv` (refuse loudly,
+  never print millions of rows to the terminal). Bit-exact vs `solve`.
+- `solve [--in <bits>] [--from <pin>=<0|1> ...]`: single-assignment eval;
+  unset block inputs default `0` loudly (the command echoes the assumed
+  vector). Exit 0 with `Y=...` lines.
+
+## 8. Draw + export
+
+- `draw [--out schematic.bmp]`: layered topological layout (inputs left,
+  outputs right, one column per level, deterministic pure function) +
+  Manhattan wires, rendered in a standalone SDL2 software window —
+  independent of `WEngineGui`, same pattern as `sig run --plot`
+  (`cli/plot.hpp`: unsupported/no-display fails loudly with a rebuild
+  hint). File export writes BMP via `SDL_SaveBMP` (zero new deps);
+  PNG/JPG only via a later single-header writer task if a real consumer
+  needs it — do not vendor image codecs for v1.
+- `export --truth t.csv --schema s.yaml [--bmp s.bmp]`: one command,
+  three artifacts, loud per-artifact counts. `import`/workspace restore
+  is `load <file.yaml>` (round-trip byte-identity pinned by test).
+
+## 9. YAML workspace (vendored yaml-cpp — 4th third-party dep)
+
+- **Decision: yaml-cpp as a git submodule under `external/yaml-cpp`
+  (pinned release tag, MIT), following the exact `external/lua` path:**
+  `wengine_yaml` (`STATIC`, no project warning flags, `SYSTEM`
+  includes) plus one runtime TU `src/logic/yaml_store.cpp` — the
+  single TU allowed to know yaml-cpp exists (same seam as
+  `src/signal/lua_solver.cpp`). Engine headers stay yaml-free, so unit
+  tests link `wengine_core` alone and never pay the dep. This record is
+  the dependency decision (per the README policy: no fifth dep without
+  its own record).
+- Rationale over hand-rolled: workspaces are user-edited artifacts, so
+  real YAML (comments, quoting, multiline, anchors later) beats a
+  canonical-subset parser users will fight; the submodule pin +
+  from-source build keeps it auditable and warning-clean.
+- Schema `version: 1` header; loader exact-matches with a loud
+  found-version refusal (same rule as link wire versions; V2 bumps with
+  a fallback loader, §12). Sections:
+  `gates: [{id: AND1, kind: and, inputs: 2, ignore: [2]}]`,
+  `wires: [{from: AND2.Y, to: NOR1.1}]`, `meta: {created, tool}`.
+  Strict in v1: unknown keys/sections are loud errors (never silently
+  ignored) — forward-compatible sections arrive as versioned schema
+  bumps, not silent tolerance. `save`/`load` round-trip is byte-identical
+  (pinned test).
+
+## 10. Module verb list (v1)
+
+```text
+add <KIND> [--inputs N]     list [--wires] [--iface]   wire <FROM.Y> <TO.i>
+unwire <TO.i>               remove <GATE>              ignore <PIN> / use <PIN>
+reset [--force]             solve [--in bits] [--from pin=0|1 ...]
+truth [--csv p] [--limit N] optimize [--to nand|nor] [--level O0|O1|O2]
+draw [--out f.bmp]          save <f.yaml> / load <f.yaml>
+export --truth t --schema s [--bmp b]   help [verb]   back
+```
+
+All verbs: `kName/kDescription/kUsage/run/complete` + module-registry
+entry + `static_assert` size check (same recipe as AGENTS.md §9).
+
+## 11. Non-goals (v1) — each with a named V2 slot in §12
+
+Sequential/clocked logic (flip-flops, clocks), tri-state buses,
+multi-driver nets, timing/delay simulation, Verilog/VHDL import,
+PNG/JPG codecs, GUI panel (separate epic, consumes the same headers).
+
+## 12. V2 extension map (no redesign: every item below is a named slot)
+
+V1 ships only combinational single-driver zero-delay logic, but the
+scaffolding already reserves each V2 feature's place. Rule for all of
+them: additive only — `Netlist` never reshapes, kind bytes are
+append-only, schema bumps carry fallback loaders.
+
+- **Value system.** Nets carry `LogicValue {kLow, kHigh, kHighZ,
+  kUnknown}` today; v1 produces/consumes only Low/High and rejects
+  Z/X loudly. Tri-state buses later just start producing Z — no type
+  change, no call-site churn.
+- **Drivers.** Every input resolves through `resolve_net(span of
+  driver values)`, which today enforces single-driver. Multi-driver /
+  wired-OR / tri-state resolution later replaces one function body;
+  the `drivers[]` arrays and `wire` verb already store fan-in lists.
+- **Sequential / clocks.** `GateKind` values 0..7 are combinational;
+  sequential kinds (`DFF`, `LATCH`, …) append at ≥16 (never renumber —
+  persisted bytes). Clocked state lives in a **parallel pool beside
+  the netlist** (same pattern as `Signals` beside `Particles`), stepped
+  by a `SequentialSolver::step(state, dt)` behind the existing
+  `ISolver` seam — the combinational evaluator is untouched, and
+  `RunConfig` gains one nested section struct per AGENTS.md §8.
+- **Timing / delay.** Every gate already stores `propagation_delay_ps`
+  (default 0; v1 eval is zero-delay, loader stores any value). Delay
+  simulation later reads the field — no schema or struct change, only
+  an evaluator that honors it plus a `set-delay` verb.
+- **Verilog / VHDL import.** Importers are pure `Netlist` builders
+  (`parse_verilog(text) -> Result<Netlist>`) in their own TUs, reusing
+  the same validation (`wire` single-driver/cycle checks) as the CLI
+  verbs. No new engine concepts: a file is just another author of the
+  same struct. New TU, never a `Netlist` change.
+- **PNG / JPG codecs.** Draw already splits pure layout math (header,
+  tested) from raster output. File export goes through one
+  `write_image(layout, path, format)` seam whose v1 backends are BMP
+  (SDL_SaveBMP) and CSV; a single-header writer (e.g. stb-style,
+  vendored like any other dep with its own record) adds backends
+  without touching layout or the `draw`/`export` verbs.
+- **GUI panel.** Consumes `wengine/logic` headers directly plus one
+  `link::Frame` adapter + one frame-source registry entry (AGENTS.md
+  §4 views rule); views stay untouched. The CLI session registry is
+  the verb vocabulary the panel mirrors — no engine change for GUI.
+- **Schema evolution.** `version: 2` (clocks/timing sections) loads v1
+  files via a fallback loader and refuses forward versions loudly —
+  the same convention as `world` serialization (`v5` + fallbacks).
