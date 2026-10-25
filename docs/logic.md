@@ -140,31 +140,52 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
 
 - O0: constant folding (`AND(x,0)→0`) + double-negation + identity
   (`AND(x,1)→x`, `OR(x,0)→x`) + dead-gate elimination (unreachable from
-  any block output). Always safe, always on.
-- O1: De Morgan push (`NOT(AND)→NAND`, `NOT(OR)→NOR`, bubble pushing) —
+  any block output) + exact truth-table simplification for small blocks
+  (n≤10, m≤16, no hidden outputs): detects semantic constants
+  (contradictions like `x & ~x == 0` that structural folding misses) and
+  dead inputs (inputs that never affect any output), collapses constants
+  to canonical form and ties dead inputs off to 0. Always safe, always on.
+  Never grows the net (gates_after <= gates_before).
+- O1: O0 + De Morgan push (`NOT(AND)→NAND`, `NOT(OR)→NOR`, bubble pushing) —
   canonical form, still mixed gates.
-- O2 (`--to nand`): full NAND-only (or `--to nor`) conversion via De
-  Morgan + duality. Gate count may grow; the report prints
+- O2 (`--to nand`): full NAND-only (or `--to nor`) conversion. Small blocks
+  (n≤8, m≤8, no hidden outputs) use exact two-level resynthesis
+  (Quine-McCluskey + greedy cover, SOP for NAND / POS for NOR) with shared
+  input inverters and globally tied dangling pins (one block input per
+  variable, so the interface stays stable instead of duplicating pins for
+  inversion); the caller picks the smaller of structural De Morgan vs
+  minimized (gates, then inputs), so repeated O2 toggles (NAND<->NOR) stay
+  near-optimal instead of 4x per toggle (e.g. `OR` 1→3→2→3→2 stable, not
+  1→3→8→17). Large blocks fall back to structural De Morgan + duality with
+  vocabulary-preserving cleanup (shared wired-gate dedup + internal
+  double-inverter cancellation + DCE, all keep all-NAND/all-NOR and never
+  merge sinks). Constant gates reuse a shared pool (internal share, sinks
+  get dedicated outputs, so 1-gate constants stay at 1-2 gates, not 4+).
+  Gate count may still grow for large/complex nets; the report prints
   before/after counts so the trade-off is visible, never hidden.
 - Optimizer is pure: `optimize(netlist, opts) -> Netlist` (new object,
   input untouched). Loud on overflow (>existing slot cap); never
   silently drops gates.
-- Interface caveat: folding drops dead pins, O2 duplicates pins for
-  inversion (`NAND(a,a)` is NOT), and gates are renamed — so the
-  post-optimize truth table matches the old one under pin replication,
-  not row-for-row (e.g. `OR(AND(0,b),c)` ≡ `c` becomes `AND(x,y)` over
-  duplicated pins `[c,c]`). The `optimize` verb prints a loud
-  before→after interface report whenever pins change; re-run `truth`
-  on the new pins and compare replicated assignments via `solve`.
+- Interface caveat: folding drops dead pins, exact simplification drops
+  dead inputs and collapses constants, O2 structural may duplicate pins
+  for inversion (`NAND(a,a)` untied is NOT with two pins) while O2
+  minimized ties them (one pin per variable, may permute input order) —
+  so the post-optimize truth table matches the old one under pin
+  replication/permutation, not row-for-row (e.g. `OR(AND(0,b),c)` ≡ `c`).
+  The `optimize` verb prints a loud before→after interface report whenever
+  pins change; re-run `truth` on the new pins and compare replicated/
+  permuted assignments via `solve`.
 - Ties through the optimizer: O0/O1 preserve classes whose pins survive
   (input-dropping rebuilds classes around shifted indices, De Morgan
   fusion copies each source pin's class to its fused counterpart,
   constant-collapse detaches the folded gate's pins with survivor
-  re-election, DCE detaches via `remove_gate`). The O2 fresh build drops
-  ties (each fresh dangling pin starts singleton) and reports the pin
+  re-election, exact dead-input elimination dissolves dead classes to
+  ignored, DCE detaches via `remove_gate`). The O2 structural fresh build
+  drops ties (each fresh dangling pin starts singleton) and reports the pin
   change through the same loud interface report — re-tie post-hoc with
-  `tie`. The optimizer never auto-ties: O2 output for untied nets is
-  unchanged.
+  `tie`. The O2 minimized build auto-ties (one class per variable, so the
+  interface stays at n inputs, not 2n); structural output for untied nets
+  is otherwise unchanged.
 
 ## 7. Truth table
 

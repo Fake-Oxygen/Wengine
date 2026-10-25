@@ -1128,7 +1128,8 @@ void test_optimize_o2_nand_family() {
       }
     }
   };
-  // OR(a,b) -> NAND(~a,~b): 1 -> 3, inverter pins duplicate positionally.
+  // OR(a,b) -> NAND(~a,~b): 1 -> 3, minimized with tied inverters keeps
+  // 2 inputs (no duplication), interface stable.
   {
     Netlist nl;
     assert(logic::add_gate(nl, GateKind::kOr, 2).ok());
@@ -1137,8 +1138,8 @@ void test_optimize_o2_nand_family() {
     Netlist opt = r.value;
     assert(opt.live_count == 3);
     all_nand(opt);
-    const std::vector<std::size_t> proj{0, 0, 1, 1};
-    check_equiv_proj(nl, opt, proj);
+    assert(logic::block_input_count(opt) == 2);
+    check_equiv(nl, opt);
   }
   // XOR(a,b) -> 4 NANDs: 1 -> 4.
   {
@@ -1165,7 +1166,8 @@ void test_optimize_o2_nand_family() {
     all_nand(opt);
     check_equiv(nl, opt);
   }
-  // BUF(a) -> out: double negation, 1 -> 2, duplicated inverter pin.
+  // BUF(a) -> out: double negation, 1 -> 2, minimized with tied inverter
+  // keeps 1 input (no duplication).
   {
     Netlist nl;
     assert(logic::add_gate(nl, GateKind::kBuf, 1).ok());
@@ -1174,8 +1176,8 @@ void test_optimize_o2_nand_family() {
     Netlist opt = r.value;
     assert(opt.live_count == 2);
     all_nand(opt);
-    const std::vector<std::size_t> proj{0, 0};
-    check_equiv_proj(nl, opt, proj);
+    assert(logic::block_input_count(opt) == 1);
+    check_equiv(nl, opt);
   }
 }
 
@@ -1190,7 +1192,8 @@ void test_optimize_o2_nor_family() {
       }
     }
   };
-  // AND(a,b) -> NOR(~a,~b): 1 -> 3.
+  // AND(a,b) -> NOR(~a,~b): 1 -> 3, minimized with tied inverters keeps
+  // 2 inputs (no duplication).
   {
     Netlist nl;
     assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
@@ -1199,10 +1202,11 @@ void test_optimize_o2_nor_family() {
     Netlist opt = r.value;
     assert(opt.live_count == 3);
     all_nor(opt);
-    const std::vector<std::size_t> proj{0, 0, 1, 1};
-    check_equiv_proj(nl, opt, proj);
+    assert(logic::block_input_count(opt) == 2);
+    check_equiv(nl, opt);
   }
-  // XOR(a,b) -> 5 NORs: 1 -> 5.
+  // XOR(a,b) -> 5 NORs: 1 -> 5, minimized with tied inverters keeps
+  // 2 inputs (no duplication).
   {
     Netlist nl;
     assert(logic::add_gate(nl, GateKind::kXor, 2).ok());
@@ -1211,8 +1215,8 @@ void test_optimize_o2_nor_family() {
     Netlist opt = r.value;
     assert(opt.live_count == 5);
     all_nor(opt);
-    const std::vector<std::size_t> proj{0, 1, 0, 0, 1, 1};
-    check_equiv_proj(nl, opt, proj);
+    assert(logic::block_input_count(opt) == 2);
+    check_equiv(nl, opt);
   }
   // OR(a,b) -> NOT(out): fused to one NOR. 2 -> 1.
   {
@@ -1254,23 +1258,26 @@ void test_optimize_o2_multioutput_order() {
     check_equiv(nl, opt); // [NAND(a,b), NOR(c,d)] positionally
   }
   {
-    // O2(nand): the NAND stays single, the NOR expands to 4 NANDs (2 -> 5).
+    // O2(nand): the NAND stays single, the NOR expands to 4 NANDs (2 -> 5),
+    // minimized with tied inverters keeps 4 inputs (no duplication) but
+    // reorders them (inverters first: c,d,a,b). Compare under permutation.
     logic::OptimizeOptions o2;
     o2.level = logic::OptLevel::kO2;
     auto r = logic::optimize(nl, o2);
     assert(r.ok());
     Netlist opt = r.value;
     assert(opt.live_count == 5);
-    assert(logic::block_input_count(opt) == 6);
+    assert(logic::block_input_count(opt) == 4);
     assert(logic::block_output_count(opt) == 2);
-    const std::vector<std::size_t> proj{0, 1, 2, 2, 3, 3};
+    const std::vector<std::size_t> proj{2, 3, 0, 1};
     check_equiv_proj(nl, opt, proj);
   }
 }
 
 void test_optimize_o2_const_pool() {
   // A constant-0 output (AND with both inputs tied) converts under NAND
-  // through the shared C0 pool: 1 -> 4 gates, still 0 inputs, still LOW.
+  // through the shared pool with a dedicated sink: 1 -> 2 gates
+  // (shared C1 + dedicated C0 sink), still 0 inputs, still LOW.
   Netlist nl;
   assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
   auto p1 = logic::parse_pin(nl, "AND1.1");
@@ -1283,7 +1290,7 @@ void test_optimize_o2_const_pool() {
   auto r = logic::optimize(nl, o2);
   assert(r.ok());
   Netlist opt = r.value;
-  assert(opt.live_count == 4);
+  assert(opt.live_count == 2);
   for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
     if (opt.gates[s].live) {
       assert(opt.gates[s].kind == GateKind::kNand);
@@ -1362,6 +1369,9 @@ void test_optimize_sampled_large() {
 void test_optimize_report() {
   // Gate-count report golden (the before/after numbers LOGIC-8's `optimize`
   // verb will print): AND(a,b) -> NOT -> NOT -> OR(c) -> out, 4 gates.
+  // O0/O1 fuse the double negation (4->2). O2(nand) is 4->3 (double-inversion
+  // cancellation across the AND/OR boundary saves 2 gates vs naive 5);
+  // O2(nor) is 4->3 (POS minimization (a|c)&(b|c) beats naive 5).
   Netlist nl;
   assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
   assert(logic::add_gate(nl, GateKind::kNot, 1).ok());
@@ -1382,12 +1392,12 @@ void test_optimize_report() {
   logic::OptimizeOptions o2n;
   o2n.level = logic::OptLevel::kO2;
   auto r2n = logic::optimize(nl, o2n);
-  assert(r2n.ok() && r2n.value.live_count == 5);
+  assert(r2n.ok() && r2n.value.live_count == 3);
   logic::OptimizeOptions o2r;
   o2r.level = logic::OptLevel::kO2;
   o2r.target = logic::OptTarget::kNor;
   auto r2r = logic::optimize(nl, o2r);
-  assert(r2r.ok() && r2r.value.live_count == 5);
+  assert(r2r.ok() && r2r.value.live_count == 3);
   std::cout << "optimize report: O0: " << before << " -> " << r0.value.live_count << "; O1: " << before
             << " -> " << r1.value.live_count << "; O2(nand): " << before << " -> "
             << r2n.value.live_count << "; O2(nor): " << before << " -> " << r2r.value.live_count

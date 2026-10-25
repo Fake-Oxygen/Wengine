@@ -1106,19 +1106,18 @@ void test_logic_verbs() {
       auto [rc, s] = run("logic optimize --level O2");
       assert(rc == 0);
       assert(s.find("2 -> 2 gates") != std::string::npos);
-      assert(s.find("2 inputs [AND1.2 OR1.2] -> 2 inputs [NAND1.1 NAND1.2]") != std::string::npos);
+      assert(s.find("2 inputs [AND1.2 OR1.2] -> 1 inputs [NAND1.1]") != std::string::npos);
       assert(s.find("1 outputs [OR1.Y] -> 1 outputs [NAND2.Y]") != std::string::npos);
       assert(s.find("pin replication") != std::string::npos);
     }
-    // Replicated assignments agree with the pre-optimize function
-    // (out = OR1.2 = c): (0,0) -> 0 and (1,1) -> 1.
+    // Minimized keeps one input (c): 0 -> 0 and 1 -> 1.
     {
-      auto [rc, s] = run("logic solve --in 00");
+      auto [rc, s] = run("logic solve --in 0");
       assert(rc == 0);
       assert(s.find("NAND2.Y=0") != std::string::npos);
     }
     {
-      auto [rc, s] = run("logic solve --in 11");
+      auto [rc, s] = run("logic solve --in 1");
       assert(rc == 0);
       assert(s.find("NAND2.Y=1") != std::string::npos);
     }
