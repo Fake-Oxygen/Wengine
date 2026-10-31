@@ -32,8 +32,10 @@ enum class GateKind : std::uint8_t {
   kNot = 6,
   kBuf = 7,
   // V2 sequential (LOGIC-V2-SEQ1): DFF = edge-triggered D + CLK,
-  // DLATCH = level-sensitive D + EN. Both take exactly 2 inputs
-  // (valid_fanin). No eval/state change in SEQ1 — vocabulary only.
+  // DLATCH = level-sensitive D + EN. DFF takes 2 (bare D+CLK, default)
+  // or 5 inputs (full control set D+CLK+RST+SET+EN, opt-in);
+  // DLATCH takes exactly 2 (valid_fanin). No eval/state change in
+  // SEQ1 — vocabulary only.
   kDff = 16,
   kDlatch = 17,
 };

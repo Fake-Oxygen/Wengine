@@ -23,6 +23,12 @@
 //   refines this same function.
 // - DFF and DLATCH both capture D on the edge in SEQ4 (documented
 //   simplification; SEQ8 gives DLATCH transparent-when-EN behavior).
+// - Full-control DFFs (5 inputs: D/CLK/RST/SET/EN) resolve with total
+//   priority RST > SET > EN-hold > D (reset wins simultaneous RST+SET).
+//   RST/SET are asynchronous (see apply_async_controls below); EN gates
+//   only the edge capture. Unconnected RST/SET read inactive (kLow);
+//   unconnected EN reads asserted (kHigh, FR-008). Bare 2-input flops
+//   behave exactly as before (controls absent → inactive).
 // - X/Z rejected loudly: block inputs must be kLow/kHigh (same rule as
 //   solve()), flop Qs are always kLow/kHigh by construction (power-on kLow,
 //   commits only write snapshots resolved to kLow/kHigh); any other value
@@ -174,38 +180,11 @@ namespace detail {
   return true;
 }
 
-} // namespace detail
-
-// Single rising edge over a flop subset (T013: selective clock domains).
-// Null `members` steps every live flop (the global SEQ4 edge); otherwise
-// only listed slots snapshot/commit, in slot order (parallel update among
-// members, same as the global edge). Combinational settle (phase 1 and
-// phase 2) is always whole-netlist, so observed outputs are end-of-step
-// values. Otherwise the SEQ4 contract above holds unchanged: validation
-// first, untouched state on failure, no Netlist topology mutation.
-[[nodiscard]] inline core::Status seq_step_filtered(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
-                                                   std::span<LogicValue> block_outputs, const std::uint16_t *members,
-                                                   std::size_t n_members) noexcept {
-  init_seq_state(st, nl);
-  if (!validate_sequential(nl).ok()) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  const std::size_t n_in = block_input_count(nl);
-  const std::size_t n_out = block_output_count(nl);
-  if (block_inputs.size() != n_in || block_outputs.size() != n_out) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  // Defensive: Qs are Low/High by construction (power-on Low, commits write
-  // snapshots only). A corrupted pool (or a future tri-state Q) fails loudly
-  // before any eval reads it.
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (st.valid[s] != 0 && st.q[s] != LogicValue::kLow && st.q[s] != LogicValue::kHigh) {
-      return core::Status::failure(core::StatusCode::kInvalidArgument);
-    }
-  }
-  // Dangling-input resolution (same order/rules as solve): leaders consume
-  // block_inputs in slot order, X/Z rejected; ignored pins tie to kLow.
-  LogicValue resolved[kMaxGates * kMaxInputs];
+// Dangling-input resolution (shared prelude for stepping and async-apply):
+// leaders consume block_inputs in slot order, X/Z rejected; ignored pins
+// tie to kLow. Callee zeroes resolved[kMaxGates * kMaxInputs] first.
+[[nodiscard]] inline core::Status compose_resolved(const Netlist &nl, std::span<const LogicValue> block_inputs,
+                                                  LogicValue *resolved) noexcept {
   for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
     resolved[i] = LogicValue::kLow;
   }
@@ -259,15 +238,19 @@ namespace detail {
       }
     }
   }
+  return core::Status::success();
+}
 
-  std::uint16_t comb_order[kMaxGates];
-  std::size_t n_comb = 0;
-  if (!detail::compile_comb_order(nl, comb_order, n_comb)) {
+// Phase 1 combinational eval at time T with OLD Qs (shared): seeds
+// gate_out with flop Qs, then settles combinational gates in the
+// deterministic comb order. Used by the stepper snapshot and the
+// async-apply path alike so wired RST/SET resolve identically.
+[[nodiscard]] inline core::Status eval_comb_phase1(const Netlist &nl, const SeqState &st, const LogicValue *resolved,
+                                                  LogicValue *gate_out, std::uint16_t *comb_order,
+                                                  std::size_t &n_comb) noexcept {
+  if (!compile_comb_order(nl, comb_order, n_comb)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-
-  // Phase 1: combinational eval at time T with OLD Qs.
-  LogicValue gate_out[kMaxGates];
   for (std::size_t s = 0; s < kMaxGates; ++s) {
     gate_out[s] = LogicValue::kLow;
   }
@@ -281,15 +264,93 @@ namespace detail {
     const std::uint16_t s = comb_order[oi];
     const Gate &g = nl.gates[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (!detail::resolve_step_input(nl, s, i, gate_out, resolved, ins[i])) {
+      if (!resolve_step_input(nl, s, i, gate_out, resolved, ins[i])) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
     }
     gate_out[s] = eval_gate(g.kind, ins, g.input_count);
   }
+  return core::Status::success();
+}
+
+// DFF control-pin resolution (full-control flops). Wired pins resolve the
+// net (with NQ polarity); dangling pins read the pre-resolved block value
+// (poke value, tie share, or dangling Low — except ignored dangling EN,
+// which reads kHigh: FR-008 unconnected enable is asserted). Pins absent
+// from the flop's fan-in read the inactive default (RST/SET kLow,
+// EN kHigh). X/Z anywhere fails loudly. Pure readout: no state mutated.
+[[nodiscard]] inline bool resolve_control(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
+                                         const LogicValue *gate_out, const LogicValue *resolved,
+                                         LogicValue &out) noexcept {
+  const Gate &g = nl.gates[slot];
+  if (input >= g.input_count) {
+    out = (g.kind == GateKind::kDff && input == 4) ? LogicValue::kHigh : LogicValue::kLow;
+    return true;
+  }
+  if (g.drivers[input] == kNoDriver && (g.ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0 &&
+      g.kind == GateKind::kDff && input == 4) {
+    out = LogicValue::kHigh;
+    return true;
+  }
+  if (g.drivers[input] != kNoDriver) {
+    return resolve_step_input(nl, slot, input, gate_out, resolved, out);
+  }
+  const LogicValue v = resolved[static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input)];
+  if (v != LogicValue::kLow && v != LogicValue::kHigh) {
+    return false;
+  }
+  out = v;
+  return true;
+}
+
+} // namespace detail
+
+// Single rising edge over a flop subset (T013: selective clock domains).
+// Null `members` steps every live flop (the global SEQ4 edge); otherwise
+// only listed slots snapshot/commit, in slot order (parallel update among
+// members, same as the global edge). Combinational settle (phase 1 and
+// phase 2) is always whole-netlist, so observed outputs are end-of-step
+// values. Otherwise the SEQ4 contract above holds unchanged: validation
+// first, untouched state on failure, no Netlist topology mutation.
+[[nodiscard]] inline core::Status seq_step_filtered(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
+                                                   std::span<LogicValue> block_outputs, const std::uint16_t *members,
+                                                   std::size_t n_members) noexcept {
+  init_seq_state(st, nl);
+  if (!validate_sequential(nl).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  const std::size_t n_in = block_input_count(nl);
+  const std::size_t n_out = block_output_count(nl);
+  if (block_inputs.size() != n_in || block_outputs.size() != n_out) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  // Defensive: Qs are Low/High by construction (power-on Low, commits write
+  // snapshots only). A corrupted pool (or a future tri-state Q) fails loudly
+  // before any eval reads it.
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (st.valid[s] != 0 && st.q[s] != LogicValue::kLow && st.q[s] != LogicValue::kHigh) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+  }
+  // Dangling-input resolution (same order/rules as solve): leaders consume
+  // block_inputs in slot order, X/Z rejected; ignored pins tie to kLow.
+  LogicValue resolved[kMaxGates * kMaxInputs];
+  if (!detail::compose_resolved(nl, block_inputs, resolved).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+
+  std::uint16_t comb_order[kMaxGates];
+  std::size_t n_comb = 0;
+  LogicValue gate_out[kMaxGates];
+  if (!detail::eval_comb_phase1(nl, st, resolved, gate_out, comb_order, n_comb).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
 
   // Snapshot: D (input 0) for every flop + CLK/EN (input 1) validation, in
-  // slot order. X/Z anywhere fails before any commit (state untouched).
+  // slot order. Full-control DFFs additionally resolve RST/SET/EN with
+  // priority RST > SET > EN-hold > D (reset wins RST+SET; EN=Low holds Q).
+  // D/CLK resolve first so X/Z there fails loudly even for held flops.
+  // X/Z anywhere fails before any commit (state untouched).
   LogicValue next_q[kMaxGates];
   for (std::size_t s = 0; s < kMaxGates; ++s) {
     next_q[s] = LogicValue::kLow;
@@ -314,6 +375,28 @@ namespace detail {
         (clk != LogicValue::kLow && clk != LogicValue::kHigh)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
+    if (g.kind == GateKind::kDff && g.input_count > 2) {
+      LogicValue rst = LogicValue::kLow;
+      LogicValue set = LogicValue::kLow;
+      LogicValue en = LogicValue::kHigh;
+      if (!detail::resolve_control(nl, s, 2, gate_out, resolved, rst) ||
+          !detail::resolve_control(nl, s, 3, gate_out, resolved, set) ||
+          !detail::resolve_control(nl, s, 4, gate_out, resolved, en)) {
+        return core::Status::failure(core::StatusCode::kInvalidArgument);
+      }
+      if (rst == LogicValue::kHigh) {
+        next_q[s] = LogicValue::kLow;
+        continue;
+      }
+      if (set == LogicValue::kHigh) {
+        next_q[s] = LogicValue::kHigh;
+        continue;
+      }
+      if (en == LogicValue::kLow) {
+        next_q[s] = st.q[s]; // synchronous hold: D ignored this edge
+        continue;
+      }
+    }
     // SEQ4: edge capture for both kinds (DLATCH level semantics in SEQ8).
     // CLK/EN validated above; the edge itself is the call.
     next_q[s] = d;
@@ -328,6 +411,7 @@ namespace detail {
   }
 
   // Phase 2: zero-delay re-settle with NEW Qs for end-of-step outputs.
+  LogicValue ins[kMaxInputs];
   for (std::size_t oi = 0; oi < n_comb; ++oi) {
     const std::uint16_t s = comb_order[oi];
     const Gate &g = nl.gates[s];
@@ -369,6 +453,68 @@ namespace detail {
 [[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
                                           std::span<LogicValue> block_outputs) noexcept {
   return seq_step_filtered(nl, st, block_inputs, block_outputs, nullptr, 0);
+}
+
+// Immediate async-apply for full-control DFFs (FR-002/FR-003): resolves
+// RST/SET nets for every live 5-input DFF and forces Q per priority
+// (RST→0, else SET→1), in slot order — taking effect with no clock
+// advance. Session calls this after every control-net mutation
+// (poke/wire/tie/load) and at step top; it never touches cycle counters,
+// EN, or D, and is a success no-op on nets without full-control flops.
+// Resolve-all-then-commit: X/Z on any resolved control fails loudly with
+// state untouched. Same validation/size contract as seq_step_filtered.
+[[nodiscard]] inline core::Status apply_async_controls(Netlist &nl, SeqState &st,
+                                                      std::span<const LogicValue> block_inputs) noexcept {
+  init_seq_state(st, nl);
+  if (!validate_sequential(nl).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  const std::size_t n_in = block_input_count(nl);
+  if (block_inputs.size() != n_in) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (st.valid[s] != 0 && st.q[s] != LogicValue::kLow && st.q[s] != LogicValue::kHigh) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+  }
+  LogicValue resolved[kMaxGates * kMaxInputs];
+  if (!detail::compose_resolved(nl, block_inputs, resolved).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  LogicValue gate_out[kMaxGates];
+  std::uint16_t comb_order[kMaxGates];
+  std::size_t n_comb = 0;
+  if (!detail::eval_comb_phase1(nl, st, resolved, gate_out, comb_order, n_comb).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  LogicValue forced_q[kMaxGates];
+  bool force[kMaxGates] = {};
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live || !is_sequential_kind(g.kind) || g.kind != GateKind::kDff || g.input_count <= 2) {
+      continue;
+    }
+    LogicValue rst = LogicValue::kLow;
+    LogicValue set = LogicValue::kLow;
+    if (!detail::resolve_control(nl, s, 2, gate_out, resolved, rst) ||
+        !detail::resolve_control(nl, s, 3, gate_out, resolved, set)) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    if (rst == LogicValue::kHigh) {
+      forced_q[s] = LogicValue::kLow;
+      force[s] = true;
+    } else if (set == LogicValue::kHigh) {
+      forced_q[s] = LogicValue::kHigh;
+      force[s] = true;
+    }
+  }
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (force[s]) {
+      st.q[s] = forced_q[s];
+    }
+  }
+  return core::Status::success();
 }
 
 // Convenience: step with block outputs discarded (state observed via

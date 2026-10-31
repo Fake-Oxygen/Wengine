@@ -50,6 +50,9 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
   } else if (wengine::logic::is_sequential_kind(g.kind)) {
     if (input == 0) {
       s += 'D';
+    } else if (g.kind == GateKind::kDff && input >= 2) {
+      // Full control set (5-input flops): canonical named forms.
+      s += (input == 2) ? "RST" : (input == 3) ? "SET" : "EN";
     } else {
       s += (g.kind == GateKind::kDff) ? "CLK" : "EN";
     }

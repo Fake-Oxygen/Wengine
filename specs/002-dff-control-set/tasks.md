@@ -23,7 +23,7 @@ core.
 
 **Purpose**: Baseline gate before any change
 
-- [ ] T001 Verify clean baseline in repo root: `cmake -S . -B build -DBUILD_TESTS=ON && cmake --build build && ctest --test-dir build --output-on-failure` passes with zero warnings
+- [X] T001 Verify clean baseline in repo root: `cmake -S . -B build -DBUILD_TESTS=ON && cmake --build build && ctest --test-dir build --output-on-failure` passes with zero warnings
 
 ---
 
@@ -35,11 +35,11 @@ behavior change yet for D-only netlists (dangling-inactive defaults).
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T002 DFF 5-pin vocabulary in `include/wengine/logic/netlist.hpp`: `valid_fanin(kDff)` accepts 2 or 5 (`default_fanin` stays 2); `parse_pin` accepts case-insensitive `RST`/`SET`/`EN` on DFF at indices 2/3/4 with numeric aliases `.3`/`.4`/`.5`; DLATCH pins unchanged
-- [ ] T003 [P] YAML 2|5 support in `src/logic/yaml_store.cpp`: loader accepts DFF `inputs: 2` (pins 2–4 dangling-inactive fallback) and `inputs: 5` with `ignore:` indices over 1..5; writer emits canonical `RST`/`SET`/`EN` names via `pin_text` and `inputs: 5`
-- [ ] T004 [P] Priority resolver + snapshot in `include/wengine/logic/seq_step.hpp`: new `noexcept` allocation-free helper `apply_async_controls(nl, st, block_inputs)` (slot order; `RST`→Q=0, else `SET`→Q=1; global across step-member subsets); `seq_step_filtered` snapshot resolves `RST`/`SET`/`EN` per flop in slot order per truth table `RST(1,*,*,*)→0; (0,1,*,*)→1; (0,0,0,*)→hold; (0,0,1,d)→d`, X/Z on any control fails loudly without committing
-- [ ] T005 [P] Engine truth-table unit tests in `tests/test_logic_seq_controls.cpp` (new file, `test_x: OK` plain-assert, links `wengine_test_assert`): every row of the research.md R3 table asserted with `==`, plus dangling-default rows (`inputs: 2` flop ≡ all-inactive) and `register with add_executable` + `add_test` in `tests/CMakeLists.txt`
-- [ ] T006 Rebuild + narrowest-tests gate in repo root: new engine tests plus existing `test_logic_seq_*` suites pass (proves zero-migration at engine level)
+- [X] T002 DFF 5-pin vocabulary in `include/wengine/logic/netlist.hpp`: `valid_fanin(kDff)` accepts 2 or 5 (`default_fanin` stays 2); `parse_pin` accepts case-insensitive `RST`/`SET`/`EN` on DFF at indices 2/3/4 with numeric aliases `.3`/`.4`/`.5`; DLATCH pins unchanged
+- [X] T003 YAML 2|5 support in `src/logic/yaml_store.cpp`: loader accepts DFF `inputs: 2` (pins 2–4 dangling-inactive fallback) and `inputs: 5` with `ignore:` indices over 1..5; writer emits canonical `RST`/`SET`/`EN` names via `pin_text` and `inputs: 5`
+- [X] T004 [P] Priority resolver + snapshot in `include/wengine/logic/seq_step.hpp`: new `noexcept` allocation-free helper `apply_async_controls(nl, st, block_inputs)` (slot order; `RST`→Q=0, else `SET`→Q=1; global across step-member subsets); `seq_step_filtered` snapshot resolves `RST`/`SET`/`EN` per flop in slot order per truth table `RST(1,*,*,*)→0; (0,1,*,*)→1; (0,0,0,*)→hold; (0,0,1,d)→d`, X/Z on any control fails loudly without committing
+- [X] T005 Engine truth-table unit tests in `tests/test_logic_seq_controls.cpp` (new file, `test_x: OK` plain-assert, links `wengine_test_assert`): every row of the research.md R3 table asserted with `==`, plus dangling-default rows (`inputs: 2` flop ≡ all-inactive) and `register with add_executable` + `add_test` in `tests/CMakeLists.txt`
+- [X] T006 Rebuild + narrowest-tests gate in repo root: new engine tests plus existing `test_logic_seq_*` suites pass (proves zero-migration at engine level)
 
 **Checkpoint**: Foundation ready — pins parse, priority resolves in engine, legacy netlists untouched; session wiring can now begin
 

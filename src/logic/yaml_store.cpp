@@ -56,11 +56,14 @@ namespace {
   } else if (is_output) {
     s += 'Y';
   } else if (is_sequential_kind(g.kind)) {
-    // Canonical named inputs (FR-010): DFF D/CLK, DLATCH D/EN.
-    if (input != 0) {
-      s += (g.kind == GateKind::kDff) ? "CLK" : "EN";
-    } else {
+    // Canonical named inputs: DFF D/CLK (+RST/SET/EN on full-control
+    // flops), DLATCH D/EN.
+    if (input == 0) {
       s += 'D';
+    } else if (g.kind == GateKind::kDff && input >= 2) {
+      s += (input == 2) ? "RST" : (input == 3) ? "SET" : "EN";
+    } else {
+      s += (g.kind == GateKind::kDff) ? "CLK" : "EN";
     }
   } else {
     s += std::to_string(static_cast<unsigned>(input) + 1u);

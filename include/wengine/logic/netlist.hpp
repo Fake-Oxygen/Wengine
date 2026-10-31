@@ -92,8 +92,13 @@ struct BlockPin {
   if (k == GateKind::kNot || k == GateKind::kBuf) {
     return n == 1;
   }
-  if (k == GateKind::kDff || k == GateKind::kDlatch) {
-    return n == 2; // D+CLK (DFF) / D+EN (DLATCH)
+  if (k == GateKind::kDff) {
+    // Bare D+CLK (2) or full control set D+CLK+RST+SET+EN (5, opt-in via
+    // `add DFF --inputs 5`); bare flops stay the default (zero-migration).
+    return n == 2 || n == 5;
+  }
+  if (k == GateKind::kDlatch) {
+    return n == 2; // D+EN (DFF) / D+EN (DLATCH)
   }
   return n >= 2 && n <= kMaxInputs;
 }
@@ -102,7 +107,8 @@ struct BlockPin {
   if (k == GateKind::kNot || k == GateKind::kBuf) {
     return 1;
   }
-  // Combinational 2..8 default 2; DFF/DLATCH take exactly 2 (D + CLK/EN).
+  // Combinational 2..8 default 2; DFF/DLATCH default 2 (D + CLK/EN).
+  // The DFF full control set is opt-in (`add DFF --inputs 5`).
   return 2;
 }
 
@@ -251,9 +257,10 @@ namespace detail {
 
 // Parse `<NAME>.Y` (output) or `<NAME>.<1..k>` (input, 1-based in text).
 // Sequential gates additionally accept named pins (FR-010/FR-011,
-// case-insensitive): DFF `D`/`CLK`/`Q`/`NQ`, DLATCH `D`/`EN`/`Q`/`NQ`.
-// Numeric aliases keep working for all kinds; names on combinational
-// kinds are rejected.
+// case-insensitive): DFF `D`/`CLK`/`Q`/`NQ` on every flop, plus `RST`/
+// `SET`/`EN` on full-control (5-input) flops only; DLATCH `D`/`EN`/`Q`/
+// `NQ`. Numeric aliases keep working for all kinds; names on
+// combinational kinds are rejected.
 // Input range validates against the gate's configured fan-in.
 [[nodiscard]] inline core::Result<PinRef> parse_pin(const Netlist &nl, std::string_view text) noexcept {
   std::size_t dot = text.find('.');
@@ -294,6 +301,33 @@ namespace detail {
       ref.is_output = false;
       ref.input = 1;
       return core::Result<PinRef>::success(ref);
+    }
+    // DFF full control set (5-input flops via `add DFF --inputs 5`):
+    // async reset/set + clock enable. Each name is valid only when the
+    // flop was created with that input — bare 2-input flops reject them
+    // exactly like out-of-range numerics (`.3`) do below.
+    if (g.kind == GateKind::kDff) {
+      if (g.input_count > 2 && match_pin_name(suffix, "RST")) {
+        PinRef ref{};
+        ref.slot = slot;
+        ref.is_output = false;
+        ref.input = 2;
+        return core::Result<PinRef>::success(ref);
+      }
+      if (g.input_count > 3 && match_pin_name(suffix, "SET")) {
+        PinRef ref{};
+        ref.slot = slot;
+        ref.is_output = false;
+        ref.input = 3;
+        return core::Result<PinRef>::success(ref);
+      }
+      if (g.input_count > 4 && match_pin_name(suffix, "EN")) {
+        PinRef ref{};
+        ref.slot = slot;
+        ref.is_output = false;
+        ref.input = 4;
+        return core::Result<PinRef>::success(ref);
+      }
     }
     if (match_pin_name(suffix, "Q")) {
       PinRef ref{};

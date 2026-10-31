@@ -119,6 +119,37 @@ expand scope and risk the SEQ8 design space.
 
 ## R7. What changes per file (grounded in current tree)
 
+## R8. Opt-in vs. default-5 (implementation addendum, 2026-10-31, Phases 1–2)
+
+**Decision**: `default_fanin(kDff)` stays 2; the full control set is
+opt-in per flop via the existing `add DFF --inputs 5` option. No
+auto-ignore, no poke exception, no hidden-state machinery.
+
+**Rationale**: A default-5 design would need auto-ignored control pins
+(to keep listings/interfaces stable), a poke-mutates-ignore exception
+(to honor "hidden until driven"), and YAML writer churn — all new
+session semantics for zero user gain over the existing `--inputs`
+spelling that `add` already offers for fan-in (used by AND gates).
+Opt-in keeps every existing golden bit-identical (proven: full suite
+72/72 with zero existing-test edits) and matches the feature premise
+("bare D-only flops" remain the default; the control set is the upgrade).
+
+**Consequences for later phases**:
+- Spec edge-case bullet ("stays hidden from listings until explicitly
+  wired or driven") is stale → rewrite in Phase 6 (T018) to: control
+  pins exist only on 5-input flops and behave like normal pins there;
+  dangling controls read inactive (RST/SET Low, EN High per FR-008).
+- Contracts C2/C4 and quickstart scenarios assume default pins → prefix
+  with `add DFF --inputs 5` when T007/T015–T020 touch those files.
+- T007 (US1 session wiring) MUST include the `compose_block_inputs`
+  EN-default rule: exposed dangling driverless DFF EN composes High
+  unless poked (FR-008 "enable asserted"); ignored dangling EN is
+  already High via the engine rule in `resolve_control`. Without this,
+  fresh 5-input flops would freeze on the compose Low default.
+- Engine `resolve_control` inactive defaults (RST/SET Low, EN High) and
+  the ignored-dangling-EN→High exception already land in T004; 2-input
+  DFFs skip the control block (treated enabled).
+
 - `include/wengine/logic/netlist.hpp`: `valid_fanin` (DFF `{2,5}`),
   `default_fanin` stays 2 (bare `add DFF` = D-only, zero-migration),
   `parse_pin` named `RST`/`SET`/`EN` on DFF (indices 2/3/4),
