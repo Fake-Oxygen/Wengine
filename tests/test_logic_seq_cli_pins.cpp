@@ -120,29 +120,32 @@ void test_nq_wiring_counts() {
   assert(g.output_fanout == 0); // Q untouched
   assert(g.nq_fanout == 1);
   assert(nl.driver_inv[static_cast<std::size_t>(1) * logic::kMaxInputs + 0] != 0);
-  // Q and NQ are both wired: the flop contributes no block outputs.
+  // Q and NQ are both wired: the flop contributes no block outputs
+  // (a dangling NQ would be hidden by the default ignore instead).
   assert(!logic::wire_text(nl, "DFF1.Q", "NOT1.1").ok()); // occupied input
-  // Fresh flop with both outputs dangling contributes two block outputs.
+  // Fresh flop with dangling Q: NQ is ignored by default, so one output.
   Netlist nl2;
   assert(logic::add_gate(nl2, GateKind::kDff, 2).ok());
-  assert(logic::block_output_count(nl2) == 2); // Q then NQ
-  // Ignoring NQ removes just the NQ column.
+  assert(logic::block_output_count(nl2) == 1); // Q only
+  // Ignoring the already-ignored NQ is a no-op; `use` re-exposes it.
   assert(logic::ignore_pin(nl2, logic::parse_pin(nl2, "DFF1.NQ").value).ok());
   assert(logic::block_output_count(nl2) == 1);
   assert(logic::use_pin(nl2, logic::parse_pin(nl2, "DFF1.NQ").value).ok());
-  assert(logic::block_output_count(nl2) == 2);
+  assert(logic::block_output_count(nl2) == 2); // Q then NQ
   // Unwire clears the polarity with the wire.
   assert(logic::unwire(nl, 1, 0).ok());
   assert(nl.gates[d].nq_fanout == 0);
   assert(nl.driver_inv[static_cast<std::size_t>(1) * logic::kMaxInputs + 0] == 0);
-  assert(logic::block_output_count(nl) == 3); // DFF.Q + DFF.NQ + NOT.Y dangling
+  assert(logic::block_output_count(nl) == 2); // DFF.Q + NOT.Y (NQ ignored)
 }
 
 void test_nq_read_time_values() {
   // NQ is read-time NOT Q: power-on Low/High, then tracks every step.
+  // NQ is explicitly `use`d here (ignored by default, so no output column).
   Netlist nl;
   assert(logic::add_gate(nl, GateKind::kDff, 2).ok());
   assert(logic::ignore_pin(nl, logic::parse_pin(nl, "DFF1.CLK").value).ok());
+  assert(logic::use_pin(nl, logic::parse_pin(nl, "DFF1.NQ").value).ok());
   SeqState st;
   LogicValue d = kH;
   LogicValue out[2] = {kL, kL};

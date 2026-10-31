@@ -364,10 +364,13 @@ namespace detail {
   g.input_count = inputs;
   g.ignored_mask = 0;
   g.ignore_output = false;
+  g.ignore_nq_output = is_sequential_kind(kind); // NQ hidden unless `use`d
   g.output_fanout = 0;
+  g.nq_fanout = 0;
   g.propagation_delay_ps = 0;
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     g.drivers[i] = kNoDriver;
+    nl.driver_inv[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0;
     nl.tie_rep[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0;
   }
   if (nl.live_count < kMaxGates) {
@@ -479,7 +482,7 @@ namespace detail {
   g.live = false;
   g.ignored_mask = 0;
   g.ignore_output = false;
-  g.ignore_nq_output = false;
+  g.ignore_nq_output = true; // fresh-state default (NQ hidden unless `use`d)
   g.output_fanout = 0;
   g.nq_fanout = 0;
   g.input_count = default_fanin(g.kind);
@@ -759,7 +762,7 @@ inline void reset_netlist(Netlist &nl) noexcept {
     g.input_count = 2;
     g.ignored_mask = 0;
     g.ignore_output = false;
-    g.ignore_nq_output = false;
+    g.ignore_nq_output = true; // fresh-state default (NQ hidden unless `use`d)
     g.output_fanout = 0;
     g.nq_fanout = 0;
     g.propagation_delay_ps = 0;

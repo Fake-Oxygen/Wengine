@@ -152,7 +152,9 @@ other new action.
   help, listings, and saved files MUST show the named forms.
 - **FR-011**: Every flop MUST also expose `NQ` (negated Q) as a second
   wireable output; `NQ` MUST always read NOT Q, including power-on
-  state and immediately after every step.
+  state and immediately after every step. Dangling `NQ` is ignored by
+  default (hidden from listings and block outputs until explicitly
+  `use`d or wired); `peek` always shows both Q and NQ regardless.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -171,8 +173,9 @@ other new action.
   pin (`D`, `CLK`/`EN`, `Q`, `NQ` per kind); numeric forms are accepted
   aliases, canonical display is named, matching is case-insensitive.
 - **NQ Output**: The second output of a flop, always the negation of Q,
-  wireable to any input (sinks read inverted Q) and reported alongside
-  Q wherever flop state is shown.
+  wireable to any input (sinks read inverted Q). Dangling `NQ` is
+  ignored by default and reported alongside Q wherever flop state is
+  shown (`peek`, `list` ignored section); `use` re-exposes it.
 
 ## Success Criteria *(mandatory)*
 

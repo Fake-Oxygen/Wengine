@@ -80,7 +80,9 @@ All ordering is slot order unless stated.
 - **Fields**: `PinRef`/`BlockPin` output selector; `Netlist` per-sink
   polarity array (zero = non-inverted); `nq_fanout` per gate
   (`output_fanout` keeps Q-only semantics); per-NQ ignore flag
-  (`ignore_output` keeps Q-only semantics).
+  (`ignore_output` keeps Q-only semantics), defaulting to ignored so
+  dangling NQ stays out of listings and block outputs until explicitly
+  `use`d (wiring bypasses the flag; `peek` reads state directly).
 - **Transitions**: `wire DFF1.NQ X.1` → edge stored + polarity set +
   `nq_fanout++`; `unwire X.1` → edge cleared + polarity cleared +
   counter decremented; `remove_gate` → all incident edges and their

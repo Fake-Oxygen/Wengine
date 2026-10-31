@@ -27,7 +27,8 @@ void no_history(cli::Shell &sh) { sh.set_history_file(""); }
 
 // Toggle flop: NOT1.Y -> DFF1.D, then DFF1.Q -> NOT1.1 (D-first order:
 // the incremental cycle check trips on Q-fanout-first wiring), CLK
-// ignored. Power-on Q=0; edge 1 latches D=NOT(0)=1.
+// ignored, NQ explicitly `use`d (ignored by default). Power-on Q=0;
+// edge 1 latches D=NOT(0)=1.
 void build_toggle(cli::Shell &sh, std::ostringstream &out) {
   assert(sh.execute("logic reset", out) == 0);
   assert(sh.execute("logic add DFF", out) == 0);
@@ -35,6 +36,7 @@ void build_toggle(cli::Shell &sh, std::ostringstream &out) {
   assert(sh.execute("logic wire NOT1.Y DFF1.D", out) == 0);
   assert(sh.execute("logic wire DFF1.Q NOT1.1", out) == 0);
   assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic use DFF1.NQ", out) == 0);
 }
 
 int run_step_direct(std::ostringstream &out, std::initializer_list<std::string_view> toks) {
@@ -177,6 +179,29 @@ void test_determinism_replay() {
   assert(out.str() == run1);
 }
 
+void test_nq_ignored_by_default() {
+  // Without an explicit `use`, a dangling NQ stays out of step reports
+  // and the block interface — while `list` shows it under ignored.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic ignore DFF1.D", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "clk: cycle 1 (1 edges)"));
+  assert(contains(out.str(), "DFF1.Q: 0 (no change)"));
+  assert(!contains(out.str(), "DFF1.NQ="));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic list --iface", out) == 0);
+  assert(contains(out.str(), "outputs (1):")); // Q only; NQ hidden
+  assert(contains(out.str(), "DFF1.NQ"));      // ...but reported under ignored
+}
+
 void test_complete() {
   cli::Shell sh;
   no_history(sh);
@@ -233,6 +258,7 @@ int main() {
   test_selective_domains();
   test_errors_changeless();
   test_determinism_replay();
+  test_nq_ignored_by_default();
   test_complete();
   std::cout << "test_logic_seq_cli_step: OK\n";
   return 0;

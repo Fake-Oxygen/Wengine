@@ -71,9 +71,9 @@ void test_counter_2bit() {
   ignore_input(nl, 1, 1); // DFF2.CLK ignored
   assert(logic::validate_sequential(nl).ok());
   assert(logic::block_input_count(nl) == 0);
-  // No Q outputs dangle (both feed logic), but each flop's NQ dangles:
-  // one NQ block output per flop in slot order.
-  assert(logic::block_output_count(nl) == 2);
+  // No Q outputs dangle (both feed logic) and NQ is ignored by default:
+  // the counter exposes no block outputs until `use`d or wired.
+  assert(logic::block_output_count(nl) == 0);
 
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
@@ -109,9 +109,9 @@ void test_shift_register_parallel_update() {
   ignore_input(nl, 0, 1);
   ignore_input(nl, 1, 1);
   assert(logic::block_input_count(nl) == 1);  // DFF0.D (SER)
-  // DFF0.NQ + DFF1.Q + DFF1.NQ dangle (DFF0.Q is wired): Q then NQ per
-  // gate in slot order.
-  assert(logic::block_output_count(nl) == 3);
+  // Only DFF1.Q dangles into the interface: DFF0.Q is wired and both NQs
+  // are ignored by default (`use` re-exposes them, covered in the pins test).
+  assert(logic::block_output_count(nl) == 1);
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
@@ -121,13 +121,11 @@ void test_shift_register_parallel_update() {
   const LogicValue want_q1[3] = {kL, kH, kL};
   const LogicValue want_out[3] = {kL, kH, kL};
   for (int i = 0; i < 3; ++i) {
-    LogicValue out[3] = {kL, kL, kL};
-    assert(logic::seq_step(nl, st, std::span<const LogicValue>(&ser[i], 1), std::span<LogicValue>(out, 3)).ok());
+    LogicValue out[1] = {kL};
+    assert(logic::seq_step(nl, st, std::span<const LogicValue>(&ser[i], 1), std::span<LogicValue>(out, 1)).ok());
     assert(st.q[0] == want_q0[i]);
     assert(st.q[1] == want_q1[i]);
-    assert(out[0] == (want_q0[i] == kH ? kL : kH)); // DFF0.NQ = NOT Q0
-    assert(out[1] == want_out[i]); // post-edge settled output (DFF1.Q)
-    assert(out[2] == (want_q1[i] == kH ? kL : kH)); // DFF1.NQ = NOT Q1
+    assert(out[0] == want_out[i]); // post-edge settled output (DFF1.Q)
   }
 }
 
@@ -192,11 +190,12 @@ void test_xz_and_size_rejected_state_untouched() {
   assert(!logic::seq_step(nl, st, std::span<const LogicValue>(&kX, 1)).ok());
   assert(st.q[0] == kH);
   // Size mismatches fail loudly (and the 3-arg overload sizes outputs itself).
-  // One flop with Q+NQ dangling: the interface carries 2 outputs here.
+  // One flop with dangling Q (NQ ignored by default): the interface
+  // carries 1 output here.
   assert(!logic::seq_step(nl, st, std::span<const LogicValue>{}, std::span<LogicValue>{}).ok());
   assert(st.q[0] == kH);
-  LogicValue outs[3] = {kL, kL, kL};
-  assert(!logic::seq_step(nl, st, std::span<const LogicValue>(&d, 1), std::span<LogicValue>(outs, 3)).ok());
+  LogicValue outs[2] = {kL, kL};
+  assert(!logic::seq_step(nl, st, std::span<const LogicValue>(&d, 1), std::span<LogicValue>(outs, 2)).ok());
   assert(st.q[0] == kH);
   // Valid step still works after the refusals (no wedging).
   d = kL;

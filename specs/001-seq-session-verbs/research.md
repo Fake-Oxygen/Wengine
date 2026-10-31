@@ -177,7 +177,8 @@ pins it). No NEEDS CLARIFICATION markers remain.
   `resolve_step_input`) applies the inversion after `resolve_net`;
   `output_fanout` keeps Q-fanout semantics with a new additive
   `nq_fanout`; block outputs enumerate dangling Q then dangling NQ per
-  gate in slot order; `ignore` gains a per-NQ flag (new additive field,
+  gate in slot order (dangling NQ hidden unless explicitly `use`d —
+  per-NQ flag defaults to ignored, wiring bypasses it); `ignore` gains a per-NQ flag (new additive field,
   Q behavior unchanged); YAML wires persist the source text (`from:
   DFF1.NQ`, no schema bump — still `version: 2`, strict loader learns
   the suffix through `parse_pin`); slot-level `wire(nl, from, to, input)`

@@ -99,9 +99,11 @@ both raster paths consume it without changing it.
   AND1.1`); sinks read the inverted value at every evaluation (scalar,
   bit-parallel, and sequential stepping). `output_fanout` keeps Q-only
   semantics; a parallel `nq_fanout` plus per-sink polarity track NQ
-  edges. Dangling `Q` then dangling `NQ` per gate (slot order) form the
-  block outputs; `ignore`/`use` accept `DFF1.NQ` via a parallel ignore
-  flag. `peek` prints both (`DFF1.Q=1 NQ=0 (serial 0)`).
+  edges. Dangling `NQ` is ignored by default (stays out of listings
+  and block outputs until explicitly `use`d or wired — most flops
+  never use it); `ignore`/`use` accept `DFF1.NQ` via a parallel ignore
+  flag. `peek` prints both (`DFF1.Q=1 NQ=0 (serial 0)`) regardless of
+  the flag, since it reads clocked state directly.
 - Wires: single-driver rule (one wire per destination input, like real
   hardware); re-wiring an occupied input is a loud usage error, never a
   silent overwrite. Fan-out is unlimited (one output → many inputs).

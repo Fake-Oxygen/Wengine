@@ -201,3 +201,11 @@ Task: "Named-pin display + completion in src/cli/commands/logic/common.cpp"  # T
 - [Story] label maps task to user story for traceability (US1 = step, US2 = poke, US3 = peek)
 - Registry appends + `static_assert` + `CMakeLists.txt` + `add_test` ride with their feature task (never batched separately — the build must stay green after every task)
 - Constitution gates per task: determinism (slot order everywhere), correctness (goldens from existing engine vectors, never the new code), zero warnings, no Netlist field removal/renumber
+
+---
+
+## Phase 7: Convergence
+
+**Purpose**: NQ ignored-by-default (user-requested readability default)
+
+- [X] T025 Change NQ outputs to ignored-by-default (dangling NQ hidden from interface/list/outputs until explicitly `use`d or wired; `peek` unchanged) across engine defaults, `add_gate` slot-recycle hygiene, YAML loader default, affected tests, and spec/plan/contracts/quickstart/docs per FR-011 as amended by user request (contradicts)

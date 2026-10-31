@@ -30,6 +30,7 @@ printf '%s\n' \
   'wire NOT1.Y DFF1.D' \
   'wire DFF1.Q NOT1.1' \
   'ignore DFF1.CLK' \
+  'use DFF1.NQ' \
   'peek' \
   'step 1' \
   'peek' \
@@ -39,7 +40,8 @@ printf '%s\n' \
 ```
 
 Expected: first `peek` reports `DFF1.Q=0 NQ=1 (serial 0)` (power-on Q=0,
-NQ=1); after `step 1`, `clk: cycle 1 (1 edges)` plus `DFF1.Q: 0->1
+NQ=1 — NQ needs the explicit `use` since dangling NQ is ignored by
+default); after `step 1`, `clk: cycle 1 (1 edges)` plus `DFF1.Q: 0->1
 (NQ 1->0)`; after `step 2`, `clk: cycle 3 (2 edges)` with net-effect
 line `DFF1.Q: 1 (no change)` (1→0→1 across the two edges) and
 `DFF1.NQ=0`; final `peek DFF1` shows `DFF1.Q=1 NQ=0 (serial 0)`.
@@ -110,10 +112,12 @@ parity).
 
 ```sh
 printf '%s\n' 'logic' 'add DFF' 'add NOT' 'wire NOT1.Y DFF1.D' \
-  'wire DFF1.Q NOT1.1' 'ignore DFF1.CLK' 'step 100' 'peek' 'back' \
+  'wire DFF1.Q NOT1.1' 'ignore DFF1.CLK' 'use DFF1.NQ' \
+  'step 100' 'peek' 'back' \
   | ./build/PhysicsSimApp > /tmp/seq_run1.txt
 printf '%s\n' 'logic' 'add DFF' 'add NOT' 'wire NOT1.Y DFF1.D' \
-  'wire DFF1.Q NOT1.1' 'ignore DFF1.CLK' 'step 100' 'peek' 'back' \
+  'wire DFF1.Q NOT1.1' 'ignore DFF1.CLK' 'use DFF1.NQ' \
+  'step 100' 'peek' 'back' \
   | ./build/PhysicsSimApp > /tmp/seq_run2.txt
 cmp /tmp/seq_run1.txt /tmp/seq_run2.txt && echo REPLAY-IDENTICAL
 ```

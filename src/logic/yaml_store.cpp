@@ -169,8 +169,9 @@ struct TieRow {
     return false;
   }
   row.kind = parsed_kind.value;
-  // Sequential gates live in the same schema version (additive: no file
-  // predating creation support can contain them, so no fallback needed).
+  // NQ defaults to ignored on sequential gates (explicit `ignore_nq: false`
+  // re-exposes, same as the `use` verb); combinational gates never read it.
+  row.ignore_nq = is_sequential_kind(row.kind);
   if (!inputs.IsScalar()) {
     err = at_line(inputs, "bad input count (want 1..8)");
     return false;

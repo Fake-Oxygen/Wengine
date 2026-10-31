@@ -116,7 +116,9 @@ struct Gate {
   std::uint8_t input_count = 2;
   std::uint8_t ignored_mask = 0; // bit i => input (i+1) ignored
   bool ignore_output = false; // dangling output excluded from iface
-  bool ignore_nq_output = false; // dangling NQ excluded from iface (sequential only)
+  bool ignore_nq_output = true; // dangling NQ excluded from iface by default
+                                // (sequential only; `use` re-exposes, wiring
+                                // bypasses — NQ shows only on explicit use)
   std::uint16_t output_fanout = 0; // derived Q fanout, for list/iface
   std::uint16_t nq_fanout = 0;     // derived NQ fanout, sequential gates only
   std::uint64_t propagation_delay_ps = 0; // V2 timing hook (§12): stored

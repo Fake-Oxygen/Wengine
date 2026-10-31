@@ -146,8 +146,8 @@ unwire/remove/ignore/use/tie/untie/reset/solve/truth/optimize/draw/
 save/load/export plus sequential `step`/`poke`/`peek`; `tie A.1 B.2` shorts two dangling inputs to one net
 (canonical lowest-pin rep, one block input per class) so NAND(a,a)
 inversion is first-class. Sequential blocks use readable named pins
-(`DFF1.D`, `DFF1.CLK`, `DFF1.Q`, plus negated `DFF1.NQ`; numeric
-aliases still work). Runnable workspaces live in
+(`DFF1.D`, `DFF1.CLK`, `DFF1.Q`, plus negated `DFF1.NQ` — dangling NQ
+is ignored unless wired or `use`d; numeric aliases still work). Runnable workspaces live in
 `examples/logic/` (`nand_pair`, `fanout`, `parity3`, `tieoff`,
 `tied_demorgan` — each header shows its run command).
 `--help`/`-h` also print help. Return codes: `0` ok, `1`
