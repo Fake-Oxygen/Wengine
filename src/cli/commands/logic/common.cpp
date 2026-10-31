@@ -136,6 +136,86 @@ void interface_pins(const Netlist &nl, std::vector<BlockPin> &in_pins, std::vect
   (void)st; // sizes are exact by construction
 }
 
+std::vector<ClockDomain> clock_domains(const Netlist &nl) {
+  std::vector<ClockDomain> domains;
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const auto &g = nl.gates[s];
+    if (!g.live || !wengine::logic::is_sequential_kind(g.kind)) {
+      continue;
+    }
+    // CLK/EN is input 1. A live driver names the domain by its source
+    // pin (NQ-driven clocks keep the NQ spelling); dangling CLK/EN pins
+    // join the implicit "clk" domain.
+    std::string name = "clk";
+    const std::uint16_t drv = (g.input_count > 1) ? g.drivers[1] : wengine::logic::kNoDriver;
+    if (drv != wengine::logic::kNoDriver && drv < kMaxGates && nl.gates[drv].live) {
+      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + 1;
+      name = pin_text(nl, drv, true, 0, nl.driver_inv[flat] != 0);
+    }
+    bool found = false;
+    for (ClockDomain &d : domains) {
+      if (d.name == name) {
+        d.members.push_back(s);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      ClockDomain d;
+      d.name = name;
+      d.members.push_back(s);
+      domains.push_back(std::move(d));
+    }
+  }
+  return domains;
+}
+
+core::Status compose_block_inputs(const Netlist &nl, std::vector<wengine::logic::LogicValue> &out) {
+  out.clear();
+  const auto &pokes = poke_map();
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const auto &g = nl.gates[s];
+    if (!g.live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      if (g.drivers[i] != kNoDriver) {
+        continue;
+      }
+      if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
+        continue;
+      }
+      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
+      if (wengine::logic::tie_leader_flat(nl, flat) != flat) {
+        continue; // members share the leader's value (same order as solve)
+      }
+      const auto it = pokes.find(flat);
+      out.push_back(it == pokes.end() ? wengine::logic::LogicValue::kLow : it->second);
+    }
+  }
+  return core::Status::success();
+}
+
+std::size_t reap_stale_pokes(const Netlist &nl) {
+  auto &pokes = poke_map();
+  std::size_t dropped = 0;
+  for (auto it = pokes.begin(); it != pokes.end();) {
+    const std::size_t flat = it->first;
+    const auto slot = static_cast<std::uint16_t>(flat / kMaxInputs);
+    const auto input = static_cast<std::uint8_t>(flat % kMaxInputs);
+    bool live = slot < kMaxGates && nl.gates[slot].live && input < nl.gates[slot].input_count &&
+                nl.gates[slot].drivers[input] == kNoDriver &&
+                (nl.gates[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) == 0;
+    if (live) {
+      ++it;
+    } else {
+      it = pokes.erase(it);
+      ++dropped;
+    }
+  }
+  return dropped;
+}
+
 core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<BlockPin> &in_pins,
                              const std::vector<BlockPin> &out_pins, std::ostream &os) {
   // Header: input pins then output pins.

@@ -3,7 +3,10 @@
 #include "wengine/cli/status.hpp"
 #include "wengine/cli/subshell.hpp"
 #include "wengine/core/status.hpp"
+#include "wengine/logic/seq_state.hpp"
 
+#include <cstdint>
+#include <map>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -79,9 +82,42 @@ wengine::logic::Netlist &workspace_impl() {
   return nl;
 }
 
+// Sequential session state (US1): same process-wide lifetime as the
+// workspace; cleared together by `reset` via reset_seq_session_state().
+wengine::logic::SeqState &seq_state_impl() {
+  static wengine::logic::SeqState st{};
+  return st;
+}
+
+std::map<std::size_t, wengine::logic::LogicValue> &poke_impl() {
+  static std::map<std::size_t, wengine::logic::LogicValue> pokes{};
+  return pokes;
+}
+
+std::map<std::string, std::uint64_t> &cycles_impl() {
+  static std::map<std::string, std::uint64_t> cycles{};
+  return cycles;
+}
+
 } // namespace
 
 ::wengine::logic::Netlist &workspace() { return workspace_impl(); }
+
+namespace support {
+
+::wengine::logic::SeqState &seq_state() { return seq_state_impl(); }
+
+std::map<std::size_t, ::wengine::logic::LogicValue> &poke_map() { return poke_impl(); }
+
+std::map<std::string, std::uint64_t> &cycle_counts() { return cycles_impl(); }
+
+void reset_seq_session_state() {
+  poke_impl().clear();
+  cycles_impl().clear();
+  ::wengine::logic::reset_seq_state(seq_state_impl());
+}
+
+} // namespace support
 
 int LogicHelpSpec::run(ArgCursor &args, std::ostream &out) {
   if (!args.has_remaining()) {

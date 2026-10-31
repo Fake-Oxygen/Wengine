@@ -9,8 +9,10 @@ Status: draft scaffold (2026-10-23). No behavior wired yet; see Plane epic
   combinational block, print/stream its truth table, optimize it
   (De Morgan → NAND-only + constant folding + dead-gate elimination),
   draw it (interactive ImGui canvas with zoom/pan, `--out bmp` file
-  export), and
-  save/restore the workspace as versioned YAML.
+  export),
+  save/restore the workspace as versioned YAML, and step sequential
+  logic: `add DFF`/`DLATCH` with named pins, `poke` stimulus,
+  `step` clock advances, `peek` flop readback (all headless).
 - Generic reusable sub-shell framework (`cli/subshell.hpp`): `logic` is
   the first consumer, future modules reuse it unchanged.
 - CLI-only in v1. Every feature is reachable from the CLI (REPL +
@@ -75,9 +77,10 @@ both raster paths consume it without changing it.
 
 - `GateKind`: `AND OR NAND NOR XOR XNOR NOT BUF` (append-only enum;
   `XNOR` = `NOT(XOR)` internally, `BUF` needed as an optimizer output)
-  plus V2 sequential `DFF` (=16, edge-triggered D+CLK) and `DLATCH`
-  (=17, level-sensitive D+EN), each exactly 2 inputs (SEQ1 vocabulary;
-  creation/stepping arrive in SEQ2+).
+  plus sequential `DFF` (=16, edge-triggered D+CLK) and `DLATCH`
+  (=17, level-sensitive D+EN vocabulary; SEQ4 steps both on the edge),
+  each exactly 2 inputs. `add DFF`/`add DLATCH` create them with
+  per-kind never-reused counters, same as combinational gates.
 - `kMaxInputs = 8`. `NOT`/`BUF` take exactly 1 input; `DFF`/`DLATCH`
   take exactly 2; the rest 2..8.
 - Identity: per-kind monotonic counters, never reused
@@ -86,11 +89,27 @@ both raster paths consume it without changing it.
   internals use dense slot indices.
 - Pins: `<NAME>.Y` (output) or `<NAME>.<1..k>` (input), e.g. `AND2.Y`,
   `NOR1.1`. Parsing is a pure `parse_pin(text) -> Result<PinRef>`.
+  Sequential gates additionally accept named pins (case-insensitive):
+  `DFF1.D`, `DFF1.CLK`, `DFF1.Q`, `DLATCH1.D`, `DLATCH1.EN`, `DFF1.NQ`;
+  numeric aliases (`DFF1.1`, `DFF1.Y`) keep working, and canonical
+  display (`list`, YAML, step/poke/peek reports) uses the named forms.
+  Named pins on combinational gates are usage errors.
+- Every flop exposes a second output `NQ` (negated Q, read live as NOT Q
+  with zero stored state). `NQ` wires like any output (`wire DFF1.NQ
+  AND1.1`); sinks read the inverted value at every evaluation (scalar,
+  bit-parallel, and sequential stepping). `output_fanout` keeps Q-only
+  semantics; a parallel `nq_fanout` plus per-sink polarity track NQ
+  edges. Dangling `Q` then dangling `NQ` per gate (slot order) form the
+  block outputs; `ignore`/`use` accept `DFF1.NQ` via a parallel ignore
+  flag. `peek` prints both (`DFF1.Q=1 NQ=0 (serial 0)`).
 - Wires: single-driver rule (one wire per destination input, like real
   hardware); re-wiring an occupied input is a loud usage error, never a
   silent overwrite. Fan-out is unlimited (one output → many inputs).
-  Cycles are rejected at `wire` time via incremental DFS (combinational
-  only in v1; sequential/clocked gates are a follow-up epic, not v1).
+  Cycles are rejected at `wire` time via incremental DFS that is
+  flop-aware: edges into sequential-gate inputs never close a cycle
+  (flop Q outputs break loops), so legal feedback (`DFF Q -> comb ->
+  D`) wires in D-input-first order while pure combinational cycles
+  still fail loudly.
 - Block interface: derived on demand, never stored — dangling inputs and
   dangling outputs become the block's inputs/outputs in slot order,
   minus pins marked `ignore`. `ignore <pin>` / `use <pin>` toggles the
@@ -259,7 +278,10 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   Strict: unknown keys/sections are loud errors (never silently
   ignored) — forward-compatible sections arrive as versioned schema
   bumps, not silent tolerance. `save`/`load` round-trip is byte-identical
-  (pinned test). Runnable example workspaces live in `examples/logic/`
+  (pinned test). Sequential gates persist in the same `version: 2`
+  schema: named pins in wire rows (`from: DFF1.NQ`, `to: DFF1.D`) plus
+  an optional `ignore_nq` gate key defaulting to false, so pre-sequential
+  files load unchanged. Runnable example workspaces live in `examples/logic/`
   (`nand_pair`, `fanout`, `parity3`, `tieoff`, `tied_demorgan` — each
   header shows its run command and expected output); `test_logic_yaml`
   loads every file, checks its hand-derived goldens, and pins
@@ -268,21 +290,34 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
 ## 10. Module verb list (v1)
 
 ```text
-add <KIND> [--inputs N]     list [--wires] [--iface]   wire <FROM.Y> <TO.i>
+add <KIND> [--inputs N]     list [--wires] [--iface]   wire <FROM.out> <TO.in>
 unwire <TO.i>               remove <GATE>              ignore <PIN> / use <PIN>
 tie <A.i> <B.j>             untie <PIN.i>              reset [--force]
 solve [--in bits] [--from pin=0|1 ...]
 truth [--csv p] [--limit N] optimize [--to nand|nor] [--level O0|O1|O2]
 draw [--out f.bmp]          save <f.yaml> / load <f.yaml>
 export --truth t --schema s [--bmp b]   help [verb]   back
+step [DOMAIN] [N] [--cycles N]   poke <PIN>=<0|1|release> [--from ...] [--clear]
+peek [GATE]
 ```
+
+Sequential session verbs (all headless: REPL session, one-shot, pipes,
+scripts — zero GUI dependency):
+`step` advances one clock domain (flops sharing a CLK/EN driver net;
+dangling CLK/EN pins form the implicit `clk`) or all flops globally,
+reporting the cycle count, per-flop Q transitions, and settled outputs;
+`poke` drives/releases dangling block inputs (sticky across steps);
+`peek` prints flop Q+NQ with stable serials in slot order. Poke maps
+and cycle counters are session state beside the workspace, cleared by
+`reset`, never serialized. Wire D-inputs before Q fanout (the
+incremental cycle check trips on Q-first wiring).
 
 All verbs: `kName/kDescription/kUsage/run/complete` + module-registry
 entry + `static_assert` size check (same recipe as AGENTS.md §9).
 
 ## 11. Non-goals (v1) — each with a named V2 slot in §12
 
-Sequential/clocked logic (flip-flops, clocks), tri-state buses,
+Tri-state buses,
 multi-driver nets, timing/delay simulation, Verilog/VHDL import,
 PNG/JPG codecs, GUI panel (separate epic, consumes the same headers).
 
@@ -301,20 +336,22 @@ append-only, schema bumps carry fallback loaders.
   driver values)`, which today enforces single-driver. Multi-driver /
   wired-OR / tri-state resolution later replaces one function body;
   the `drivers[]` arrays and `wire` verb already store fan-in lists.
-- **Sequential / clocks.** `GateKind` values 0..7 are combinational;
+- **Sequential / clocks (shipped).** `GateKind` values 0..7 are combinational;
   sequential kinds append at ≥16, pinned: `DFF`=16 (D+CLK,
   edge-triggered), `DLATCH`=17 (D+EN, level-sensitive) — never
   renumber, never reuse persisted bytes. Clocked state lives in a **parallel pool beside
   the netlist** (`logic::SeqState` in `seq_state.hpp`: per-slot Q + valid +
   never-reused serials, synced by `init_seq_state`, cleared by `reset_seq_state` —
-  same pattern as `Signals` beside `Particles`), stepped
-  by a `SequentialSolver::step(state, dt)` behind the existing
-  `ISolver` seam — the combinational evaluator is untouched, and
-  `RunConfig` gains one nested section struct per AGENTS.md §8.
-  Cycle validation is flop-aware: `validate_sequential` runs Kahn over
+  same pattern as `Signals` beside `Particles`), stepped per edge by
+  `seq_step`/`seq_step_filtered` (global edge or one named clock domain;
+  the combinational evaluator only gained NQ-polarity reads at existing
+  resolution funnels). Cycle validation is flop-aware: `validate_sequential` runs Kahn over
   combinational edges only (drivers into DFF.D/CLK excluded, Q outputs
   break loops), and `wire()` / the `wire` verb take that path whenever
   sequential gates are present (pure-comb netlists keep the old path).
+  Session verbs `step`/`poke`/`peek` expose control and readback
+  headlessly; a `SequentialSolver::step(state, dt)` behind the `ISolver`
+  seam plus a `RunConfig` nested section remain future work per AGENTS.md §8.
 - **Timing / delay.** Every gate already stores `propagation_delay_ps`
   (default 0; v1 eval is zero-delay, loader stores any value). Delay
   simulation later reads the field — no schema or struct change, only

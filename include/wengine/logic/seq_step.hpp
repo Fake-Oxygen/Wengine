@@ -52,6 +52,21 @@ namespace wengine::logic {
 
 namespace detail {
 
+// Subset-step membership (T013): a null member list means every live flop
+// (the global SEQ4 edge); otherwise only listed slots snapshot/commit.
+// Linear scan — member counts are small and stepping is CLI-paced.
+[[nodiscard]] inline bool is_step_member(const std::uint16_t *members, std::size_t n_members, std::uint16_t slot) noexcept {
+  if (members == nullptr) {
+    return true;
+  }
+  for (std::size_t i = 0; i < n_members; ++i) {
+    if (members[i] == slot) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Combinational-only level order for the stepper (SEQ4): Kahn over
 // combinational edges only, same determinism as ensure_topology (slot-order
 // seeds, slot-order successors). Sequential gates act as roots (their Q is
@@ -161,12 +176,16 @@ namespace detail {
 
 } // namespace detail
 
-// Single rising edge over the whole netlist (global clock). See header note
-// for the two-phase contract. On failure the SeqState is untouched (snapshot
-// validates fully before any commit) and block_outputs are unspecified;
-// the Netlist topology fields are never mutated.
-[[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
-                                          std::span<LogicValue> block_outputs) noexcept {
+// Single rising edge over a flop subset (T013: selective clock domains).
+// Null `members` steps every live flop (the global SEQ4 edge); otherwise
+// only listed slots snapshot/commit, in slot order (parallel update among
+// members, same as the global edge). Combinational settle (phase 1 and
+// phase 2) is always whole-netlist, so observed outputs are end-of-step
+// values. Otherwise the SEQ4 contract above holds unchanged: validation
+// first, untouched state on failure, no Netlist topology mutation.
+[[nodiscard]] inline core::Status seq_step_filtered(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
+                                                   std::span<LogicValue> block_outputs, const std::uint16_t *members,
+                                                   std::size_t n_members) noexcept {
   init_seq_state(st, nl);
   if (!validate_sequential(nl).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -280,6 +299,9 @@ namespace detail {
     if (!g.live || !is_sequential_kind(g.kind)) {
       continue;
     }
+    if (!detail::is_step_member(members, n_members, s)) {
+      continue; // selective domain: this flop holds its Q this edge
+    }
     LogicValue d = LogicValue::kLow;
     LogicValue clk = LogicValue::kLow;
     if (!detail::resolve_step_input(nl, s, 0, gate_out, resolved, d)) {
@@ -297,9 +319,9 @@ namespace detail {
     next_q[s] = d;
   }
 
-  // Commit: parallel Q update in slot order.
+  // Commit: parallel Q update in slot order (members only for subsets).
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && is_sequential_kind(nl.gates[s].kind)) {
+    if (nl.gates[s].live && is_sequential_kind(nl.gates[s].kind) && detail::is_step_member(members, n_members, s)) {
       st.q[s] = next_q[s];
       gate_out[s] = next_q[s]; // seed phase 2 with NEW Qs
     }
@@ -342,11 +364,17 @@ namespace detail {
   return core::Status::success();
 }
 
+// Single rising edge over the whole netlist (global clock): every live
+// flop steps. Exact SEQ4 semantics, via the filtered core.
+[[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
+                                          std::span<LogicValue> block_outputs) noexcept {
+  return seq_step_filtered(nl, st, block_inputs, block_outputs, nullptr, 0);
+}
+
 // Convenience: step with block outputs discarded (state observed via
 // SeqState.q / find_seq_serial). Computes the same end-of-step values;
 // only the caller-visible copy is dropped.
-[[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st,
-                                          std::span<const LogicValue> block_inputs) noexcept {
+[[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs) noexcept {
   const std::size_t n_out = block_output_count(nl);
   LogicValue scratch[kMaxGates];
   for (std::size_t i = 0; i < kMaxGates; ++i) {

@@ -358,6 +358,9 @@ if(BUILD_CLI)
         src/cli/commands/logic/reset.cpp
         src/cli/commands/logic/save.cpp
         src/cli/commands/logic/solve.cpp
+        src/cli/commands/logic/step.cpp
+        src/cli/commands/logic/poke.cpp
+        src/cli/commands/logic/peek.cpp
         src/cli/commands/logic/tie.cpp
         src/cli/commands/logic/truth.cpp
         src/cli/commands/logic/unwire.cpp
@@ -698,6 +701,24 @@ if(BUILD_TESTS)
     add_executable(test_logic_seq_cli_pins tests/test_logic_seq_cli_pins.cpp)
     target_link_libraries(test_logic_seq_cli_pins PRIVATE wengine_logic_yaml)
     add_test(NAME logic_seq_cli_pins COMMAND test_logic_seq_cli_pins)
+
+    # US1 `step` verb goldens: advance/selective domains, zero-cycle,
+    # errors, determinism replay, completion. Drives wengine_cli Shell.
+    add_executable(test_logic_seq_cli_step tests/test_logic_seq_cli_step.cpp)
+    target_link_libraries(test_logic_seq_cli_step PRIVATE wengine_cli)
+    add_test(NAME logic_seq_cli_step COMMAND test_logic_seq_cli_step)
+
+    # US2 `poke` verb goldens: drive/release/list, aliases, duplicates,
+    # unwireable targets, composition into step. Drives wengine_cli Shell.
+    add_executable(test_logic_seq_cli_poke tests/test_logic_seq_cli_poke.cpp)
+    target_link_libraries(test_logic_seq_cli_poke PRIVATE wengine_cli)
+    add_test(NAME logic_seq_cli_poke COMMAND test_logic_seq_cli_poke)
+
+    # US3 `peek` verb goldens: scopes, Q+NQ format, empty workspace,
+    # errors, serial stability, completion. Drives wengine_cli Shell.
+    add_executable(test_logic_seq_cli_peek tests/test_logic_seq_cli_peek.cpp)
+    target_link_libraries(test_logic_seq_cli_peek PRIVATE wengine_cli)
+    add_test(NAME logic_seq_cli_peek COMMAND test_logic_seq_cli_peek)
 
     # LOGIC-6 workspace store: yaml-cpp seam TU + yaml-free header. Links
     # wengine_logic_yaml only (never wengine_cli); test_logic above stays

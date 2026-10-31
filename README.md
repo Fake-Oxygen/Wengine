@@ -143,9 +143,11 @@ REPL commands: `help [cmd]`, `exit`/`quit`, plus registered commands
 `logic <verb>` also works one-shot) — the reusable session pattern
 future modules follow (see `docs/logic.md`). Verbs cover add/list/wire/
 unwire/remove/ignore/use/tie/untie/reset/solve/truth/optimize/draw/
-save/load/export; `tie A.1 B.2` shorts two dangling inputs to one net
+save/load/export plus sequential `step`/`poke`/`peek`; `tie A.1 B.2` shorts two dangling inputs to one net
 (canonical lowest-pin rep, one block input per class) so NAND(a,a)
-inversion is first-class. Runnable workspaces live in
+inversion is first-class. Sequential blocks use readable named pins
+(`DFF1.D`, `DFF1.CLK`, `DFF1.Q`, plus negated `DFF1.NQ`; numeric
+aliases still work). Runnable workspaces live in
 `examples/logic/` (`nand_pair`, `fanout`, `parity3`, `tieoff`,
 `tied_demorgan` — each header shows its run command).
 `--help`/`-h` also print help. Return codes: `0` ok, `1`
@@ -467,6 +469,7 @@ tests/  benchmarks/  examples/
 | `link` | `wengine/link/frame.hpp`, `protocol.hpp`, `socket_publisher.hpp`, `shm_publisher.hpp`, `control_server.hpp`, `uart_codec.hpp`, `uart_publisher.hpp` | Solver-agnostic `Frame` adapters (stable particle IDs) + versioned wire codec (SHM v3 72 B items, socket v3 70 B items); app-edge SHM publisher and POSIX TCP/UDP stream publishers (`wengine_link_net`), exact version/domain gates, compact UDP frames, and lag/loss accounting; domain-free TCP line server for the control plane (same package); UART serial publisher + control pump with COBS framing (same package) |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,entity_index,entity_generation,x,y,vx,vy` v3 with stable IDs, legacy 7-col still parses as unavailable, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions over a reused scratch buffer, `StrideSink` step-aligned decimation, drop counters); the snapshot reference is valid only for the call — retaining sinks copy or enqueue-owned before returning |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
+| `logic` | `wengine/logic/netlist.hpp`, `types.hpp`, `eval.hpp`, `seq_state.hpp`, `seq_step.hpp` | Gate netlist (slots recycle, per-kind counters never reused), named seq pins + NQ second output with per-sink polarity, scalar/bit-parallel eval, clocked `SeqState` pool + global/subset edge stepping |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion. Two-level `ic` dispatch (`ic_dispatch.hpp` + `ic_registry.hpp`) keeps part-specific chips off the top level |
 | `tui` | `wengine/tui/exec.hpp`, `wengine/tui/async.hpp`, `wengine/tui/forms.hpp`, `wengine/tui/forms/` (shared types + one form definition per command), `wengine/tui/batches.hpp`, `wengine/tui/batches/` (shared types + one builder definition per command), `wengine/tui/choice.hpp` (shared ncurses-free enum-choice dialog model + per-field resolvers), `wengine/tui/views.hpp`, `wengine/tui/run.hpp`, `wengine/cli/cancel.hpp`, `src/tui/` | Ncurses front end (`PhysicsSimApp --tui`, `BUILD_TUI`): terminal handling only — every line runs on the async worker (`AsyncTask` + its own `Shell::execute`) with captured output, so TUI text stays byte-identical to the CLI by construction (full-registry parity matrix + completion == REPL); progress + step-boundary Ctrl-C cancel (sinks flushed/closed); guided forms compose argv strings only (F3 browser for closed-form families, with declarative required/optional argument profiles and mode/op-specific filtering in the two-pane builders; Ctrl-B then Left/Right switches panes and Space toggles viable arguments; Space on a `[choice]`-marked enum field opens the option dialog instead of typing (static options declared per field, registry vocabularies resolved centrally); F4 builders for `sim run` / `sig run` batches incl. solver/kind-aware, prerequisite-filtered arguments and `--forever`); output views render captured text only (PASS/FAIL/Error highlight, `/`+`n`/`N` scrollback search, F5 save-pane-to-file, wrapped resize reflow, visible scroll position, `TERM=dumb`/NO_COLOR fallback with loud refusal on cursor-less terminals); history is the shared REPL file; `ctest -R tui_pty_smoke` covers launch/run/complete/recall/quit + dynamic form and run-builder profiles + a choice-dialog open/cancel on a PTY |
 
@@ -677,6 +680,7 @@ parity vs headless bus, verb rejections), `test_signal_panel_lua`
 matrix),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
+`test_logic_seq_cli_pins` (named pins D/CLK/EN/Q + NQ polarity, fanout/interface counts, YAML round-trip), `test_logic_seq_cli_step`, `test_logic_seq_cli_poke`, `test_logic_seq_cli_peek` (verb goldens: advance/selective domains, poke/release, Q+NQ readback, determinism replay, completion),
 `test_frame_source` (source registry, channels, ring,
 particle + signal CSV-exactness, sink re-attach, plot bounds),
 `test_gui_stream_source`

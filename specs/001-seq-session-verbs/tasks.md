@@ -63,14 +63,14 @@ delivers a working advance-and-observe loop alone
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T012 [US1] Step goldens in `tests/test_logic_seq_cli_step.cpp` (2-bit counter + shift-register vectors from `test_logic_seq_step.cpp` driven through verbs; selective domains `clk_a` vs `clk_b`; zero-cycle no-op report; unknown-domain/negative-count usage errors change nothing; determinism replay)
+- [X] T012 [US1] Step goldens in `tests/test_logic_seq_cli_step.cpp` (2-bit counter + shift-register vectors from `test_logic_seq_step.cpp` driven through verbs; selective domains `clk_a` vs `clk_b`; zero-cycle no-op report; unknown-domain/negative-count usage errors change nothing; determinism replay)
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Subset-step core in `include/wengine/logic/seq_step.hpp` (flop-subset snapshot/commit in slot order + global combinational re-settle; global call = all flops, preserving SEQ4 semantics)
-- [ ] T014 [US1] CLI session state in `src/cli/commands/logic.cpp` + `src/cli/commands/logic/common.hpp` + `src/cli/commands/logic/common.cpp` (ClockDomain derivation per data-model §1; sticky poke map + block-input composition defaulting unset pins Low; per-domain cycle counters; `reset` clears all three)
-- [ ] T015 [US1] `step` verb in `src/cli/commands/logic/step.cpp` + spec in `include/wengine/cli/logic_registry.hpp` + `LogicRegistry` append (19→20) with `complete()` (domain names incl. NQ-driven nets, `--cycles=` form)
-- [ ] T016 [US1] Register `tests/test_logic_seq_cli_step.cpp` in `CMakeLists.txt` + `add_test`; sync `static_assert` 19→20 and add step help/completion goldens in `tests/test_cli_args.cpp`
+- [X] T013 [US1] Subset-step core in `include/wengine/logic/seq_step.hpp` (flop-subset snapshot/commit in slot order + global combinational re-settle; global call = all flops, preserving SEQ4 semantics)
+- [X] T014 [US1] CLI session state in `src/cli/commands/logic.cpp` + `src/cli/commands/logic/common.hpp` + `src/cli/commands/logic/common.cpp` (ClockDomain derivation per data-model §1; sticky poke map + block-input composition defaulting unset pins Low; per-domain cycle counters; `reset` clears all three)
+- [X] T015 [US1] `step` verb in `src/cli/commands/logic/step.cpp` + spec in `include/wengine/cli/logic_registry.hpp` + `LogicRegistry` append (19→20) with `complete()` (domain names incl. NQ-driven nets, `--cycles=` form)
+- [X] T016 [US1] Register `tests/test_logic_seq_cli_step.cpp` in `CMakeLists.txt` + `add_test`; sync `static_assert` 19→20 and add step help/completion goldens in `tests/test_cli_args.cpp`
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently (Scenario 1 + 4 pass)
 
@@ -90,11 +90,11 @@ stimulus independent of clocking
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T017 [US2] Poke goldens in `tests/test_logic_seq_cli_poke.cpp` (drive/release/list-map; named spelling + numeric alias resolve to one entry; unknown-pin/wired-pin/bad-value/duplicate errors; poke composes into `step` block inputs per data-model §3)
+- [X] T017 [US2] Poke goldens in `tests/test_logic_seq_cli_poke.cpp` (drive/release/list-map; named spelling + numeric alias resolve to one entry; unknown-pin/wired-pin/bad-value/duplicate errors; poke composes into `step` block inputs per data-model §3)
 
 ### Implementation for User Story 2
 
-- [ ] T018 [US2] `poke` verb in `src/cli/commands/logic/poke.cpp` + spec in `include/wengine/cli/logic_registry.hpp` + `LogicRegistry` append (20→21) with `complete()` (reuse `complete_from_value` helper; `--from=`/`--clear`/`--help` forms); sync `static_assert` 20→21 in `tests/test_cli_args.cpp` and register `tests/test_logic_seq_cli_poke.cpp` in `CMakeLists.txt` + `add_test`
+- [X] T018 [US2] `poke` verb in `src/cli/commands/logic/poke.cpp` + spec in `include/wengine/cli/logic_registry.hpp` + `LogicRegistry` append (20→21) with `complete()` (reuse `complete_from_value` helper; `--from=`/`--clear`/`--help` forms); sync `static_assert` 20→21 in `tests/test_cli_args.cpp` and register `tests/test_logic_seq_cli_poke.cpp` in `CMakeLists.txt` + `add_test`
 
 **Checkpoint**: At this point, User Stories 1 AND 2 work (poke → step → peek loop closable from session, one-shot, and pipes)
 
@@ -114,11 +114,11 @@ delivers readback with no other new action
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T019 [US3] Peek goldens in `tests/test_logic_seq_cli_peek.cpp` (all three scopes; Q+NQ line format per contract; empty-workspace `no flops` success; unknown-gate/combinational-gate errors; serial stability across steps)
+- [X] T019 [US3] Peek goldens in `tests/test_logic_seq_cli_peek.cpp` (all three scopes; Q+NQ line format per contract; empty-workspace `no flops` success; unknown-gate/combinational-gate errors; serial stability across steps)
 
 ### Implementation for User Story 3
 
-- [ ] T020 [US3] `peek` verb in `src/cli/commands/logic/peek.cpp` + spec in `include/wengine/cli/logic_registry.hpp` + `LogicRegistry` append (21→22) with `complete()` (live sequential gate names only); sync `static_assert` 21→22 in `tests/test_cli_args.cpp` and register `tests/test_logic_seq_cli_peek.cpp` in `CMakeLists.txt` + `add_test`
+- [X] T020 [US3] `peek` verb in `src/cli/commands/logic/peek.cpp` + spec in `include/wengine/cli/logic_registry.hpp` + `LogicRegistry` append (21→22) with `complete()` (live sequential gate names only); sync `static_assert` 21→22 in `tests/test_cli_args.cpp` and register `tests/test_logic_seq_cli_peek.cpp` in `CMakeLists.txt` + `add_test`
 
 **Checkpoint**: All user stories independently functional (full poke → step → peek loop)
 
@@ -128,10 +128,10 @@ delivers readback with no other new action
 
 **Purpose**: Docs, full-suite verification, quickstart proof
 
-- [ ] T021 Document named pins + NQ + step/poke/peek verbs in `docs/logic.md` (pin table D/CLK/EN/Q/NQ, alias rule, NQ wiring/interface semantics, verb summary)
-- [ ] T022 Update README Run examples, module table, and test list for the three verbs + named pins + new test binaries
-- [ ] T023 Full verification: `dev` + `test-opt` presets configure/build, `ctest --output-on-failure` green, zero new compiler warnings (`-Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor` on `wengine_cli`)
-- [ ] T024 Run `specs/001-seq-session-verbs/quickstart.md` Scenarios 1–4 verbatim incl. the replay gate (`cmp` silent)
+- [X] T021 Document named pins + NQ + step/poke/peek verbs in `docs/logic.md` (pin table D/CLK/EN/Q/NQ, alias rule, NQ wiring/interface semantics, verb summary)
+- [X] T022 Update README Run examples, module table, and test list for the three verbs + named pins + new test binaries
+- [X] T023 Full verification: `dev` + `test-opt` presets configure/build, `ctest --output-on-failure` green, zero new compiler warnings (`-Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wnon-virtual-dtor` on `wengine_cli`)
+- [X] T024 Run `specs/001-seq-session-verbs/quickstart.md` Scenarios 1–4 verbatim incl. the replay gate (`cmp` silent)
 
 ---
 

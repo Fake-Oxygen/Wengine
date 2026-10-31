@@ -305,12 +305,65 @@ struct LogicExportSpec {
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
+struct LogicStepSpec {
+  static constexpr std::string_view kName = "step";
+  static constexpr std::string_view kDescription = "Advance clocks by N edges (sequential)";
+  static constexpr std::string_view kUsage =
+      "step [DOMAIN] [N] [--cycles N]\n"
+      "  step\n"
+      "  step 5\n"
+      "  step BUF1.Y 3\n"
+      "  step --cycles 100\n"
+      "Advances one rising edge per count: globally with no DOMAIN, else\n"
+      "only flops clocked by DOMAIN (dangling CLK/EN pins form domain\n"
+      "`clk`). Reports the cycle count, stepped flop transitions, and\n"
+      "settled block outputs. Zero count reports without stepping; errors\n"
+      "change no state.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
+struct LogicPokeSpec {
+  static constexpr std::string_view kName = "poke";
+  static constexpr std::string_view kDescription = "Drive or release a block input pin (sequential stimulus)";
+  static constexpr std::string_view kUsage =
+      "poke <PIN>=<0|1> [--from <PIN>=<0|1> ...]\n"
+      "poke <PIN>=release\n"
+      "poke [--clear]\n"
+      "  poke DFF1.D=1\n"
+      "  poke --from AND1.1=1 --from AND1.2=0\n"
+      "  poke DFF1.D=release\n"
+      "Drives a dangling block input to 0/1 (sticky across steps) or\n"
+      "releases it back to wired behavior. Bare `poke` lists the map;\n"
+      "`--clear` drops every entry. Named seq pins work (DFF1.D);\n"
+      "numeric aliases too (DFF1.1). Errors change no state.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
+struct LogicPeekSpec {
+  static constexpr std::string_view kName = "peek";
+  static constexpr std::string_view kDescription = "Show flop Q state (sequential readback)";
+  static constexpr std::string_view kUsage =
+      "peek [GATE]\n"
+      "  peek\n"
+      "  peek DFF1\n"
+      "Prints Q and NQ with the stable flop serial, in slot order: all\n"
+      "flops with no argument, one block with GATE. Empty workspace\n"
+      "reports `no flops` successfully. Read-only: never mutates state.";
+
+  static int run(ArgCursor &args, std::ostream &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
 // Append new verb specs here; names stay unique via the compile-time validation.
 using LogicRegistry = Registry<LogicHelpSpec, LogicBackSpec, LogicAddSpec, LogicListSpec,
                                LogicWireSpec, LogicUnwireSpec, LogicRemoveSpec,
                                LogicIgnoreSpec, LogicUseSpec, LogicTieSpec, LogicUntieSpec,
                                LogicResetSpec, LogicSolveSpec, LogicTruthSpec, LogicOptimizeSpec,
                                LogicDrawSpec, LogicSaveSpec, LogicLoadSpec,
-                               LogicExportSpec>;
+                               LogicExportSpec, LogicStepSpec, LogicPokeSpec, LogicPeekSpec>;
 
 } // namespace wengine::cli::logic

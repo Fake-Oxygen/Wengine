@@ -681,7 +681,7 @@ void test_history() {
 void test_logic_session() {
   // Module registry shape (LOGIC-8: full v1 verb set, 17 specs;
   // LOGIC-14: + tie/untie, 19 specs).
-  static_assert(logic::LogicRegistry::all().size() == 19);
+  static_assert(logic::LogicRegistry::all().size() == 22);
   static_assert(logic::LogicRegistry::find("help") != nullptr);
   static_assert(logic::LogicRegistry::find("back") != nullptr);
   static_assert(logic::LogicRegistry::find("add") != nullptr);
@@ -701,6 +701,9 @@ void test_logic_session() {
   static_assert(logic::LogicRegistry::find("save") != nullptr);
   static_assert(logic::LogicRegistry::find("load") != nullptr);
   static_assert(logic::LogicRegistry::find("export") != nullptr);
+  static_assert(logic::LogicRegistry::find("step") != nullptr);
+  static_assert(logic::LogicRegistry::find("poke") != nullptr);
+  static_assert(logic::LogicRegistry::find("peek") != nullptr);
   static_assert(logic::LogicRegistry::find("nope") == nullptr);
 
   Shell sh;
@@ -733,8 +736,16 @@ void test_logic_session() {
   assert(sh.execute("logic back extra", out) == 2);
   assert(sh.execute("logic --help", out) == 0);
   assert(out.str().find("Session verbs") != std::string::npos);
+  assert(out.str().find("step - Advance clocks by N edges") != std::string::npos);
   assert(sh.execute("help logic", out) == 0);
   assert(out.str().find("[logic]>") != std::string::npos);
+  // `step` is a first-class verb: help works one-shot.
+  assert(sh.execute("logic step --help", out) == 0);
+  assert(out.str().find("step [DOMAIN] [N]") != std::string::npos);
+  assert(sh.execute("logic poke --help", out) == 0);
+  assert(out.str().find("poke <PIN>=<0|1>") != std::string::npos);
+  assert(sh.execute("logic peek --help", out) == 0);
+  assert(out.str().find("peek [GATE]") != std::string::npos);
 
   // Full REPL drive over plain streams: prompt swap, session help, back
   // returns to the top level, then quit.
@@ -792,14 +803,15 @@ void test_logic_session() {
            has(verbs, "unwire") && has(verbs, "remove") && has(verbs, "ignore") &&
            has(verbs, "use") && has(verbs, "tie") && has(verbs, "untie") && has(verbs, "reset") && has(verbs, "solve") &&
            has(verbs, "truth") && has(verbs, "optimize") && has(verbs, "draw") &&
-           has(verbs, "save") && has(verbs, "load") && has(verbs, "export"));
-    assert(verbs.size() == 19);
+           has(verbs, "save") && has(verbs, "load") && has(verbs, "export") && has(verbs, "step") && has(verbs, "poke") &&
+           has(verbs, "peek"));
+    assert(verbs.size() == 22);
     assert(!has(verbs, "ohm") && !has(verbs, "--help")); // flags need a '-' prefix
     const std::vector<std::string> want_dash_help{"--help"};
     assert(complete_line("logic --h", 9, all) == want_dash_help);
     const std::vector<std::string> want_help{"help"};
     assert(complete_line("logic h", 7, all) == want_help);
-    assert(complete_line("logic help ", 11, all).size() == 19); // every verb
+    assert(complete_line("logic help ", 11, all).size() == 22); // every verb
     // Session help lists module verbs only (never top-level commands).
     {
       std::ostringstream help_out;
@@ -1546,8 +1558,10 @@ void test_logic_completion() {
   // Verb-name prefixes follow registry order.
   const std::vector<std::string> want_a{"add"};
   assert(complete_line("logic a", 7, all) == want_a);
-  const std::vector<std::string> want_s{"solve", "save"};
+  const std::vector<std::string> want_s{"solve", "save", "step"};
   assert(complete_line("logic s", 7, all) == want_s);
+  const std::vector<std::string> want_p{"poke", "peek"};
+  assert(complete_line("logic p", 7, all) == want_p);
   const std::vector<std::string> want_u{"unwire", "use", "untie"};
   assert(complete_line("logic u", 7, all) == want_u);
   const std::vector<std::string> want_t{"tie", "truth"};

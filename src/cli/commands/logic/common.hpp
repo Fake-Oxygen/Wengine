@@ -9,10 +9,12 @@
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/seq_state.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
+#include <map>
 #include <span>
 #include <string>
 #include <string_view>
@@ -42,6 +44,34 @@ void collect_block_inputs(const wengine::logic::Netlist &nl, std::string_view pa
 // Ordered interface (slot order, then input index) for solve/truth/export.
 void interface_pins(const wengine::logic::Netlist &nl, std::vector<wengine::logic::BlockPin> &in_pins,
                     std::vector<wengine::logic::BlockPin> &out_pins);
+
+// Sequential session state (US1, data-model §2/§3/§5): process-wide beside
+// workspace(), cleared by `reset`. Sticky poke values keyed by tie-leader
+// flat index, per-domain cycle counters, and the clocked flop pool.
+wengine::logic::SeqState &seq_state();
+std::map<std::size_t, wengine::logic::LogicValue> &poke_map();
+std::map<std::string, std::uint64_t> &cycle_counts();
+void reset_seq_session_state();
+
+// Clock domains (data-model §1): live flops grouped by CLK/EN driver net
+// (named by the source pin, e.g. "BUF1.Y" or "DFF2.NQ"); flops with
+// dangling CLK/EN pins form the implicit "clk" domain. First-seen (slot)
+// order; members in slot order.
+struct ClockDomain {
+  std::string name;
+  std::vector<std::uint16_t> members;
+};
+std::vector<ClockDomain> clock_domains(const wengine::logic::Netlist &nl);
+
+// Block-input vector in interface order, composed from the poke map with
+// unset pins defaulting to Low (same order solve() consumes). Stale
+// entries (removed/rewired pins) are skipped by construction.
+wengine::core::Status compose_block_inputs(const wengine::logic::Netlist &nl, std::vector<wengine::logic::LogicValue> &out);
+
+// Drop poke entries that no longer resolve to a live pokable pin
+// (removed gate, rewired input); returns the dropped count so callers can
+// report it loudly.
+std::size_t reap_stale_pokes(const wengine::logic::Netlist &nl);
 
 // Truth streaming over the bit-parallel word evaluator (bit-exact vs solve).
 core::Status write_truth_csv(wengine::logic::Netlist &nl, std::uint64_t rows,
