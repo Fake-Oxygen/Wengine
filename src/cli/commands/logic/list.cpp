@@ -43,6 +43,9 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
     }
     out << "  " << support::gate_name(nl, s) << ' ' << wengine::logic::gate_kind_name(g.kind) << " inputs="
         << static_cast<unsigned>(g.input_count) << " fanout=" << g.output_fanout;
+    if (wengine::logic::is_sequential_kind(g.kind)) {
+      out << " nqfanout=" << g.nq_fanout;
+    }
     bool first_ign = true;
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
       if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) == 0) {
@@ -77,7 +80,8 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
         if (drv == wengine::logic::kNoDriver) {
           continue;
         }
-        out << "  " << support::pin_text(nl, drv, true, 0) << " -> " << support::pin_text(nl, s, false, i) << '\n';
+        const bool neg = nl.driver_inv[static_cast<std::size_t>(s) * wengine::logic::kMaxInputs + i] != 0;
+        out << "  " << support::pin_text(nl, drv, true, 0, neg) << " -> " << support::pin_text(nl, s, false, i) << '\n';
       }
     }
   }
@@ -97,7 +101,7 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
       out << "  (none)\n";
     }
     for (const BlockPin &p : out_pins) {
-      out << "  " << support::pin_text(nl, p.slot, true, 0) << '\n';
+      out << "  " << support::pin_text(nl, p.slot, true, 0, p.negated) << '\n';
     }
     std::vector<std::string> ignored;
     for (std::uint16_t s = 0; s < kMaxGates; ++s) {
@@ -112,6 +116,9 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
       }
       if (g.ignore_output) {
         ignored.push_back(support::pin_text(nl, s, true, 0));
+      }
+      if (wengine::logic::is_sequential_kind(g.kind) && g.ignore_nq_output) {
+        ignored.push_back(support::pin_text(nl, s, true, 0, true));
       }
     }
     out << "ignored (" << ignored.size() << "):\n";

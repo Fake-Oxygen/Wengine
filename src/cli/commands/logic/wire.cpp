@@ -26,7 +26,7 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
   std::optional<std::string_view> from_text = args.next_positional();
   std::optional<std::string_view> to_text = args.next_positional();
   if (!from_text || !to_text) {
-    return cli::usage_error(out, "wire needs FROM.Y and TO.i (e.g. wire AND1.Y NOT1.1)", kUsage);
+    return cli::usage_error(out, "wire needs FROM.out and TO.in (e.g. wire AND1.Y NOT1.1, wire DFF1.Q AND1.1)", kUsage);
   }
   if (args.has_remaining()) {
     return cli::unexpected_error(out, *args.first_remaining(), kUsage);
@@ -34,14 +34,14 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
   Netlist &nl = workspace();
   const auto from = wengine::logic::parse_pin(nl, *from_text);
   if (!from.ok()) {
-    return cli::usage_error(out, std::string("bad source pin '") + std::string(*from_text) + "' (want NAME.Y)", kUsage);
+    return cli::usage_error(out, std::string("bad source pin '") + std::string(*from_text) + "' (want NAME.out)", kUsage);
   }
   const auto to = wengine::logic::parse_pin(nl, *to_text);
   if (!to.ok()) {
-    return cli::usage_error(out, std::string("bad destination pin '") + std::string(*to_text) + "' (want NAME.i)", kUsage);
+    return cli::usage_error(out, std::string("bad destination pin '") + std::string(*to_text) + "' (want NAME.in)", kUsage);
   }
   if (!from.value.is_output || to.value.is_output) {
-    return cli::usage_error(out, "wire needs FROM.Y (output) and TO.i (input)", kUsage);
+    return cli::usage_error(out, "wire needs FROM.out (output) and TO.in (input)", kUsage);
   }
   const auto &dst = nl.gates[to.value.slot];
   if (dst.drivers[to.value.input] != wengine::logic::kNoDriver) {
@@ -51,13 +51,13 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::usage_error(out, "input is tied (untie it first)", kUsage);
   }
   if (wengine::logic::has_sequential_gates(nl)) {
-    // Sequential netlist (LOGIC-V2-SEQ3): flop Q outputs break loops, so
-    // the comb-only reachability check would false-positive on legal
-    // feedback (DFF Q -> comb -> D). Tentatively wire, validate the whole
-    // graph over comb edges only, then revert: wire_pins() below stays the
-    // single mutation path (its internal reaches_seq agrees with the
-    // validator — both are exact single-edge cycle tests). Dormant until
-    // YAML v3 (SEQ10) introduces sequential gates; add/load reject them.
+    // Sequential netlist: flop Q outputs break loops, so the comb-only
+    // reachability check would false-positive on legal feedback (DFF Q ->
+    // comb -> D). Tentatively wire, validate the whole graph over comb
+    // edges only, then revert: wire_pins() below stays the single mutation
+    // path (its internal reaches_seq agrees with the validator — both are
+    // exact single-edge cycle tests). Polarity/fanout are untouched by the
+    // probe (validate_sequential reads drivers only), so plain revert is exact.
     wengine::logic::Gate &dst_gate = nl.gates[to.value.slot];
     wengine::logic::Gate &src_gate = nl.gates[from.value.slot];
     dst_gate.drivers[to.value.input] = from.value.slot;
@@ -75,7 +75,7 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
   if (!st.ok()) {
     return cli::usage_error(out, "invalid wire", kUsage);
   }
-  out << "wired " << support::pin_text(nl, from.value.slot, true, 0) << " -> "
+  out << "wired " << support::pin_text(nl, from.value.slot, true, 0, from.value.negated) << " -> "
       << support::pin_text(nl, to.value.slot, false, to.value.input) << '\n';
   return core::kExitOk;
 }

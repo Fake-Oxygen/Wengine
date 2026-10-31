@@ -140,7 +140,7 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
     out << '\n';
   }
   for (std::size_t o = 0; o < nout; ++o) {
-    out << support::pin_text(nl, out_pins[o].slot, true, 0) << '=' << ((outputs[o] == LogicValue::kHigh) ? '1' : '0') << '\n';
+    out << support::pin_text(nl, out_pins[o].slot, true, 0, out_pins[o].negated) << '=' << ((outputs[o] == LogicValue::kHigh) ? '1' : '0') << '\n';
   }
   return core::kExitOk;
 }

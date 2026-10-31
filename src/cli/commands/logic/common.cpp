@@ -39,11 +39,20 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
   return s;
 }
 
-[[nodiscard]] std::string pin_text(const Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input) {
+[[nodiscard]] std::string pin_text(const Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input, bool negated) {
   std::string s = gate_name(nl, slot);
   s += '.';
-  if (is_output) {
+  const auto &g = nl.gates[slot];
+  if (is_output && wengine::logic::is_sequential_kind(g.kind)) {
+    s += negated ? "NQ" : "Q";
+  } else if (is_output) {
     s += 'Y';
+  } else if (wengine::logic::is_sequential_kind(g.kind)) {
+    if (input == 0) {
+      s += 'D';
+    } else {
+      s += (g.kind == GateKind::kDff) ? "CLK" : "EN";
+    }
   } else {
     s += std::to_string(static_cast<unsigned>(input) + 1u);
   }
@@ -76,6 +85,12 @@ void collect_pins(const Netlist &nl, bool want_out, bool want_in, std::string_vi
       std::string p = pin_text(nl, s, true, 0);
       if (p.size() >= partial.size() && p.substr(0, partial.size()) == partial) {
         out.push_back(p);
+      }
+      if (wengine::logic::is_sequential_kind(g.kind)) {
+        std::string nq = pin_text(nl, s, true, 0, true);
+        if (nq.size() >= partial.size() && nq.substr(0, partial.size()) == partial) {
+          out.push_back(nq);
+        }
       }
     }
     if (want_in) {
@@ -137,7 +152,7 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
       os << ',';
     }
     first = false;
-    os << pin_text(nl, p.slot, true, 0);
+    os << pin_text(nl, p.slot, true, 0, p.negated);
   }
   os << '\n';
   if (!os) {
@@ -201,7 +216,7 @@ core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t t
     headers.push_back(pin_text(nl, p.slot, false, p.input));
   }
   for (const BlockPin &p : out_pins) {
-    headers.push_back(pin_text(nl, p.slot, true, 0));
+    headers.push_back(pin_text(nl, p.slot, true, 0, p.negated));
   }
   std::vector<std::size_t> widths;
   widths.reserve(ncols);

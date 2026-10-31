@@ -40,7 +40,7 @@ int LogicIgnoreSpec::run(ArgCursor &args, std::ostream &out) {
   if (!wengine::logic::ignore_pin(nl, pin.value).ok()) {
     return cli::runtime_error(out, "ignore failed");
   }
-  out << "ignored " << support::pin_text(nl, pin.value.slot, pin.value.is_output, pin.value.input) << '\n';
+  out << "ignored " << support::pin_text(nl, pin.value.slot, pin.value.is_output, pin.value.input, pin.value.negated) << '\n';
   return core::kExitOk;
 }
 

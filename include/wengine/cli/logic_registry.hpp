@@ -65,8 +65,10 @@ struct LogicAddSpec {
       "add <KIND> [--inputs N]\n"
       "  add AND\n"
       "  add OR --inputs 3\n"
-      "Kinds: AND OR NAND NOR XOR XNOR NOT BUF (case-insensitive).\n"
-      "NOT/BUF take exactly 1 input; the rest 2..8 (default 2, NOT/BUF default 1).";
+      "  add DFF\n"
+      "Kinds: AND OR NAND NOR XOR XNOR NOT BUF DFF DLATCH (case-insensitive).\n"
+      "NOT/BUF take exactly 1 input; DFF/DLATCH exactly 2 (pins D/CLK, D/EN);\n"
+      "the rest 2..8 (default 2, NOT/BUF default 1).";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
@@ -92,9 +94,12 @@ struct LogicWireSpec {
   static constexpr std::string_view kName = "wire";
   static constexpr std::string_view kDescription = "Wire an output pin to an input pin";
   static constexpr std::string_view kUsage =
-      "wire <FROM.Y> <TO.i>\n"
+      "wire <FROM.out> <TO.in>\n"
       "  wire AND1.Y NOT1.1\n"
-      "Single-driver: the destination input must be unwired; cycles are rejected.";
+      "  wire DFF1.Q AND1.1\n"
+      "  wire DFF1.NQ AND1.2\n"
+      "Single-driver: the destination input must be unwired; cycles are rejected.\n"
+      "Sequential gates use named pins (DFF1.D, DFF1.CLK, DFF1.Q, DFF1.NQ).";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);

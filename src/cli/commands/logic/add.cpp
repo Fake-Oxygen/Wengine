@@ -37,11 +37,6 @@ int LogicAddSpec::run(ArgCursor &args, std::ostream &out) {
   if (!kind.ok()) {
     return cli::usage_error(out, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH)", kUsage);
   }
-  if (wengine::logic::kind_ordinal(kind.value) >= 8) {
-    // SEQ1 vocabulary only: DFF/DLATCH parse + validate fan-in, but the
-    // Netlist holds combinational gates only until SEQ2 (state pool).
-    return cli::usage_error(out, "sequential gates need SEQ2 (DFF/DLATCH not yet addable)", kUsage);
-  }
   std::uint8_t inputs = wengine::logic::default_fanin(kind.value);
   if (inputs_text) {
     const auto n = cli::parse_i64(*inputs_text);
@@ -54,7 +49,7 @@ int LogicAddSpec::run(ArgCursor &args, std::ostream &out) {
   const auto added = wengine::logic::add_gate(nl, kind.value, inputs);
   if (!added.ok()) {
     if (added.error == std::string_view("bad fan-in for kind")) {
-      return cli::usage_error(out, "bad fan-in for kind (NOT/BUF take 1, the rest 2..8)", kUsage);
+      return cli::usage_error(out, "bad fan-in for kind (NOT/BUF take 1, DFF/DLATCH exactly 2, the rest 2..8)", kUsage);
     }
     return cli::runtime_error(out, "netlist full (max 1024 gates)");
   }

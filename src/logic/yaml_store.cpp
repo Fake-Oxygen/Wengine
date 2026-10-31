@@ -47,11 +47,21 @@ namespace {
   return s;
 }
 
-[[nodiscard]] std::string pin_text(const Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input) {
+[[nodiscard]] std::string pin_text(const Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input, bool negated = false) {
   std::string s = gate_name(nl, slot);
   s += '.';
-  if (is_output) {
+  const Gate &g = nl.gates[slot];
+  if (is_output && is_sequential_kind(g.kind)) {
+    s += negated ? "NQ" : "Q";
+  } else if (is_output) {
     s += 'Y';
+  } else if (is_sequential_kind(g.kind)) {
+    // Canonical named inputs (FR-010): DFF D/CLK, DLATCH D/EN.
+    if (input != 0) {
+      s += (g.kind == GateKind::kDff) ? "CLK" : "EN";
+    } else {
+      s += 'D';
+    }
   } else {
     s += std::to_string(static_cast<unsigned>(input) + 1u);
   }
@@ -98,6 +108,7 @@ struct GateRow {
   std::uint8_t inputs = 0;
   std::uint8_t ignored_mask = 0;
   bool ignore_output = false;
+  bool ignore_nq = false; // optional key, sequential gates only
   std::uint64_t delay_ps = 0;
   std::uint32_t counter = 0;
 };
@@ -118,7 +129,7 @@ struct TieRow {
   constexpr const char *kWant[6] = {"id", "kind", "inputs", "ignore", "ignore_output", "delay_ps"};
   for (auto it = g.begin(); it != g.end(); ++it) {
     const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
-    bool known = false;
+    bool known = (key == "ignore_nq"); // optional 7th key (sequential gates)
     for (const char *w : kWant) {
       if (key == w) {
         known = true;
@@ -126,15 +137,14 @@ struct TieRow {
       }
     }
     if (!known) {
-      err = at_line(it->first, "unknown gate key '" + key + "' (want id|kind|inputs|ignore|ignore_output|delay_ps)");
+      err = at_line(it->first, "unknown gate key '" + key + "' (want id|kind|inputs|ignore|ignore_output|delay_ps|ignore_nq)");
       return false;
     }
   }
   for (const char *w : kWant) {
     const YAML::Node v = g[w];
     if (!v || !v.IsDefined()) {
-      err = at_line(g, std::string("gate entry needs 6 fields (id, kind, inputs, ignore, ignore_output, delay_ps), missing '") +
-                           w + "'");
+      err = at_line(g, std::string("gate entry needs 6 fields (id, kind, inputs, ignore, ignore_output, delay_ps), missing '") + w + "'");
       return false;
     }
   }
@@ -159,12 +169,8 @@ struct TieRow {
     return false;
   }
   row.kind = parsed_kind.value;
-  if (kind_ordinal(row.kind) >= 8) {
-    // SEQ1 vocabulary only: sequential gates parse, but v2 workspaces hold
-    // combinational gates only (schema v3 + SEQ2 state pool arrive later).
-    err = at_line(kind, "sequential gates need schema v3 (DFF/DLATCH not yet supported)");
-    return false;
-  }
+  // Sequential gates live in the same schema version (additive: no file
+  // predating creation support can contain them, so no fallback needed).
   if (!inputs.IsScalar()) {
     err = at_line(inputs, "bad input count (want 1..8)");
     return false;
@@ -240,6 +246,22 @@ struct TieRow {
   } else {
     err = at_line(ignore_output, "ignore_output must be true|false");
     return false;
+  }
+  // Optional 7th key: missing means false (all pre-NQ files).
+  const YAML::Node ignore_nq = g["ignore_nq"];
+  if (ignore_nq && ignore_nq.IsDefined()) {
+    if (!ignore_nq.IsScalar()) {
+      err = at_line(ignore_nq, "ignore_nq must be true|false");
+      return false;
+    }
+    if (ignore_nq.Scalar() == "true") {
+      row.ignore_nq = true;
+    } else if (ignore_nq.Scalar() == "false") {
+      row.ignore_nq = false;
+    } else {
+      err = at_line(ignore_nq, "ignore_nq must be true|false");
+      return false;
+    }
   }
   if (!delay.IsScalar() || !parse_u64(delay.Scalar(), row.delay_ps)) {
     err = at_line(delay.IsDefined() ? delay : g, "bad delay_ps");
@@ -420,7 +442,7 @@ struct TieRow {
     for (std::size_t i = 0; i < gates.size(); ++i) {
       const YAML::Node g = gates[i];
       if (!g.IsMap()) {
-        err = at_line(g, "gate entry must read '{id: ..., kind: ..., inputs: ..., ignore: [...], ignore_output: ..., delay_ps: ...}'");
+        err = at_line(g, "gate entry must read '{id: ..., kind: ..., inputs: ..., ignore: [...], ignore_output: ..., [ignore_nq: ... ,] delay_ps: ...}'");
         return false;
       }
       GateRow row;
@@ -482,7 +504,9 @@ struct TieRow {
     slot.input_count = g.inputs;
     slot.ignored_mask = g.ignored_mask;
     slot.ignore_output = g.ignore_output;
+    slot.ignore_nq_output = g.ignore_nq;
     slot.output_fanout = 0;
+    slot.nq_fanout = 0;
     slot.propagation_delay_ps = g.delay_ps;
     for (std::size_t k = 0; k < kMaxInputs; ++k) {
       slot.drivers[k] = kNoDriver;
@@ -520,7 +544,7 @@ struct TieRow {
       return false;
     }
     if (!from.value.is_output || to.value.is_output) {
-      err = at + "wire needs FROM.Y TO.i (got '" + w.from + "' -> '" + w.to + "')";
+      err = at + "wire needs FROM.out TO.in (got '" + w.from + "' -> '" + w.to + "')";
       return false;
     }
     Gate &dst = tmp.gates[to.value.slot];
@@ -528,12 +552,17 @@ struct TieRow {
       err = at + "input already wired '" + w.to + "'";
       return false;
     }
-    if (detail::reaches(tmp, to.value.slot, from.value.slot)) {
+    if (detail::reaches_seq(tmp, to.value.slot, from.value.slot)) {
       err = at + "wire closes a combinational cycle '" + w.from + "' -> '" + w.to + "'";
       return false;
     }
     dst.drivers[to.value.input] = from.value.slot;
-    ++tmp.gates[from.value.slot].output_fanout;
+    if (from.value.negated) {
+      ++tmp.gates[from.value.slot].nq_fanout;
+      tmp.driver_inv[tie_flat(to.value.slot, to.value.input)] = 1;
+    } else {
+      ++tmp.gates[from.value.slot].output_fanout;
+    }
   }
   for (const TieRow &t : tie_rows) {
     const std::string at = "line " + std::to_string(t.line) + ": ";
@@ -619,6 +648,12 @@ void save_text(const Netlist &nl, std::string &out) {
     }
     out += "], ignore_output: ";
     out += g.ignore_output ? "true" : "false";
+    if (is_sequential_kind(g.kind)) {
+      // Sequential-only 7th key (comb rows keep the 6-field canonical
+      // bytes so existing goldens are untouched).
+      out += ", ignore_nq: ";
+      out += g.ignore_nq_output ? "true" : "false";
+    }
     out += ", delay_ps: ";
     out += std::to_string(g.propagation_delay_ps);
     out += "}\n";
@@ -635,7 +670,8 @@ void save_text(const Netlist &nl, std::string &out) {
         continue;
       }
       out += "  - {from: ";
-      out += pin_text(nl, drv, true, 0);
+      const bool neg = nl.driver_inv[tie_flat(s, i)] != 0;
+      out += pin_text(nl, drv, true, 0, neg);
       out += ", to: ";
       out += pin_text(nl, s, false, i);
       out += "}\n";

@@ -307,7 +307,7 @@ void draw_scene(SDL_Renderer *ren, const wengine::logic::Netlist &nl,
   // unrelated routes never merge by construction).
   (void)SDL_SetRenderDrawColor(ren, 20, 20, 20, 255);
   for (const auto &p : sc.gates) {
-    if (nl.gates[p.slot].output_fanout > 1) {
+    if (nl.gates[p.slot].output_fanout + nl.gates[p.slot].nq_fanout > 1) {
       gfx::fill_circle(ren, p.x + kLayoutBoxW, p.y + kLayoutBoxH / 2, 4);
     }
   }

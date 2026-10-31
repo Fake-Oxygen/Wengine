@@ -24,8 +24,14 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 [[nodiscard]] bool starts_with(std::string_view text, std::string_view prefix) noexcept;
 
 // Display names (per-kind counters, never reused): "AND1", "AND1.Y", "AND1.2".
+// Sequential gates show named pins: "DFF1.D", "DFF1.CLK", "DFF1.Q", "DFF1.NQ".
 [[nodiscard]] std::string gate_name(const wengine::logic::Netlist &nl, std::uint16_t slot);
-[[nodiscard]] std::string pin_text(const wengine::logic::Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input);
+[[nodiscard]] std::string pin_text(const wengine::logic::Netlist &nl, std::uint16_t slot, bool is_output,
+                                   std::uint8_t input, bool negated = false);
+
+void collect_gate_names(const wengine::logic::Netlist &nl, std::string_view partial, std::vector<std::string> &out);
+// Slot order; per gate the output pins first (Q then NQ on sequential gates),
+// then inputs (named on sequential gates, numeric elsewhere).
 
 void collect_gate_names(const wengine::logic::Netlist &nl, std::string_view partial, std::vector<std::string> &out);
 // Slot order; per gate the output pin first, then inputs 1..k.

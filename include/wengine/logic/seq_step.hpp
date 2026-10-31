@@ -142,7 +142,8 @@ namespace detail {
     if (!resolve_net(&gate_out[drv], 1, sunk)) {
       return false;
     }
-    out = sunk;
+    // NQ source: the sink reads the negated value (T005).
+    out = apply_polarity(sunk, nl.driver_inv[static_cast<std::size_t>(slot) * kMaxInputs + input]);
     return true;
   }
   if ((g.ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
@@ -319,13 +320,21 @@ namespace detail {
   std::size_t out_cursor = 0;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     const Gate &g = nl.gates[s];
-    if (!g.live || g.output_fanout != 0 || g.ignore_output) {
+    if (!g.live) {
       continue;
     }
-    if (out_cursor >= block_outputs.size()) {
-      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    if (g.output_fanout == 0 && !g.ignore_output) {
+      if (out_cursor >= block_outputs.size()) {
+        return core::Status::failure(core::StatusCode::kInvalidArgument);
+      }
+      block_outputs[out_cursor++] = gate_out[s];
     }
-    block_outputs[out_cursor++] = gate_out[s];
+    if (is_sequential_kind(g.kind) && g.nq_fanout == 0 && !g.ignore_nq_output) {
+      if (out_cursor >= block_outputs.size()) {
+        return core::Status::failure(core::StatusCode::kInvalidArgument);
+      }
+      block_outputs[out_cursor++] = apply_polarity(gate_out[s], 1);
+    }
   }
   if (out_cursor != block_outputs.size()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);

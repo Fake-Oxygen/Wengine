@@ -28,7 +28,7 @@ namespace {
     if (!text.empty()) {
       text += ' ';
     }
-    text += support::pin_text(nl, p.slot, is_output, p.input);
+    text += support::pin_text(nl, p.slot, is_output, p.input, p.negated);
   }
   return text;
 }

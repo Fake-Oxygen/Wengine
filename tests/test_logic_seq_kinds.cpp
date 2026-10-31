@@ -118,23 +118,37 @@ void test_fanin() {
   assert(logic::default_fanin(GateKind::kAnd) == 2);
 }
 
-void test_no_state_change() {
-  // SEQ1 is vocabulary only: creation of sequential gates stays loud and
-  // leaves the Netlist untouched (SEQ2 adds the state pool + creation).
+void test_creation() {
+  // Sequential creation path (T003): DFF/DLATCH take exactly 2 inputs,
+  // with per-kind never-reused counters (DFF1, DFF2, ...).
   Netlist nl;
-  assert(!logic::add_gate(nl, GateKind::kDff, 2).ok());
-  assert(!logic::add_gate(nl, GateKind::kDlatch, 2).ok());
-  assert(!logic::add_gate(nl, GateKind::kDff).ok());
-  assert(nl.live_count == 0);
-  // Name resolution on an empty workspace fails loudly (no crash on the
-  // >=16 ordinals), and combinational creation still works.
-  assert(!logic::resolve_gate(nl, "DFF1").ok());
-  assert(!logic::resolve_gate(nl, "DLATCH1").ok());
+  auto d1 = logic::add_gate(nl, GateKind::kDff, 2);
+  assert(d1.ok());
+  assert(nl.gates[d1.value].counter == 1);
+  assert(nl.gates[d1.value].input_count == 2);
+  auto l1 = logic::add_gate(nl, GateKind::kDlatch); // default fan-in is 2
+  assert(l1.ok());
+  assert(nl.gates[l1.value].counter == 1);
+  assert(nl.live_count == 2);
+  // Wrong fan-in stays loud, state untouched.
+  assert(!logic::add_gate(nl, GateKind::kDff, 1).ok());
+  assert(!logic::add_gate(nl, GateKind::kDff, 3).ok());
+  assert(!logic::add_gate(nl, GateKind::kDlatch, 8).ok());
+  assert(nl.live_count == 2);
+  // Names resolve (case-insensitive kind).
+  assert(logic::resolve_gate(nl, "DFF1").value == d1.value);
+  assert(logic::resolve_gate(nl, "dlatch1").value == l1.value);
+  assert(!logic::resolve_gate(nl, "DFF2").ok());
+  // Counters never reused: remove DFF1, the next DFF is DFF2.
+  assert(logic::remove_gate(nl, d1.value).ok());
+  auto d2 = logic::add_gate(nl, GateKind::kDff, 2);
+  assert(d2.ok());
+  assert(nl.gates[d2.value].counter == 2);
+  assert(logic::resolve_gate(nl, "DFF2").value == d2.value);
+  // Combinational creation unchanged.
   auto a = logic::add_gate(nl, GateKind::kAnd, 2);
   assert(a.ok());
-  assert(nl.live_count == 1);
-  assert(logic::resolve_gate(nl, "AND1").ok());
-  assert(!logic::resolve_gate(nl, "DFF1").ok());
+  assert(nl.gates[a.value].counter == 1);
 }
 
 } // namespace
@@ -145,7 +159,7 @@ int main() {
   test_parse_sequential();
   test_round_trip();
   test_fanin();
-  test_no_state_change();
+  test_creation();
   std::cout << "test_logic_seq_kinds: OK\n";
   return 0;
 }

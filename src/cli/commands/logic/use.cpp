@@ -36,7 +36,7 @@ int LogicUseSpec::run(ArgCursor &args, std::ostream &out) {
   if (!wengine::logic::use_pin(nl, pin.value).ok()) {
     return cli::runtime_error(out, "use failed");
   }
-  out << "unignored " << support::pin_text(nl, pin.value.slot, pin.value.is_output, pin.value.input) << '\n';
+  out << "unignored " << support::pin_text(nl, pin.value.slot, pin.value.is_output, pin.value.input, pin.value.negated) << '\n';
   return core::kExitOk;
 }
 

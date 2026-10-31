@@ -692,6 +692,13 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic_seq_step PRIVATE wengine_core)
     add_test(NAME logic_seq_step COMMAND test_logic_seq_step)
 
+    # Sequential named pins (D/CLK/EN/Q) + NQ negated output: parse
+    # aliases, NQ inversion (solve/word/step), fanout/interface counts,
+    # YAML round-trip. Links wengine_logic_yaml for the store seam.
+    add_executable(test_logic_seq_cli_pins tests/test_logic_seq_cli_pins.cpp)
+    target_link_libraries(test_logic_seq_cli_pins PRIVATE wengine_logic_yaml)
+    add_test(NAME logic_seq_cli_pins COMMAND test_logic_seq_cli_pins)
+
     # LOGIC-6 workspace store: yaml-cpp seam TU + yaml-free header. Links
     # wengine_logic_yaml only (never wengine_cli); test_logic above stays
     # on wengine_core alone by design.

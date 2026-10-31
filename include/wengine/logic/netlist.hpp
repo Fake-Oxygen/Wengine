@@ -26,12 +26,14 @@ struct PinRef {
   std::uint16_t slot = 0;
   bool is_output = false;
   std::uint8_t input = 0; // 0-based, valid iff !is_output
+  bool negated = false;   // valid iff is_output: NQ source on sequential gates
 };
 
 struct BlockPin {
   std::uint16_t slot = 0;
   std::uint8_t input = 0; // valid iff !is_output
   bool is_output = false;
+  bool negated = false; // valid iff is_output: the NQ (rather than Q) block output
 };
 
 // Tied-input equivalence (LOGIC-14): input-input shorts as first-class
@@ -154,6 +156,21 @@ namespace detail {
 }
 } // namespace detail
 
+// Exact case-insensitive pin-name match ("clk" == "CLK", "q" == "Q").
+// Empty name never matches; longer/shorter suffixes fall through to the
+// numeric parser so `DFF1.1` keeps working alongside `DFF1.D`.
+[[nodiscard]] constexpr bool match_pin_name(std::string_view suffix, std::string_view name) noexcept {
+  if (name.empty() || suffix.size() != name.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < suffix.size(); ++i) {
+    if (detail::to_upper(suffix[i]) != name[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Case-insensitive ("and", "AND", "And" all match). Exact full match.
 // Sequential kinds (DFF/DLATCH) parse here (SEQ1 vocabulary); creation
 // stays rejected by add_gate until SEQ2 provides the state pool.
@@ -233,6 +250,10 @@ namespace detail {
 }
 
 // Parse `<NAME>.Y` (output) or `<NAME>.<1..k>` (input, 1-based in text).
+// Sequential gates additionally accept named pins (FR-010/FR-011,
+// case-insensitive): DFF `D`/`CLK`/`Q`/`NQ`, DLATCH `D`/`EN`/`Q`/`NQ`.
+// Numeric aliases keep working for all kinds; names on combinational
+// kinds are rejected.
 // Input range validates against the gate's configured fan-in.
 [[nodiscard]] inline core::Result<PinRef> parse_pin(const Netlist &nl, std::string_view text) noexcept {
   std::size_t dot = text.find('.');
@@ -256,6 +277,38 @@ namespace detail {
   }
   const std::uint16_t slot = gate.value;
   const Gate &g = nl.gates[slot];
+  // Named sequential pins (FR-010): checked before the generic Y/numeric
+  // forms; numeric aliases fall through below and keep working.
+  if (is_sequential_kind(g.kind)) {
+    if (match_pin_name(suffix, "D")) {
+      PinRef ref{};
+      ref.slot = slot;
+      ref.is_output = false;
+      ref.input = 0;
+      return core::Result<PinRef>::success(ref);
+    }
+    const std::string_view clk_name = (g.kind == GateKind::kDff) ? "CLK" : "EN";
+    if (match_pin_name(suffix, clk_name)) {
+      PinRef ref{};
+      ref.slot = slot;
+      ref.is_output = false;
+      ref.input = 1;
+      return core::Result<PinRef>::success(ref);
+    }
+    if (match_pin_name(suffix, "Q")) {
+      PinRef ref{};
+      ref.slot = slot;
+      ref.is_output = true;
+      return core::Result<PinRef>::success(ref);
+    }
+    if (match_pin_name(suffix, "NQ")) {
+      PinRef ref{};
+      ref.slot = slot;
+      ref.is_output = true;
+      ref.negated = true;
+      return core::Result<PinRef>::success(ref);
+    }
+  }
   if (suffix.size() == 1 && (suffix[0] == 'Y' || suffix[0] == 'y')) {
     PinRef ref{};
     ref.slot = slot;
@@ -283,10 +336,9 @@ namespace detail {
     return core::Result<std::uint16_t>::failure("bad fan-in for kind");
   }
   const std::uint8_t ord = kind_ordinal(kind);
-  if (ord >= 8) {
-    // SEQ1 vocabulary only: DFF/DLATCH parse + validate fan-in, but no
-    // Netlist slot may hold them yet (next_counter covers ordinals 0..7;
-    // SEQ2 adds the parallel state pool + creation path). Loud until then.
+  if (ord >= 8 && !is_sequential_kind(kind)) {
+    // No such kind exists today (ordinals are 0..7 + 16/17); the guard
+    // stays so future appended kinds fail loudly until wired up.
     return core::Result<std::uint16_t>::failure("bad gate kind");
   }
   if (nl.next_counter[ord] == 0) {
@@ -400,7 +452,13 @@ namespace detail {
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     const std::uint16_t drv = g.drivers[i];
     if (drv != kNoDriver && drv < kMaxGates && nl.gates[drv].live) {
-      if (nl.gates[drv].output_fanout > 0) {
+      const std::size_t flat = tie_flat(slot, i);
+      if (nl.driver_inv[flat] != 0) {
+        nl.driver_inv[flat] = 0;
+        if (nl.gates[drv].nq_fanout > 0) {
+          --nl.gates[drv].nq_fanout;
+        }
+      } else if (nl.gates[drv].output_fanout > 0) {
         --nl.gates[drv].output_fanout;
       }
     }
@@ -414,16 +472,20 @@ namespace detail {
     for (std::uint8_t i = 0; i < o.input_count; ++i) {
       if (o.drivers[i] == slot) {
         o.drivers[i] = kNoDriver;
+        nl.driver_inv[tie_flat(s, i)] = 0;
       }
     }
   }
   g.live = false;
   g.ignored_mask = 0;
   g.ignore_output = false;
+  g.ignore_nq_output = false;
   g.output_fanout = 0;
+  g.nq_fanout = 0;
   g.input_count = default_fanin(g.kind);
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     g.drivers[i] = kNoDriver;
+    nl.driver_inv[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0;
     nl.tie_rep[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0;
   }
   if (nl.live_count > 0) {
@@ -555,6 +617,7 @@ namespace detail {
   }
   to.drivers[to_input] = from_slot;
   ++from.output_fanout;
+  nl.driver_inv[tie_flat(to_slot, to_input)] = 0; // slot-wire is never inverted
   nl.dirty = true;
   nl.topo_size = 0;
   return core::Status::success();
@@ -576,8 +639,18 @@ namespace detail {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   to.drivers[to_input] = kNoDriver;
-  if (drv < kMaxGates && nl.gates[drv].live && nl.gates[drv].output_fanout > 0) {
-    --nl.gates[drv].output_fanout;
+  if (drv < kMaxGates && nl.gates[drv].live) {
+    // Polarity-aware release: NQ edges decrement nq_fanout, Q edges
+    // decrement output_fanout.
+    const std::size_t flat = tie_flat(to_slot, to_input);
+    if (nl.driver_inv[flat] != 0) {
+      nl.driver_inv[flat] = 0;
+      if (nl.gates[drv].nq_fanout > 0) {
+        --nl.gates[drv].nq_fanout;
+      }
+    } else if (nl.gates[drv].output_fanout > 0) {
+      --nl.gates[drv].output_fanout;
+    }
   }
   nl.dirty = true;
   nl.topo_size = 0;
@@ -588,7 +661,27 @@ namespace detail {
   if (!from.is_output || to.is_output) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  return wire(nl, from.slot, to.slot, to.input);
+  if (from.slot >= kMaxGates || !nl.gates[from.slot].live) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  // NQ sources exist on sequential gates only (parse_pin gates this, but
+  // slot-built refs bypass text — stay loud, never silent).
+  if (from.negated && !is_sequential_kind(nl.gates[from.slot].kind)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  const core::Status st = wire(nl, from.slot, to.slot, to.input);
+  if (!st.ok() || !from.negated) {
+    return st;
+  }
+  // Move the edge from the Q fanout to the NQ fanout and mark the sink
+  // inverted (wire() always establishes the non-inverted state).
+  Gate &src = nl.gates[from.slot];
+  if (src.output_fanout > 0) {
+    --src.output_fanout;
+  }
+  ++src.nq_fanout;
+  nl.driver_inv[tie_flat(to.slot, to.input)] = 1;
+  return core::Status::success();
 }
 
 [[nodiscard]] inline core::Status unwire_pin(Netlist &nl, PinRef pin) noexcept {
@@ -619,7 +712,11 @@ namespace detail {
   }
   Gate &g = nl.gates[pin.slot];
   if (pin.is_output) {
-    g.ignore_output = true;
+    if (pin.negated) {
+      g.ignore_nq_output = true;
+    } else {
+      g.ignore_output = true;
+    }
     return core::Status::success();
   }
   if (pin.input >= g.input_count) {
@@ -638,7 +735,11 @@ namespace detail {
   }
   Gate &g = nl.gates[pin.slot];
   if (pin.is_output) {
-    g.ignore_output = false;
+    if (pin.negated) {
+      g.ignore_nq_output = false;
+    } else {
+      g.ignore_output = false;
+    }
     return core::Status::success();
   }
   if (pin.input >= g.input_count) {
@@ -658,16 +759,19 @@ inline void reset_netlist(Netlist &nl) noexcept {
     g.input_count = 2;
     g.ignored_mask = 0;
     g.ignore_output = false;
+    g.ignore_nq_output = false;
     g.output_fanout = 0;
+    g.nq_fanout = 0;
     g.propagation_delay_ps = 0;
     for (std::size_t i = 0; i < kMaxInputs; ++i) {
       g.drivers[i] = kNoDriver;
     }
     for (std::size_t i = 0; i < kMaxInputs; ++i) {
+      nl.driver_inv[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
       nl.tie_rep[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
     }
   }
-  for (std::size_t i = 0; i < 8; ++i) {
+  for (std::size_t i = 0; i < nl.next_counter.size(); ++i) {
     nl.next_counter[i] = 1;
   }
   nl.live_count = 0;
@@ -893,10 +997,15 @@ inline void reset_netlist(Netlist &nl) noexcept {
   std::size_t n = 0;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     const Gate &g = nl.gates[s];
-    if (!g.live || g.output_fanout != 0 || g.ignore_output) {
+    if (!g.live) {
       continue;
     }
-    ++n;
+    if (g.output_fanout == 0 && !g.ignore_output) {
+      ++n; // Q (or the single output on combinational gates)
+    }
+    if (is_sequential_kind(g.kind) && g.nq_fanout == 0 && !g.ignore_nq_output) {
+      ++n; // NQ second output
+    }
   }
   return n;
 }
@@ -930,13 +1039,21 @@ inline void reset_netlist(Netlist &nl) noexcept {
   }
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     const Gate &g = nl.gates[s];
-    if (!g.live || g.output_fanout != 0 || g.ignore_output) {
+    if (!g.live) {
       continue;
     }
-    if (out_buf != nullptr && need_out < out_cap) {
-      out_buf[need_out] = BlockPin{.slot = s, .input = 0, .is_output = true};
+    if (g.output_fanout == 0 && !g.ignore_output) {
+      if (out_buf != nullptr && need_out < out_cap) {
+        out_buf[need_out] = BlockPin{.slot = s, .input = 0, .is_output = true, .negated = false};
+      }
+      ++need_out;
     }
-    ++need_out;
+    if (is_sequential_kind(g.kind) && g.nq_fanout == 0 && !g.ignore_nq_output) {
+      if (out_buf != nullptr && need_out < out_cap) {
+        out_buf[need_out] = BlockPin{.slot = s, .input = 0, .is_output = true, .negated = true};
+      }
+      ++need_out;
+    }
   }
   if (in_n != nullptr) {
     *in_n = need_in;

@@ -62,6 +62,16 @@ enum class LogicValue : std::uint8_t {
   return true;
 }
 
+// Apply NQ sink polarity (T005): invert an already-resolved Low/High value
+// when the sink input is wired from a flop NQ output. Non-inverted sinks
+// pass through untouched.
+[[nodiscard]] constexpr LogicValue apply_polarity(LogicValue v, std::uint8_t inv) noexcept {
+  if (inv == 0) {
+    return v;
+  }
+  return (v == LogicValue::kHigh) ? LogicValue::kLow : LogicValue::kHigh;
+}
+
 inline constexpr std::size_t kMaxInputs = 8;
 inline constexpr std::size_t kMaxGates = 1024; // slot cap, loud on overflow
 
@@ -106,7 +116,9 @@ struct Gate {
   std::uint8_t input_count = 2;
   std::uint8_t ignored_mask = 0; // bit i => input (i+1) ignored
   bool ignore_output = false; // dangling output excluded from iface
-  std::uint16_t output_fanout = 0; // derived, for list/iface
+  bool ignore_nq_output = false; // dangling NQ excluded from iface (sequential only)
+  std::uint16_t output_fanout = 0; // derived Q fanout, for list/iface
+  std::uint16_t nq_fanout = 0;     // derived NQ fanout, sequential gates only
   std::uint64_t propagation_delay_ps = 0; // V2 timing hook (§12): stored
                                           // now, honored later; v1 eval is
                                           // zero-delay regardless of value
@@ -128,7 +140,14 @@ struct Gate {
 // class.
 struct Netlist {
   std::array<Gate, kMaxGates> gates{};
-  std::array<std::uint32_t, 8> next_counter{1, 1, 1, 1, 1, 1, 1, 1}; // per GateKind ordinal, first id is 1
+  // Per-kind monotonic counters (never reused), indexed by kind_ordinal:
+  // 0..7 combinational, 16 DFF, 17 DLATCH (8..15 unused, stay 1).
+  std::array<std::uint32_t, 18> next_counter{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+  // Per-sink output polarity: driver_inv[flat] != 0 means the sink input
+  // reads the NEGATED source value (wire from a flop NQ output). Zero is
+  // the all-non-inverted state by construction; slot-level wire() always
+  // clears, wire_pins() sets it for NQ sources, unwire()/remove clear it.
+  std::array<std::uint8_t, kMaxGates * kMaxInputs> driver_inv{};
   std::array<std::uint16_t, kMaxGates * kMaxInputs> tie_rep{};
   std::uint16_t live_count = 0;
   bool dirty = true;
