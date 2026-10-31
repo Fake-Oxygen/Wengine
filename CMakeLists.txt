@@ -686,6 +686,12 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic_seq_cycles PRIVATE wengine_core)
     add_test(NAME logic_seq_cycles COMMAND test_logic_seq_cycles)
 
+    # LOGIC-V2-SEQ4 scalar single-step sequential eval: header-only,
+    # links wengine_core alone like test_logic.
+    add_executable(test_logic_seq_step tests/test_logic_seq_step.cpp)
+    target_link_libraries(test_logic_seq_step PRIVATE wengine_core)
+    add_test(NAME logic_seq_step COMMAND test_logic_seq_step)
+
     # LOGIC-6 workspace store: yaml-cpp seam TU + yaml-free header. Links
     # wengine_logic_yaml only (never wengine_cli); test_logic above stays
     # on wengine_core alone by design.
