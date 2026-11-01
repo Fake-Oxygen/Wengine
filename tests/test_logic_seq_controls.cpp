@@ -11,6 +11,8 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <filesystem>
 #include <iostream>
 #include <span>
 #include <sstream>
@@ -819,8 +821,7 @@ void test_cli_control_completion() {
   }
 }
 
-void test_cli_determinism_replay() {
-  // SC-005: reset -> preset -> stall -> advance -> readback, replayed
+void test_cli_determinism_replay() {  // SC-005: reset -> preset -> stall -> advance -> readback, replayed
   // twice byte-identically (async assertion lands between advances).
   const std::vector<std::string> script = {
       "logic add DFF --inputs 5",
@@ -858,6 +859,101 @@ void test_cli_determinism_replay() {
   assert(contains(first, "clk: cycle 6 (1 edges)")); // 2 + 3 + 1 edges total
 }
 
+void test_cli_wired_control_session() {
+  // FR-007 session boundary: a wired RST net forces Q with a force line
+  // when its driver goes High; the shape survives save/reset/load and
+  // re-asserts identically. Usage errors change no state.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic add BUF", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic ignore DFF1.D", out) == 0);
+  // Raise Q via SET so the wired-RST force is observable H->L.
+  assert(sh.execute("logic poke DFF1.SET=1", out) == 0);
+  assert(sh.execute("logic poke DFF1.SET=release", out) == 0);
+  // Wiring a quiet driver (dangling BUF input reads Low) forces nothing.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic wire BUF1.Y DFF1.RST", out) == 0);
+  assert(contains(out.str(), "wired BUF1.Y -> DFF1.RST"));
+  assert(!contains(out.str(), "DFF1.Q:"));
+  // Driving the net High forces Q at once with a force line.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke BUF1.1=1", out) == 0);
+  assert(contains(out.str(), "poked BUF1.1=1"));
+  assert(contains(out.str(), "DFF1.Q: 1->0 (NQ 0->1)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek DFF1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1"));
+  // Invalid control stimulus is a usage error with no state change.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DFF1.RST=2", out) != 0);
+  assert(sh.execute("logic peek DFF1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1"));
+  // Interface lists the named control pins.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic list --iface", out) == 0);
+  assert(contains(out.str(), "DFF1.SET"));
+  assert(contains(out.str(), "DFF1.EN"));
+  // Save, wipe, reload: shape, mask, and wire survive; re-assert works.
+  const std::string tmp =
+      (std::filesystem::temp_directory_path() / "wengine_seq_controls_roundtrip.yaml").string();
+  std::remove(tmp.c_str());
+  assert(sh.execute(std::string("logic save ") + tmp, out) == 0);
+  assert(contains(out.str(), "saved 2 gates 1 wires"));
+  assert(sh.execute("logic reset", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute(std::string("logic load ") + tmp, out) == 0);
+  assert(contains(out.str(), "loaded 2 gates 1 wires"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DFF1.SET=1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0->1 (NQ 1->0)"));
+  assert(sh.execute("logic poke DFF1.SET=release", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke BUF1.1=1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 1->0 (NQ 0->1)"));
+  std::remove(tmp.c_str());
+  // Bare 2-input flops reject control names like out-of-range numerics.
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DFF1.RST=1", out) != 0);
+  assert(sh.execute("logic peek DFF1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1"));
+}
+
+void test_cli_step_zero_live_controls() {
+  // `step 0` with live async controls: reports current (forced) state,
+  // moves no cycle counter, and emits no duplicate force line (every
+  // mutation path already applied).
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  assert(sh.execute("logic step 1", out) == 0); // Q=1, cycle 1
+  assert(sh.execute("logic poke DFF1.RST=1", out) == 0); // force 1->0 now
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 0", out) == 0);
+  assert(contains(out.str(), "clk: cycle 1 (0 edges, no-op)"));
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1"));
+  assert(!contains(out.str(), "DFF1.Q:"));
+}
+
 } // namespace cli_session
 
 int main() {
@@ -879,6 +975,8 @@ int main() {
   cli_session::test_cli_conflict_matrix();
   cli_session::test_cli_control_completion();
   cli_session::test_cli_determinism_replay();
+  cli_session::test_cli_wired_control_session();
+  cli_session::test_cli_step_zero_live_controls();
   std::cout << "test_logic_seq_controls: OK\n";
   return 0;
 }

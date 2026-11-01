@@ -211,3 +211,13 @@ Task: "YAML RST round-trip test in tests/test_logic_seq_controls.cpp [T009]"
 - No new CLI commands → no registry-size `static_assert` changes expected (T021 verifies)
 - No YAML schema bump (`version: 2` retained; T003 loader accepts both counts)
 - No commits, pushes, or branches in any task (per project discipline; T021 asserts clean status only)
+
+---
+
+## Phase 8: Convergence
+
+**Purpose**: Close the three gaps found by the converge assessment (all behavior verified working live; these pin it with committed goldens/docs). Run after all Phase 1–7 work; `/speckit.implement` can complete this phase independently.
+
+- [X] T023 Add Shell goldens for session wired-control + file round-trip paths in `tests/test_logic_seq_controls.cpp`: wire `BUF1.Y -> DFF1.RST` via session then poke the driver High and assert the `DFF1.Q: 1->0` force line and `peek` readback; `save` to a unique tmp path, `reset`, `load`, re-assert RST and assert identical forcing; usage-error-no-mutation cases (`poke DFF1.RST=2`, `RST` on a bare 2-input flop); `list --iface` shows named `DFF1.RST`/`SET`/`EN` per FR-007 (partial)
+- [X] T024 Pin `step 0` with live async controls in `tests/test_logic_seq_controls.cpp`: assert RST then `step 0` reports current forced state with cycle counters unmoved and no duplicate force line per T007 (partial)
+- [X] T025 Extend the README `logic` module-table row with the DFF RST/SET/EN control set and priority per T018 (partial)
