@@ -64,7 +64,11 @@ struct ClockDomain {
 std::vector<ClockDomain> clock_domains(const wengine::logic::Netlist &nl);
 
 // Block-input vector in interface order, composed from the poke map with
-// unset pins defaulting to Low (same order solve() consumes). Stale
+// unset pins defaulting to Low (same order solve() consumes), except an
+// untied unpoked DFF clock-enable (input 4), which defaults to High
+// (FR-008: unconnected enable reads asserted). Tied EN follows its tie
+// net; poked EN keeps the poked value; ignored dangling EN reads
+// asserted via the engine rule in resolve_control. Stale
 // entries (removed/rewired pins) are skipped by construction.
 wengine::core::Status compose_block_inputs(const wengine::logic::Netlist &nl, std::vector<wengine::logic::LogicValue> &out);
 
@@ -72,6 +76,13 @@ wengine::core::Status compose_block_inputs(const wengine::logic::Netlist &nl, st
 // (removed gate, rewired input); returns the dropped count so callers can
 // report it loudly.
 std::size_t reap_stale_pokes(const wengine::logic::Netlist &nl);
+
+// Apply pending async controls (RST/SET) after a control-net mutation:
+// composes block inputs, forces Qs via apply_async_controls, and reports
+// each forced flop in step-report form (`DFF1.Q: a->b (NQ ...)`); quiet
+// when nothing moved. Never touches cycle counters. Returns failure on
+// engine refusal (engine contract: state untouched).
+wengine::core::Status apply_async_and_report(wengine::logic::Netlist &nl, std::ostream &out);
 
 // Truth streaming over the bit-parallel word evaluator (bit-exact vs solve).
 core::Status write_truth_csv(wengine::logic::Netlist &nl, std::uint64_t rows,

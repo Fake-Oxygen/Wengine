@@ -77,6 +77,10 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
   }
   out << "wired " << support::pin_text(nl, from.value.slot, true, 0, from.value.negated) << " -> "
       << support::pin_text(nl, to.value.slot, false, to.value.input) << '\n';
+  // A freshly driven RST/SET acts at once; report forced flops below.
+  if (!support::apply_async_and_report(nl, out).ok()) {
+    return cli::runtime_error(out, "wire failed");
+  }
   return core::kExitOk;
 }
 

@@ -1,9 +1,11 @@
 #include "common.hpp"
 
 #include "wengine/logic/eval.hpp"
+#include "wengine/logic/seq_step.hpp"
 #include "wengine/logic/types.hpp"
 #include "wengine/logic/yaml_store.hpp"
 
+#include <array>
 #include <ostream>
 #include <span>
 #include <string>
@@ -38,6 +40,14 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
   s += std::to_string(nl.gates[slot].counter);
   return s;
 }
+
+namespace {
+
+[[nodiscard]] char bit_of(wengine::logic::LogicValue v) noexcept {
+  return (v == wengine::logic::LogicValue::kHigh) ? '1' : '0';
+}
+
+} // namespace
 
 [[nodiscard]] std::string pin_text(const Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input, bool negated) {
   std::string s = gate_name(nl, slot);
@@ -193,6 +203,13 @@ core::Status compose_block_inputs(const Netlist &nl, std::vector<wengine::logic:
         continue; // members share the leader's value (same order as solve)
       }
       const auto it = pokes.find(flat);
+      if (it == pokes.end() && g.kind == wengine::logic::GateKind::kDff && i == 4 && nl.tie_rep[flat] == 0) {
+        // FR-008 (see R8): untied, unpoked enable reads asserted. Tied EN
+        // follows its tie net via the generic rule below; ignored EN is
+        // skipped above and reads asserted via resolve_control.
+        out.push_back(wengine::logic::LogicValue::kHigh);
+        continue;
+      }
       out.push_back(it == pokes.end() ? wengine::logic::LogicValue::kLow : it->second);
     }
   }
@@ -217,6 +234,42 @@ std::size_t reap_stale_pokes(const Netlist &nl) {
     }
   }
   return dropped;
+}
+
+core::Status apply_async_and_report(Netlist &nl, std::ostream &out) {
+  wengine::logic::SeqState &st = seq_state();
+  wengine::logic::init_seq_state(st, nl);
+  std::array<wengine::logic::LogicValue, kMaxGates> old_q{};
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (nl.gates[s].live && wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+      old_q[s] = st.q[s];
+    }
+  }
+  std::vector<wengine::logic::LogicValue> inputs;
+  if (!compose_block_inputs(nl, inputs).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (!wengine::logic::apply_async_controls(nl, st, std::span<const wengine::logic::LogicValue>(inputs.data(), inputs.size())).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+      continue;
+    }
+    if (st.q[s] == old_q[s]) {
+      continue;
+    }
+    const wengine::logic::LogicValue before = old_q[s];
+    const wengine::logic::LogicValue now = st.q[s];
+    out << pin_text(nl, s, true, 0) << ": " << bit_of(before) << "->" << bit_of(now) << " (NQ "
+        << bit_of(before == wengine::logic::LogicValue::kHigh ? wengine::logic::LogicValue::kLow
+                                                              : wengine::logic::LogicValue::kHigh)
+        << "->"
+        << bit_of(now == wengine::logic::LogicValue::kHigh ? wengine::logic::LogicValue::kLow
+                                                           : wengine::logic::LogicValue::kHigh)
+        << ")\n";
+  }
+  return core::Status::success();
 }
 
 core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<BlockPin> &in_pins,

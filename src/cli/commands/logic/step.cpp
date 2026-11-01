@@ -185,6 +185,12 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
   if (inputs.size() != in_pins.size()) {
     return cli::runtime_error(out, "step failed");
   }
+  // Live async controls act before edges (and before the transition
+  // baseline below, so the report shows what stepping itself did);
+  // cycle counters only move for edges taken.
+  if (!wengine::logic::apply_async_controls(nl, st, std::span<const LogicValue>(inputs.data(), inputs.size())).ok()) {
+    return cli::runtime_error(out, "step failed");
+  }
   // Old Q for the transition report (stepped flops only).
   std::vector<LogicValue> old_q(wengine::logic::kMaxGates, LogicValue::kLow);
   for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {

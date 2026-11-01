@@ -19,8 +19,8 @@ cmake --build build
 
 ```text
 logic
-add DFF
-add DFF
+add DFF --inputs 5
+add DFF --inputs 5
 ignore DFF1.CLK
 ignore DFF2.CLK
 poke DFF1.D=1
@@ -41,7 +41,7 @@ further `step`; the following `step 1` advances from the reset state.
 
 ```text
 logic
-add DFF
+add DFF --inputs 5
 ignore DFF1.CLK
 poke DFF1.SET=1
 peek                   # expect DFF1.Q=1 NQ=0 with D still 0, no step
@@ -56,8 +56,8 @@ release.
 
 ```text
 logic
-add DFF
-add DFF
+add DFF --inputs 5
+add DFF --inputs 5
 ignore DFF1.CLK
 ignore DFF2.CLK
 poke DFF1.EN=0
@@ -74,7 +74,7 @@ captures normally.
 
 ```text
 logic
-add DFF
+add DFF --inputs 5
 ignore DFF1.CLK
 poke DFF1.RST=1
 poke DFF1.SET=1
@@ -93,8 +93,12 @@ against its pinned output — outputs must be byte-identical.
 
 ## Validation checklist
 
-- [ ] Reset forces Q=0 with no `step`, holds while asserted (scenario 1)
-- [ ] Preset forces Q=1 with no `step`, releases cleanly (scenario 2)
-- [ ] `EN=0` holds across 3 edges while sibling captures (scenario 3)
-- [ ] RST+SET reads Q=0 everywhere (REPL, script, pipe) (scenario 4)
-- [ ] Old D-only scripts replay byte-identically (scenario 5)
+- [x] Reset forces Q=0 with no `step`, holds while asserted (scenario 1)
+- [x] Preset forces Q=1 with no `step`, releases cleanly (scenario 2)
+- [x] `EN=0` holds across 3 edges while sibling captures (scenario 3)
+- [x] RST+SET reads Q=0 everywhere (REPL, script, pipe) (scenario 4)
+- [x] Old D-only scripts replay byte-identically (scenario 5)
+
+Validated 2026-10-31 headlessly (pipe spelling; scenarios 1–4 also
+covered by `test_logic_seq_controls` Shell goldens, scenario 5 by the
+unchanged pre-existing suites).

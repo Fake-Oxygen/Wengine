@@ -48,6 +48,10 @@ int LogicLoadSpec::run(ArgCursor &args, std::ostream &out) {
   const std::size_t wires = support::wire_count(tmp);
   workspace() = tmp;
   out << "loaded " << gates << " gates " << wires << " wires <- '" << *path << "'\n";
+  // Controls stored live in the file act at once; report forced flops below.
+  if (!support::apply_async_and_report(workspace(), out).ok()) {
+    return cli::runtime_error(out, "load failed");
+  }
   return core::kExitOk;
 }
 

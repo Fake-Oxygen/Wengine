@@ -7,6 +7,9 @@ in `data-model.md`; exact C++ spelling lands in `tasks.md`/implementation.
 
 ## C1. Named pins (extends FR-010/FR-011 vocabulary)
 
+Control-capable flops are opt-in (`add DFF --inputs 5`); bare `add DFF`
+stays D-only. On 5-input flops:
+
 ```text
 DFFn.D    input 0   data (unchanged)
 DFFn.CLK  input 1   clock (unchanged)

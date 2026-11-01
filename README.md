@@ -147,9 +147,23 @@ save/load/export plus sequential `step`/`poke`/`peek`; `tie A.1 B.2` shorts two 
 (canonical lowest-pin rep, one block input per class) so NAND(a,a)
 inversion is first-class. Sequential blocks use readable named pins
 (`DFF1.D`, `DFF1.CLK`, `DFF1.Q`, plus negated `DFF1.NQ` — dangling NQ
-is ignored unless wired or `use`d; numeric aliases still work). Runnable workspaces live in
+is ignored unless wired or `use`d; numeric aliases still work).
+`add DFF --inputs 5` makes the full control set (`RST`/`SET`/`EN`)
+for counters/FSMs with priority `RST > SET > EN-hold > D`
+(reset wins); unconnected controls read inactive. Runnable workspaces live in
 `examples/logic/` (`nand_pair`, `fanout`, `parity3`, `tieoff`,
-`tied_demorgan` — each header shows its run command).
+`tied_demorgan` — each header shows its run command). Reset + stall:
+
+```text
+> logic add DFF --inputs 5
+> logic ignore DFF1.CLK
+> logic poke DFF1.D=1
+> logic step 1                  # DFF1.Q: 0->1
+> logic poke DFF1.RST=1         # DFF1.Q: 1->0 (no clock needed)
+> logic poke DFF1.RST=release
+> logic poke DFF1.EN=0
+> logic step 2                  # DFF1.Q: 0 (no change) — stalled
+```
 `--help`/`-h` also print help. Return codes: `0` ok, `1`
 runtime/unknown-command error, `2` argument/usage error, `-1` internal exit
 signal (REPL loop only).
@@ -680,7 +694,7 @@ parity vs headless bus, verb rejections), `test_signal_panel_lua`
 matrix),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
-`test_logic_seq_cli_pins` (named pins D/CLK/EN/Q + NQ polarity, fanout/interface counts, YAML round-trip), `test_logic_seq_cli_step`, `test_logic_seq_cli_poke`, `test_logic_seq_cli_peek` (verb goldens: advance/selective domains, poke/release, Q+NQ readback, determinism replay, completion),
+`test_logic_seq_cli_pins` (named pins D/CLK/EN/Q + NQ polarity, fanout/interface counts, YAML round-trip), `test_logic_seq_cli_step`, `test_logic_seq_cli_poke`, `test_logic_seq_cli_peek` (verb goldens: advance/selective domains, poke/release, Q+NQ readback, determinism replay, completion), `test_logic_seq_controls` (DFF RST/SET/EN: fan-in rules, named pins, priority truth table, async-apply, hold, wired reset, YAML round-trip, session scenarios, conflict matrix),
 `test_frame_source` (source registry, channels, ring,
 particle + signal CSV-exactness, sink re-attach, plot bounds),
 `test_gui_stream_source`

@@ -56,9 +56,9 @@ asserted, release → normal capture resumes
 
 ### Implementation for User Story 1
 
-- [ ] T007 [US1] Session async-apply wiring in `src/cli/commands/logic/poke.cpp`, `src/cli/commands/logic/step.cpp` (plus wire/tie/load mutation paths): call `apply_async_controls` after every control-net mutation and at top of `step` before edge looping; cycle counters unchanged by async-only activity; forced transitions reuse the existing `DFF1.Q: a->b` report form
-- [ ] T008 [P] [US1] CLI reset scenario tests in `tests/test_logic_seq_controls.cpp`: quickstart §1 flow, multi-flop reset-hold-release, `EN`-held + `RST` conflict (async wins), release-then-capture resumption
-- [ ] T009 [P] [US1] YAML RST round-trip test in `tests/test_logic_seq_controls.cpp`: save workspace with `DFF1.RST` wired + `inputs: 5`, reload, re-assert, identical readback; legacy `inputs: 2` file loads with reset inactive
+- [X] T007 [US1] Session async-apply wiring in `src/cli/commands/logic/poke.cpp`, `src/cli/commands/logic/step.cpp` (plus wire/tie/load mutation paths): call `apply_async_controls` after every control-net mutation and at top of `step` before edge looping; cycle counters unchanged by async-only activity; forced transitions reuse the existing `DFF1.Q: a->b` report form
+- [X] T008 [P] [US1] CLI reset scenario tests in `tests/test_logic_seq_controls.cpp`: quickstart §1 flow, multi-flop reset-hold-release, `EN`-held + `RST` conflict (async wins), release-then-capture resumption
+- [X] T009 [P] [US1] YAML RST round-trip test in `tests/test_logic_seq_controls.cpp`: save workspace with `DFF1.RST` wired + `inputs: 5`, reload, re-assert, identical readback; legacy `inputs: 2` file loads with reset inactive
 
 **Checkpoint**: At this point, User Story 1 is fully functional and testable independently (resettable counters/FSMs with zero clocking)
 
@@ -75,8 +75,8 @@ reads Q=1 with no step; release + `step 1` with D=0 returns Q=0;
 
 ### Implementation for User Story 2
 
-- [ ] T010 [US2] CLI preset scenario tests in `tests/test_logic_seq_controls.cpp`: quickstart §2 seed flow, `SET`-hold across `step N` (Q stays 1), 3-flop counter-seed via `SET` then counting from seed
-- [ ] T011 [P] [US2] Simultaneous-assertion tests in `tests/test_logic_seq_controls.cpp`: `RST`+`SET` → Q=0 on REPL/pipe/script spellings with identical readback; `NQ` live-negation after every async force (`peek` shows `Q=1 NQ=0` and `Q=0 NQ=1`)
+- [X] T010 [US2] CLI preset scenario tests in `tests/test_logic_seq_controls.cpp`: quickstart §2 seed flow, `SET`-hold across `step N` (Q stays 1), 3-flop counter-seed via `SET` then counting from seed
+- [X] T011 [P] [US2] Simultaneous-assertion tests in `tests/test_logic_seq_controls.cpp`: `RST`+`SET` → Q=0 on REPL/pipe/script spellings with identical readback; `NQ` live-negation after every async force (`peek` shows `Q=1 NQ=0` and `Q=0 NQ=1`)
 
 **Checkpoint**: At this point, User Stories 1 AND 2 both work independently (reset + seedable preset)
 
@@ -93,9 +93,9 @@ sibling captures Q=1; `peek` confirms
 
 ### Implementation for User Story 3
 
-- [ ] T012 [US3] Hold reporting in `src/cli/commands/logic/step.cpp`: `EN=0` flops emit existing no-change line shapes (`DFF1.Q: v (no change)`) per edge while siblings report captures; held flops excluded from transition diffs
-- [ ] T013 [US3] CLI stall scenario tests in `tests/test_logic_seq_controls.cpp`: quickstart §3 flow, 5-edge freeze (SC-002), `EN` release mid-sequence resumes capture next edge, dangling-`EN` flop always captures (enabled default)
-- [ ] T014 [P] [US3] Domain-subset × enable interaction test in `tests/test_logic_seq_controls.cpp`: stepped subset with an `EN=0` member holds while other members capture; non-members hold regardless of `EN` (existing subset rule preserved)
+- [X] T012 [US3] Hold reporting in `src/cli/commands/logic/step.cpp`: `EN=0` flops emit existing no-change line shapes (`DFF1.Q: v (no change)`) per edge while siblings report captures; held flops excluded from transition diffs
+- [X] T013 [US3] CLI stall scenario tests in `tests/test_logic_seq_controls.cpp`: quickstart §3 flow, 5-edge freeze (SC-002), `EN` release mid-sequence resumes capture next edge, dangling-`EN` flop always captures (enabled default)
+- [X] T014 [P] [US3] Domain-subset × enable interaction test in `tests/test_logic_seq_controls.cpp`: stepped subset with an `EN=0` member holds while other members capture; non-members hold regardless of `EN` (existing subset rule preserved)
 
 **Checkpoint**: All three control stories independently functional (reset, preset, stall)
 
@@ -111,10 +111,10 @@ file, pipe) with identical readback for every conflicting combination
 
 ### Implementation for User Story 4
 
-- [ ] T015 [US4] Help + completion in `include/wengine/cli/logic_registry.hpp` and `src/cli/commands/logic/common.cpp`: pin table (`RST`/`SET`/`EN` + active levels + dangling defaults) and the normative sentence `RST (async) > SET (async) > EN-hold (sync) > D; RST+SET -> Q=0`; completion suggests new pin names after `DFFn.`
-- [ ] T016 [P] [US4] Full conflict-matrix CLI test in `tests/test_logic_seq_controls.cpp`: all 8 `RST`×`SET`×`EN` combinations × D-toggle × both Q_old values against the research.md R3 table, identical output across session/script/pipe harness spellings
-- [ ] T017 [P] [US4] `docs/logic.md` update: priority statement, 5-pin table with active levels and dangling defaults, async-vs-sync split, global-async vs per-member-sync scoping rule, DLATCH-unchanged note
-- [ ] T018 [US4] `README.md` update: Run example (reset + stall), module table entry, test-list entry for `test_logic_seq_controls`
+- [X] T015 [US4] Help + completion in `include/wengine/cli/logic_registry.hpp` and `src/cli/commands/logic/common.cpp`: pin table (`RST`/`SET`/`EN` + active levels + dangling defaults) and the normative sentence `RST (async) > SET (async) > EN-hold (sync) > D; RST+SET -> Q=0`; completion suggests new pin names after `DFFn.`
+- [X] T016 [P] [US4] Full conflict-matrix CLI test in `tests/test_logic_seq_controls.cpp`: all 8 `RST`×`SET`×`EN` combinations × D-toggle × both Q_old values against the research.md R3 table, identical output across session/script/pipe harness spellings
+- [X] T017 [P] [US4] `docs/logic.md` update: priority statement, 5-pin table with active levels and dangling defaults, async-vs-sync split, global-async vs per-member-sync scoping rule, DLATCH-unchanged note
+- [X] T018 [US4] `README.md` update: Run example (reset + stall), module table entry, test-list entry for `test_logic_seq_controls`
 
 **Checkpoint**: Priority rule is user-visible, machine-proven, and documented; all user stories independently functional
 
@@ -124,10 +124,10 @@ file, pipe) with identical readback for every conflicting combination
 
 **Purpose**: Gates, determinism proof, and review hygiene
 
-- [ ] T019 Determinism replay test in `tests/test_logic_seq_controls.cpp`: scripted 10-step reset→preset→stall→advance→readback sequence (SC-005) replayed twice byte-identically, including async assertion between advances
-- [ ] T020 [P] Quickstart validation: execute all 5 scenarios in `specs/002-dff-control-set/quickstart.md` headlessly and check every expected outcome + checklist box
-- [ ] T021 Full suite + hygiene gate in repo root: `ctest --test-dir build --output-on-failure` green, zero new compiler warnings, registry-size `static_assert`s intact (no new commands added), `git status` shows only intended files, no commits/pushes
-- [ ] T022 Constitution compliance review: correctness (goldens independent of implementation), determinism (slot-order + zero-migration), dependency direction (cli→solvers only), docs living-spec updated, residual risks noted
+- [X] T019 Determinism replay test in `tests/test_logic_seq_controls.cpp`: scripted 10-step reset→preset→stall→advance→readback sequence (SC-005) replayed twice byte-identically, including async assertion between advances
+- [X] T020 [P] Quickstart validation: execute all 5 scenarios in `specs/002-dff-control-set/quickstart.md` headlessly and check every expected outcome + checklist box
+- [X] T021 Full suite + hygiene gate in repo root: `ctest --test-dir build --output-on-failure` green, zero new compiler warnings, registry-size `static_assert`s intact (no new commands added), `git status` shows only intended files, no commits/pushes
+- [X] T022 Constitution compliance review: correctness (goldens independent of implementation), determinism (slot-order + zero-migration), dependency direction (cli→solvers only), docs living-spec updated, residual risks noted
 
 ---
 

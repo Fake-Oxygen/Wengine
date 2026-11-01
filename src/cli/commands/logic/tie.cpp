@@ -59,6 +59,10 @@ int LogicTieSpec::run(ArgCursor &args, std::ostream &out) {
   }
   out << "tied " << support::pin_text(nl, a.value.slot, false, a.value.input) << " = "
       << support::pin_text(nl, b.value.slot, false, b.value.input) << '\n';
+  // A freshly tied RST/SET net acts at once; report forced flops below.
+  if (!support::apply_async_and_report(nl, out).ok()) {
+    return cli::runtime_error(out, "tie failed");
+  }
   return core::kExitOk;
 }
 

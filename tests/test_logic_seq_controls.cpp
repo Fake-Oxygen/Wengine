@@ -3,12 +3,19 @@
 #include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/seq_step.hpp"
 #include "wengine/logic/types.hpp"
+#include "wengine/logic/yaml_store.hpp"
+#include "wengine/cli/args.hpp"
+#include "wengine/cli/logic_registry.hpp"
+#include "wengine/cli/shell.hpp"
 
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <span>
+#include <sstream>
+#include <string>
+#include <vector>
 
 using namespace wengine;
 using wengine::logic::GateKind;
@@ -17,6 +24,12 @@ using wengine::logic::Netlist;
 using wengine::logic::SeqState;
 
 namespace {
+
+bool contains(const std::string &hay, const std::string &needle) {
+  return hay.find(needle) != std::string::npos;
+}
+
+void no_history(cli::Shell &sh) { sh.set_history_file(""); }
 
 constexpr LogicValue kL = LogicValue::kLow;
 constexpr LogicValue kH = LogicValue::kHigh;
@@ -323,6 +336,530 @@ void test_wired_rst() {
 
 } // namespace
 
+namespace cli_session {
+
+void test_cli_reset_flow() {
+  // Quickstart §1: 2-flop reset-hold-release with step counting from zero.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic ignore DFF2.CLK", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  assert(sh.execute("logic poke DFF2.D=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "clk: cycle 1 (1 edges)"));
+  assert(contains(out.str(), "DFF1.Q: 0->1"));
+  assert(contains(out.str(), "DFF2.Q: 0->1"));
+  // Assert reset: immediate force lines, no clock advance.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DFF1.RST=1", out) == 0);
+  assert(contains(out.str(), "poked DFF1.RST=1"));
+  assert(contains(out.str(), "DFF1.Q: 1->0 (NQ 0->1)"));
+  assert(sh.execute("logic poke DFF2.RST=1", out) == 0);
+  assert(contains(out.str(), "DFF2.Q: 1->0 (NQ 0->1)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1"));
+  assert(contains(out.str(), "DFF2.Q=0 NQ=1"));
+  // Held reset freezes counting: two edges, no change.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 2", out) == 0);
+  assert(contains(out.str(), "clk: cycle 3 (2 edges)"));
+  assert(contains(out.str(), "DFF1.Q: 0 (no change)"));
+  assert(contains(out.str(), "DFF2.Q: 0 (no change)"));
+  // Release and count from zero.
+  assert(sh.execute("logic poke DFF1.RST=release", out) == 0);
+  assert(sh.execute("logic poke DFF2.RST=release", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0->1"));
+  assert(contains(out.str(), "DFF2.Q: 0->1"));
+}
+
+void test_cli_reset_beats_hold() {
+  // Async RST wins over disabled EN: force lands with no step, and the
+  // held edge cannot revive Q while RST stays asserted.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  assert(sh.execute("logic step 1", out) == 0); // Q=1
+  assert(sh.execute("logic poke DFF1.EN=0", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=0", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DFF1.RST=1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 1->0 (NQ 0->1)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0 (no change)"));
+  // Release RST (EN still 0): the flop holds 0, proving release alone
+  // never forces and the hold path owns the edge.
+  assert(sh.execute("logic poke DFF1.RST=release", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0 (no change)"));
+  // Release EN: normal capture resumes next edge.
+  assert(sh.execute("logic poke DFF1.EN=1", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0->1"));
+}
+
+void test_yaml_control_roundtrip() {  // Save/load preserves the 5-input shape, ignore mask, and the RST wire;
+  // the reloaded net forces identically. Legacy inputs:2 loads with
+  // controls absent (bare behavior).
+  Netlist nl;
+  const std::uint16_t f = logic::add_gate(nl, GateKind::kDff, 5).value;
+  const std::uint16_t b = logic::add_gate(nl, GateKind::kBuf, 1).value;
+  (void)b;
+  logic::PinRef clk{};
+  clk.slot = f;
+  clk.is_output = false;
+  clk.input = 1;
+  assert(logic::ignore_pin(nl, clk).ok());
+  assert(logic::wire_text(nl, "BUF1.Y", "DFF1.RST").ok());
+  std::string text;
+  logic::yaml::save_text(nl, text);
+  assert(contains(text, "inputs: 5"));
+  assert(contains(text, "DFF1.RST"));
+  Netlist back;
+  std::string err;
+  assert(logic::yaml::load_text(text, back, err));
+  assert(back.gates[f].input_count == 5);
+  assert(back.gates[f].drivers[2] != logic::kNoDriver);
+  std::string again;
+  logic::yaml::save_text(back, again);
+  assert(again == text); // byte-identical round-trip
+  // Re-assert on the loaded net: SET raises Q, then driving the wired
+  // RST net (BUF1.1 block input) forces it back with no step.
+  {
+    logic::SeqState st;
+    // Interface order: [DFF1.D, DFF1.SET, DFF1.EN, BUF1.1].
+    assert(logic::block_input_count(back) == 4);
+    const LogicValue seed[4] = {kL, kH, kH, kL};
+    assert(logic::apply_async_controls(back, st, std::span<const LogicValue>(seed, 4)).ok());
+    assert(st.q[f] == kH);
+    const LogicValue force[4] = {kL, kL, kH, kH};
+    assert(logic::apply_async_controls(back, st, std::span<const LogicValue>(force, 4)).ok());
+    assert(st.q[f] == kL);
+  }
+  // Legacy bare flop: loads, rejects control names, steps D-only.
+  const std::string legacy =
+      "version: 2\n"
+      "gates:\n"
+      "  - {id: DFF1, kind: dff, inputs: 2, ignore: [1, 2], ignore_output: false, delay_ps: 0}\n"
+      "wires:\n"
+      "ties:\n"
+      "meta:\n"
+      "  tool: wengine-logic\n";
+  Netlist old;
+  assert(logic::yaml::load_text(legacy, old, err));
+  assert(!logic::parse_pin(old, "DFF1.RST").ok());
+  assert(!logic::parse_pin(old, "DFF1.3").ok());
+  assert(logic::parse_pin(old, "DFF1.CLK").ok());
+}
+
+void test_cli_preset_flow() {
+  // Quickstart §2: preset without clocking, hold across edges, release
+  // latches nothing (next capture follows D).
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DFF1.SET=1", out) == 0);
+  assert(contains(out.str(), "poked DFF1.SET=1"));
+  assert(contains(out.str(), "DFF1.Q: 0->1 (NQ 1->0)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek DFF1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=1 NQ=0"));
+  // SET held across 2 edges with D=0: Q stays 1 (no-change, still forced).
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 2", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 1 (no change)"));
+  // Release: nothing moves until the next edge captures D=0.
+  assert(sh.execute("logic poke DFF1.SET=release", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek DFF1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=1 NQ=0"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 1->0 (NQ 0->1)"));
+}
+
+void test_cli_counter_seed() {
+  // Seed a 2-bit counter (D0=NOT Q0, D1=Q1 XOR Q0) to 10 via SET, then
+  // count 10 -> 11 -> 00. DFF1=Q0 (LSB), DFF2=Q1 (MSB).
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic add NOT", out) == 0);
+  assert(sh.execute("logic add XOR", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic ignore DFF2.CLK", out) == 0);
+  // D-side first (incremental cycle check): comb -> flop D inputs.
+  assert(sh.execute("logic wire NOT1.Y DFF1.D", out) == 0);
+  assert(sh.execute("logic wire XOR1.Y DFF2.D", out) == 0);
+  assert(sh.execute("logic wire DFF1.Q NOT1.1", out) == 0);
+  assert(sh.execute("logic wire DFF1.Q XOR1.1", out) == 0);
+  assert(sh.execute("logic wire DFF2.Q XOR1.2", out) == 0);
+  // Seed (Q1,Q0) = (1,0): SET on DFF2 only.
+  assert(sh.execute("logic poke DFF2.SET=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0"));
+  assert(contains(out.str(), "DFF2.Q=1"));
+  assert(sh.execute("logic poke DFF2.SET=release", out) == 0);
+  // 10 -> 11: D0 = NOT 0 = 1, D1 = 1 XOR 0 = 1.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0->1"));
+  assert(contains(out.str(), "DFF2.Q: 1 (no change)"));
+  // 11 -> 00: D0 = NOT 1 = 0, D1 = 1 XOR 1 = 0.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 1->0"));
+  assert(contains(out.str(), "DFF2.Q: 1->0"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1"));
+  assert(contains(out.str(), "DFF2.Q=0 NQ=1"));
+}
+
+void test_cli_set_reset_conflict() {
+  // RST+SET reads 0 everywhere; releasing RST flips to 1 with no step;
+  // NQ tracks live. Same script twice -> byte-identical readback.
+  const auto run_script = []() {
+    cli::Shell sh;
+    no_history(sh);
+    std::ostringstream out;
+    assert(sh.execute("logic reset", out) == 0);
+    out.str(""); // drop the reset line: its gate count reflects prior state
+    out.clear();
+    assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+    assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+    assert(sh.execute("logic poke DFF1.RST=1", out) == 0);
+    assert(sh.execute("logic poke DFF1.SET=1", out) == 0);
+    assert(sh.execute("logic peek DFF1", out) == 0);
+    assert(sh.execute("logic poke DFF1.RST=release", out) == 0);
+    assert(sh.execute("logic peek DFF1", out) == 0);
+    assert(sh.execute("logic poke DFF1.RST=1", out) == 0);
+    assert(sh.execute("logic peek DFF1", out) == 0);
+    return out.str();
+  };
+  const std::string first = run_script();
+  const std::string second = run_script();
+  assert(first == second);
+  assert(contains(first, "DFF1.Q=0 NQ=1")); // RST+SET -> 0, then RST alone -> 0
+  assert(contains(first, "DFF1.Q: 0->1 (NQ 1->0)")); // RST release lets SET win
+  assert(contains(first, "DFF1.Q: 1->0 (NQ 0->1)")); // re-asserted RST forces back
+  assert(contains(first, "DFF1.Q=1 NQ=0")); // SET-alone readback
+}
+
+void test_cli_stall_flow() {
+  // Quickstart §3: EN=0 holds across 3 edges while the sibling captures;
+  // release resumes capture; dangling EN captures (enabled by default).
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic ignore DFF2.CLK", out) == 0);
+  assert(sh.execute("logic poke DFF1.EN=0", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  assert(sh.execute("logic poke DFF2.D=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 3", out) == 0);
+  assert(contains(out.str(), "clk: cycle 3 (3 edges)"));
+  assert(contains(out.str(), "DFF1.Q: 0 (no change)"));
+  assert(contains(out.str(), "DFF2.Q: 0->1 (NQ 1->0)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1"));
+  assert(contains(out.str(), "DFF2.Q=1 NQ=0"));
+  // Five-edge freeze on the held flop (SC-002): still 0, sibling stays 1.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 5", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0 (no change)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek DFF1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1"));
+  // Release mid-sequence: capture resumes on the very next edge.
+  assert(sh.execute("logic poke DFF1.EN=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0->1 (NQ 1->0)"));
+  // Dangling EN (never poked) captures: DFF2 proved it from power-on.
+}
+
+void test_cli_subset_enable() {  // Selective hold composes with clock-domain subsets: an EN=0 member
+  // holds when its domain steps; an enabled non-member is untouched.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0); // DFF1: implicit clk
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0); // DFF2: driven clock
+  assert(sh.execute("logic add BUF", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic wire BUF1.Y DFF2.CLK", out) == 0);
+  assert(sh.execute("logic ignore DFF1.D", out) == 0);
+  assert(sh.execute("logic poke DFF1.EN=0", out) == 0);
+  assert(sh.execute("logic poke DFF2.D=1", out) == 0);
+  assert(sh.execute("logic poke DFF2.EN=0", out) == 0);
+  // Step the implicit domain: member holds (EN=0), driven flop untouched.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step clk 1", out) == 0);
+  assert(contains(out.str(), "clk: cycle 1 (1 edges)"));
+  assert(contains(out.str(), "DFF1.Q: 0 (no change)"));
+  assert(!contains(out.str(), "DFF2.Q:"));
+  // Step the driven domain: its EN=0 member holds too.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step BUF1.Y 1", out) == 0);
+  assert(contains(out.str(), "BUF1.Y: cycle 1 (1 edges)"));
+  assert(contains(out.str(), "DFF2.Q: 0 (no change)"));
+  assert(!contains(out.str(), "DFF1.Q:"));
+  // Enabled non-members still hold: enable DFF2, step the other domain.
+  assert(sh.execute("logic poke DFF2.EN=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step clk 1", out) == 0);
+  assert(!contains(out.str(), "DFF2.Q:"));
+  // The enabled member captures when its own domain steps (D=1 poked).
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step BUF1.Y 1", out) == 0);
+  assert(contains(out.str(), "DFF2.Q: 0->1 (NQ 1->0)"));
+}
+
+namespace {
+
+// Reference resolver mirroring research.md R3 (independent of the engine
+// under test): reset > set > enable-hold > D capture.
+char resolve_q(char q_old, char rst, char set, char en, char d) {
+  if (rst == '1') {
+    return '0';
+  }
+  if (set == '1') {
+    return '1';
+  }
+  if (en == '0') {
+    return q_old;
+  }
+  return d;
+}
+
+void run_case(char q_old, char rst, char set, char en, char d, std::string &peek_out) {
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  if (q_old == '1') {
+    // Establish Q=1 via SET, then release (release latches nothing).
+    assert(sh.execute("logic poke DFF1.SET=1", out) == 0);
+    assert(sh.execute("logic poke DFF1.SET=release", out) == 0);
+  }
+  std::string poke = "logic poke DFF1.RST=";
+  poke += rst;
+  assert(sh.execute(poke, out) == 0);
+  poke = "logic poke DFF1.SET=";
+  poke += set;
+  assert(sh.execute(poke, out) == 0);
+  poke = "logic poke DFF1.EN=";
+  poke += en;
+  assert(sh.execute(poke, out) == 0);
+  poke = "logic poke DFF1.D=";
+  poke += d;
+  assert(sh.execute(poke, out) == 0);
+  // Edge-capture rows (RST=0, SET=0) only resolve on an edge; forced rows
+  // re-assert the same value through the step, so one step is uniform.
+  assert(sh.execute("logic step 1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek DFF1", out) == 0);
+  peek_out = out.str();
+}
+
+} // namespace
+
+void test_cli_conflict_matrix() {
+  // All 8 RST×SET×EN combinations × D × both Q_olds against the R3
+  // reference. One path (Shell lines) serves REPL, one-shot, and piped
+  // input alike (all funnel through Shell::execute); direct spec calls
+  // below add the in-process spelling.
+  for (char q_old : {'0', '1'}) {
+    for (char rst : {'0', '1'}) {
+      for (char set : {'0', '1'}) {
+        for (char en : {'0', '1'}) {
+          for (char d : {'0', '1'}) {
+            std::string peek;
+            run_case(q_old, rst, set, en, d, peek);
+            const char want = resolve_q(q_old, rst, set, en, d);
+            const char want_nq = (want == '1') ? '0' : '1';
+            std::string line = "DFF1.Q=";
+            line += want;
+            line += " NQ=";
+            line += want_nq;
+            assert(contains(peek, line));
+          }
+        }
+      }
+    }
+  }
+  // Direct-call spelling parity on one conflict row (RST+SET, EN held):
+  // same force line and readback as the Shell spelling.
+  {
+    cli::Shell sh;
+    no_history(sh);
+    std::ostringstream out;
+    assert(sh.execute("logic reset", out) == 0);
+    assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+    assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+    std::array<std::string_view, 1> t_rst{"DFF1.RST=1"};
+    cli::ArgCursor c_rst{std::span<const std::string_view>(t_rst)};
+    assert(cli::logic::LogicPokeSpec::run(c_rst, out) == 0);
+    assert(contains(out.str(), "poked DFF1.RST=1"));
+    std::array<std::string_view, 1> t_set{"DFF1.SET=1"};
+    cli::ArgCursor c_set{std::span<const std::string_view>(t_set)};
+    assert(cli::logic::LogicPokeSpec::run(c_set, out) == 0);
+    assert(contains(out.str(), "poked DFF1.SET=1"));
+    std::array<std::string_view, 1> t_peek{"DFF1"};
+    cli::ArgCursor c_peek{std::span<const std::string_view>(t_peek)};
+    std::ostringstream pout;
+    assert(cli::logic::LogicPeekSpec::run(c_peek, pout) == 0);
+    assert(contains(pout.str(), "DFF1.Q=0 NQ=1")); // reset wins, async, no step
+  }
+}
+
+void test_cli_control_completion() {
+  // New pin names complete after `DFF1.` in wire/poke position (T015:
+  // generic collect_pins/poke paths pick them up via pin_text).
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF --inputs 5", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  std::vector<std::string> names;
+  {
+    // One prior pin (the source) selects destination completion.
+    const std::array<std::string_view, 1> prior{"BUF1.Y"};
+    const std::span<const std::string_view> prior_span(prior);
+    cli::logic::LogicWireSpec::complete(prior_span, "DFF1.", names);
+    bool rst = false;
+    bool set = false;
+    bool en = false;
+    for (const std::string &n : names) {
+      if (n == "DFF1.RST") {
+        rst = true;
+      }
+      if (n == "DFF1.SET") {
+        set = true;
+      }
+      if (n == "DFF1.EN") {
+        en = true;
+      }
+    }
+    assert(rst && set && en);
+  }
+  {
+    const std::span<const std::string_view> no_prior{};
+    names.clear();
+    cli::logic::LogicPokeSpec::complete(no_prior, "DFF1.R", names);
+    bool seen = false;
+    for (const std::string &n : names) {
+      if (n == "DFF1.RST=1" || n == "DFF1.RST=0" || n == "DFF1.RST=release") {
+        seen = true;
+      }
+    }
+    assert(seen);
+  }
+}
+
+void test_cli_determinism_replay() {
+  // SC-005: reset -> preset -> stall -> advance -> readback, replayed
+  // twice byte-identically (async assertion lands between advances).
+  const std::vector<std::string> script = {
+      "logic add DFF --inputs 5",
+      "logic add DFF --inputs 5",
+      "logic ignore DFF1.CLK",
+      "logic ignore DFF2.CLK",
+      "logic poke DFF1.D=1",
+      "logic poke DFF2.D=0",
+      "logic step 2",
+      "logic poke DFF2.SET=1",
+      "logic peek",
+      "logic poke DFF2.SET=release",
+      "logic poke DFF1.EN=0",
+      "logic step 3",
+      "logic poke DFF1.RST=1",
+      "logic peek",
+      "logic step 1",
+  };
+  const auto run = [&]() {
+    cli::Shell sh;
+    no_history(sh);
+    std::ostringstream out;
+    assert(sh.execute("logic reset", out) == 0);
+    out.str("");
+    out.clear();
+    for (const std::string &line : script) {
+      assert(sh.execute(line, out) == 0);
+    }
+    return out.str();
+  };
+  const std::string first = run();
+  const std::string second = run();
+  assert(first == second);
+  assert(contains(first, "DFF1.Q: 1->0 (NQ 0->1)")); // async RST between advances
+  assert(contains(first, "clk: cycle 6 (1 edges)")); // 2 + 3 + 1 edges total
+}
+
+} // namespace cli_session
+
 int main() {
   test_fanin_control();
   test_parse_control_pins();
@@ -331,6 +868,17 @@ int main() {
   test_hold();
   test_zero_migration();
   test_wired_rst();
+  cli_session::test_cli_reset_flow();
+  cli_session::test_cli_reset_beats_hold();
+  cli_session::test_yaml_control_roundtrip();
+  cli_session::test_cli_preset_flow();
+  cli_session::test_cli_counter_seed();
+  cli_session::test_cli_set_reset_conflict();
+  cli_session::test_cli_stall_flow();
+  cli_session::test_cli_subset_enable();
+  cli_session::test_cli_conflict_matrix();
+  cli_session::test_cli_control_completion();
+  cli_session::test_cli_determinism_replay();
   std::cout << "test_logic_seq_controls: OK\n";
   return 0;
 }

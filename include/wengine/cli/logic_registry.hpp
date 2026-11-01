@@ -66,9 +66,14 @@ struct LogicAddSpec {
       "  add AND\n"
       "  add OR --inputs 3\n"
       "  add DFF\n"
+      "  add DFF --inputs 5\n"
       "Kinds: AND OR NAND NOR XOR XNOR NOT BUF DFF DLATCH (case-insensitive).\n"
-      "NOT/BUF take exactly 1 input; DFF/DLATCH exactly 2 (pins D/CLK, D/EN);\n"
-      "the rest 2..8 (default 2, NOT/BUF default 1).";
+      "NOT/BUF take exactly 1 input; DLATCH exactly 2 (pins D/EN); DFF 2\n"
+      "(pins D/CLK, the default) or 5 (full control set D/CLK/RST/SET/EN);\n"
+      "the rest 2..8 (default 2, NOT/BUF default 1).\n"
+      "DFF priority: RST (async) > SET (async) > EN-hold (sync) > D;\n"
+      "RST+SET -> Q=0. Unconnected RST/SET read 0 (inactive), EN reads 1\n"
+      "(enabled).";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
@@ -99,7 +104,8 @@ struct LogicWireSpec {
       "  wire DFF1.Q AND1.1\n"
       "  wire DFF1.NQ AND1.2\n"
       "Single-driver: the destination input must be unwired; cycles are rejected.\n"
-      "Sequential gates use named pins (DFF1.D, DFF1.CLK, DFF1.Q, DFF1.NQ).";
+      "Sequential gates use named pins (DFF1.D, DFF1.CLK, DFF1.Q, DFF1.NQ;\n"
+      "DFF1.RST, DFF1.SET, DFF1.EN on --inputs 5 flops).";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
@@ -336,8 +342,11 @@ struct LogicPokeSpec {
       "  poke DFF1.D=release\n"
       "Drives a dangling block input to 0/1 (sticky across steps) or\n"
       "releases it back to wired behavior. Bare `poke` lists the map;\n"
-      "`--clear` drops every entry. Named seq pins work (DFF1.D);\n"
-      "numeric aliases too (DFF1.1). Errors change no state.";
+      "`--clear` drops every entry. Named seq pins work (DFF1.D, DFF1.RST,\n"
+      "DFF1.SET, DFF1.EN on --inputs 5 flops); numeric aliases too (DFF1.1).\n"
+      "Poked RST/SET force Q at once (async); poked EN=0 holds Q across\n"
+      "steps. Priority: RST > SET > EN-hold > D; RST+SET -> Q=0.\n"
+      "Errors change no state.";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);

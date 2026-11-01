@@ -78,11 +78,13 @@ both raster paths consume it without changing it.
 - `GateKind`: `AND OR NAND NOR XOR XNOR NOT BUF` (append-only enum;
   `XNOR` = `NOT(XOR)` internally, `BUF` needed as an optimizer output)
   plus sequential `DFF` (=16, edge-triggered D+CLK) and `DLATCH`
-  (=17, level-sensitive D+EN vocabulary; SEQ4 steps both on the edge),
-  each exactly 2 inputs. `add DFF`/`add DLATCH` create them with
-  per-kind never-reused counters, same as combinational gates.
-- `kMaxInputs = 8`. `NOT`/`BUF` take exactly 1 input; `DFF`/`DLATCH`
-  take exactly 2; the rest 2..8.
+  (=17, level-sensitive D+EN vocabulary; SEQ4 steps both on the edge).
+  `add DFF`/`add DLATCH` create them with per-kind never-reused
+  counters, same as combinational gates. `add DFF` makes a bare 2-input
+  flop by default; `add DFF --inputs 5` makes the full control set
+  (D/CLK/RST/SET/EN: async reset/set + clock enable) for counters/FSMs.
+- `kMaxInputs = 8`. `NOT`/`BUF` take exactly 1 input; `DLATCH`
+  takes exactly 2; `DFF` takes 2 or 5; the rest 2..8.
 - Identity: per-kind monotonic counters, never reused
   (`AND1, AND2, …`, `NOT5, …`), slots recycle — same convention as
   signal serials (AGENTS.md §8). Display names use kind+counter;
@@ -90,10 +92,12 @@ both raster paths consume it without changing it.
 - Pins: `<NAME>.Y` (output) or `<NAME>.<1..k>` (input), e.g. `AND2.Y`,
   `NOR1.1`. Parsing is a pure `parse_pin(text) -> Result<PinRef>`.
   Sequential gates additionally accept named pins (case-insensitive):
-  `DFF1.D`, `DFF1.CLK`, `DFF1.Q`, `DLATCH1.D`, `DLATCH1.EN`, `DFF1.NQ`;
-  numeric aliases (`DFF1.1`, `DFF1.Y`) keep working, and canonical
+  `DFF1.D`, `DFF1.CLK`, `DFF1.Q`, `DLATCH1.D`, `DLATCH1.EN`, `DFF1.NQ`,
+  plus `DFF1.RST`, `DFF1.SET`, `DFF1.EN` on full-control (5-input) flops;
+  numeric aliases (`DFF1.1`, `DFF1.Y`, `DFF1.3`) keep working, and canonical
   display (`list`, YAML, step/poke/peek reports) uses the named forms.
-  Named pins on combinational gates are usage errors.
+  Named pins on combinational gates are usage errors. Control names on
+  bare 2-input flops are rejected like out-of-range numerics.
 - Every flop exposes a second output `NQ` (negated Q, read live as NOT Q
   with zero stored state). `NQ` wires like any output (`wire DFF1.NQ
   AND1.1`); sinks read the inverted value at every evaluation (scalar,
@@ -104,6 +108,17 @@ both raster paths consume it without changing it.
   never use it); `ignore`/`use` accept `DFF1.NQ` via a parallel ignore
   flag. `peek` prints both (`DFF1.Q=1 NQ=0 (serial 0)`) regardless of
   the flag, since it reads clocked state directly.
+- DFF control set (minimum viable flop for counters/FSMs): 5-input
+  flops (`D`=0, `CLK`=1, `RST`=2, `SET`=3, `EN`=4) resolve with total
+  priority `RST (async) > SET (async) > EN-hold (sync) > D capture`;
+  simultaneous RST+SET reads Q=0 (reset wins). `RST`/`SET` take effect
+  immediately (no clock advance; `poke`/`wire`/`tie`/`load` apply them at
+  once and `step` applies them before edging). `EN=0` holds Q across
+  edges; unconnected RST/SET read 0 (inactive) and unconnected EN reads
+  1 (enabled), so bare and dangling-control flops behave exactly as
+  before. Async forces are global (every live flop, slot order);
+  EN-hold/D-capture stay per stepped clock-domain member. `DLATCH`
+  keeps its 2-input D/EN behavior unchanged.
 - Wires: single-driver rule (one wire per destination input, like real
   hardware); re-wiring an occupied input is a loud usage error, never a
   silent overwrite. Fan-out is unlimited (one output → many inputs).
@@ -281,9 +296,12 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   ignored) — forward-compatible sections arrive as versioned schema
   bumps, not silent tolerance. `save`/`load` round-trip is byte-identical
   (pinned test). Sequential gates persist in the same `version: 2`
-  schema: named pins in wire rows (`from: DFF1.NQ`, `to: DFF1.D`) plus
-  an optional `ignore_nq` gate key defaulting to false, so pre-sequential
-  files load unchanged. Runnable example workspaces live in `examples/logic/`
+  schema: named pins in wire rows (`from: DFF1.NQ`, `to: DFF1.D`,
+  `to: DFF1.RST`) plus an optional `ignore_nq` gate key defaulting to
+  false, so pre-sequential files load unchanged. DFF rows carry
+  `inputs: 2` (bare) or `inputs: 5` (full control set); legacy
+  `inputs: 2` files load with controls absent (inactive defaults).
+  Runnable example workspaces live in `examples/logic/`
   (`nand_pair`, `fanout`, `parity3`, `tieoff`, `tied_demorgan` — each
   header shows its run command and expected output); `test_logic_yaml`
   loads every file, checks its hand-derived goldens, and pins
@@ -309,7 +327,10 @@ scripts — zero GUI dependency):
 dangling CLK/EN pins form the implicit `clk`) or all flops globally,
 reporting the cycle count, per-flop Q transitions, and settled outputs;
 `poke` drives/releases dangling block inputs (sticky across steps);
-`peek` prints flop Q+NQ with stable serials in slot order. Poke maps
+`peek` prints flop Q+NQ with stable serials in slot order. Poked or wired
+RST/SET force Q at once (visible in the next `peek` with no `step`);
+`step` applies pending async controls before edging, and forced moves
+report in the same `DFF1.Q: a->b` form as captures. Poke maps
 and cycle counters are session state beside the workspace, cleared by
 `reset`, never serialized. Wire D-inputs before Q fanout (the
 incremental cycle check trips on Q-first wiring).
@@ -340,15 +361,20 @@ append-only, schema bumps carry fallback loaders.
   the `drivers[]` arrays and `wire` verb already store fan-in lists.
 - **Sequential / clocks (shipped).** `GateKind` values 0..7 are combinational;
   sequential kinds append at ≥16, pinned: `DFF`=16 (D+CLK,
-  edge-triggered), `DLATCH`=17 (D+EN, level-sensitive) — never
-  renumber, never reuse persisted bytes. Clocked state lives in a **parallel pool beside
+  edge-triggered; 2 inputs bare, or 5 with the RST/SET/EN control set),
+  `DLATCH`=17 (D+EN, level-sensitive) — never
+  renumber, never reuse persisted bytes. DFF priority is total:
+  `RST (async) > SET (async) > EN-hold (sync) > D`, reset wins
+  simultaneous assertion; controls resolve in slot order with X/Z loud.
+  Clocked state lives in a **parallel pool beside
   the netlist** (`logic::SeqState` in `seq_state.hpp`: per-slot Q + valid +
   never-reused serials, synced by `init_seq_state`, cleared by `reset_seq_state` —
   same pattern as `Signals` beside `Particles`), stepped per edge by
   `seq_step`/`seq_step_filtered` (global edge or one named clock domain;
   the combinational evaluator only gained NQ-polarity reads at existing
   resolution funnels). Cycle validation is flop-aware: `validate_sequential` runs Kahn over
-  combinational edges only (drivers into DFF.D/CLK excluded, Q outputs
+  combinational edges only (drivers into sequential-gate inputs
+  excluded — all five DFF inputs and both DLATCH inputs, Q outputs
   break loops), and `wire()` / the `wire` verb take that path whenever
   sequential gates are present (pure-comb netlists keep the old path).
   Session verbs `step`/`poke`/`peek` expose control and readback

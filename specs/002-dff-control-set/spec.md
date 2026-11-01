@@ -132,11 +132,11 @@ behavior.
 - What happens when enable is deasserted at the same time D changes?
   Q holds its pre-edge value; D changes are ignored for that edge and
   every subsequent edge until enable is reasserted.
-- How does the system handle an unconnected (dangling) control pin? It
-  behaves as the inactive value (no reset, no set, enable holding the flop
-  enabled), consistent with the existing dangling-input rule, and stays
-  hidden from listings until explicitly wired or driven unless the help
-  states otherwise.
+- How does the system handle an unconnected (dangling) control pin on a
+  5-input flop? It behaves as the inactive value (no reset, no set,
+  enable holding the flop enabled: RST/SET read 0, EN reads 1),
+  consistent with FR-008; like any other dangling pin it appears in the
+  block interface until explicitly wired or ignored.
 - How does the system handle invalid drive values on control pins? Only
   clean logic values are accepted; unknown/floating drives are rejected as
   usage errors that change no state.

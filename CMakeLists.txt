@@ -697,9 +697,10 @@ if(BUILD_TESTS)
 
     # DFF full control set (RST/SET/EN, opt-in 5-input fan-in): fan-in
     # rules, named pins, priority truth table, async-apply, hold,
-    # wired reset, zero-migration. Header-only, wengine_core alone.
+    # wired reset, zero-migration, plus session (Shell) scenario goldens
+    # and YAML round-trip. Links wengine_cli (Shell + yaml store seam).
     add_executable(test_logic_seq_controls tests/test_logic_seq_controls.cpp)
-    target_link_libraries(test_logic_seq_controls PRIVATE wengine_core)
+    target_link_libraries(test_logic_seq_controls PRIVATE wengine_cli)
     add_test(NAME logic_seq_controls COMMAND test_logic_seq_controls)
 
     # Sequential named pins (D/CLK/EN/Q) + NQ negated output: parse

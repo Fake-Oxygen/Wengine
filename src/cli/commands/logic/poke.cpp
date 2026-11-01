@@ -166,6 +166,11 @@ int LogicPokeSpec::run(ArgCursor &args, std::ostream &out) {
     }
     pokes[e.leader] = *e.value;
   }
+  // Live async controls act at once (RST/SET force Q with no clock);
+  // forced flops report in step form below the poke confirmations.
+  if (!support::apply_async_and_report(nl, out).ok()) {
+    return cli::runtime_error(out, "poke failed");
+  }
   return core::kExitOk;
 }
 
