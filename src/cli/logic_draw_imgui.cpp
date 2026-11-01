@@ -227,6 +227,8 @@ void draw_gate_body(Scene &s, const wengine::logic::Gate &g, float x, float y, f
   }
   case GateKind::kDff:
   case GateKind::kDlatch:
+  case GateKind::kJk:
+  case GateKind::kT:
     break; // SEQ12 owns flop/latch symbols; nothing drawn until then.
   } // switch
   // Input stubs land on the symbol border, drawn AFTER the body so the

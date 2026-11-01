@@ -77,14 +77,18 @@ both raster paths consume it without changing it.
 
 - `GateKind`: `AND OR NAND NOR XOR XNOR NOT BUF` (append-only enum;
   `XNOR` = `NOT(XOR)` internally, `BUF` needed as an optimizer output)
-  plus sequential `DFF` (=16, edge-triggered D+CLK) and `DLATCH`
-  (=17, level-sensitive D+EN vocabulary; SEQ4 steps both on the edge).
-  `add DFF`/`add DLATCH` create them with per-kind never-reused
+  plus sequential `DFF` (=16, edge-triggered D+CLK), `DLATCH`
+  (=17, level-sensitive D+EN vocabulary; SEQ4 steps both on the edge),
+  `JK` (=18, edge-triggered J+K+CLK) and `T` (=19, edge-triggered
+  T+CLK; SEQ4 steps all four on the edge).
+  `add DFF`/`add DLATCH`/`add JK`/`add T` create them with per-kind never-reused
   counters, same as combinational gates. `add DFF` makes a bare 2-input
   flop by default; `add DFF --inputs 5` makes the full control set
-  (D/CLK/RST/SET/EN: async reset/set + clock enable) for counters/FSMs.
+  (D/CLK/RST/SET/EN: async reset/set + clock enable) for counters/FSMs;
+  `add JK` makes a fixed 3-input flop, `add T` a fixed 2-input flop.
 - `kMaxInputs = 8`. `NOT`/`BUF` take exactly 1 input; `DLATCH`
-  takes exactly 2; `DFF` takes 2 or 5; the rest 2..8.
+  takes exactly 2; `DFF` takes 2 or 5; `T` takes exactly 2; `JK` takes
+  exactly 3; the rest 2..8.
 - Identity: per-kind monotonic counters, never reused
   (`AND1, AND2, …`, `NOT5, …`), slots recycle — same convention as
   signal serials (AGENTS.md §8). Display names use kind+counter;
@@ -93,11 +97,14 @@ both raster paths consume it without changing it.
   `NOR1.1`. Parsing is a pure `parse_pin(text) -> Result<PinRef>`.
   Sequential gates additionally accept named pins (case-insensitive):
   `DFF1.D`, `DFF1.CLK`, `DFF1.Q`, `DLATCH1.D`, `DLATCH1.EN`, `DFF1.NQ`,
+  `JK1.J`, `JK1.K`, `JK1.CLK`, `JK1.Q`, `JK1.NQ`, `T1.T`, `T1.CLK`,
+  `T1.Q`, `T1.NQ`,
   plus `DFF1.RST`, `DFF1.SET`, `DFF1.EN` on full-control (5-input) flops;
   numeric aliases (`DFF1.1`, `DFF1.Y`, `DFF1.3`) keep working, and canonical
   display (`list`, YAML, step/poke/peek reports) uses the named forms.
   Named pins on combinational gates are usage errors. Control names on
-  bare 2-input flops are rejected like out-of-range numerics.
+  bare 2-input flops are rejected like out-of-range numerics, as are
+  kind-foreign names (`D` on a JK flop, `J` on a DFF).
 - Every flop exposes a second output `NQ` (negated Q, read live as NOT Q
   with zero stored state). `NQ` wires like any output (`wire DFF1.NQ
   AND1.1`); sinks read the inverted value at every evaluation (scalar,
@@ -119,6 +126,14 @@ both raster paths consume it without changing it.
   before. Async forces are global (every live flop, slot order);
   EN-hold/D-capture stay per stepped clock-domain member. `DLATCH`
   keeps its 2-input D/EN behavior unchanged.
+- JK/T flop kinds (classic counters/dividers without DFF emulation):
+  3-input JK flops (`J`=0, `K`=1, `CLK`=2) resolve per edge from pre-edge
+  Q as `J=0,K=0` hold / `J=0,K=1` reset (Q=0) / `J=1,K=0` set (Q=1) /
+  `J=1,K=1` toggle; 2-input T flops (`T`=0, `CLK`=1) hold on `T=0` and
+  toggle on `T=1`. Both are synchronous-only (no async pins; hold is
+  `J=K=0` / `T=0`), ride the same stepper and verbs as DFF/DLATCH
+  (poke/wire/peek/save-load, NQ polarity, dangling-reads-inactive, X/Z
+  loud), and power on at Q=0.
 - Wires: single-driver rule (one wire per destination input, like real
   hardware); re-wiring an occupied input is a loud usage error, never a
   silent overwrite. Fan-out is unlimited (one output → many inputs).
@@ -362,10 +377,15 @@ append-only, schema bumps carry fallback loaders.
 - **Sequential / clocks (shipped).** `GateKind` values 0..7 are combinational;
   sequential kinds append at ≥16, pinned: `DFF`=16 (D+CLK,
   edge-triggered; 2 inputs bare, or 5 with the RST/SET/EN control set),
-  `DLATCH`=17 (D+EN, level-sensitive) — never
+  `DLATCH`=17 (D+EN, level-sensitive),
+  `JK`=18 (J+K+CLK, edge-triggered; exactly 3 inputs),
+  `T`=19 (T+CLK, edge-triggered; exactly 2 inputs) — never
   renumber, never reuse persisted bytes. DFF priority is total:
   `RST (async) > SET (async) > EN-hold (sync) > D`, reset wins
   simultaneous assertion; controls resolve in slot order with X/Z loud.
+  JK excitation is total: `J=0,K=0` hold / `J=0,K=1` reset / `J=1,K=0`
+  set / `J=1,K=1` toggle from pre-edge Q; T excitation is total: `T=0`
+  hold / `T=1` toggle; both resolve in slot order with X/Z loud.
   Clocked state lives in a **parallel pool beside
   the netlist** (`logic::SeqState` in `seq_state.hpp`: per-slot Q + valid +
   never-reused serials, synced by `init_seq_state`, cleared by `reset_seq_state` —

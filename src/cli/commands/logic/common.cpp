@@ -58,7 +58,13 @@ namespace {
   } else if (is_output) {
     s += 'Y';
   } else if (wengine::logic::is_sequential_kind(g.kind)) {
-    if (input == 0) {
+    // Canonical named inputs: DFF D/CLK (+RST/SET/EN on full-control
+    // flops), DLATCH D/EN, JK J/K/CLK, T T/CLK (003-jk-t-flops).
+    if (g.kind == GateKind::kJk) {
+      s += (input == 0) ? "J" : (input == 1) ? "K" : "CLK";
+    } else if (g.kind == GateKind::kT) {
+      s += (input == 0) ? "T" : "CLK";
+    } else if (input == 0) {
       s += 'D';
     } else if (g.kind == GateKind::kDff && input >= 2) {
       // Full control set (5-input flops): canonical named forms.

@@ -2,8 +2,8 @@
 
 // Scalar single-step sequential eval (LOGIC-V2-SEQ4).
 //
-// Zero-delay single-clock-edge stepper for DFF/DLATCH with deterministic
-// end-of-step evaluation. One call advances every flop by one rising edge
+// Zero-delay single-clock-edge stepper for DFF/DLATCH/JK/T with
+// deterministic end-of-step evaluation. One call advances every flop by one rising edge
 // (global clock — CLK/EN pins are validated Low/High but do not gate; the
 // edge itself is the call, same as the signals two-phase convention where
 // generators evaluate at time T and sums commit at T+1).
@@ -17,12 +17,15 @@
 //     settling, so outputs are end-of-step values at T+1).
 //
 // Rules (SEQ4):
-// - Rising-edge only. CLK (DFF input 1) / EN (DLATCH input 1) must resolve
-//   to kLow/kHigh; HighZ/Unknown fail loudly. The value does not gate the
-//   update in SEQ4 — level-sensitive DLATCH semantics arrive in SEQ8, which
-//   refines this same function.
+// - Rising-edge only. CLK (DFF input 1, JK input 2, T input 1) / EN
+//   (DLATCH input 1) must resolve to kLow/kHigh; HighZ/Unknown fail
+//   loudly. The value does not gate the update in SEQ4 — level-sensitive
+//   DLATCH semantics arrive in SEQ8, which refines this same function.
 // - DFF and DLATCH both capture D on the edge in SEQ4 (documented
 //   simplification; SEQ8 gives DLATCH transparent-when-EN behavior).
+//   JK/T resolve their excitation tables instead (003-jk-t-flops):
+//   JK J=0,K=0 hold / J=0,K=1 reset / J=1,K=0 set / J=1,K=1 toggle from
+//   pre-edge Q; T=0 hold, T=1 toggle.
 // - Full-control DFFs (5 inputs: D/CLK/RST/SET/EN) resolve with total
 //   priority RST > SET > EN-hold > D (reset wins simultaneous RST+SET).
 //   RST/SET are asynchronous (see apply_async_controls below); EN gates
@@ -375,6 +378,44 @@ namespace detail {
         (clk != LogicValue::kLow && clk != LogicValue::kHigh)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
+    if (g.kind == GateKind::kT) {
+      // T flop (003-jk-t-flops): T=High toggles pre-edge Q, T=Low holds
+      // it. CLK (input 1) validated above; per the SEQ4 rule the edge
+      // itself is the call, so the value does not gate the update.
+      if (d == LogicValue::kHigh) {
+        next_q[s] = (st.q[s] == LogicValue::kHigh) ? LogicValue::kLow : LogicValue::kHigh;
+      } else {
+        next_q[s] = st.q[s]; // hold: T ignored this edge
+      }
+      continue;
+    }
+    if (g.kind == GateKind::kJk) {
+      // JK flop (003-jk-t-flops): the shared prelude resolved J (input 0)
+      // into d and K (input 1) into clk, both validated Low/High above.
+      // Resolve the clock (input 2) here; per the SEQ4 rule it is
+      // validated, not gating. Excitation resolves from pre-edge Q.
+      LogicValue jk_clk = LogicValue::kLow;
+      if (!detail::resolve_step_input(nl, s, 2, gate_out, resolved, jk_clk)) {
+        return core::Status::failure(core::StatusCode::kInvalidArgument);
+      }
+      if (jk_clk != LogicValue::kLow && jk_clk != LogicValue::kHigh) {
+        return core::Status::failure(core::StatusCode::kInvalidArgument);
+      }
+      const bool j = (d == LogicValue::kHigh);
+      const bool k = (clk == LogicValue::kHigh);
+      if (!j && !k) {
+        next_q[s] = st.q[s]; // hold
+      } else if (j && !k) {
+        next_q[s] = LogicValue::kHigh; // set
+      } else if (!j && k) {
+        next_q[s] = LogicValue::kLow; // reset
+      } else if (st.q[s] == LogicValue::kHigh) {
+        next_q[s] = LogicValue::kLow; // toggle
+      } else {
+        next_q[s] = LogicValue::kHigh; // toggle
+      }
+      continue;
+    }
     if (g.kind == GateKind::kDff && g.input_count > 2) {
       LogicValue rst = LogicValue::kLow;
       LogicValue set = LogicValue::kLow;
@@ -397,8 +438,10 @@ namespace detail {
         continue;
       }
     }
-    // SEQ4: edge capture for both kinds (DLATCH level semantics in SEQ8).
-    // CLK/EN validated above; the edge itself is the call.
+    // SEQ4: edge capture for the D-capture kinds (bare DFFs and DLATCH;
+    // DLATCH level semantics arrive in SEQ8). CLK/EN validated above; the
+    // edge itself is the call. T/JK flops take their own branches earlier
+    // (003-jk-t-flops).
     next_q[s] = d;
   }
 

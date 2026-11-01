@@ -240,6 +240,63 @@ void test_tie_round_trip() {
   }
 }
 
+void test_t_round_trip() {
+  // T rows persist canonically (kind: t, inputs: 2) with `T1.Q` wire
+  // endpoints and `ignore:` indices; reload is netlist-equal and
+  // re-saves byte-identically (003-jk-t-flops T010).
+  logic::Netlist nl;
+  assert(logic::add_gate(nl, logic::GateKind::kT, 2).ok()); // T1 @0
+  assert(logic::add_gate(nl, logic::GateKind::kT, 2).ok()); // T2 @1
+  auto p = logic::parse_pin(nl, "T1.CLK");
+  assert(p.ok());
+  assert(logic::ignore_pin(nl, p.value).ok());
+  assert(logic::wire(nl, 0, 1, 0).ok()); // T1.Q -> T2.T
+  std::string text;
+  logic::yaml::save_text(nl, text);
+  assert(contains(text, "{id: T1, kind: t, inputs: 2, ignore: [2]"));
+  assert(contains(text, "{id: T2, kind: t, inputs: 2, ignore: []"));
+  assert(contains(text, "{from: T1.Q, to: T2.T}"));
+
+  logic::Netlist back;
+  std::string err;
+  assert(logic::yaml::load_text(text, back, err));
+  assert(netlists_equal(nl, back));
+  std::string again;
+  logic::yaml::save_text(back, again);
+  assert(again == text); // byte-identical
+}
+
+void test_jk_round_trip() {
+  // JK rows persist canonically (kind: jk, inputs: 3) with `JK1.Q` wire
+  // endpoints and `ignore:` indices; reload is netlist-equal and
+  // re-saves byte-identically (003-jk-t-flops T014).
+  logic::Netlist nl;
+  assert(logic::add_gate(nl, logic::GateKind::kJk, 3).ok()); // JK1 @0
+  assert(logic::add_gate(nl, logic::GateKind::kJk, 3).ok()); // JK2 @1
+  auto p = logic::parse_pin(nl, "JK1.CLK");
+  assert(p.ok());
+  assert(logic::ignore_pin(nl, p.value).ok());
+  p = logic::parse_pin(nl, "JK2.CLK");
+  assert(p.ok());
+  assert(logic::ignore_pin(nl, p.value).ok());
+  assert(logic::wire(nl, 0, 1, 0).ok()); // JK1.Q -> JK2.J
+  assert(logic::wire(nl, 0, 1, 1).ok()); // JK1.Q -> JK2.K
+  std::string text;
+  logic::yaml::save_text(nl, text);
+  assert(contains(text, "{id: JK1, kind: jk, inputs: 3, ignore: [3]"));
+  assert(contains(text, "{id: JK2, kind: jk, inputs: 3, ignore: [3]"));
+  assert(contains(text, "{from: JK1.Q, to: JK2.J}"));
+  assert(contains(text, "{from: JK1.Q, to: JK2.K}"));
+
+  logic::Netlist back;
+  std::string err;
+  assert(logic::yaml::load_text(text, back, err));
+  assert(netlists_equal(nl, back));
+  std::string again;
+  logic::yaml::save_text(back, again);
+  assert(again == text); // byte-identical
+}
+
 void test_malformed_line_numbers() {
   const std::string head =
       "version: 1\n"
@@ -465,6 +522,8 @@ int main() {
   test_foreign_version_refusal();
   test_v1_fallback_loads_untied();
   test_tie_round_trip();
+  test_t_round_trip();
+  test_jk_round_trip();
   test_malformed_line_numbers();
   test_examples();
   std::cout << "test_logic_yaml: OK\n";

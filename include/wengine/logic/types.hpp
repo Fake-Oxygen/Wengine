@@ -36,8 +36,13 @@ enum class GateKind : std::uint8_t {
   // or 5 inputs (full control set D+CLK+RST+SET+EN, opt-in);
   // DLATCH takes exactly 2 (valid_fanin). No eval/state change in
   // SEQ1 — vocabulary only.
+  // V2 JK/T (003-jk-t-flops): JK = edge-triggered J + K + CLK (exactly
+  // 3 inputs); T = edge-triggered T + CLK (exactly 2 inputs). Both ride
+  // the same single-edge stepper; excitation resolves in seq_step.
   kDff = 16,
   kDlatch = 17,
+  kJk = 18,
+  kT = 19,
 };
 
 // Net value. V1 produces/consumes only kLow/kHigh; kHighZ/kUnknown exist
@@ -99,6 +104,10 @@ inline constexpr std::size_t kMaxGates = 1024; // slot cap, loud on overflow
     return "DFF";
   case GateKind::kDlatch:
     return "DLATCH";
+  case GateKind::kJk:
+    return "JK";
+  case GateKind::kT:
+    return "T";
   }
   return "?";
 }
@@ -145,8 +154,9 @@ struct Gate {
 struct Netlist {
   std::array<Gate, kMaxGates> gates{};
   // Per-kind monotonic counters (never reused), indexed by kind_ordinal:
-  // 0..7 combinational, 16 DFF, 17 DLATCH (8..15 unused, stay 1).
-  std::array<std::uint32_t, 18> next_counter{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+  // 0..7 combinational, 16 DFF, 17 DLATCH, 18 JK, 19 T (8..15 unused,
+  // stay 1).
+  std::array<std::uint32_t, 20> next_counter{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
   // Per-sink output polarity: driver_inv[flat] != 0 means the sink input
   // reads the NEGATED source value (wire from a flop NQ output). Zero is
   // the all-non-inverted state by construction; slot-level wire() always

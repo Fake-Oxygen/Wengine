@@ -202,6 +202,183 @@ void test_nq_ignored_by_default() {
   assert(contains(out.str(), "DFF1.NQ"));      // ...but reported under ignored
 }
 
+void test_mixed_kinds_session() {
+  // US3 (003-jk-t-flops, quickstart §5): one DFF + one JK + one T in one
+  // clock domain — one advance steps every kind per its own table under a
+  // single shared cycle count; replayed scripts read back identically.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF", out) == 0);
+  assert(sh.execute("logic add JK", out) == 0);
+  assert(sh.execute("logic add T", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic ignore JK1.CLK", out) == 0);
+  assert(sh.execute("logic ignore T1.CLK", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  assert(sh.execute("logic poke JK1.J=1", out) == 0);
+  assert(sh.execute("logic poke JK1.K=1", out) == 0);
+  assert(sh.execute("logic poke T1.T=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 2", out) == 0);
+  assert(contains(out.str(), "clk: cycle 2 (2 edges)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  const std::string first = out.str();
+  // D captured 1; JK toggled twice (back 0); T toggled twice (back 0).
+  assert(contains(first, "DFF1.Q=1"));
+  assert(contains(first, "JK1.Q=0 NQ=1"));
+  assert(contains(first, "T1.Q=0 NQ=1"));
+  // Identical rebuild + sequence reads back byte-identically.
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF", out) == 0);
+  assert(sh.execute("logic add JK", out) == 0);
+  assert(sh.execute("logic add T", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic ignore JK1.CLK", out) == 0);
+  assert(sh.execute("logic ignore T1.CLK", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  assert(sh.execute("logic poke JK1.J=1", out) == 0);
+  assert(sh.execute("logic poke JK1.K=1", out) == 0);
+  assert(sh.execute("logic poke T1.T=1", out) == 0);
+  assert(sh.execute("logic step 2", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(out.str() == first);
+}
+
+void test_jk_counter_session() {
+  // US2 (003-jk-t-flops): JK truth table through session verbs, a 2-bit
+  // synchronous counter, and wrong-kind pin rejection.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add JK", out) == 0);
+  assert(sh.execute("logic ignore JK1.CLK", out) == 0);
+  // Truth table from Q=0: hold, reset, set, toggle.
+  assert(sh.execute("logic poke JK1.J=0", out) == 0);
+  assert(sh.execute("logic poke JK1.K=0", out) == 0);
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(sh.execute("logic peek JK1", out) == 0);
+  assert(contains(out.str(), "JK1.Q=0 NQ=1"));
+  assert(sh.execute("logic poke JK1.K=1", out) == 0); // 01 reset
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(sh.execute("logic peek JK1", out) == 0);
+  assert(contains(out.str(), "JK1.Q=0 NQ=1"));
+  assert(sh.execute("logic poke JK1.J=1", out) == 0);
+  assert(sh.execute("logic poke JK1.K=0", out) == 0); // 10 set
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(sh.execute("logic peek JK1", out) == 0);
+  assert(contains(out.str(), "JK1.Q=1 NQ=0"));
+  assert(sh.execute("logic poke JK1.K=1", out) == 0); // 11 toggle
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(sh.execute("logic peek JK1", out) == 0);
+  assert(contains(out.str(), "JK1.Q=0 NQ=1"));
+  // 2-bit synchronous counter: JK1 toggles every edge, JK2 on carry.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add JK", out) == 0);
+  assert(sh.execute("logic add JK", out) == 0);
+  assert(sh.execute("logic ignore JK1.CLK", out) == 0);
+  assert(sh.execute("logic ignore JK2.CLK", out) == 0);
+  assert(sh.execute("logic poke JK1.J=1", out) == 0);
+  assert(sh.execute("logic poke JK1.K=1", out) == 0);
+  assert(sh.execute("logic wire JK1.Q JK2.J", out) == 0);
+  assert(sh.execute("logic wire JK1.Q JK2.K", out) == 0);
+  const char *want[4] = {"JK1.Q=1 NQ=0", "JK1.Q=0 NQ=1", "JK1.Q=1 NQ=0", "JK1.Q=0 NQ=1"};
+  const char *want_hi[4] = {"JK2.Q=0 NQ=1", "JK2.Q=1 NQ=0", "JK2.Q=1 NQ=0", "JK2.Q=0 NQ=1"};
+  for (int i = 0; i < 4; ++i) {
+    out.str("");
+    out.clear();
+    assert(sh.execute("logic step 1", out) == 0);
+    assert(sh.execute("logic peek", out) == 0);
+    assert(contains(out.str(), want[i]));
+    assert(contains(out.str(), want_hi[i]));
+  }
+  // Wrong-kind pins are usage errors that change no state.
+  assert(sh.execute("logic add DFF", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DFF1.J=1", out) == 2);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke JK1.D=1", out) == 2);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek JK1", out) == 0);
+  assert(contains(out.str(), "JK1.Q=0 NQ=1")); // still wrapped 00
+}
+
+void test_t_divider_session() {
+  // US1 (003-jk-t-flops): T divider through session verbs — add, poke,
+  // wire (ripple chain), step, peek — plus hold rows and usage errors.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add T", out) == 0);
+  assert(sh.execute("logic add T", out) == 0);
+  assert(sh.execute("logic ignore T1.CLK", out) == 0);
+  assert(sh.execute("logic ignore T2.CLK", out) == 0);
+  assert(sh.execute("logic poke T1.T=1", out) == 0);
+  assert(contains(out.str(), "poked T1.T=1"));
+  // Ripple divide-by-4: T1.Q feeds T2.T.
+  assert(sh.execute("logic wire T1.Q T2.T", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 4", out) == 0);
+  const std::string stepped = out.str();
+  assert(contains(stepped, "clk: cycle 4 (4 edges)"));
+  assert(contains(stepped, "T1.Q:"));
+  assert(contains(stepped, "T2.Q:"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  const std::string first_peek = out.str();
+  // 4 first-stage toggles land T1 back at 0; T2 saw T=1 on two edges
+  // (OLD T1.Q was High at edges 2 and 4) and lands back at 0.
+  assert(contains(first_peek, "T1.Q=0 NQ=1"));
+  assert(contains(first_peek, "T2.Q=0 NQ=1"));
+  // Hold: T=0 freezes T1 across 3 edges (T2 follows: T1.Q stays 0).
+  assert(sh.execute("logic poke T1.T=0", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 3", out) == 0);
+  assert(contains(out.str(), "clk: cycle 7 (3 edges)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "T1.Q=0 NQ=1"));
+  assert(contains(out.str(), "T2.Q=0 NQ=1"));
+  // Invalid drive value is a usage error that changes no state.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke T1.T=2", out) == 2);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "T1.Q=0 NQ=1"));
+  // Deterministic replay: identical rebuild + sequence reads back equal.
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add T", out) == 0);
+  assert(sh.execute("logic add T", out) == 0);
+  assert(sh.execute("logic ignore T1.CLK", out) == 0);
+  assert(sh.execute("logic ignore T2.CLK", out) == 0);
+  assert(sh.execute("logic poke T1.T=1", out) == 0);
+  assert(sh.execute("logic wire T1.Q T2.T", out) == 0);
+  assert(sh.execute("logic step 4", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(out.str() == first_peek);
+}
+
 void test_complete() {
   cli::Shell sh;
   no_history(sh);
@@ -259,6 +436,9 @@ int main() {
   test_errors_changeless();
   test_determinism_replay();
   test_nq_ignored_by_default();
+  test_t_divider_session();
+  test_jk_counter_session();
+  test_mixed_kinds_session();
   test_complete();
   std::cout << "test_logic_seq_cli_step: OK\n";
   return 0;

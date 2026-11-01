@@ -57,8 +57,12 @@ namespace {
     s += 'Y';
   } else if (is_sequential_kind(g.kind)) {
     // Canonical named inputs: DFF D/CLK (+RST/SET/EN on full-control
-    // flops), DLATCH D/EN.
-    if (input == 0) {
+    // flops), DLATCH D/EN, JK J/K/CLK, T T/CLK.
+    if (g.kind == GateKind::kJk) {
+      s += (input == 0) ? "J" : (input == 1) ? "K" : "CLK";
+    } else if (g.kind == GateKind::kT) {
+      s += (input == 0) ? "T" : "CLK";
+    } else if (input == 0) {
       s += 'D';
     } else if (g.kind == GateKind::kDff && input >= 2) {
       s += (input == 2) ? "RST" : (input == 3) ? "SET" : "EN";
@@ -163,12 +167,12 @@ struct TieRow {
   }
   row.id = id.Scalar();
   if (!kind.IsScalar()) {
-    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH)");
+    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T)");
     return false;
   }
   const auto parsed_kind = parse_gate_kind(kind.Scalar());
   if (!parsed_kind.ok()) {
-    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH)");
+    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T)");
     return false;
   }
   row.kind = parsed_kind.value;

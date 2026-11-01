@@ -821,6 +821,105 @@ void test_cli_control_completion() {
   }
 }
 
+void test_cli_jk_t_help_completion() {
+  // US4 (003-jk-t-flops T017): help names both kinds with pin tables and
+  // the excitation sentences; kind + pin completion suggest JK/T forms.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic add --help", out) == 0);
+  assert(contains(out.str(), "JK T"));
+  assert(contains(out.str(), "pins J/K/CLK"));
+  assert(contains(out.str(), "pins T/CLK"));
+  assert(contains(out.str(), "J=0,K=0 hold"));
+  assert(contains(out.str(), "J=1,K=1"));
+  assert(contains(out.str(), "toggle"));
+  assert(contains(out.str(), "T: T=0 hold; T=1 toggle"));
+  // Kind-name completion.
+  std::vector<std::string> names;
+  {
+    const std::span<const std::string_view> no_prior{};
+    cli::logic::LogicAddSpec::complete(no_prior, "J", names);
+    bool saw_jk = false;
+    for (const std::string &n : names) {
+      if (n == "JK") {
+        saw_jk = true;
+      }
+    }
+    assert(saw_jk);
+    names.clear();
+    cli::logic::LogicAddSpec::complete(no_prior, "T", names);
+    bool saw_t = false;
+    for (const std::string &n : names) {
+      if (n == "T") {
+        saw_t = true;
+      }
+    }
+    assert(saw_t);
+  }
+  // Pin-name completion after `JKn.` / `Tn.` (generic collect_pins path
+  // via pin_text).
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add JK", out) == 0);
+  assert(sh.execute("logic add T", out) == 0);
+  assert(sh.execute("logic add BUF", out) == 0);
+  {
+    const std::array<std::string_view, 1> prior{"BUF1.Y"};
+    const std::span<const std::string_view> prior_span(prior);
+    names.clear();
+    cli::logic::LogicWireSpec::complete(prior_span, "JK1.", names);
+    bool j = false;
+    bool k = false;
+    bool clk = false;
+    for (const std::string &n : names) {
+      if (n == "JK1.J") {
+        j = true;
+      }
+      if (n == "JK1.K") {
+        k = true;
+      }
+      if (n == "JK1.CLK") {
+        clk = true;
+      }
+    }
+    assert(j && k && clk);
+    names.clear();
+    cli::logic::LogicWireSpec::complete(prior_span, "T1.", names);
+    bool t = false;
+    bool tclk = false;
+    for (const std::string &n : names) {
+      if (n == "T1.T") {
+        t = true;
+      }
+      if (n == "T1.CLK") {
+        tclk = true;
+      }
+    }
+    assert(t && tclk);
+  }
+  {
+    const std::span<const std::string_view> no_prior{};
+    names.clear();
+    cli::logic::LogicPokeSpec::complete(no_prior, "JK1.J", names);
+    bool seen = false;
+    for (const std::string &n : names) {
+      if (n == "JK1.J=1" || n == "JK1.J=0" || n == "JK1.J=release") {
+        seen = true;
+      }
+    }
+    assert(seen);
+    names.clear();
+    cli::logic::LogicPokeSpec::complete(no_prior, "T1.T", names);
+    seen = false;
+    for (const std::string &n : names) {
+      if (n == "T1.T=1" || n == "T1.T=0" || n == "T1.T=release") {
+        seen = true;
+      }
+    }
+    assert(seen);
+  }
+}
+
 void test_cli_determinism_replay() {  // SC-005: reset -> preset -> stall -> advance -> readback, replayed
   // twice byte-identically (async assertion lands between advances).
   const std::vector<std::string> script = {
@@ -974,6 +1073,7 @@ int main() {
   cli_session::test_cli_subset_enable();
   cli_session::test_cli_conflict_matrix();
   cli_session::test_cli_control_completion();
+  cli_session::test_cli_jk_t_help_completion();
   cli_session::test_cli_determinism_replay();
   cli_session::test_cli_wired_control_session();
   cli_session::test_cli_step_zero_live_controls();

@@ -153,7 +153,11 @@ duplicates phase-1/phase-2/commit and risks drift between kind paths.
 - `src/cli/commands/logic/common.cpp` (+ `logic_registry.hpp` if kind
   lists live there): help kind list += JK/T with pin tables + the two
   excitation sentences (contracts C6); tab-completion suggests
-  `J`/`K`/`CLK` after `JKn.`, `T`/`CLK` after `Tn.`.
+  `J`/`K`/`CLK` after `JKn.`, `T`/`CLK` after `Tn.`. `support::pin_text`
+  (session display names) is a second DFF/DLATCH-only mapping beside the
+  YAML one — extended with the same JK/T rows (implementation addendum:
+  found via a `poked T1.D=1` mislabel during T009; behavior was already
+  correct).
 - No changes to `add`/`poke`/`step`/`peek`/`wire`/`tie`/`ignore`/`use`/
   `save`/`load` logic paths — they are kind-table-driven and pick up the
   new kinds via the engine tables (verified by tests, not by inspection).
