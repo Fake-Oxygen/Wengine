@@ -394,7 +394,8 @@ append-only, schema bumps carry fallback loaders.
   the combinational evaluator only gained NQ-polarity reads at existing
   resolution funnels). Cycle validation is flop-aware: `validate_sequential` runs Kahn over
   combinational edges only (drivers into sequential-gate inputs
-  excluded — all five DFF inputs and both DLATCH inputs, Q outputs
+  excluded — all five DFF inputs, both DLATCH inputs, all three JK
+  inputs, and both T inputs; Q outputs
   break loops), and `wire()` / the `wire` verb take that path whenever
   sequential gates are present (pure-comb netlists keep the old path).
   Session verbs `step`/`poke`/`peek` expose control and readback

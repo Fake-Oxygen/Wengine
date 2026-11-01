@@ -200,3 +200,11 @@ With multiple developers:
 - Engine tests assert against the hand-derived research R3 tables, never implementation output (constitution I)
 - Commit after each task or logical group; stop at any checkpoint to validate
 - Avoid: vague tasks, same-file parallel edits (`seq_step.hpp` snapshot loop is sequential T007→T011), cross-story dependencies that break independence
+
+---
+
+## Phase 8: Convergence
+
+**Purpose**: Close the assessed gap between the artifacts and the code (converge run, 2026-11-01). One LOW finding; no CRITICAL/HIGH issues.
+
+- [X] T021 Update the flop-aware cycle-validation sentence in `docs/logic.md` to enumerate all sequential input sets (five DFF + two DLATCH + three JK + two T) per T018/`docs/logic.md` §12 (partial)
