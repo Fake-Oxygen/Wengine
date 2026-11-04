@@ -8,9 +8,14 @@
 #include "views/graphs_panel.hpp"
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/csv_sink.hpp"
+#include "wengine/emit/logic_sink.hpp"
 #include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
+#include "wengine/logic/netlist.hpp"
+#include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/types.hpp"
 #include "wengine/solvers/projectile.hpp"
+#include "wengine/solvers/sequential.hpp"
 #include "wengine/solvers/signal.hpp"
 
 #include <cassert>
@@ -40,7 +45,7 @@ wengine::world::Snapshot make_snap(std::uint64_t step) {
 
 void test_registry() {
   // One entry per solver adapter; update with each new domain.
-  static_assert(std::tuple_size_v<decltype(wengine::gui::kFrameSources)> == 2);
+  static_assert(std::tuple_size_v<decltype(wengine::gui::kFrameSources)> == 3);
   const wengine::world::Snapshot s = make_snap(3);
   const wengine::link::Frame via_reg =
       wengine::gui::adapt_frame(s, "projectile");
@@ -60,6 +65,23 @@ void test_registry() {
   assert(via_sig.items.empty() && via_sig.channels.size() == 2);
   assert(via_sig.channels[0].name == "sig.count");
   assert(via_sig.channels[1].name == "sig.0.U" && via_sig.channels[1].value == 3.3);
+  // The logic domain has its own entry (channels only, no items).
+  // Serials need not ascend after slot recycling — order is preserved.
+  wengine::world::Snapshot seq;
+  seq.step_index = 5;
+  seq.sim_time = 0.05;
+  seq.seq_serial.push_back(4);
+  seq.seq_serial.push_back(7);
+  seq.seq_value.push_back(1);
+  seq.seq_value.push_back(0);
+  seq.seq_output.push_back(1);
+  const wengine::link::Frame via_seq = wengine::gui::adapt_frame(seq, "logic");
+  const wengine::link::Frame direct_seq = wengine::link::frame_from_logic_snapshot(seq);
+  assert(via_seq == direct_seq);
+  assert(via_seq.items.empty() && via_seq.channels.size() == 3);
+  assert(via_seq.channels[0].name == "seq.count" && via_seq.channels[0].value == 2.0);
+  assert(via_seq.channels[1].name == "seq.4.Q" && via_seq.channels[1].value == 1.0);
+  assert(via_seq.channels[2].name == "seq.7.Q" && via_seq.channels[2].value == 0.0);
 }
 
 void test_default_channel() {
@@ -229,6 +251,60 @@ void test_signals_csv_exactness() {
   std::remove(path.c_str());
 }
 
+void test_logic_csv_exactness() {
+  // Sequential-domain three-level parity: emitted snapshots through
+  // LogicCsvSink and the recorder agree bit-for-bit, and re-reading the
+  // artifact adapts to the same frames (== on re-read, max_digits10).
+  const std::string path = "/tmp/wengine_test_frames_seq.csv";
+  std::remove(path.c_str());
+  wengine::gui::FrameHistory history;
+  wengine::gui::FrameRecorder recorder(history);
+  recorder.set_solver("logic");
+  {
+    // Single T flop, T=High: Q toggles every step (1,0,1,...).
+    wengine::logic::Netlist nl;
+    const std::uint16_t t = wengine::logic::add_gate(nl, wengine::logic::GateKind::kT).value;
+    wengine::logic::PinRef clk{};
+    clk.slot = t;
+    clk.is_output = false;
+    clk.input = 1;
+    assert(wengine::logic::ignore_pin(nl, clk).ok());
+    assert(wengine::logic::validate_sequential(nl).ok());
+    wengine::core::Runner runner{{.dt = 0.01, .emit_every = 2}};
+    wengine::solvers::SequentialSolver solver;
+    runner.add_solver(solver);
+    runner.state().netlist = nl;
+    wengine::logic::init_seq_state(runner.state().seq, runner.state().netlist);
+    runner.state().seq_inputs.push_back(wengine::logic::LogicValue::kHigh);
+    runner.state().seq_outputs.assign(wengine::logic::block_output_count(nl),
+                                      wengine::logic::LogicValue::kLow);
+    wengine::emit::LogicCsvSink csv(path);
+    assert(csv.ok());
+    runner.add_sink(csv);
+    runner.add_sink(recorder);
+    assert(runner.run(10).ok());
+    assert(csv.flush().ok());
+    assert(csv.rows_written() == 5); // steps 2,4,6,8,10
+  }
+  assert(history.size() == 5);
+
+  std::ifstream in(path);
+  std::vector<wengine::world::Snapshot> snaps;
+  std::string error;
+  assert(wengine::emit::parse_logic_log(in, snaps, error).ok());
+  assert(snaps.size() == history.size());
+  for (std::size_t k = 0; k < snaps.size(); ++k) {
+    const wengine::link::Frame want =
+        wengine::link::frame_from_logic_snapshot(snaps[k]);
+    assert(want == history.frames()[k]);
+  }
+  assert(history.frames().back().channels.size() == 2);
+  assert(history.frames().back().channels[0].name == "seq.count");
+  assert(history.frames().back().channels[1].name == "seq.0.Q");
+  assert(history.frames().back().channels[1].value == 0.0); // step 10: Low
+  std::remove(path.c_str());
+}
+
 wengine::core::RunConfig batch_cfg() {
   wengine::core::RunConfig cfg;
   cfg.loop.dt = 0.01;
@@ -267,6 +343,7 @@ int main() {
   test_history_ring_and_reset();
   test_csv_exactness();
   test_signals_csv_exactness();
+  test_logic_csv_exactness();
   test_controller_sink_reattach();
   std::printf("test_frame_source: OK\n");
   return 0;

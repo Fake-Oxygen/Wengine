@@ -23,6 +23,9 @@
 // push_back, ...) or enqueues an owned block into a pooled queue (see
 // link/output_queue.hpp) before returning — never retaining the reference.
 
+#include "wengine/logic/netlist.hpp"
+#include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/types.hpp"
 #include "wengine/world/entity.hpp"
 #include "wengine/world/particles.hpp"
 #include "wengine/world/signals.hpp"
@@ -40,11 +43,22 @@ struct State {
   EntityRegistry entities;
   Particles particles;
   Signals signals;
+  // Sequential pool (singleton, not entity-attached — research R1):
+  // netlist topology (immutable during the run) + clocked Q state +
+  // retained stimulus (interface order) + retained member list (empty =
+  // all domains) + retained settled outputs (rewritten every step).
+  // despawn_entity never touches these; clear() resets all five.
+  logic::Netlist netlist;
+  logic::SeqState seq;
+  std::vector<logic::LogicValue> seq_inputs;
+  std::vector<std::uint16_t> seq_members;
+  std::vector<logic::LogicValue> seq_outputs;
 
   // Registry-only spawn; attach components (particles.attach(...)) opt-in.
   Entity spawn_entity() { return entities.spawn(); }
 
   // False when `e` is stale/foreign. Detaches pools, then releases the slot.
+  // The sequential pool is a singleton and is never touched here.
   bool despawn_entity(Entity e) {
     if (!entities.alive(e)) {
       return false;
@@ -60,6 +74,11 @@ struct State {
     entities.clear();
     particles.clear();
     signals.clear();
+    netlist = logic::Netlist{};
+    seq = logic::SeqState{};
+    seq_inputs.clear();
+    seq_members.clear();
+    seq_outputs.clear();
   }
 
   bool operator==(const State &) const noexcept = default;
@@ -88,9 +107,16 @@ struct Snapshot {
   std::vector<std::uint64_t> sig_serial;
   std::vector<double> sig_value;
   std::vector<std::uint8_t> sig_quantity;
+  // Dense copy of live sequential flops in slot order (deterministic):
+  // stable serial + Q (0/1) per flop, plus settled block outputs in
+  // block_output_count order (0/1). Serials never reused across recycle.
+  std::vector<std::uint64_t> seq_serial;
+  std::vector<std::uint8_t> seq_value;
+  std::vector<std::uint8_t> seq_output;
 
   [[nodiscard]] std::size_t particle_count() const noexcept { return pos_x.size(); }
   [[nodiscard]] std::size_t signal_count() const noexcept { return sig_value.size(); }
+  [[nodiscard]] std::size_t seq_count() const noexcept { return seq_value.size(); }
   // True when particle identity is present (fill_snapshot output, or an
   // empty snapshot vacuously). False means legacy/unavailable: dense order
   // only, no stable IDs.
@@ -103,7 +129,7 @@ struct Snapshot {
 
 // Fill `out` from `s` (clocks + dense live arrays in slot order),
 // reusing `out`'s capacities: allocation-free once `out` has warmed to the
-// live population; growth allocates at most once per vector per fill (nine
+// live population; growth allocates at most once per vector per fill (twelve
 // vectors total). `clear()` retains capacity, so shrinking (despawn, zero
 // live sources) never allocates either. Value-identical to take_snapshot.
 inline void fill_snapshot(const State &s, Snapshot &out) {
@@ -163,6 +189,27 @@ inline void fill_snapshot(const State &s, Snapshot &out) {
       out.sig_quantity.push_back(s.signals.quantity[i]);
     }
   }
+  out.seq_serial.clear();
+  out.seq_value.clear();
+  out.seq_output.clear();
+  if (out.seq_serial.capacity() < s.seq.live_count) {
+    out.seq_serial.reserve(s.seq.live_count);
+  }
+  if (out.seq_value.capacity() < s.seq.live_count) {
+    out.seq_value.reserve(s.seq.live_count);
+  }
+  if (out.seq_output.capacity() < s.seq_outputs.size()) {
+    out.seq_output.reserve(s.seq_outputs.size());
+  }
+  for (std::uint16_t i = 0; i < logic::kMaxGates; ++i) {
+    if (s.seq.valid[i] != 0) {
+      out.seq_serial.push_back(s.seq.serial[i]);
+      out.seq_value.push_back(static_cast<std::uint8_t>(s.seq.q[i]));
+    }
+  }
+  for (const logic::LogicValue v : s.seq_outputs) {
+    out.seq_output.push_back(static_cast<std::uint8_t>(v));
+  }
 }
 
 [[nodiscard]] inline Snapshot take_snapshot(const State &s) {
@@ -188,6 +235,9 @@ inline void select_signals_into(const Snapshot &s, std::span<const std::uint64_t
   out.vel_y = s.vel_y;
   out.particle_index = s.particle_index;
   out.particle_generation = s.particle_generation;
+  out.seq_serial = s.seq_serial;
+  out.seq_value = s.seq_value;
+  out.seq_output = s.seq_output;
   out.sig_serial.clear();
   out.sig_value.clear();
   out.sig_quantity.clear();

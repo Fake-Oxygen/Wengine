@@ -481,7 +481,7 @@ void test_completion() {
   }
   assert(complete_line("sim run --steps 10", 18, all).empty()); // numeric value
   {
-    const std::vector<std::string> want{"projectile", "signal"};
+    const std::vector<std::string> want{"projectile", "signal", "logic"};
     assert(complete_line("sim run --solver ", 17, all) == want);
   }
   assert(complete_line("sim run --solver=p", 18, all) ==
@@ -1625,6 +1625,181 @@ void test_logic_completion() {
   logic::reset_logic_workspace();
 }
 
+void test_sim_logic_seq() {
+  // US4: sim run --solver logic with --seq-file/--seq-clocks/--seq-from.
+  // Workspaces are built through the logic verbs (self-maintaining schema);
+  // the process-wide workspace is reset before and after.
+  auto run = [](const std::string &line) {
+    Shell sh;
+    sh.set_history_file("");
+    std::ostringstream out;
+    const int rc = sh.execute(line, out);
+    return std::pair<int, std::string>{rc, out.str()};
+  };
+  auto read_file = [](const std::string &path) {
+    std::ifstream f(path, std::ios::binary);
+    assert(!!f);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  };
+  logic::reset_logic_workspace();
+  const std::string ws = "/tmp/wengine_test_sim_seq_t.yaml";
+  const std::string csv = "/tmp/wengine_test_sim_seq.csv";
+  std::remove(ws.c_str());
+  std::remove(csv.c_str());
+  assert(run("logic reset").first == 0);
+  assert(run("logic add T").first == 0);
+  assert(run("logic ignore T1.CLK").first == 0);
+  assert(run(std::string("logic save ") + ws).first == 0);
+
+  // Happy path: T=High toggles every step (1,0,1,0 over 4 steps).
+  {
+    auto [rc, s] = run("sim run --solver logic --seq-file " + ws +
+                       " --steps 4 --seq-from T1.T=1 --emit-csv " + csv);
+    assert(rc == 0);
+    assert(s.find("solver=logic") != std::string::npos);
+    const std::string log = read_file(csv);
+    assert(log.find("step,time,seq_id,value\n") == 0);
+    assert(log.find("\n1,") != std::string::npos);
+    // Exact Q sequence rows (T=High every step).
+    std::istringstream in(log);
+    std::string header;
+    assert(static_cast<bool>(std::getline(in, header)));
+    std::size_t row = 0;
+    const char want[4] = {'1', '0', '1', '0'};
+    std::string line;
+    while (std::getline(in, line)) {
+      assert(row < 4);
+      assert(line.size() >= 1 && line.back() == want[row]);
+      ++row;
+    }
+    assert(row == 4);
+  }
+  // EN-defaults-High stimulus parity: 5-input DFF, D driven, EN unset.
+  // Transparent (EN High) follows D to 1; frozen (EN Low) would hold 0.
+  {
+    const std::string ff = "/tmp/wengine_test_sim_seq_ff5.yaml";
+    const std::string fc = "/tmp/wengine_test_sim_seq_ff5.csv";
+    std::remove(ff.c_str());
+    std::remove(fc.c_str());
+    assert(run("logic reset").first == 0);
+    assert(run("logic add DFF --inputs 5").first == 0);
+    assert(run("logic ignore DFF1.CLK").first == 0);
+    assert(run(std::string("logic save ") + ff).first == 0);
+    auto [rc, s] =
+        run("sim run --solver logic --seq-file " + ff + " --steps 1 --seq-from DFF1.D=1 --emit-csv " + fc);
+    assert(rc == 0);
+    const std::string log = read_file(fc);
+    assert(log.find(",1\n") != std::string::npos); // Q followed D: EN read High
+    std::remove(ff.c_str());
+    std::remove(fc.c_str());
+  }
+  // Usage discipline: missing file, orphan, unreadable, bad YAML, stray.
+  {
+    auto [rc, s] = run("sim run --solver logic --steps 1");
+    assert(rc == 2);
+    assert(s.find("logic run needs --seq-file") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("sim run --solver projectile --seq-file " + ws + " --steps 1");
+    assert(rc == 2);
+    assert(s.find("--seq-* options only apply to solver 'logic'") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("sim run --solver logic --seq-file /tmp/wengine_test_sim_seq_missing.yaml --steps 1");
+    assert(rc == 2);
+    assert(s.find("cannot open --seq-file") != std::string::npos);
+  }
+  {
+    const std::string bad = "/tmp/wengine_test_sim_seq_bad.yaml";
+    {
+      std::ofstream f(bad, std::ios::binary | std::ios::trunc);
+      assert(!!f);
+      f << "version: 3\ngates:\nwires:\nties:\nmeta:\n  tool: x\n";
+    }
+    auto [brc, bs] = run("sim run --solver logic --seq-file " + bad + " --steps 1");
+    assert(brc == 2);
+    assert(bs.find("cannot load --seq-file") != std::string::npos);
+    assert(bs.find("line 1:") != std::string::npos); // strict loader is line-numbered
+    std::remove(bad.c_str());
+  }
+  assert(run("sim run --solver logic --seq-file " + ws + " --steps 1 extra").first == 2);
+  // Unknown domain, empty selection, duplicate domain.
+  {
+    auto [rc, s] = run("sim run --solver logic --seq-file " + ws + " --seq-clocks nope --steps 1");
+    assert(rc == 2);
+    assert(s.find("unknown clock domain 'nope'") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("sim run --solver logic --seq-file " + ws + " --seq-clocks \"\" --steps 1");
+    assert(rc == 2);
+    assert(s.find("empty --seq-clocks selection") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("sim run --solver logic --seq-file " + ws + " --seq-clocks clk,clk --steps 1");
+    assert(rc == 2);
+    assert(s.find("duplicate clock domain") != std::string::npos);
+  }
+  // Unknown pin, non-binary value.
+  {
+    auto [rc, s] = run("sim run --solver logic --seq-file " + ws + " --seq-from T1.X=1 --steps 1");
+    assert(rc == 2);
+    assert(s.find("unknown pin 'T1.X'") != std::string::npos);
+  }
+  {
+    auto [rc, s] = run("sim run --solver logic --seq-file " + ws + " --seq-from T1.T=2 --steps 1");
+    assert(rc == 2);
+    assert(s.find("want PIN=0|1") != std::string::npos);
+  }
+  // A named domain selects: the implicit "clk" domain steps the T flop.
+  {
+    const std::string sel = "/tmp/wengine_test_sim_seq_clk.csv";
+    std::remove(sel.c_str());
+    auto [rc, s] = run("sim run --solver logic --seq-file " + ws +
+                       " --seq-clocks clk --steps 2 --seq-from T1.T=1 --emit-csv " + sel);
+    assert(rc == 0);
+    const std::string log = read_file(sel);
+    assert(log.find(",1\n") != std::string::npos && log.find(",0\n") != std::string::npos);
+    std::remove(sel.c_str());
+  }
+  // Completion: the three flags, plus workspace-aware values.
+  {
+    const auto all = CliRegistry::all();
+    auto has = [](const std::vector<std::string> &v, std::string_view word) {
+      for (const auto &e : v) {
+        if (e == word) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const auto flags = complete_line("sim run --seq-", 13, all);
+    assert(has(flags, "--seq-file") && has(flags, "--seq-clocks") && has(flags, "--seq-from"));
+    {
+      const std::string line = "sim run --seq-file " + ws + " --seq-clocks ";
+      const auto c = complete_line(line, line.size(), all);
+      assert(c.size() == 1 && c[0] == "clk");
+    }
+    {
+      const std::string line = "sim run --seq-file " + ws + " --seq-from ";
+      const auto c = complete_line(line, line.size(), all);
+      assert(c.size() == 1 && c[0] == "T1.T");
+    }
+    {
+      const std::string line = "sim run --seq-file " + ws + " --seq-from T1.T=";
+      const auto c = complete_line(line, line.size(), all);
+      assert((c == std::vector<std::string>{"T1.T=0", "T1.T=1"}));
+    }
+    {
+      const std::string line = "sim run --seq-file " + ws + " --seq-clocks=c";
+      const auto c = complete_line(line, line.size(), all);
+      assert(c.size() == 1 && c[0] == "--seq-clocks=clk");
+    }
+  }
+  std::remove(ws.c_str());
+  std::remove(csv.c_str());
+  logic::reset_logic_workspace();
+}
+
 } // namespace
 
 int main() {
@@ -1645,6 +1820,7 @@ int main() {
   test_logic_session();
   test_logic_verbs();
   test_logic_completion();
+  test_sim_logic_seq();
   std::cout << "test_cli_args: OK\n";
   return 0;
 }

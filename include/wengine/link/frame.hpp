@@ -169,4 +169,23 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
   return f;
 }
 
+// Sequential adapter (005): Snapshot sequential arrays -> generic Frame.
+// One channel per live flop (`seq.<serial>.Q`, 0/1) plus the live count;
+// no items (flop Q probes are scalar time series, like signals).
+// Deterministic: dense slot order in, channel order out. Serials are NOT
+// ascending after slot recycling — consumers validate uniqueness within a
+// step, preserving order. Allocates like the adapters above.
+[[nodiscard]] inline Frame frame_from_logic_snapshot(const world::Snapshot &s) {
+  Frame f;
+  f.step = s.step_index;
+  f.time = s.sim_time;
+  f.channels.reserve(s.seq_count() + 1);
+  f.channels.push_back({"seq.count", static_cast<double>(s.seq_count())});
+  for (std::size_t k = 0; k < s.seq_count(); ++k) {
+    std::string name = "seq." + std::to_string(s.seq_serial[k]) + ".Q";
+    f.channels.push_back({name, static_cast<double>(s.seq_value[k])});
+  }
+  return f;
+}
+
 } // namespace wengine::link

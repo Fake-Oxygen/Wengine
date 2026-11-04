@@ -59,9 +59,10 @@ void test_counter_2bit() {
   place_seq(nl, 1, GateKind::kDff, 2); // DFF2 = Q1 (MSB)
   const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
   const std::uint16_t x = logic::add_gate(nl, GateKind::kXor, 2).value;
-  // Feedback build order matters (SEQ3 Q-boundary): comb->flop edges are
-  // invisible to reaches_seq, so wire each flop D input FIRST, then the Q
-  // fanout — the reverse order trips the incremental cycle check.
+  // Feedback build order is free (Q-boundary): comb->flop edges are
+  // invisible to the cycle check either way, so flop D inputs and Q
+  // fanout wire in any order — declarative formats list wires in file
+  // order, not build order.
   assert(logic::wire(nl, n, 0, 0).ok()); // NOT.Y -> DFF.Q0.D
   assert(logic::wire(nl, 0, n, 0).ok()); // Q0 -> NOT.1
   assert(logic::wire(nl, x, 1, 0).ok()); // XOR.Y -> DFF.Q1.D

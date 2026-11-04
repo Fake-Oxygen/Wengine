@@ -4,6 +4,7 @@
 #include "wengine/cli/status.hpp"
 #include "wengine/core/run_config.hpp"
 #include "wengine/emit/csv_sink.hpp"
+#include "wengine/emit/logic_sink.hpp"
 #include "wengine/emit/routing.hpp"
 #include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
@@ -12,6 +13,9 @@
 #include "wengine/link/shm_publisher.hpp"
 #include "wengine/link/socket_publisher.hpp"
 #include "wengine/link/uart_publisher.hpp"
+#include "wengine/logic/netlist.hpp"
+#include "wengine/logic/seq_config.hpp"
+#include "wengine/logic/yaml_store.hpp"
 #include "wengine/ros2/cli_options.hpp"
 #include "wengine/ros2/publisher.hpp"
 #ifdef WENGINE_HAS_RCLCPP
@@ -25,10 +29,12 @@
 #include "wengine/solvers/solver_registry.hpp"
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <csignal>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <ostream>
@@ -77,7 +83,7 @@ bool combined_stop() noexcept {
   return sigint_requested() || cli::cancel_requested();
 }
 
-constexpr std::array<std::string_view, 45> kSimOptions{{
+constexpr std::array<std::string_view, 48> kSimOptions{{
     "--steps", "-n", "--dt", "--solver", "--gravity", "-g", "--particles", "-p", "--x0",
     "--y0", "--vx0", "--vy0", "--emit-csv", "--emit-shm", "--emit-tcp", "--emit-udp",
     "--emit-every", "--emit-csv-stride", "--emit-shm-stride", "--emit-tcp-stride",
@@ -87,6 +93,7 @@ constexpr std::array<std::string_view, 45> kSimOptions{{
     "--emit-ros-select", "--ros-node", "--ros-ns", "--ros-signal-stem",
     "--ros-particle-stem", "--ros-qos", "--ros-grouped", "--ros-per-serial",
     "--emit-health", "--paced", "--rate",
+    "--seq-file", "--seq-clocks", "--seq-from",
     "--help", "-h",
 }};
 
@@ -97,7 +104,7 @@ constexpr std::array<std::string_view, 45> kSimOptions{{
 inline constexpr std::uint64_t kHealthChunkSteps = 4096;
 
 void print_live_health(std::uint64_t done_steps,
-                       const std::optional<link::ShmPublisher> &shm,
+    const std::optional<link::ShmPublisher> &shm,
                        const std::optional<link::TcpPublisher> &tcp,
                        const std::optional<link::UdpPublisher> &udp,
                        const link::uart::UartPublisher *uart, double elapsed_s,
@@ -139,6 +146,367 @@ void print_live_health(std::uint64_t done_steps,
     std::cerr << "live uart: "
               << link::format_publisher_health(uart->stats(), uart->status(), uart->last_errno(), 0, 0, 0)
               << '\n';
+  }
+}
+
+// Sequential section builders (005-US4): --seq-file/--seq-clocks/--seq-from
+// lower to logic::SequentialRunConfig (parsed values only). Domain names
+// mirror the session clock_domains vocabulary: one domain per clock-driver
+// net over edge flops (DFF/JK/T), named by the source pin (e.g. "BUF1.Y",
+// "DFF2.NQ"); dangling CLK pins join the implicit "clk" domain; level
+// latches belong to no domain. Matching is case-insensitive like the
+// session step verb; the engine re-validates the flattened slot list.
+
+[[nodiscard]] inline bool seq_eq_ci(std::string_view a, std::string_view b) noexcept {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (std::size_t k = 0; k < a.size(); ++k) {
+    char ca = a[k];
+    char cb = b[k];
+    if (ca >= 'a' && ca <= 'z') {
+      ca = static_cast<char>(ca - ('a' - 'A'));
+    }
+    if (cb >= 'a' && cb <= 'z') {
+      cb = static_cast<char>(cb - ('a' - 'A'));
+    }
+    if (ca != cb) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] inline std::string seq_gate_name(const logic::Netlist &nl, std::uint16_t slot) {
+  std::string s(logic::gate_kind_name(nl.gates[slot].kind));
+  s += std::to_string(nl.gates[slot].counter);
+  return s;
+}
+
+struct SeqDomain {
+  std::string name;
+  std::vector<std::uint16_t> members;
+};
+
+[[nodiscard]] inline std::vector<SeqDomain> seq_clock_domains(const logic::Netlist &nl) {
+  std::vector<SeqDomain> domains;
+  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+    const logic::Gate &g = nl.gates[s];
+    if (!g.live) {
+      continue;
+    }
+    if (g.kind != logic::GateKind::kDff && g.kind != logic::GateKind::kJk &&
+        g.kind != logic::GateKind::kT) {
+      continue;
+    }
+    std::string name = "clk";
+    const std::uint16_t drv = (g.input_count > 1) ? g.drivers[1] : logic::kNoDriver;
+    if (drv != logic::kNoDriver && drv < logic::kMaxGates && nl.gates[drv].live) {
+      const std::size_t flat = static_cast<std::size_t>(s) * logic::kMaxInputs + 1;
+      const bool neg = nl.driver_inv[flat] != 0;
+      name = seq_gate_name(nl, drv) + '.';
+      name += logic::is_sequential_kind(nl.gates[drv].kind) ? (neg ? "NQ" : "Q") : "Y";
+    }
+    bool found = false;
+    for (SeqDomain &d : domains) {
+      if (d.name == name) {
+        d.members.push_back(s);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      SeqDomain d;
+      d.name = name;
+      d.members.push_back(s);
+      domains.push_back(std::move(d));
+    }
+  }
+  return domains;
+}
+
+// Canonical input-pin text for block-interface pins (mirrors the session
+// pin_text vocabulary so completion and --seq-from accept the same spellings
+// the interactive verbs show: DFF D/CLK/RST/SET/EN, DLATCH D/EN, JK J/K/CLK,
+// T T/CLK, SRLATCH S/R, numeric elsewhere).
+[[nodiscard]] inline std::string seq_pin_text(const logic::Netlist &nl, std::uint16_t slot,
+                                              std::uint8_t input) {
+  const logic::Gate &g = nl.gates[slot];
+  if (!logic::is_sequential_kind(g.kind)) {
+    return seq_gate_name(nl, slot) + '.' + std::to_string(static_cast<unsigned>(input) + 1u);
+  }
+  std::string s = seq_gate_name(nl, slot);
+  s += '.';
+  if (g.kind == logic::GateKind::kJk) {
+    s += (input == 0) ? "J" : (input == 1) ? "K" : "CLK";
+  } else if (g.kind == logic::GateKind::kT) {
+    s += (input == 0) ? "T" : "CLK";
+  } else if (g.kind == logic::GateKind::kSrlatch) {
+    s += (input == 0) ? "S" : "R";
+  } else if (input == 0) {
+    s += 'D';
+  } else if (g.kind == logic::GateKind::kDff && input >= 2) {
+    s += (input == 2) ? "RST" : (input == 3) ? "SET" : "EN";
+  } else {
+    s += (g.kind == logic::GateKind::kDff) ? "CLK" : "EN";
+  }
+  return s;
+}
+
+// Block-interface input pins in interface order (slot order, tie leaders
+// only), like the session collect_block_inputs.
+inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::string> &out) {
+  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+    const logic::Gate &g = nl.gates[s];
+    if (!g.live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      if (g.drivers[i] != logic::kNoDriver) {
+        continue;
+      }
+      if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
+        continue;
+      }
+      const std::size_t flat = static_cast<std::size_t>(s) * logic::kMaxInputs + i;
+      if (logic::tie_leader_flat(nl, flat) != flat) {
+        continue;
+      }
+      out.push_back(seq_pin_text(nl, s, i));
+    }
+  }
+}
+
+// Compose the section from the three flags: load the workspace, resolve
+// domain names to flattened member slots, and compose the stimulus vector
+// in block-interface order from --seq-from overrides (unset pins read Low,
+// except an untied DFF clock-enable which reads High — the same rule as the
+// session compose_block_inputs with an empty poke map, so batch and
+// interactive stimuli agree pin for pin).
+[[nodiscard]] inline bool seq_build_section(std::string_view file,
+                                            const std::optional<std::string_view> &clocks,
+                                            const std::vector<std::string_view> &from,
+                                            logic::SequentialRunConfig &out, std::string &err) {
+  const auto fail = [&](std::string msg) {
+    err = std::move(msg);
+    return false;
+  };
+  std::ifstream f(std::string(file), std::ios::binary);
+  if (!f) {
+    return fail(std::string("cannot open --seq-file '") + std::string(file) + "'");
+  }
+  std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  if (!f.eof() && !f) {
+    return fail(std::string("cannot read --seq-file '") + std::string(file) + "'");
+  }
+  logic::Netlist nl;
+  std::string load_err;
+  if (!logic::yaml::load_text(text, nl, load_err)) {
+    return fail(std::string("cannot load --seq-file '") + std::string(file) + "': " + load_err);
+  }
+  // Domain selection: exactly one form — omitted means all domains.
+  const std::vector<SeqDomain> domains = seq_clock_domains(nl);
+  std::vector<std::uint16_t> members;
+  const bool step_all = !clocks.has_value();
+  if (clocks.has_value()) {
+    const std::string_view list = *clocks;
+    if (list.empty()) {
+      return fail("empty --seq-clocks selection steps nothing (omit the flag for all domains)");
+    }
+    std::size_t begin = 0;
+    while (true) {
+      const std::size_t comma = list.find(',', begin);
+      const std::string_view name =
+          (comma == std::string_view::npos) ? list.substr(begin) : list.substr(begin, comma - begin);
+      const SeqDomain *hit = nullptr;
+      for (const SeqDomain &d : domains) {
+        if (seq_eq_ci(d.name, name)) {
+          hit = &d;
+          break;
+        }
+      }
+      if (hit == nullptr) {
+        std::string want;
+        for (const SeqDomain &d : domains) {
+          if (!want.empty()) {
+            want += '|';
+          }
+          want += d.name;
+        }
+        return fail(std::string("unknown clock domain '") + std::string(name) +
+                    "' (want " + want + ")");
+      }
+      for (std::uint16_t h : hit->members) {
+        for (std::uint16_t m : members) {
+          if (m == h) {
+            return fail(std::string("duplicate clock domain '") + std::string(name) +
+                        "' in --seq-clocks");
+          }
+        }
+      }
+      members.insert(members.end(), hit->members.begin(), hit->members.end());
+      if (comma == std::string_view::npos) {
+        break;
+      }
+      begin = comma + 1;
+    }
+    std::sort(members.begin(), members.end());
+  }
+  // Stimulus in block-interface order with session defaults.
+  const std::size_t n_in = logic::block_input_count(nl);
+  std::vector<logic::BlockPin> in_pins(n_in);
+  std::vector<logic::BlockPin> out_pins(logic::block_output_count(nl));
+  std::size_t nin_got = n_in;
+  std::size_t nout_got = out_pins.size();
+  if (!logic::block_interface(nl, in_pins.data(), in_pins.size(), &nin_got, out_pins.data(),
+                              out_pins.size(), &nout_got)
+           .ok()) {
+    return fail("cannot derive block interface (internal error)");
+  }
+  std::vector<logic::LogicValue> stimulus;
+  stimulus.reserve(n_in);
+  for (const logic::BlockPin &p : in_pins) {
+    const std::size_t flat = static_cast<std::size_t>(p.slot) * logic::kMaxInputs + p.input;
+    const logic::Gate &g = nl.gates[p.slot];
+    if (g.kind == logic::GateKind::kDff && p.input == 4 && nl.tie_rep[flat] == 0) {
+      stimulus.push_back(logic::LogicValue::kHigh); // FR-008: unconnected EN asserted
+    } else {
+      stimulus.push_back(logic::LogicValue::kLow);
+    }
+  }
+  for (std::string_view spec : from) {
+    const std::size_t eq = spec.find('=');
+    if (eq == std::string_view::npos) {
+      return fail(std::string("bad --seq-from '") + std::string(spec) + "' (want PIN=0|1)");
+    }
+    const std::string_view pin = spec.substr(0, eq);
+    const std::string_view bit = spec.substr(eq + 1);
+    if (bit != "0" && bit != "1") {
+      return fail(std::string("bad --seq-from '") + std::string(spec) + "' (want PIN=0|1)");
+    }
+    const auto parsed = logic::parse_pin(nl, pin);
+    if (!parsed.ok()) {
+      return fail(std::string("unknown pin '") + std::string(pin) + "' in --seq-from");
+    }
+    const logic::PinRef &ref = parsed.value;
+    bool block_input = false;
+    std::size_t index = 0;
+    if (!ref.is_output && ref.slot < logic::kMaxGates) {
+      const logic::Gate &g = nl.gates[ref.slot];
+      if (g.live && ref.input < g.input_count && g.drivers[ref.input] == logic::kNoDriver &&
+          (g.ignored_mask & static_cast<std::uint8_t>(1u << ref.input)) == 0) {
+        const std::size_t flat =
+            static_cast<std::size_t>(ref.slot) * logic::kMaxInputs + ref.input;
+        if (logic::tie_leader_flat(nl, flat) == flat) {
+          for (std::size_t k = 0; k < in_pins.size(); ++k) {
+            const std::size_t lflat = static_cast<std::size_t>(in_pins[k].slot) *
+                                          logic::kMaxInputs +
+                                      in_pins[k].input;
+            if (lflat == flat) {
+              index = k;
+              block_input = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (!block_input) {
+      return fail(std::string("pin '") + std::string(pin) +
+                  "' is not a driven block input (want a dangling interface pin)");
+    }
+    stimulus[index] = (bit == "1") ? logic::LogicValue::kHigh : logic::LogicValue::kLow;
+  }
+  out.netlist = nl;
+  out.stimulus = std::move(stimulus);
+  out.members = std::move(members);
+  out.step_all_domains = step_all;
+  out.set = true;
+  return true;
+}
+
+// Load the --seq-file workspace named in prior_args for completion (quiet:
+// any failure simply yields no candidates).
+[[nodiscard]] inline bool seq_complete_workspace(std::span<const std::string_view> prior_args,
+                                                 logic::Netlist &nl) {
+  std::string_view file;
+  bool have = false;
+  for (std::size_t k = 0; k < prior_args.size(); ++k) {
+    if (prior_args[k] == "--seq-file") {
+      if (k + 1 < prior_args.size()) {
+        file = prior_args[k + 1];
+        have = true;
+      }
+      break;
+    }
+    constexpr std::string_view kEq = "--seq-file=";
+    if (prior_args[k].size() > kEq.size() && prior_args[k].substr(0, kEq.size()) == kEq) {
+      file = prior_args[k].substr(kEq.size());
+      have = true;
+      break;
+    }
+  }
+  if (!have || file.empty()) {
+    return false;
+  }
+  std::ifstream f(std::string(file), std::ios::binary);
+  if (!f) {
+    return false;
+  }
+  std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  if (!f.eof() && !f) {
+    return false;
+  }
+  std::string err;
+  return logic::yaml::load_text(text, nl, err);
+}
+
+inline void complete_seq_from_value(const logic::Netlist &nl, std::string_view val,
+                                    std::vector<std::string> &out) {
+  // Mirrors the session complete_from_value: bare pin prefix -> pin names;
+  // exact pin (or pin + bit prefix) -> valued PIN=0|1 forms.
+  const std::size_t eq = val.find('=');
+  if (eq == std::string_view::npos) {
+    std::vector<std::string> pins;
+    seq_collect_block_inputs(nl, pins);
+    bool exact = false;
+    for (const std::string &p : pins) {
+      if (p == val) {
+        exact = true;
+        break;
+      }
+    }
+    if (exact) {
+      out.emplace_back(std::string(val) + "=0");
+      out.emplace_back(std::string(val) + "=1");
+      return;
+    }
+    for (std::string &p : pins) {
+      if (p.size() >= val.size() && p.substr(0, val.size()) == val) {
+        out.push_back(p);
+      }
+    }
+    return;
+  }
+  const std::string_view pin = val.substr(0, eq);
+  const std::string_view bit = val.substr(eq + 1);
+  std::vector<std::string> pins;
+  seq_collect_block_inputs(nl, pins);
+  bool known = false;
+  for (const std::string &p : pins) {
+    if (p == pin) {
+      known = true;
+      break;
+    }
+  }
+  if (!known) {
+    return;
+  }
+  if (std::string_view("0").substr(0, bit.size()) == bit) {
+    out.emplace_back(std::string(pin) + "=0");
+  }
+  if (std::string_view("1").substr(0, bit.size()) == bit) {
+    out.emplace_back(std::string(pin) + "=1");
   }
 }
 
@@ -318,6 +686,12 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   if (auto o = args.take_option({"--solver"})) {
     solver_name = *o;
   }
+  const auto o_seq_file = args.take_option({"--seq-file"});
+  const auto o_seq_clocks = args.take_option({"--seq-clocks"});
+  std::vector<std::string_view> o_seq_from;
+  while (auto o = args.take_option({"--seq-from"})) {
+    o_seq_from.push_back(*o);
+  }
 
   // Mode subcommand: exactly one `run` positional; all params are named.
   std::array<std::string_view, 2> pos{};
@@ -401,8 +775,16 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     return usage_error(out, "--gravity only applies to solver 'projectile'");
   }
   // Domain dispatch for outputs only (no solver vocabulary): signal runs
-  // log the signals table and publish signal channels.
+  // log the signals table and publish signal channels; logic runs log the
+  // sequential table and publish seq channels.
   const bool is_signal = sdef->name == solvers::SignalSolver::kName;
+  const bool is_logic = sdef->name == solvers::SequentialSolver::kName;
+
+  // Sequential options belong to the logic solver only (one command per
+  // solver domain); the engine driver re-validates the populated section.
+  if (!is_logic && (o_seq_file || o_seq_clocks || !o_seq_from.empty())) {
+    return usage_error(out, "--seq-* options only apply to solver 'logic'");
+  }
 
   // Per-output sampling validation (PHYSI-34): a stride/select without its
   // output is a usage error, never silently ignored; selections need the
@@ -579,8 +961,9 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
 
   // Headless run goes through the engine seam: the CLI builds a RunConfig
   // (plain data, no engine wiring here) and the driver owns the rest.
-  // Signal runs default to zero particles unless explicitly requested.
-  if (is_signal && !particles_given) {
+  // Signal and logic runs default to zero particles unless explicitly
+  // requested (particles are orthogonal to both domains).
+  if ((is_signal || is_logic) && !particles_given) {
     n_particles = 0;
   }
   core::RunConfig cfg;
@@ -596,13 +979,55 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   cfg.vx0 = vx0;
   cfg.vy0 = vy0;
 
-  // Signal runs log the signals table (D2b-A); particle runs keep CsvSink.
+  // Sequential section: the logic solver needs an explicit workspace (no
+  // defaults run); any --seq-* with another solver was rejected above.
+  if (is_logic) {
+    if (!o_seq_file) {
+      return usage_error(out, "logic run needs --seq-file <workspace.yaml>");
+    }
+    logic::SequentialRunConfig seq;
+    std::string seq_err;
+    if (!seq_build_section(*o_seq_file, o_seq_clocks, o_seq_from, seq, seq_err)) {
+      return usage_error(out, seq_err);
+    }
+    cfg.seq = std::move(seq);
+  }
+
+  // Known transport capacity before running: logic frames carry seq.count
+  // plus one channel per live flop (1 + N <= 64, same gate as signals);
+  // CSV is unbounded. Counts the validated section the --seq-* options
+  // populate (empty until then, always fits).
+  if (is_logic && (shm_name || tcp_endpoint || udp_endpoint)) {
+    std::size_t n_flops = 0;
+    for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
+      const logic::Gate &g = cfg.seq.netlist.gates[slot];
+      if (g.live && logic::is_sequential_kind(g.kind)) {
+        ++n_flops;
+      }
+    }
+    if (!cli::signal_channels_fit(n_flops)) {
+      out << "Error: logic run needs " << (n_flops + 1) << " channels, transport holds "
+          << link::kMaxChannels << '\n';
+      out << kUsage << '\n';
+      return core::kExitUsage;
+    }
+  }
+
+  // Signal runs log the signals table (D2b-A), logic runs the sequential
+  // table; particle runs keep CsvSink.
   std::optional<emit::CsvSink> csv;
   std::optional<emit::SignalsCsvSink> sig_csv;
+  std::optional<emit::LogicCsvSink> logic_csv;
   if (csv_path) {
     if (is_signal) {
       sig_csv.emplace(std::string{*csv_path});
       if (!sig_csv->ok()) {
+        out << "Error: cannot open CSV file '" << *csv_path << "'\n";
+        return core::kExitRuntime;
+      }
+    } else if (is_logic) {
+      logic_csv.emplace(std::string{*csv_path});
+      if (!logic_csv->ok()) {
         out << "Error: cannot open CSV file '" << *csv_path << "'\n";
         return core::kExitRuntime;
       }
@@ -617,12 +1042,13 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
 
   // SHM publish rides the same emit path as CSV (both are best-effort
   // ISinks owned here, never in RunConfig). Domain tag = solver name so
-  // readers pick the matching adapter; the signal solver publishes through
-  // the signal Frame adapter (same class, no subclassing, no engine change).
+  // readers pick the matching adapter; signal and logic solvers publish
+  // through their own Frame adapters (same class, no subclassing).
   std::optional<link::ShmPublisher> shm;
   if (shm_name) {
-    const link::FrameAdapter adapter = is_signal ? &link::frame_from_signal_snapshot
-                                                 : &link::frame_from_snapshot;
+    const link::FrameAdapter adapter = is_signal   ? &link::frame_from_signal_snapshot
+                                       : is_logic ? &link::frame_from_logic_snapshot
+                                                  : &link::frame_from_snapshot;
     shm.emplace(*shm_name, solver_name, adapter);
     if (!shm->ok()) {
       if (shm->status().code == core::StatusCode::kInvalidArgument) {
@@ -641,8 +1067,9 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     if (!link::parse_endpoint(*tcp_endpoint).ok()) {
       return usage_error(out, "invalid TCP endpoint (want host:port)");
     }
-    const link::FrameAdapter adapter = is_signal ? &link::frame_from_signal_snapshot
-                                                 : &link::frame_from_snapshot;
+    const link::FrameAdapter adapter = is_signal   ? &link::frame_from_signal_snapshot
+                                       : is_logic ? &link::frame_from_logic_snapshot
+                                                  : &link::frame_from_snapshot;
     tcp.emplace(*tcp_endpoint, solver_name, adapter);
     if (!tcp->ok()) {
       out << "Error: cannot connect TCP '" << *tcp_endpoint << "'\n";
@@ -654,8 +1081,9 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     if (!link::parse_endpoint(*udp_endpoint).ok()) {
       return usage_error(out, "invalid UDP endpoint (want host:port)");
     }
-    const link::FrameAdapter adapter = is_signal ? &link::frame_from_signal_snapshot
-                                                 : &link::frame_from_snapshot;
+    const link::FrameAdapter adapter = is_signal   ? &link::frame_from_signal_snapshot
+                                       : is_logic ? &link::frame_from_logic_snapshot
+                                                  : &link::frame_from_snapshot;
     udp.emplace(*udp_endpoint, solver_name, adapter,
                 static_cast<std::size_t>(udp_budget));
     if (!udp->ok()) {
@@ -743,6 +1171,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   std::optional<emit::StrideSink> csv_stride;
   std::optional<emit::SignalSubsetSink> sig_csv_subset;
   std::optional<emit::StrideSink> sig_csv_stride;
+  std::optional<emit::StrideSink> logic_csv_stride;
   std::optional<emit::SignalSubsetSink> shm_subset;
   std::optional<emit::StrideSink> shm_stride;
   std::optional<emit::SignalSubsetSink> tcp_subset;
@@ -757,6 +1186,7 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
 #endif
   emit::ISink *csv_out = nullptr;
   emit::ISink *sig_csv_out = nullptr;
+  emit::ISink *logic_csv_out = nullptr;
   emit::ISink *shm_out = nullptr;
   emit::ISink *tcp_out = nullptr;
   emit::ISink *udp_out = nullptr;
@@ -778,6 +1208,13 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     if (csv_sampling.stride_given && csv_sampling.stride != 1) {
       sig_csv_stride.emplace(*sig_csv_out, csv_sampling.stride);
       sig_csv_out = &*sig_csv_stride;
+    }
+  }
+  if (logic_csv) {
+    logic_csv_out = &*logic_csv;
+    if (csv_sampling.stride_given && csv_sampling.stride != 1) {
+      logic_csv_stride.emplace(*logic_csv_out, csv_sampling.stride);
+      logic_csv_out = &*logic_csv_stride;
     }
   }
   if (shm) {
@@ -857,13 +1294,16 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
   world::State s;
-  std::array<emit::ISink *, 7> sink_arr{};
+  std::array<emit::ISink *, 8> sink_arr{};
   std::size_t n_sinks = 0;
   if (csv_out) {
     sink_arr[n_sinks++] = csv_out;
   }
   if (sig_csv_out) {
     sink_arr[n_sinks++] = sig_csv_out;
+  }
+  if (logic_csv_out) {
+    sink_arr[n_sinks++] = logic_csv_out;
   }
   if (shm_out) {
     sink_arr[n_sinks++] = shm_out;
@@ -971,7 +1411,8 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
     tcp_finish = tcp->finish(link::kTcpFinishTimeoutMs);
   }
   if (!st.ok()) {
-    out << "Error: simulation step failed (partial step state is not a completed tick)\n";
+    out << "Error: simulation step failed at step " << s.step_index
+        << " (partial step state is not a completed tick)\n";
     return core::kExitRuntime;
   }
 
@@ -1245,6 +1686,53 @@ void SimSpec::complete(std::span<const std::string_view> prior_args, std::string
     for (std::string_view q : {ros2::cli_options::kQosLatest, ros2::cli_options::kQosReliable}) {
       if (q.substr(0, sub.size()) == sub) {
         out.emplace_back(std::string{kRosQosEq} + std::string{q});
+      }
+    }
+    return;
+  }
+  // Values for a preceding "--seq-clocks": clock-domain names from the
+  // --seq-file workspace when available (nothing otherwise).
+  if (!prior_args.empty() && prior_args.back() == "--seq-clocks") {
+    logic::Netlist nl;
+    if (seq_complete_workspace(prior_args, nl)) {
+      for (const SeqDomain &d : seq_clock_domains(nl)) {
+        if (d.name.size() >= partial.size() && d.name.substr(0, partial.size()) == partial) {
+          out.emplace_back(d.name);
+        }
+      }
+    }
+    return;
+  }
+  // Values for a preceding "--seq-from": block-input pins -> PIN=0|1 forms.
+  if (!prior_args.empty() && prior_args.back() == "--seq-from") {
+    logic::Netlist nl;
+    if (seq_complete_workspace(prior_args, nl)) {
+      complete_seq_from_value(nl, partial, out);
+    }
+    return;
+  }
+  constexpr std::string_view kSeqClocksEq = "--seq-clocks=";
+  if (partial.substr(0, kSeqClocksEq.size()) == kSeqClocksEq) {
+    const std::string_view sub = partial.substr(kSeqClocksEq.size());
+    logic::Netlist nl;
+    if (seq_complete_workspace(prior_args, nl)) {
+      for (const SeqDomain &d : seq_clock_domains(nl)) {
+        if (d.name.size() >= sub.size() && d.name.substr(0, sub.size()) == sub) {
+          out.emplace_back(std::string{kSeqClocksEq} + d.name);
+        }
+      }
+    }
+    return;
+  }
+  constexpr std::string_view kSeqFromEq = "--seq-from=";
+  if (partial.substr(0, kSeqFromEq.size()) == kSeqFromEq) {
+    const std::string_view sub = partial.substr(kSeqFromEq.size());
+    logic::Netlist nl;
+    if (seq_complete_workspace(prior_args, nl)) {
+      std::vector<std::string> forms;
+      complete_seq_from_value(nl, sub, forms);
+      for (std::string &f : forms) {
+        out.emplace_back(std::string{kSeqFromEq} + f);
       }
     }
     return;

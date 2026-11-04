@@ -695,6 +695,12 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic_seq_step PRIVATE wengine_core)
     add_test(NAME logic_seq_step COMMAND test_logic_seq_step)
 
+    # 005-sequential-nets-runner US1: SequentialSolver + configured-run
+    # driver goldens vs hand-derived references. Links wengine_core alone.
+    add_executable(test_logic_seq_runner tests/test_logic_seq_runner.cpp)
+    target_link_libraries(test_logic_seq_runner PRIVATE wengine_core)
+    add_test(NAME logic_seq_runner COMMAND test_logic_seq_runner)
+
     # DFF full control set (RST/SET/EN, opt-in 5-input fan-in): fan-in
     # rules, named pins, priority truth table, async-apply, hold,
     # wired reset, zero-migration, plus session (Shell) scenario goldens

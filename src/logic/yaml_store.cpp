@@ -17,6 +17,7 @@
 
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <yaml-cpp/yaml.h>
@@ -562,7 +563,12 @@ struct TieRow {
       err = at + "input already wired '" + w.to + "'";
       return false;
     }
-    if (detail::reaches_seq(tmp, to.value.slot, from.value.slot)) {
+    // Q-boundary (same rule as logic::wire): an edge into a
+    // sequential-gate input can never close a combinational cycle, so
+    // file order never affects acceptance. The whole-graph validator at
+    // the end stays authoritative.
+    if (!is_sequential_kind(dst.kind) &&
+        detail::reaches_seq(tmp, to.value.slot, from.value.slot)) {
       err = at + "wire closes a combinational cycle '" + w.from + "' -> '" + w.to + "'";
       return false;
     }
@@ -620,7 +626,14 @@ struct TieRow {
   }
   tmp.dirty = true;
   tmp.topo_size = 0;
-  if (!ensure_topology(tmp).ok()) {
+  // Flop-aware cycle check (mirrors the wire verb): combinational loops
+  // always fail; feedback through sequential gates validates sequentially.
+  if (has_sequential_gates(tmp)) {
+    if (!validate_sequential(tmp).ok()) {
+      err = "workspace topology error";
+      return false;
+    }
+  } else if (!ensure_topology(tmp).ok()) {
     err = "workspace topology error";
     return false;
   }

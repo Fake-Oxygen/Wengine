@@ -21,6 +21,7 @@
 // wiring stays at the edge.
 
 #include "wengine/core/runner.hpp"
+#include "wengine/logic/seq_config.hpp"
 #include "wengine/signal/types.hpp"
 
 #include <cstdint>
@@ -40,6 +41,7 @@ struct RunConfig {
   double vx0 = 10.0;
   double vy0 = 10.0;
   signal::SignalRunConfig signal; // signal-scoped (count/params/set)
+  logic::SequentialRunConfig seq; // logic/sequential-scoped (netlist/stimulus/members/set)
 };
 
 } // namespace wengine::core

@@ -45,6 +45,8 @@ struct SeqState {
   std::array<std::uint64_t, kMaxGates> serial{}; // stable flop id, never reused
   std::uint64_t next_serial{0};
   std::uint16_t live_count{0};
+
+  bool operator==(const SeqState &) const noexcept = default;
 };
 
 [[nodiscard]] inline bool seq_has(const SeqState &st, std::uint16_t slot) noexcept {

@@ -98,6 +98,37 @@ void test_clk_and_dlatch_variants() {
   assert(logic::validate_sequential(latch).ok());
 }
 
+void test_flop_feedback_reverse_order() {
+  // a.yml shape: flop Q+NQ fanout wired first, combinational feedback
+  // into the flop input last. An edge into a sequential input is a
+  // Q-boundary, never a cycle edge — so acceptance must not depend on
+  // wiring order (declarative formats like YAML list wires in file
+  // order, not build order).
+  Netlist nl;
+  place_seq(nl, 0, GateKind::kT, 1); // T1
+  const std::uint16_t o = logic::add_gate(nl, GateKind::kOr, 2).value;
+  logic::PinRef q{};
+  q.slot = 0;
+  q.is_output = true;
+  logic::PinRef nq{};
+  nq.slot = 0;
+  nq.is_output = true;
+  nq.negated = true;
+  logic::PinRef i0{};
+  i0.slot = o;
+  i0.is_output = false;
+  i0.input = 0;
+  logic::PinRef i1{};
+  i1.slot = o;
+  i1.is_output = false;
+  i1.input = 1;
+  assert(logic::wire_pins(nl, q, i0).ok());  // T1.Q -> OR.1
+  assert(logic::wire_pins(nl, nq, i1).ok()); // T1.NQ -> OR.2
+  assert(logic::wire(nl, o, 0, 0).ok());     // OR.Y -> T1.T (feedback last)
+  assert(logic::has_sequential_gates(nl));
+  assert(logic::validate_sequential(nl).ok());
+}
+
 void test_comb_cycle_still_rejected_with_flop_present() {
   // A live-but-uninvolved flop must not shield a real combinational cycle.
   Netlist nl;
@@ -141,6 +172,7 @@ int main() {
   test_validate_rejects_comb_cycles();
   test_flop_feedback_loop();
   test_clk_and_dlatch_variants();
+  test_flop_feedback_reverse_order();
   test_comb_cycle_still_rejected_with_flop_present();
   test_wire_unchanged_for_comb();
   test_has_sequential_gates_tracks_lifetime();

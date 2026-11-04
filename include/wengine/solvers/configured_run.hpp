@@ -29,6 +29,9 @@
 
 #include "wengine/core/run_config.hpp"
 #include "wengine/core/runner.hpp"
+#include "wengine/logic/netlist.hpp"
+#include "wengine/logic/seq_config.hpp"
+#include "wengine/logic/seq_state.hpp"
 #include "wengine/signal/types.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 #include "wengine/world/state.hpp"
@@ -164,6 +167,55 @@ class ConfiguredRun {
       return fail("signal options only apply to solver 'signal'");
     }
 
+    // Sequential-scoped section: parsed values only, driver validates +
+    // populates the singleton State pool. The topology is required (no
+    // defaults run): solver "logic" needs set, any other solver rejects
+    // set. Stimulus rides in block-interface order (Low/High only);
+    // members is the flattened edge-flop (DFF/JK/T) slot list — empty
+    // iff step_all_domains (default all-domains path).
+    const bool is_logic = solver->name() == SequentialSolver::kName;
+    if (is_logic) {
+      if (!cfg.seq.set) {
+        return fail("logic run requires a sequential section (set)");
+      }
+      if (!logic::validate_sequential(cfg.seq.netlist).ok()) {
+        return fail("invalid sequential net (combinational cycle or bad topology)");
+      }
+      if (cfg.seq.stimulus.size() != logic::block_input_count(cfg.seq.netlist)) {
+        return fail("invalid sequential stimulus (size must match block inputs)");
+      }
+      for (logic::LogicValue v : cfg.seq.stimulus) {
+        if (v != logic::LogicValue::kLow && v != logic::LogicValue::kHigh) {
+          return fail("invalid sequential stimulus (Low/High only)");
+        }
+      }
+      if (cfg.seq.step_all_domains && !cfg.seq.members.empty()) {
+        return fail("invalid sequential members (must be empty when stepping all domains)");
+      }
+      if (!cfg.seq.step_all_domains && cfg.seq.members.empty()) {
+        return fail("invalid sequential members (empty selection steps nothing)");
+      }
+      for (std::size_t k = 0; k < cfg.seq.members.size(); ++k) {
+        const std::uint16_t m = cfg.seq.members[k];
+        if (m >= logic::kMaxGates || !cfg.seq.netlist.gates[m].live) {
+          return fail("invalid sequential member (not a live slot)");
+        }
+        const logic::GateKind mk = cfg.seq.netlist.gates[m].kind;
+        const bool edge_kind = mk == logic::GateKind::kDff || mk == logic::GateKind::kJk ||
+                               mk == logic::GateKind::kT;
+        if (!edge_kind) {
+          return fail("invalid sequential member (not an edge flop)");
+        }
+        for (std::size_t j = 0; j < k; ++j) {
+          if (cfg.seq.members[j] == m) {
+            return fail("invalid sequential members (duplicate slot)");
+          }
+        }
+      }
+    } else if (cfg.seq.set) {
+      return fail("logic options only apply to solver 'logic'");
+    }
+
     ConfiguredRun run;
     run.solver_ = std::move(solver);
     run.runner_ = core::Runner(cfg.loop);
@@ -230,6 +282,19 @@ class ConfiguredRun {
           return fail("signal setup failed");
         }
       }
+    }
+    if (is_logic) {
+      // Populate the singleton sequential pool from the validated
+      // section: topology copy (immutable during the run), clocked-state
+      // sync (fresh serials, power-on Low), retained stimulus + member
+      // list, and settled outputs sized to the block interface (Low
+      // until the first step rewrites them).
+      world::State &st = run.runner_.state();
+      st.netlist = cfg.seq.netlist;
+      logic::init_seq_state(st.seq, st.netlist);
+      st.seq_inputs = cfg.seq.stimulus;
+      st.seq_members = cfg.seq.members;
+      st.seq_outputs.assign(logic::block_output_count(st.netlist), logic::LogicValue::kLow);
     }
     out = std::move(run);
     return core::Status::success();

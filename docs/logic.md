@@ -425,8 +425,17 @@ append-only, schema bumps carry fallback loaders.
   break loops), and `wire()` / the `wire` verb take that path whenever
   sequential gates are present (pure-comb netlists keep the old path).
   Session verbs `step`/`poke`/`peek` expose control and readback
-  headlessly; a `SequentialSolver::step(state, dt)` behind the `ISolver`
-  seam plus a `RunConfig` nested section remain future work per AGENTS.md §8.
+  headlessly; the engine path is shipped too: a header-only
+  `SequentialSolver` (`kName="logic"`) behind the `ISolver` seam steps the
+  singleton pool through `core::Runner` with end-of-step value-at-T+dt
+  stamps, a nested `logic::SequentialRunConfig` section (topology +
+  stimulus + multi-clock member list, honored only for solver `logic`)
+  aggregated into `core::RunConfig`, extended `Snapshot` rows
+  (`seq_serial`/`seq_value`/`seq_output` in slot order), format-v6
+  checkpoints with v1–v5 fallbacks, one `link::Frame` adapter
+  (`seq.count` + `seq.<serial>.Q`) plus frame-source registry entry, one
+  tidy `LogicCsvSink`, and `sim run --solver logic` with
+  `--seq-file/--seq-clocks/--seq-from` options.
 - **Timing / delay.** Every gate already stores `propagation_delay_ps`
   (default 0; v1 eval is zero-delay, loader stores any value). Delay
   simulation later reads the field — no schema or struct change, only

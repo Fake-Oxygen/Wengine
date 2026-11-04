@@ -458,7 +458,7 @@ void test_serialize_signals() {
 
 void test_registry() {
   static_assert(solvers::SolverRegistry::find("signal") != nullptr);
-  static_assert(solvers::SolverRegistry::all().size() == 2);
+  static_assert(solvers::SolverRegistry::all().size() == 3);
   const solvers::SolverDef *def = solvers::SolverRegistry::find("signal");
   assert(def != nullptr);
   std::unique_ptr<core::ISolver> solver = def->create();

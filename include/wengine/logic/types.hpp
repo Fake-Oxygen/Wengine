@@ -141,6 +141,8 @@ struct Gate {
                                           // now, honored later; v1 eval is
                                           // zero-delay regardless of value
   std::array<std::uint16_t, kMaxInputs> drivers{};
+
+  bool operator==(const Gate &) const noexcept = default;
 };
 
 // Fixed-capacity SoA-ish pool: slots recycle, counters don't.
@@ -173,6 +175,8 @@ struct Netlist {
   std::array<std::uint16_t, kMaxGates> topo_order{};
   std::array<std::uint16_t, kMaxGates> topo_level{};
   std::uint16_t topo_size = 0;
+
+  bool operator==(const Netlist &) const noexcept = default;
 };
 
 } // namespace wengine::logic

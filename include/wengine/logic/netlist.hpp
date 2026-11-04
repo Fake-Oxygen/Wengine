@@ -724,7 +724,14 @@ namespace detail {
   if (nl.tie_rep[tie_flat(to_slot, to_input)] != 0) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
   }
-  if (detail::reaches_seq(nl, to_slot, from_slot)) {
+  // Q-boundary: an edge into a sequential-gate input can never close a
+  // combinational cycle (flop Q outputs break loops — see
+  // validate_sequential, which excludes exactly these edges), so the
+  // incremental check is vacuous there and acceptance never depends on
+  // wiring order. The whole-graph validator stays authoritative for
+  // combinational destinations (a live-but-uninvolved flop shields
+  // nothing).
+  if (!is_sequential_kind(to.kind) && detail::reaches_seq(nl, to_slot, from_slot)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // cycle
   }
   to.drivers[to_input] = from_slot;

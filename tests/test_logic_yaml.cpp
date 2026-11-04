@@ -351,6 +351,48 @@ void test_sr_round_trip() {
   assert(again == text); // byte-identical
 }
 
+void test_sequential_feedback_round_trip() {
+  // Flop Q+NQ fanout with combinational feedback (a.yml shape): the
+  // feedback edge lands on a flop input (Q-boundary), so file order
+  // never affects acceptance — the loader takes it and the trip is
+  // netlist-equal and byte-identical.
+  logic::Netlist nl;
+  assert(logic::add_gate(nl, logic::GateKind::kT, 2).ok());  // T1 @0
+  assert(logic::add_gate(nl, logic::GateKind::kOr, 2).ok()); // OR1 @1
+  auto q = logic::parse_pin(nl, "T1.Q");
+  assert(q.ok());
+  auto nq = logic::parse_pin(nl, "T1.NQ");
+  assert(nq.ok());
+  auto i0 = logic::parse_pin(nl, "OR1.1");
+  assert(i0.ok());
+  auto i1 = logic::parse_pin(nl, "OR1.2");
+  assert(i1.ok());
+  assert(logic::wire_pins(nl, q.value, i0.value).ok());  // T1.Q -> OR1.1
+  assert(logic::wire_pins(nl, nq.value, i1.value).ok()); // T1.NQ -> OR1.2
+  auto t = logic::parse_pin(nl, "T1.T");
+  assert(t.ok());
+  auto y = logic::parse_pin(nl, "OR1.Y");
+  assert(y.ok());
+  assert(logic::wire_pins(nl, y.value, t.value).ok()); // OR1.Y -> T1.T
+  std::string text;
+  logic::yaml::save_text(nl, text);
+  assert(contains(text, "{from: T1.Q, to: OR1.1}"));
+  assert(contains(text, "{from: T1.NQ, to: OR1.2}"));
+  assert(contains(text, "{from: OR1.Y, to: T1.T}"));
+
+  logic::Netlist back;
+  std::string err;
+  assert(logic::yaml::load_text(text, back, err));
+  assert(netlists_equal(nl, back));
+  // NQ polarity survives the trip (not covered by netlists_equal).
+  assert(back.driver_inv[logic::tie_flat(1, 0)] == 0);
+  assert(back.driver_inv[logic::tie_flat(1, 1)] == 1);
+  assert(back.gates[0].nq_fanout == 1);
+  std::string again;
+  logic::yaml::save_text(back, again);
+  assert(again == text); // byte-identical
+}
+
 void test_malformed_line_numbers() {
   const std::string head =
       "version: 1\n"
@@ -580,6 +622,7 @@ int main() {
   test_jk_round_trip();
   test_dlatch_round_trip();
   test_sr_round_trip();
+  test_sequential_feedback_round_trip();
   test_malformed_line_numbers();
   test_examples();
   std::cout << "test_logic_yaml: OK\n";
