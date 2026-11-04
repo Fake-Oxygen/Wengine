@@ -1,0 +1,38 @@
+# two_clock_counter.yaml: two independent clock domains with mixed initial states.
+#
+# DFF1 is clocked by BUF1.Y (named domain "BUF1.Y"); DFF2's clock dangles,
+# so it forms the implicit "clk" domain. Each flop toggles itself
+# (DFFn.Q -> NOTn.1, NOTn.Y -> DFFn.D). Mixed power-on inits (DFF1=0,
+# DFF2=1) persist in the file and apply on load — no stepping needed to
+# see them. Selective stepping advances one domain while the other holds.
+#
+# Run:
+#   printf 'logic load examples/logic/two_clock_counter.yaml\nlogic peek\nlogic step BUF1.Y 1\nlogic peek\nlogic step clk 1\nlogic peek\nlogic step 1\nlogic peek\nexit\n' | ./build/PhysicsSimApp
+# Expect: `loaded 5 gates 5 wires`; the first `peek` shows the stored
+#   inits `DFF1.Q=0 NQ=1 (serial 0)` and `DFF2.Q=1 NQ=0 (serial 1)`;
+#   `step BUF1.Y 1` reports `DFF1.Q: 0->1` (DFF2 holds 1); `step clk 1`
+#   reports `DFF2.Q: 1->0` (DFF1 holds 1); `step 1` advances both
+#   (`DFF1.Q: 1->0`, `DFF2.Q: 0->1`), back at the power-on values.
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: BUF1, kind: buf, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: DFF1, kind: dff, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0, init: 0}
+  - {id: DFF2, kind: dff, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0, init: 1}
+  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: NOT2, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+wires:
+  - {from: BUF1.Y, to: DFF1.CLK}
+  - {from: DFF1.Q, to: NOT1.1}
+  - {from: NOT1.Y, to: DFF1.D}
+  - {from: DFF2.Q, to: NOT2.1}
+  - {from: NOT2.Y, to: DFF2.D}
+ties:
+clocks:
+  - {name: BUF1.Y}
+  - {name: clk}
+meta:
+  tool: wengine-logic

@@ -15,6 +15,7 @@
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/types.hpp"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -26,6 +27,10 @@ struct SequentialRunConfig {
   std::vector<std::uint16_t> members;  // flattened edge-flop slots to step
   bool step_all_domains = true;        // true = every live edge flop steps
   bool set = false;                    // explicitly provided (driver gate)
+  // Per-slot power-on values from the workspace bundle (006), applied to
+  // the pool right after init_seq_state, pre-first-step. All-Low default
+  // preserves the legacy fresh-attach behavior for direct construction.
+  std::array<LogicValue, kMaxGates> init_q{};
 };
 
 } // namespace wengine::logic

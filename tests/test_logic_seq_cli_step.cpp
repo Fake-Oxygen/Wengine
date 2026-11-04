@@ -650,7 +650,7 @@ void test_sr_illegal_file_load_keeps_workspace() {
   {
     std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
     assert(f.good());
-    f << "version: 2\n"
+    f << "version: 1\n"
          "gates:\n"
          "  - {id: SRLATCH1, kind: srlatch, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
          "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
@@ -658,6 +658,7 @@ void test_sr_illegal_file_load_keeps_workspace() {
          "  - {from: NOT1.Y, to: SRLATCH1.S}\n"
          "  - {from: NOT1.Y, to: SRLATCH1.R}\n"
          "ties:\n"
+         "clocks:\n"
          "meta:\n"
          "  tool: wengine-logic\n";
   }
@@ -738,6 +739,233 @@ void test_mixed_edge_level_session() {
   assert(out.str() == first);
 }
 
+void test_reload_run_determinism() {
+  // Repeated load-plus-run is identical (006): the same file loaded
+  // twice (fresh reset between) powers on identically — same serials,
+  // same Q — and identical stepping produces identical reports.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  const std::string tmp =
+      (std::filesystem::temp_directory_path() / "wengine_reload_det.yaml").string();
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    assert(f.good());
+    f << "version: 1\n"
+         "gates:\n"
+         "  - {id: DFF1, kind: dff, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0, init: 1}\n"
+         "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+         "wires:\n"
+         "  - {from: DFF1.Q, to: NOT1.1}\n"
+         "  - {from: NOT1.Y, to: DFF1.D}\n"
+         "ties:\n"
+         "clocks:\n"
+         "  - {name: clk}\n"
+         "meta:\n"
+         "  tool: wengine-logic\n";
+  }
+  const auto run_once = [&]() {
+    assert(sh.execute("logic reset", out) == 0);
+    assert(sh.execute(std::string("logic load ") + tmp, out) == 0);
+    out.str("");
+    out.clear();
+    assert(sh.execute("logic peek", out) == 0);
+    const std::string peek = out.str();
+    out.str("");
+    out.clear();
+    assert(sh.execute("logic step 3", out) == 0);
+    return peek + out.str();
+  };
+  const std::string first = run_once();
+  const std::string second = run_once();
+  assert(first == second);
+  assert(contains(first, "DFF1.Q=1"));
+  std::remove(tmp.c_str());
+}
+
+void test_selective_step_after_reload() {
+  // Domain fidelity across save/load (006 T017): a two-clock toggle net
+  // with mixed inits steps identically after reload — stepping BUF1.Y
+  // three times advances DFF1 while DFF2 holds, then step-all advances
+  // both.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  const std::string tmp =
+      (std::filesystem::temp_directory_path() / "wengine_two_domain.yaml").string();
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    assert(f.good());
+    f << "version: 1\n"
+         "gates:\n"
+         "  - {id: BUF1, kind: buf, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+         "  - {id: DFF1, kind: dff, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0, init: 0}\n"
+         "  - {id: DFF2, kind: dff, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0, init: 1}\n"
+         "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+         "  - {id: NOT2, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+         "wires:\n"
+         "  - {from: BUF1.Y, to: DFF1.CLK}\n"
+         "  - {from: DFF1.Q, to: NOT1.1}\n"
+         "  - {from: NOT1.Y, to: DFF1.D}\n"
+         "  - {from: DFF2.Q, to: NOT2.1}\n"
+         "  - {from: NOT2.Y, to: DFF2.D}\n"
+         "ties:\n"
+         "clocks:\n"
+         "  - {name: BUF1.Y}\n"
+         "  - {name: clk}\n"
+         "meta:\n"
+         "  tool: wengine-logic\n";
+  }
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute(std::string("logic load ") + tmp, out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0"));
+  assert(contains(out.str(), "DFF2.Q=1"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step BUF1.Y 3", out) == 0);
+  assert(contains(out.str(), "BUF1.Y: cycle 3"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  // Toggled thrice from 0 (0->1->0->1) while the implicit domain held 1
+  // (a stepped DFF2 would read NOT(1)=0 after the first edge).
+  assert(contains(out.str(), "DFF1.Q=1"));
+  assert(contains(out.str(), "DFF2.Q=1"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0"));
+  assert(contains(out.str(), "DFF2.Q=0"));
+  std::remove(tmp.c_str());
+}
+
+// Shipped advanced-example transcripts (006 T026): the Run/Expect
+// headers of the three new reference files, executed against the real
+// shipped files (absolute source dir, same recipe as test_logic_yaml).
+#ifdef WENGINE_LOGIC_EXAMPLE_DIR
+constexpr std::string_view kExampleDir = WENGINE_LOGIC_EXAMPLE_DIR;
+#else
+constexpr std::string_view kExampleDir = "../examples/logic";
+#endif
+
+void test_example_two_clock_counter() {
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  const std::string f = std::string(kExampleDir) + "/two_clock_counter.yaml";
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute(std::string("logic load ") + f, out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1 (serial 0)"));
+  assert(contains(out.str(), "DFF2.Q=1 NQ=0 (serial 1)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step BUF1.Y 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0->1"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=1"));
+  assert(contains(out.str(), "DFF2.Q=1")); // held
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step clk 1", out) == 0);
+  assert(contains(out.str(), "DFF2.Q: 1->0"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=1")); // held
+  assert(contains(out.str(), "DFF2.Q=0"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 1->0"));
+  assert(contains(out.str(), "DFF2.Q: 0->1"));
+}
+
+void test_example_gated_async_counter() {
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  const std::string f = std::string(kExampleDir) + "/gated_async_counter.yaml";
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute(std::string("logic load ") + f, out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0 NQ=1 (serial 0)"));
+  assert(sh.execute("logic poke DFF1.EN=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 0->1"));
+  assert(sh.execute("logic poke DFF1.RST=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0")); // async force, no step
+  assert(sh.execute("logic poke DFF1.RST=release", out) == 0);
+  assert(sh.execute("logic poke DFF1.SET=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=1")); // async force, no step
+  assert(sh.execute("logic poke DFF1.SET=release DFF1.EN=0", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "DFF1.Q: 1 (no change)")); // EN-hold
+}
+
+void test_example_jk_t_latch_chain() {
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  const std::string f = std::string(kExampleDir) + "/jk_t_latch_chain.yaml";
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute(std::string("logic load ") + f, out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "JK1.Q=0"));
+  assert(contains(out.str(), "T1.Q=0"));
+  assert(contains(out.str(), "DLATCH1.Q=0"));
+  assert(sh.execute("logic poke JK1.J=1", out) == 0);
+  assert(sh.execute("logic poke JK1.K=1", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.EN=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 2", out) == 0);
+  assert(contains(out.str(), "JK1.Q: 0 (no change)")); // toggled twice
+  assert(contains(out.str(), "T1.Q: 0->1"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "JK1.Q=0"));
+  assert(contains(out.str(), "T1.Q=1"));
+  assert(contains(out.str(), "DLATCH1.Q=0")); // tracked pre-edge 0
+  assert(sh.execute("logic poke DLATCH1.EN=0", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "JK1.Q: 0->1"));
+  assert(contains(out.str(), "T1.Q: 1 (no change)")); // T saw pre-edge 0
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "JK1.Q=1"));
+  assert(contains(out.str(), "T1.Q=1"));
+  assert(contains(out.str(), "DLATCH1.Q=0")); // frozen
+}
+
 } // namespace
 
 int main() {
@@ -746,6 +974,11 @@ int main() {
   test_selective_domains();
   test_errors_changeless();
   test_determinism_replay();
+  test_reload_run_determinism();
+  test_selective_step_after_reload();
+  test_example_two_clock_counter();
+  test_example_gated_async_counter();
+  test_example_jk_t_latch_chain();
   test_nq_ignored_by_default();
   test_t_divider_session();
   test_dlatch_level_session();

@@ -14,6 +14,7 @@
 #include "wengine/logic/types.hpp"
 #include "wengine/logic/yaml_store.hpp"
 
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <iostream>
@@ -214,21 +215,23 @@ void test_yaml_nq_round_trip() {
   assert(logic::block_input_count(nl) == 2);   // BUF1.1, AND1.2
   assert(logic::block_output_count(nl) == 2);  // NOT1.Y, AND1.Y
   std::string text;
-  logic::yaml::save_text(nl, text);
+  std::array<LogicValue, logic::kMaxGates> inits{};
+  inits.fill(kL);
+  logic::yaml::save_text(nl, inits, text);
   assert(contains(text, "to: DFF1.D"));
   assert(contains(text, "from: DFF1.NQ"));
   assert(contains(text, "ignore_nq: true"));
   assert(contains(text, "to: NOT1.1")); // combinational pins stay numeric
-  Netlist back;
+  logic::yaml::Workspace ws;
   std::string err;
-  assert(logic::yaml::load_text(text, back, err));
-  assert(netlists_equal_full(nl, back));
+  assert(logic::yaml::load_text(text, ws, err));
+  assert(netlists_equal_full(nl, ws.netlist));
   std::string again;
-  logic::yaml::save_text(back, again);
+  logic::yaml::save_text(ws.netlist, ws.init, again);
   assert(text == again); // byte-identical round-trip
   // Counters survive the trip: the next DFF is DFF2.
-  assert(logic::add_gate(back, GateKind::kDff, 2).ok());
-  assert(back.gates[4].counter == 2);
+  assert(logic::add_gate(ws.netlist, GateKind::kDff, 2).ok());
+  assert(ws.netlist.gates[4].counter == 2);
 }
 
 } // namespace

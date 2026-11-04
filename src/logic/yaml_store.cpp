@@ -1,20 +1,22 @@
-// Versioned logic-workspace store (LOGIC-6).
+// Versioned logic-workspace store (LOGIC-6; 006-versioned-workspace-v1).
 //
 // THE single TU allowed to know yaml-cpp exists (same seam as
 // src/signal/lua_solver.cpp). No other engine, CLI, or test TU includes a
 // yaml header; the public surface is the yaml-free
 // include/wengine/logic/yaml_store.hpp.
 //
-// Save emits one canonical byte layout (manual string build, identical to
-// the LOGIC-5 hand writer it replaces — the round-trip test pins the
-// bytes). Load parses real YAML via yaml-cpp (comments, quoting, block vs
-// flow style, multiline all accepted) then validates the strict v1 schema:
-// exact version gate, no unknown keys anywhere, single-driver wires, known
-// gates/pins, no cycles. Every diagnostic carries a 1-based `line N:`
-// prefix from the offending node's mark.
+// Save emits one canonical v1 byte layout. Load parses real YAML via
+// yaml-cpp (comments, quoting, block vs flow style, multiline all
+// accepted) then validates the strict v1 schema: exact version gate
+// (new generation only — retired v1/v2 files are refused loudly, never
+// loaded), no unknown keys anywhere, single-driver wires, known
+// gates/pins, per-sequential-row inits, clocks/topology agreement, no
+// cycles. Every diagnostic carries a 1-based `line N:` prefix from the
+// offending node's mark.
 
 #include "wengine/logic/yaml_store.hpp"
 
+#include "wengine/logic/clock_domains.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
@@ -119,6 +121,8 @@ struct GateRow {
   std::uint8_t ignored_mask = 0;
   bool ignore_output = false;
   bool ignore_nq = false; // optional key, sequential gates only
+  bool has_init = false;  // optional key, sequential gates only
+  LogicValue init = LogicValue::kLow;
   std::uint64_t delay_ps = 0;
   std::uint32_t counter = 0;
 };
@@ -135,11 +139,16 @@ struct TieRow {
   std::size_t line = 1;
 };
 
+struct ClockRow {
+  std::string name;
+  std::size_t line = 1;
+};
+
 [[nodiscard]] bool check_gate_map(const YAML::Node &g, GateRow &row, std::string &err) {
   constexpr const char *kWant[6] = {"id", "kind", "inputs", "ignore", "ignore_output", "delay_ps"};
   for (auto it = g.begin(); it != g.end(); ++it) {
     const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
-    bool known = (key == "ignore_nq"); // optional 7th key (sequential gates)
+    bool known = (key == "ignore_nq") || (key == "init"); // optional 7th/8th keys (sequential gates)
     for (const char *w : kWant) {
       if (key == w) {
         known = true;
@@ -147,7 +156,7 @@ struct TieRow {
       }
     }
     if (!known) {
-      err = at_line(it->first, "unknown gate key '" + key + "' (want id|kind|inputs|ignore|ignore_output|delay_ps|ignore_nq)");
+      err = at_line(it->first, "unknown gate key '" + key + "' (want id|kind|inputs|ignore|ignore_output|delay_ps|ignore_nq|init)");
       return false;
     }
   }
@@ -274,6 +283,30 @@ struct TieRow {
       return false;
     }
   }
+  // Optional 8th key: per-sequential-row power-on value. Missing means
+  // Low (hand-written files stay small); combinational rows must not
+  // carry it.
+  const YAML::Node init = g["init"];
+  if (init && init.IsDefined()) {
+    if (!is_sequential_kind(row.kind)) {
+      err = at_line(init, "init needs a sequential gate (got '" + row.id + "')");
+      return false;
+    }
+    if (!init.IsScalar()) {
+      err = at_line(init, "bad init value (want 0|1)");
+      return false;
+    }
+    if (init.Scalar() == "1") {
+      row.has_init = true;
+      row.init = LogicValue::kHigh;
+    } else if (init.Scalar() == "0") {
+      row.has_init = true;
+      row.init = LogicValue::kLow;
+    } else {
+      err = at_line(init, "bad init value (want 0|1)");
+      return false;
+    }
+  }
   if (!delay.IsScalar() || !parse_u64(delay.Scalar(), row.delay_ps)) {
     err = at_line(delay.IsDefined() ? delay : g, "bad delay_ps");
     return false;
@@ -329,7 +362,29 @@ struct TieRow {
   return true;
 }
 
-[[nodiscard]] bool load_impl(const std::string &text, Netlist &out, std::string &err) {
+[[nodiscard]] bool check_clocks_map(const YAML::Node &c, ClockRow &row, std::string &err) {
+  for (auto it = c.begin(); it != c.end(); ++it) {
+    const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
+    if (key != "name") {
+      err = at_line(it->first, "clock fields must read 'name'");
+      return false;
+    }
+  }
+  const YAML::Node name = c["name"];
+  if (!name || !name.IsDefined()) {
+    err = at_line(c, "clock entry needs 1 field (name)");
+    return false;
+  }
+  if (!name.IsScalar() || name.Scalar().empty()) {
+    err = at_line(c, "empty clock name");
+    return false;
+  }
+  row.name = name.Scalar();
+  row.line = line_of(c);
+  return true;
+}
+
+[[nodiscard]] bool load_impl(const std::string &text, Workspace &out, std::string &err) {
   if (text.find_first_not_of(" \t\r\n#") == std::string::npos) {
     // Cheap empty/whitespace fast path; comment-only files fall through
     // to the parser and hit the same diagnostic below.
@@ -341,7 +396,7 @@ struct TieRow {
       }
     }
     if (only_ws) {
-      err = "empty workspace (want 'version: 2' first)";
+      err = "empty workspace (want 'version: 1' first)";
       return false;
     }
   }
@@ -358,17 +413,18 @@ struct TieRow {
     return false;
   }
   if (!root || !root.IsDefined() || root.IsNull()) {
-    err = "empty workspace (want 'version: 2' first)";
+    err = "empty workspace (want 'version: 1' first)";
     return false;
   }
   if (!root.IsMap()) {
-    err = at_line(root, "workspace root must read 'version: 2' first");
+    err = at_line(root, "workspace root must read 'version: 1' first");
     return false;
   }
   for (auto it = root.begin(); it != root.end(); ++it) {
     const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
-    if (key != "version" && key != "gates" && key != "wires" && key != "ties" && key != "meta") {
-      err = at_line(it->first, "unknown workspace key '" + key + "' (want version|gates|wires|ties|meta)");
+    if (key != "version" && key != "gates" && key != "wires" && key != "ties" && key != "clocks" &&
+        key != "meta") {
+      err = at_line(it->first, "unknown workspace key '" + key + "' (want version|gates|wires|ties|clocks|meta)");
       return false;
     }
   }
@@ -376,21 +432,10 @@ struct TieRow {
   const YAML::Node gates = root["gates"];
   const YAML::Node wires = root["wires"];
   const YAML::Node ties = root["ties"];
+  const YAML::Node clocks = root["clocks"];
   const YAML::Node meta = root["meta"];
   if (!version || !version.IsDefined()) {
-    err = "first line must read 'version: 2'";
-    return false;
-  }
-  if (!gates || !gates.IsDefined()) {
-    err = "want 'gates:' section";
-    return false;
-  }
-  if (!wires || !wires.IsDefined()) {
-    err = "want 'wires:' section";
-    return false;
-  }
-  if (!meta || !meta.IsDefined()) {
-    err = "want 'meta:' section";
+    err = "first line must read 'version: 1'";
     return false;
   }
   if (!version.IsScalar()) {
@@ -403,18 +448,39 @@ struct TieRow {
       err = at_line(version, "bad workspace version");
       return false;
     }
-    if (v != 1 && v != static_cast<std::uint64_t>(kWorkspaceVersion)) {
-      err = at_line(version, "unsupported workspace version " + std::to_string(v) + " (want 2)");
+    if (v == 2) {
+      err = at_line(version, "workspace version 2 is retired (want 1: re-save from a live session)");
       return false;
     }
-    if (v == 1 && ties && ties.IsDefined()) {
-      err = at_line(ties, "version 1 workspaces must not carry 'ties:' (want version 2)");
+    if (v != static_cast<std::uint64_t>(kWorkspaceVersion)) {
+      err = at_line(version, "unsupported workspace version " + std::to_string(v) + " (want 1)");
       return false;
     }
-    if (v == static_cast<std::uint64_t>(kWorkspaceVersion) && (!ties || !ties.IsDefined())) {
-      err = "want 'ties:' section";
-      return false;
-    }
+  }
+  if (!gates || !gates.IsDefined()) {
+    err = "want 'gates:' section";
+    return false;
+  }
+  if (!wires || !wires.IsDefined()) {
+    err = "want 'wires:' section";
+    return false;
+  }
+  if (!ties || !ties.IsDefined()) {
+    // A `version: 1` file without `ties:` is a retired first-generation
+    // file (indistinguishable from it by the marker alone): refuse as
+    // legacy, never misload.
+    err = "legacy workspace version 1 is retired (missing 'ties:' section, want 1)";
+    return false;
+  }
+  if (!clocks || !clocks.IsDefined()) {
+    // Same generation-marker collision as `ties:` above: a `version: 1`
+    // file without `clocks:` is retired first-generation content.
+    err = "legacy workspace version 1 is retired (missing 'clocks:' section, want 1)";
+    return false;
+  }
+  if (!meta || !meta.IsDefined()) {
+    err = "want 'meta:' section";
+    return false;
   }
   if (!gates.IsSequence() && !gates.IsNull()) {
     err = at_line(gates, "'gates:' must read a sequence");
@@ -426,6 +492,10 @@ struct TieRow {
   }
   if (ties && ties.IsDefined() && !ties.IsSequence() && !ties.IsNull()) {
     err = at_line(ties, "'ties:' must read a sequence");
+    return false;
+  }
+  if (!clocks.IsSequence() && !clocks.IsNull()) {
+    err = at_line(clocks, "'clocks:' must read a sequence");
     return false;
   }
   if (!meta.IsMap()) {
@@ -448,12 +518,13 @@ struct TieRow {
   std::vector<GateRow> gate_rows;
   std::vector<WireRow> wire_rows;
   std::vector<TieRow> tie_rows;
+  std::vector<ClockRow> clock_rows;
   if (gates.IsSequence()) {
     gate_rows.reserve(gates.size());
     for (std::size_t i = 0; i < gates.size(); ++i) {
       const YAML::Node g = gates[i];
       if (!g.IsMap()) {
-        err = at_line(g, "gate entry must read '{id: ..., kind: ..., inputs: ..., ignore: [...], ignore_output: ..., [ignore_nq: ... ,] delay_ps: ...}'");
+        err = at_line(g, "gate entry must read '{id: ..., kind: ..., inputs: ..., ignore: [...], ignore_output: ..., [ignore_nq: ...,] delay_ps: ...[, init: ...]}'");
         return false;
       }
       GateRow row;
@@ -491,6 +562,21 @@ struct TieRow {
         return false;
       }
       tie_rows.push_back(std::move(row));
+    }
+  }
+  if (clocks.IsSequence()) {
+    clock_rows.reserve(clocks.size());
+    for (std::size_t i = 0; i < clocks.size(); ++i) {
+      const YAML::Node c = clocks[i];
+      if (!c.IsMap()) {
+        err = at_line(c, "clock entry must read '{name: ...}'");
+        return false;
+      }
+      ClockRow row;
+      if (!check_clocks_map(c, row, err)) {
+        return false;
+      }
+      clock_rows.push_back(std::move(row));
     }
   }
   if (gate_rows.size() > kMaxGates) {
@@ -637,14 +723,73 @@ struct TieRow {
     err = "workspace topology error";
     return false;
   }
-  out = tmp;
+  // Per-slot power-on values: explicit `init:` keys land on their gate's
+  // slot; every other slot reads Low. `check_gate_map` already rejected
+  // `init` on combinational rows.
+  std::array<LogicValue, kMaxGates> inits{};
+  inits.fill(LogicValue::kLow);
+  for (std::size_t i = 0; i < gate_rows.size(); ++i) {
+    if (gate_rows[i].has_init) {
+      inits[i] = gate_rows[i].init;
+    }
+  }
+  // Pinned clock domains: the stored names must equal the derived set
+  // exactly (order-insensitive) — membership itself stays derived from
+  // the topology above, so any drift fails loudly instead of silently
+  // re-deriving.
+  {
+    const std::vector<ClockDomain> derived = derive_clock_domains(tmp);
+    for (const ClockRow &c : clock_rows) {
+      std::size_t hits = 0;
+      for (const ClockRow &d : clock_rows) {
+        if (d.name == c.name) {
+          ++hits;
+        }
+      }
+      if (hits > 1) {
+        err = "line " + std::to_string(c.line) + ": duplicate clock domain '" + c.name + "'";
+        return false;
+      }
+      bool found = false;
+      for (const ClockDomain &d : derived) {
+        if (d.name == c.name) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        err = "line " + std::to_string(c.line) + ": unknown clock domain '" + c.name +
+              "' (not derived from this workspace)";
+        return false;
+      }
+    }
+    if (clock_rows.size() != derived.size()) {
+      for (const ClockDomain &d : derived) {
+        bool found = false;
+        for (const ClockRow &c : clock_rows) {
+          if (c.name == d.name) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          err = "workspace topology derives clock domain '" + d.name + "' with no 'clocks:' entry";
+          return false;
+        }
+      }
+      err = "workspace topology derives no clock domain for a stored 'clocks:' entry";
+      return false;
+    }
+  }
+  out.netlist = tmp;
+  out.init = inits;
   return true;
 }
 
 } // namespace
 
-void save_text(const Netlist &nl, std::string &out) {
-  out += "version: 2\n";
+void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits, std::string &out) {
+  out += "version: 1\n";
   out += "gates:\n";
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     const Gate &g = nl.gates[s];
@@ -673,12 +818,17 @@ void save_text(const Netlist &nl, std::string &out) {
     out += g.ignore_output ? "true" : "false";
     if (is_sequential_kind(g.kind)) {
       // Sequential-only 7th key (comb rows keep the 6-field canonical
-      // bytes so existing goldens are untouched).
+      // shape); the power-on value trails last (see below).
       out += ", ignore_nq: ";
       out += g.ignore_nq_output ? "true" : "false";
     }
     out += ", delay_ps: ";
     out += std::to_string(g.propagation_delay_ps);
+    if (is_sequential_kind(g.kind)) {
+      // Trailing power-on value from the caller's per-slot inits.
+      out += ", init: ";
+      out += (inits[s] == LogicValue::kHigh) ? "1" : "0";
+    }
     out += "}\n";
   }
   out += "wires:\n";
@@ -732,13 +882,22 @@ void save_text(const Netlist &nl, std::string &out) {
       out += "}\n";
     }
   }
+  out += "clocks:\n";
+  // Canonical: one entry per derived clock domain (`derive_clock_domains`
+  // vocabulary), first-seen slot order, so save/load round-trips
+  // byte-identically. Empty for combinational nets.
+  for (const ClockDomain &d : derive_clock_domains(nl)) {
+    out += "  - {name: ";
+    out += d.name;
+    out += "}\n";
+  }
   out += "meta:\n";
   out += "  tool: ";
   out += kToolName;
   out += "\n";
 }
 
-bool load_text(const std::string &text, Netlist &out, std::string &err) {
+bool load_text(const std::string &text, Workspace &out, std::string &err) {
   try {
     return load_impl(text, out, err);
   } catch (const YAML::Exception &e) {

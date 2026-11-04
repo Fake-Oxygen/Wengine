@@ -295,8 +295,9 @@ struct LogicSaveSpec {
   static constexpr std::string_view kUsage =
       "save <file.yaml>\n"
       "  save work.yaml\n"
-      "Writes the versioned workspace (version: 2) in canonical form; round-trips\n"
-      "byte-identically through `load`.";
+      "Writes the versioned workspace (version: 1, with flop inits and\n"
+      "clock domains) in canonical form; round-trips byte-identically\n"
+      "through `load`.";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
@@ -308,8 +309,9 @@ struct LogicLoadSpec {
   static constexpr std::string_view kUsage =
       "load <file.yaml>\n"
       "  load work.yaml\n"
-      "Replaces the workspace; version must be 1..2 (v1 loads untied; loud otherwise); unknown\n"
-      "keys/sections are errors. Fails atomically (the workspace is kept on error).";
+      "Replaces the workspace; accepts version 1 only (retired generations are\n"
+      "refused loudly); unknown keys/sections are errors. Fails atomically\n"
+      "(workspace and pool state are kept on error).";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);

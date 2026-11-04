@@ -1,5 +1,6 @@
 #include "common.hpp"
 
+#include "wengine/logic/clock_domains.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/seq_step.hpp"
 #include "wengine/logic/types.hpp"
@@ -158,39 +159,14 @@ void interface_pins(const Netlist &nl, std::vector<BlockPin> &in_pins, std::vect
 }
 
 std::vector<ClockDomain> clock_domains(const Netlist &nl) {
+  // Single engine-owned derivation (006): the file pins these same names,
+  // so session stepping must use exactly the loader's vocabulary.
   std::vector<ClockDomain> domains;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const auto &g = nl.gates[s];
-    if (!g.live || !wengine::logic::is_sequential_kind(g.kind)) {
-      continue;
-    }
-    if (g.kind != GateKind::kDff && g.kind != GateKind::kJk && g.kind != GateKind::kT) {
-      continue; // 004: level latches (DLATCH/SRLATCH) belong to no clock
-                // domain — advances never gate their level-resolved Q.
-    }
-    // CLK/EN is input 1. A live driver names the domain by its source
-    // pin (NQ-driven clocks keep the NQ spelling); dangling CLK/EN pins
-    // join the implicit "clk" domain.
-    std::string name = "clk";
-    const std::uint16_t drv = (g.input_count > 1) ? g.drivers[1] : wengine::logic::kNoDriver;
-    if (drv != wengine::logic::kNoDriver && drv < kMaxGates && nl.gates[drv].live) {
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + 1;
-      name = pin_text(nl, drv, true, 0, nl.driver_inv[flat] != 0);
-    }
-    bool found = false;
-    for (ClockDomain &d : domains) {
-      if (d.name == name) {
-        d.members.push_back(s);
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      ClockDomain d;
-      d.name = name;
-      d.members.push_back(s);
-      domains.push_back(std::move(d));
-    }
+  for (const wengine::logic::ClockDomain &d : wengine::logic::derive_clock_domains(nl)) {
+    ClockDomain out;
+    out.name = d.name;
+    out.members = d.members;
+    domains.push_back(std::move(out));
   }
   return domains;
 }
@@ -441,10 +417,21 @@ core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t t
 
 void save_yaml(std::ostream &os, const Netlist &nl) {
   // Canonical bytes live in the versioned store (src/logic/yaml_store.cpp,
-  // the single TU allowed to know yaml-cpp exists); this CLI wrapper only
-  // streams them out. Byte-identical to the LOGIC-5 layout by construction.
+  // the single TU allowed to know yaml-cpp exists); this CLI wrapper
+  // resyncs the pool and streams live Q as the file's per-element power-on
+  // values (006: save captures live state), plus the derived clock
+  // domains. Byte-identical to the v1 layout by construction.
+  wengine::logic::SeqState &st = seq_state();
+  wengine::logic::init_seq_state(st, nl);
+  std::array<wengine::logic::LogicValue, wengine::logic::kMaxGates> inits{};
+  inits.fill(wengine::logic::LogicValue::kLow);
+  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
+    if (st.valid[s] != 0) {
+      inits[s] = st.q[s];
+    }
+  }
   std::string text;
-  wengine::logic::yaml::save_text(nl, text);
+  wengine::logic::yaml::save_text(nl, inits, text);
   os << text;
 }
 
@@ -515,12 +502,21 @@ namespace support {
 
 namespace yaml {
 
-bool load_text(const std::string &text, Netlist &out, std::string &err) {
+bool load_text(const std::string &text, Netlist &out,
+               std::array<wengine::logic::LogicValue, wengine::logic::kMaxGates> &inits,
+               std::string &err) {
   // Strict v1 loader lives in the versioned store
   // (src/logic/yaml_store.cpp, the single TU allowed to know yaml-cpp
-  // exists); this CLI wrapper only forwards. Atomic: `out` is
-  // untouched on failure, so `load` keeps the workspace on error.
-  return wengine::logic::yaml::load_text(text, out, err);
+  // exists); this CLI wrapper forwards the bundle. Atomic: `out` and
+  // `inits` are untouched on failure, so `load` keeps the workspace on
+  // error.
+  wengine::logic::yaml::Workspace ws;
+  if (!wengine::logic::yaml::load_text(text, ws, err)) {
+    return false;
+  }
+  out = ws.netlist;
+  inits = ws.init;
+  return true;
 }
 
 } // namespace yaml

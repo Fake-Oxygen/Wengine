@@ -1,5 +1,6 @@
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/logic_sink.hpp"
+#include "wengine/logic/clock_domains.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/seq_step.hpp"
@@ -347,6 +348,26 @@ void test_driver_empty_net_run() {
   assert(snap.seq_serial.empty() && snap.seq_value.empty() && snap.seq_output.empty());
 }
 
+void test_driver_section_inits_power_on() {
+  // Section power-on values seed the pool (006): the T divider driven
+  // High toggles from its seeded value, not from all-Low.
+  core::RunConfig cfg = make_logic_config(make_tdivider(), {kH}, 1);
+  cfg.seq.init_q[0] = kH; // T1 @ slot 0 powers on High
+  world::State out;
+  assert(solvers::run_headless(cfg, std::span<emit::ISink *>{}, out).ok());
+  assert(out.step_index == 1);
+  assert(out.seq.q[0] == kL); // 1 -> toggle -> 0 after one edge
+}
+
+void test_driver_default_inits_low() {
+  // Direct-constructed sections keep the legacy all-Low fresh power-on.
+  core::RunConfig cfg = make_logic_config(make_tdivider(), {kH}, 1);
+  world::State out;
+  assert(solvers::run_headless(cfg, std::span<emit::ISink *>{}, out).ok());
+  assert(out.step_index == 1);
+  assert(out.seq.q[0] == kH); // 0 -> toggle -> 1 after one edge
+}
+
 // --- T015: selection goldens (multi-clock member subsets) ---
 
 // Two independent T flops (dangling CLKs form the implicit domain each) plus
@@ -480,6 +501,48 @@ void test_selection_member_rejections_untouched() {
     assert(!solvers::run_headless(cfg, none, out).ok());
   }
   assert(out.step_index == 0); // rejected before stepping
+}
+
+void test_derived_domain_selection_with_inits() {
+  // Derived-domain selection composes with power-on inits (006 T018):
+  // resolve the "BUF1.Y" domain by NAME through the engine derivation,
+  // flatten its members, and run — the driven flop captures from its
+  // seeded value while the implicit-domain flop holds its own seeded
+  // value (a stepped DFF2 would have captured NOT(1)=0 instead).
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kBuf, 1).value == 0); // BUF1 @0
+  assert(logic::add_gate(nl, GateKind::kDff).value == 1);     // DFF1 @1
+  assert(logic::add_gate(nl, GateKind::kDff).value == 2);     // DFF2 @2
+  assert(logic::add_gate(nl, GateKind::kNot, 1).value == 3);  // NOT1 @3
+  assert(logic::add_gate(nl, GateKind::kNot, 1).value == 4);  // NOT2 @4
+  assert(logic::wire(nl, 0, 1, 1).ok());                     // BUF1.Y -> DFF1.CLK
+  assert(logic::wire(nl, 1, 3, 0).ok());                     // DFF1.Q -> NOT1.1
+  assert(logic::wire(nl, 3, 1, 0).ok());                     // NOT1.Y -> DFF1.D
+  assert(logic::wire(nl, 2, 4, 0).ok());                     // DFF2.Q -> NOT2.1
+  assert(logic::wire(nl, 4, 2, 0).ok());                     // NOT2.Y -> DFF2.D
+  assert(logic::validate_sequential(nl).ok());
+  const std::vector<logic::ClockDomain> domains = logic::derive_clock_domains(nl);
+  assert(domains.size() == 2);
+  std::vector<std::uint16_t> members;
+  for (const auto &d : domains) {
+    if (d.name == "BUF1.Y") {
+      members = d.members;
+    }
+  }
+  assert(members.size() == 1 && members[0] == 1);
+  core::RunConfig sel = make_select_config(nl, {kL, kL}, members, false, 1);
+  sel.seq.init_q[1] = kL;
+  sel.seq.init_q[2] = kH;
+  world::State a;
+  assert(solvers::run_headless(sel, std::span<emit::ISink *>{}, a).ok());
+  assert(a.seq.q[1] == kH); // captured NOT(0)=1
+  assert(a.seq.q[2] == kH); // held at seeded 1
+  core::RunConfig all = make_select_config(nl, {kL, kL}, {}, true, 1);
+  all.seq.init_q[1] = kL;
+  all.seq.init_q[2] = kH;
+  world::State b;
+  assert(solvers::run_headless(all, std::span<emit::ISink *>{}, b).ok());
+  assert(b.seq.q[1] == kH && b.seq.q[2] == kL); // both captured
 }
 
 // --- T021: observation goldens (snapshot / CSV / replay parity) ---
@@ -755,6 +818,9 @@ int main() {
   test_driver_identical_replay();
   test_driver_bad_config_rejected();
   test_driver_empty_net_run();
+  test_driver_section_inits_power_on();
+  test_driver_default_inits_low();
+  test_derived_domain_selection_with_inits();
   test_selection_selective_advance_hold();
   test_selection_all_domains_advance();
   test_selection_dangling_clk_membership();

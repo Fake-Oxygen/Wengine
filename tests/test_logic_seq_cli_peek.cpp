@@ -7,6 +7,9 @@
 #include "wengine/core/status.hpp"
 
 #include <cassert>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <span>
 #include <sstream>
@@ -147,6 +150,39 @@ void test_complete() {
   }
 }
 
+void test_load_applies_inits() {
+  // Stored inits power the pool on load (006): mixed values are visible
+  // in the first peek before any advance, and a fresh load restarts
+  // serials from 0 (new pool lifetime).
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  const std::string tmp =
+      (std::filesystem::temp_directory_path() / "wengine_peek_inits.yaml").string();
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    assert(f.good());
+    f << "version: 1\n"
+         "gates:\n"
+         "  - {id: DFF1, kind: dff, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0, init: 1}\n"
+         "  - {id: DLATCH1, kind: dlatch, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
+         "wires:\n"
+         "ties:\n"
+         "clocks:\n"
+         "  - {name: clk}\n"
+         "meta:\n"
+         "  tool: wengine-logic\n";
+  }
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute(std::string("logic load ") + tmp, out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=1 NQ=0 (serial 0)"));
+  assert(contains(out.str(), "DLATCH1.Q=0 NQ=1 (serial 1)"));
+  std::remove(tmp.c_str());
+}
+
 } // namespace
 
 int main() {
@@ -156,6 +192,7 @@ int main() {
   test_serials_stable_across_steps();
   test_errors();
   test_complete();
+  test_load_applies_inits();
   std::cout << "test_logic_seq_cli_peek: OK\n";
   return 0;
 }

@@ -11,6 +11,7 @@
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
@@ -53,10 +54,11 @@ std::map<std::size_t, wengine::logic::LogicValue> &poke_map();
 std::map<std::string, std::uint64_t> &cycle_counts();
 void reset_seq_session_state();
 
-// Clock domains (data-model §1): live flops grouped by CLK/EN driver net
-// (named by the source pin, e.g. "BUF1.Y" or "DFF2.NQ"); flops with
-// dangling CLK/EN pins form the implicit "clk" domain. First-seen (slot)
-// order; members in slot order.
+// Clock domains (data-model §1): the engine-owned `derive_clock_domains`
+// vocabulary — live flops grouped by CLK driver net (named by the source
+// pin, e.g. "BUF1.Y" or "DFF2.NQ"); flops with dangling CLK pins form the
+// implicit "clk" domain. First-seen (slot) order; members in slot order.
+// Level latches (DLATCH/SRLATCH) belong to no clock domain.
 struct ClockDomain {
   std::string name;
   std::vector<std::uint16_t> members;
@@ -102,7 +104,9 @@ core::Status write_truth_pretty(wengine::logic::Netlist &nl, std::uint64_t rows,
                                 const std::vector<wengine::logic::BlockPin> &in_pins,
                                 const std::vector<wengine::logic::BlockPin> &out_pins, std::ostream &os);
 
-// Canonical YAML workspace (byte-identical save/load round-trip).
+// Canonical YAML workspace (byte-identical save/load round-trip). The
+// saver captures live pool Q as the file's per-element inits (006: save
+// captures live state).
 void save_yaml(std::ostream &os, const wengine::logic::Netlist &nl);
 
 [[nodiscard]] std::size_t wire_count(const wengine::logic::Netlist &nl) noexcept;
@@ -113,11 +117,15 @@ void complete_from_value(const wengine::logic::Netlist &nl, std::string_view val
 
 namespace yaml {
 
-// Strict v2 loader (see logic/yaml_store.hpp): `version: 1..2` gate (v1
-// loads untied via fallback), all of gates/wires/ties(v2)/meta present,
-// unknown keys are errors. Builds into
-// `out` (slot order == file order); `out` is untouched on failure.
-bool load_text(const std::string &text, wengine::logic::Netlist &out, std::string &err);
+// Strict v1 loader (see logic/yaml_store.hpp): `version: 1` gate (retired
+// generations refused loudly, never loaded), all of
+// gates/wires/ties/clocks/meta present, per-sequential-row inits,
+// clocks/topology agreement, unknown keys are errors. Builds into `out` (slot order ==
+// file order) plus per-slot power-on values into `inits`; both untouched
+// on failure.
+bool load_text(const std::string &text, wengine::logic::Netlist &out,
+               std::array<wengine::logic::LogicValue, wengine::logic::kMaxGates> &inits,
+               std::string &err);
 
 } // namespace yaml
 

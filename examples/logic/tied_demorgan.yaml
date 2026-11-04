@@ -27,7 +27,7 @@
 # Notes: comments like this one load fine (`load` accepts the YAML
 # superset) but `save` rewrites in canonical comment-free form, so a
 # save/load round-trip is byte-identical only from the second save on.
-version: 2
+version: 1
 gates:
   - {id: NAND1, kind: nand, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
   - {id: NAND2, kind: nand, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
@@ -43,5 +43,6 @@ ties:
   - {a: NAND3.1, b: NAND3.2}
   - {a: XOR1.1, b: XOR1.2}
   - {a: XOR1.1, b: AND1.1}
+clocks:
 meta:
   tool: wengine-logic

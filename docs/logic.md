@@ -311,29 +311,37 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   real YAML (comments, quoting, multiline, anchors later) beats a
   canonical-subset parser users will fight; the submodule pin +
   from-source build keeps it auditable and warning-clean.
-- Schema `version: 2` header (v1 files without `ties:` load via a
-  fallback loader as untied workspaces); the loader accepts 1..2 with a
-  loud found-version refusal otherwise (same rule as link wire versions;
-  V3 bumps with a fallback loader, §12). Sections:
+- Schema `version: 1` header, new generation (006): the retired
+  first- and second-generation files are refused loudly (naming the found
+  version), never loaded — no fallback loader, no migration. The loader
+  accepts only `version: 1` files carrying all six sections, with a loud
+  found-version refusal otherwise. Sections:
   `gates: [{id: AND1, kind: and, inputs: 2, ignore: [2]}]`,
   `wires: [{from: AND2.Y, to: NOR1.1}]`,
   `ties: [{a: NAND1.1, b: NAND1.2}]` (one entry per non-leader tied
   member: `a` = class leader, `b` = member, ordered by `b` in slot
-  order, so the bytes are canonical), `meta: {created, tool}`.
+  order, so the bytes are canonical),
+  `clocks: [{name: BUF1.Y}]` (one entry per derived clock domain, in
+  first-seen slot order — source-pin spelling, or bare `clk` for the
+  implicit dangling-clock domain; membership stays derived from the
+  topology and is validated by set-equality on load),
+  `meta: {created, tool}`.
   Strict: unknown keys/sections are loud errors (never silently
   ignored) — forward-compatible sections arrive as versioned schema
   bumps, not silent tolerance. `save`/`load` round-trip is byte-identical
-  (pinned test). Sequential gates persist in the same `version: 2`
-  schema: named pins in wire rows (`from: DFF1.NQ`, `to: DFF1.D`,
-  `to: DFF1.RST`) plus an optional `ignore_nq` gate key defaulting to
-  false, so pre-sequential files load unchanged. DFF rows carry
-  `inputs: 2` (bare) or `inputs: 5` (full control set); legacy
-  `inputs: 2` files load with controls absent (inactive defaults).
+  (pinned test). Sequential gates persist with per-row `init: 0|1`
+  power-on values (default 0 when absent from hand-written files):
+  `save` captures live pool Q as the file's inits, and `load` starts a
+  new pool lifetime powered on to them. Named pins persist in wire rows
+  (`from: DFF1.NQ`, `to: DFF1.D`, `to: DFF1.RST`) plus an optional
+  `ignore_nq` gate key defaulting to false. DFF rows carry `inputs: 2`
+  (bare) or `inputs: 5` (full control set).
   Runnable example workspaces live in `examples/logic/`
-  (`nand_pair`, `fanout`, `parity3`, `tieoff`, `tied_demorgan` — each
-  header shows its run command and expected output); `test_logic_yaml`
-  loads every file, checks its hand-derived goldens, and pins
-  save/load/save stability.
+  (`nand_pair`, `fanout`, `parity3`, `tieoff`, `tied_demorgan` plus the
+  advanced sequential references `two_clock_counter`,
+  `gated_async_counter`, `jk_t_latch_chain` — each header shows its run
+  command and expected output); `test_logic_yaml` loads every file,
+  checks its hand-derived goldens, and pins save/load/save stability.
 
 ## 10. Module verb list (v1)
 
@@ -383,7 +391,9 @@ PNG/JPG codecs, GUI panel (separate epic, consumes the same headers).
 V1 ships only combinational single-driver zero-delay logic, but the
 scaffolding already reserves each V2 feature's place. Rule for all of
 them: additive only — `Netlist` never reshapes, kind bytes are
-append-only, schema bumps carry fallback loaders.
+append-only, schema bumps carry fallback loaders (a generation may still
+be retired without a loader by explicit decision — see Schema evolution
+below).
 
 - **Value system.** Nets carry `LogicValue {kLow, kHigh, kHighZ,
   kUnknown}` today; v1 produces/consumes only Low/High and rejects
@@ -455,6 +465,9 @@ append-only, schema bumps carry fallback loaders.
   `link::Frame` adapter + one frame-source registry entry (AGENTS.md
   §4 views rule); views stay untouched. The CLI session registry is
   the verb vocabulary the panel mirrors — no engine change for GUI.
-- **Schema evolution.** `version: 2` (clocks/timing sections) loads v1
-  files via a fallback loader and refuses forward versions loudly —
-  the same convention as `world` serialization (`v5` + fallbacks).
+- **Schema evolution.** `version: 1`, new generation (006): retired
+  first- and second-generation files are refused loudly with no fallback
+  loader — the only legacy behavior is the version-naming refusal. The
+  same loud-refusal convention as `world` serialization applies to
+  forward versions; unlike `world` (`v6` + fallbacks), the workspace
+  keeps no backward-compatibility loaders by explicit decision.

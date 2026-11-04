@@ -292,6 +292,14 @@ class ConfiguredRun {
       world::State &st = run.runner_.state();
       st.netlist = cfg.seq.netlist;
       logic::init_seq_state(st.seq, st.netlist);
+      // Workspace power-on values (006): seed every live sequential
+      // slot from the section, pre-first-step. All-Low default keeps
+      // direct-constructed configs on the legacy fresh-attach behavior.
+      for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+        if (st.seq.valid[s] != 0 && logic::is_sequential_kind(st.netlist.gates[s].kind)) {
+          st.seq.q[s] = cfg.seq.init_q[s];
+        }
+      }
       st.seq_inputs = cfg.seq.stimulus;
       st.seq_members = cfg.seq.members;
       st.seq_outputs.assign(logic::block_output_count(st.netlist), logic::LogicValue::kLow);

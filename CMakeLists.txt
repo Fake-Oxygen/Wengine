@@ -720,6 +720,10 @@ if(BUILD_TESTS)
     # errors, determinism replay, completion. Drives wengine_cli Shell.
     add_executable(test_logic_seq_cli_step tests/test_logic_seq_cli_step.cpp)
     target_link_libraries(test_logic_seq_cli_step PRIVATE wengine_cli)
+    # Shipped-example transcripts (006): absolute source dir, same recipe
+    # as test_logic_yaml.
+    target_compile_definitions(test_logic_seq_cli_step PRIVATE
+        "WENGINE_LOGIC_EXAMPLE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/examples/logic\"")
     add_test(NAME logic_seq_cli_step COMMAND test_logic_seq_cli_step)
 
     # US2 `poke` verb goldens: drive/release/list, aliases, duplicates,

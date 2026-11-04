@@ -8,6 +8,7 @@
 #include "wengine/cli/logic_registry.hpp"
 #include "wengine/cli/shell.hpp"
 
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -426,8 +427,7 @@ void test_cli_reset_beats_hold() {
 }
 
 void test_yaml_control_roundtrip() {  // Save/load preserves the 5-input shape, ignore mask, and the RST wire;
-  // the reloaded net forces identically. Legacy inputs:2 loads with
-  // controls absent (bare behavior).
+// the reloaded net forces identically.
   Netlist nl;
   const std::uint16_t f = logic::add_gate(nl, GateKind::kDff, 5).value;
   const std::uint16_t b = logic::add_gate(nl, GateKind::kBuf, 1).value;
@@ -438,17 +438,21 @@ void test_yaml_control_roundtrip() {  // Save/load preserves the 5-input shape, 
   clk.input = 1;
   assert(logic::ignore_pin(nl, clk).ok());
   assert(logic::wire_text(nl, "BUF1.Y", "DFF1.RST").ok());
+  std::array<LogicValue, logic::kMaxGates> inits{};
+  inits.fill(kL);
   std::string text;
-  logic::yaml::save_text(nl, text);
+  logic::yaml::save_text(nl, inits, text);
   assert(contains(text, "inputs: 5"));
   assert(contains(text, "DFF1.RST"));
-  Netlist back;
+  assert(contains(text, "clocks:\n  - {name: clk}\n")); // CLK ignored+dangling: implicit domain
+  logic::yaml::Workspace ws;
   std::string err;
-  assert(logic::yaml::load_text(text, back, err));
+  assert(logic::yaml::load_text(text, ws, err));
+  Netlist &back = ws.netlist;
   assert(back.gates[f].input_count == 5);
   assert(back.gates[f].drivers[2] != logic::kNoDriver);
   std::string again;
-  logic::yaml::save_text(back, again);
+  logic::yaml::save_text(back, ws.init, again);
   assert(again == text); // byte-identical round-trip
   // Re-assert on the loaded net: SET raises Q, then driving the wired
   // RST net (BUF1.1 block input) forces it back with no step.
@@ -463,17 +467,21 @@ void test_yaml_control_roundtrip() {  // Save/load preserves the 5-input shape, 
     assert(logic::apply_async_controls(back, st, std::span<const LogicValue>(force, 4)).ok());
     assert(st.q[f] == kL);
   }
-  // Legacy bare flop: loads, rejects control names, steps D-only.
-  const std::string legacy =
-      "version: 2\n"
+  // Bare 2-input flop in v1 shape: loads with controls absent (bare
+  // behavior), rejects control names, steps D-only.
+  const std::string bare =
+      "version: 1\n"
       "gates:\n"
       "  - {id: DFF1, kind: dff, inputs: 2, ignore: [1, 2], ignore_output: false, delay_ps: 0}\n"
       "wires:\n"
       "ties:\n"
+      "clocks:\n"
+      "  - {name: clk}\n"
       "meta:\n"
       "  tool: wengine-logic\n";
-  Netlist old;
-  assert(logic::yaml::load_text(legacy, old, err));
+  logic::yaml::Workspace bare_ws;
+  assert(logic::yaml::load_text(bare, bare_ws, err));
+  Netlist old = bare_ws.netlist;
   assert(!logic::parse_pin(old, "DFF1.RST").ok());
   assert(!logic::parse_pin(old, "DFF1.3").ok());
   assert(logic::parse_pin(old, "DFF1.CLK").ok());

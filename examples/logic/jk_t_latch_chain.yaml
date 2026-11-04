@@ -1,0 +1,35 @@
+# jk_t_latch_chain.yaml: JK divider driving a T divider, sampled by a level latch.
+#
+# JK1 (J=K=1, poked) toggles every edge; its Q drives T1.T, so T1 divides
+# again; DLATCH1 samples T1.Q while EN is poked High and freezes when EN
+# is released. All clocks dangle, so every flop shares the implicit "clk"
+# domain; level latches belong to no domain. Stored inits are all zero
+# and apply on load. The trace below exercises every sequential kind in
+# one run: JK toggle, T hold/toggle from pre-edge Q, and transparent vs
+# frozen latch behavior across an EN change.
+#
+# Run:
+#   printf 'logic load examples/logic/jk_t_latch_chain.yaml\nlogic peek\nlogic poke JK1.J=1\nlogic poke JK1.K=1\nlogic poke DLATCH1.EN=1\nlogic step 2\nlogic peek\nlogic poke DLATCH1.EN=0\nlogic step 1\nlogic peek\nexit\n' | ./build/PhysicsSimApp
+# Expect: `loaded 3 gates 2 wires`; first `peek` shows all stored zeroes
+#   (`JK1.Q=0`, `T1.Q=0`, `DLATCH1.Q=0`, serials 0-2); `step 2` reports
+#   `JK1.Q: 0 (no change)` (toggled twice), `T1.Q: 0->1` (second edge saw
+#   T=1), `DLATCH1.Q: 0 (no change)` (transparent, tracking pre-edge 0);
+#   with EN released, `step 1` reports `JK1.Q: 0->1`, `T1.Q: 1 (no change)`
+#   (T saw pre-edge 0), and the frozen `DLATCH1.Q: 0 (no change)`.
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: JK1, kind: jk, inputs: 3, ignore: [], ignore_output: false, delay_ps: 0, init: 0}
+  - {id: T1, kind: t, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0, init: 0}
+  - {id: DLATCH1, kind: dlatch, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0, init: 0}
+wires:
+  - {from: JK1.Q, to: T1.T}
+  - {from: T1.Q, to: DLATCH1.D}
+ties:
+clocks:
+  - {name: clk}
+meta:
+  tool: wengine-logic

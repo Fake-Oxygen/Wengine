@@ -22,5 +22,7 @@ gates:
   - {id: XOR2, kind: xor, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
 wires:
   - {from: XOR1.Y, to: XOR2.1}
+ties:
+clocks:
 meta:
   tool: wengine-logic

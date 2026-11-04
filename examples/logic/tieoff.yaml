@@ -21,5 +21,7 @@ gates:
   - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 250}
 wires:
   - {from: AND1.Y, to: NOT1.1}
+ties:
+clocks:
 meta:
   tool: wengine-logic

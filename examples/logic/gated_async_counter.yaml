@@ -1,0 +1,32 @@
+# gated_async_counter.yaml: enable-gated toggle flop with asynchronous controls.
+#
+# DFF1 is a full-control-set flop (D/CLK/RST/SET/EN): it toggles itself
+# (DFF1.Q -> NOT1.1, NOT1.Y -> DFF1.D) while EN is asserted, and RST/SET
+# force Q at once with total priority RST > SET > EN-hold > D. The clock
+# dangles, so the flop forms the implicit "clk" domain; the stored init
+# (DFF1=0) applies on load. Control persistence (EN pokes) and async
+# forces survive save/load like any other workspace content.
+#
+# Run:
+#   printf 'logic load examples/logic/gated_async_counter.yaml\nlogic peek\nlogic poke DFF1.EN=1\nlogic step 1\nlogic peek\nlogic poke DFF1.RST=1\nlogic peek\nlogic poke DFF1.RST=release\nlogic poke DFF1.SET=1\nlogic peek\nlogic poke DFF1.SET=release DFF1.EN=0\nlogic step 1\nlogic peek\nexit\n' | ./build/PhysicsSimApp
+# Expect: `loaded 2 gates 2 wires`; first `peek` shows the stored init
+#   `DFF1.Q=0 NQ=1 (serial 0)`; with EN poked, `step 1` captures
+#   `DFF1.Q: 0->1`; poking RST forces `DFF1.Q: 1->0` at once with no step;
+#   after release, poking SET forces `DFF1.Q: 0->1` at once; with EN
+#   released, `step 1` holds (`DFF1.Q: 1 (no change)`).
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: DFF1, kind: dff, inputs: 5, ignore: [], ignore_output: false, delay_ps: 0, init: 0}
+  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+wires:
+  - {from: DFF1.Q, to: NOT1.1}
+  - {from: NOT1.Y, to: DFF1.D}
+ties:
+clocks:
+  - {name: clk}
+meta:
+  tool: wengine-logic

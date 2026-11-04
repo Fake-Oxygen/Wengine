@@ -1152,9 +1152,10 @@ void test_logic_verbs() {
       assert(s.find("saved 2 gates 1 wires") != std::string::npos);
     }
     const std::string before = read_file(y1);
-    assert(before.find("version: 2\n") == 0);
+    assert(before.find("version: 1\n") == 0);
     assert(before.find("AND1") != std::string::npos);
     assert(before.find("ties:\n") != std::string::npos);
+    assert(before.find("clocks:\n") != std::string::npos);
     assert(run("logic reset").first == 0);
     {
       auto [rc, s] = run(std::string("logic load ") + y1);
@@ -1179,11 +1180,11 @@ void test_logic_verbs() {
       {
         std::ofstream f(bad, std::ios::binary | std::ios::trunc);
         assert(!!f);
-        f << "version: 3\ngates:\nwires:\nties:\nmeta:\n  tool: x\n";
+        f << "version: 3\ngates:\nwires:\nties:\nclocks:\nmeta:\n  tool: x\n";
       }
       auto [brc, bs] = run(std::string("logic load ") + bad);
       assert(brc == 1);
-      assert(bs.find("unsupported workspace version 3 (want 2)") != std::string::npos);
+      assert(bs.find("unsupported workspace version 3 (want 1)") != std::string::npos);
       assert(bs.find("line 1:") != std::string::npos); // loud with line number
       auto [rc, s] = run("logic list");
       assert(rc == 0);
@@ -1234,13 +1235,15 @@ void test_logic_verbs() {
              "    ignore: [2]\n"
              "    ignore_output: false\n"
              "    delay_ps: 0\n"
-             "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
-             "wires:\n"
-             "  - {from: AND1.Y, to: NOT1.1}\n"
-             "meta:\n"
-             "  tool: wengine-logic\n";
-      }
-      assert(run(std::string("logic load ") + edit).first == 0);
+              "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+              "wires:\n"
+              "  - {from: AND1.Y, to: NOT1.1}\n"
+              "ties:\n"
+              "clocks:\n"
+              "meta:\n"
+              "  tool: wengine-logic\n";
+       }
+       assert(run(std::string("logic load ") + edit).first == 0);
       const std::string y3 = "/tmp/opencode/logic_ws_e.yaml";
       std::remove(y3.c_str());
       assert(run(std::string("logic save ") + y3).first == 0);
@@ -1258,11 +1261,13 @@ void test_logic_verbs() {
              "gates:\n"
              "  - {id: AND1, kind: and, inputs: 3, ignore: [2], ignore_output: false, delay_ps: 0}\n"
              "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
-             "wires:\n"
-             "  - {from: AND1.Y, to: NOT1.1}\n"
-             "  - {from: AND1.Y, to: NOT1.1}\n"
-             "meta:\n"
-             "  tool: wengine-logic\n";
+              "wires:\n"
+              "  - {from: AND1.Y, to: NOT1.1}\n"
+              "  - {from: AND1.Y, to: NOT1.1}\n"
+              "ties:\n"
+              "clocks:\n"
+              "meta:\n"
+              "  tool: wengine-logic\n";
       }
       auto [rc, s] = run(std::string("logic load ") + dup);
       assert(rc == 1);
@@ -1275,8 +1280,8 @@ void test_logic_verbs() {
       {
         std::ofstream f(unk, std::ios::binary | std::ios::trunc);
         assert(!!f);
-        f << "version: 1\ngates:\n  - {id: AND1, kind: frobnicate, inputs: 2, ignore: [], "
-             "ignore_output: false, delay_ps: 0}\nwires:\nmeta:\n  tool: wengine-logic\n";
+         f << "version: 1\ngates:\n  - {id: AND1, kind: frobnicate, inputs: 2, ignore: [], "
+              "ignore_output: false, delay_ps: 0}\nwires:\nties:\nclocks:\nmeta:\n  tool: wengine-logic\n";
       }
       auto [rc, s] = run(std::string("logic load ") + unk);
       assert(rc == 1);
@@ -1398,7 +1403,8 @@ void test_logic_verbs() {
       std::remove(t1.c_str());
       std::remove(t2.c_str());
     }
-    // v1 files (no ties:) still load via the fallback path.
+    // Retired first-generation files (version: 1 without the new required
+    // sections) are refused loudly; the workspace is kept.
     {
       const std::string v1 = "/tmp/opencode/logic_tie_v1.yaml";
       {
@@ -1412,12 +1418,15 @@ void test_logic_verbs() {
              "  tool: wengine-logic\n";
       }
       assert(run("logic reset").first == 0);
-      assert(run(std::string("logic load ") + v1).first == 0);
+      assert(run("logic add NOT").first == 0);
+      auto [lrc, ls] = run(std::string("logic load ") + v1);
+      assert(lrc == 1);
+      assert(ls.find("version 1") != std::string::npos); // names the retired generation
       {
         auto [rc, s] = run("logic list --iface");
         assert(rc == 0);
-        assert(s.find("inputs (2):") != std::string::npos);
-        assert(s.find("ties (0):") != std::string::npos);
+        assert(s.find("NOT1") != std::string::npos); // workspace kept
+        assert(s.find("NAND1") == std::string::npos);
       }
       std::remove(v1.c_str());
     }

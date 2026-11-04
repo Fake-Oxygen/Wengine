@@ -13,6 +13,7 @@
 #include "wengine/link/shm_publisher.hpp"
 #include "wengine/link/socket_publisher.hpp"
 #include "wengine/link/uart_publisher.hpp"
+#include "wengine/logic/clock_domains.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_config.hpp"
 #include "wengine/logic/yaml_store.hpp"
@@ -149,13 +150,15 @@ void print_live_health(std::uint64_t done_steps,
   }
 }
 
-// Sequential section builders (005-US4): --seq-file/--seq-clocks/--seq-from
-// lower to logic::SequentialRunConfig (parsed values only). Domain names
-// mirror the session clock_domains vocabulary: one domain per clock-driver
-// net over edge flops (DFF/JK/T), named by the source pin (e.g. "BUF1.Y",
-// "DFF2.NQ"); dangling CLK pins join the implicit "clk" domain; level
-// latches belong to no domain. Matching is case-insensitive like the
-// session step verb; the engine re-validates the flattened slot list.
+// Sequential section builders (005-US4, 006): --seq-file/--seq-clocks/
+// --seq-from lower to logic::SequentialRunConfig (parsed values only).
+// Domain names use the single engine-owned derivation (one domain per
+// clock-driver net over edge flops (DFF/JK/T), named by the source pin
+// (e.g. "BUF1.Y", "DFF2.NQ"); dangling CLK pins join the implicit "clk"
+// domain; level latches belong to no domain) — the same vocabulary the
+// session step verb and the file's `clocks:` section share. Matching is
+// case-insensitive like the session step verb; the engine re-validates
+// the flattened slot list.
 
 [[nodiscard]] inline bool seq_eq_ci(std::string_view a, std::string_view b) noexcept {
   if (a.size() != b.size()) {
@@ -189,38 +192,14 @@ struct SeqDomain {
 };
 
 [[nodiscard]] inline std::vector<SeqDomain> seq_clock_domains(const logic::Netlist &nl) {
+  // Single engine-owned derivation (006), adapted to the local vocabulary
+  // type used by the --seq-clocks lowering and completion below.
   std::vector<SeqDomain> domains;
-  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-    const logic::Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    if (g.kind != logic::GateKind::kDff && g.kind != logic::GateKind::kJk &&
-        g.kind != logic::GateKind::kT) {
-      continue;
-    }
-    std::string name = "clk";
-    const std::uint16_t drv = (g.input_count > 1) ? g.drivers[1] : logic::kNoDriver;
-    if (drv != logic::kNoDriver && drv < logic::kMaxGates && nl.gates[drv].live) {
-      const std::size_t flat = static_cast<std::size_t>(s) * logic::kMaxInputs + 1;
-      const bool neg = nl.driver_inv[flat] != 0;
-      name = seq_gate_name(nl, drv) + '.';
-      name += logic::is_sequential_kind(nl.gates[drv].kind) ? (neg ? "NQ" : "Q") : "Y";
-    }
-    bool found = false;
-    for (SeqDomain &d : domains) {
-      if (d.name == name) {
-        d.members.push_back(s);
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      SeqDomain d;
-      d.name = name;
-      d.members.push_back(s);
-      domains.push_back(std::move(d));
-    }
+  for (const logic::ClockDomain &d : logic::derive_clock_domains(nl)) {
+    SeqDomain out;
+    out.name = d.name;
+    out.members = d.members;
+    domains.push_back(std::move(out));
   }
   return domains;
 }
@@ -301,9 +280,11 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
   }
   logic::Netlist nl;
   std::string load_err;
-  if (!logic::yaml::load_text(text, nl, load_err)) {
+  logic::yaml::Workspace ws;
+  if (!logic::yaml::load_text(text, ws, load_err)) {
     return fail(std::string("cannot load --seq-file '") + std::string(file) + "': " + load_err);
   }
+  nl = ws.netlist;
   // Domain selection: exactly one form — omitted means all domains.
   const std::vector<SeqDomain> domains = seq_clock_domains(nl);
   std::vector<std::uint16_t> members;
@@ -418,6 +399,7 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
     stimulus[index] = (bit == "1") ? logic::LogicValue::kHigh : logic::LogicValue::kLow;
   }
   out.netlist = nl;
+  out.init_q = ws.init;
   out.stimulus = std::move(stimulus);
   out.members = std::move(members);
   out.step_all_domains = step_all;
@@ -458,7 +440,12 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
     return false;
   }
   std::string err;
-  return logic::yaml::load_text(text, nl, err);
+  logic::yaml::Workspace ws;
+  if (!logic::yaml::load_text(text, ws, err)) {
+    return false;
+  }
+  nl = ws.netlist;
+  return true;
 }
 
 inline void complete_seq_from_value(const logic::Netlist &nl, std::string_view val,

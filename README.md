@@ -561,10 +561,11 @@ core `src/*.cpp` only, no contrib graphbuilder, `SYSTEM` includes) plus
 `wengine_logic_yaml` (`STATIC`: `src/logic/yaml_store.cpp`, the single TU
 allowed to know yaml-cpp exists, strict warnings) — engine headers stay
 yaml-free (see `logic/yaml_store.hpp`), so existing tests keep linking
-`wengine_core` alone. Strict v2 schema (`version: 2`, gates/wires/ties/meta;
-unknown keys are loud errors with `line N:` diagnostics, never silent
-tolerance), the 1..2 version gate (v1 files load untied via a fallback
-loader; loud found-version refusal otherwise)
+`wengine_core` alone. Strict v1 schema (new generation: `version: 1`,
+gates/wires/ties/clocks/meta plus per-sequential-row `init:` power-on
+values; unknown keys are loud errors with `line N:` diagnostics, never
+silent tolerance), the version-1-only gate (retired generations are
+refused loudly with the found version named, never loaded)
 are locked in `docs/logic.md` sec. 9. No fifth third-party dep without
 its own decision record.
 

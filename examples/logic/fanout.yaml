@@ -23,5 +23,7 @@ gates:
 wires:
   - {from: AND1.Y, to: NOT1.1}
   - {from: AND1.Y, to: BUF1.1}
+ties:
+clocks:
 meta:
   tool: wengine-logic
