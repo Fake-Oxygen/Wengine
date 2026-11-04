@@ -106,6 +106,9 @@ struct BlockPin {
   if (k == GateKind::kT) {
     return n == 2; // T+CLK (003-jk-t-flops)
   }
+  if (k == GateKind::kSrlatch) {
+    return n == 2; // S+R (004-sr-d-latches)
+  }
   return n >= 2 && n <= kMaxInputs;
 }
 
@@ -113,9 +116,9 @@ struct BlockPin {
   if (k == GateKind::kNot || k == GateKind::kBuf) {
     return 1;
   }
-  // Combinational 2..8 default 2; DFF/DLATCH/T default 2 (D + CLK/EN);
-  // JK defaults to 3 (J + K + CLK). The DFF full control set is opt-in
-  // (`add DFF --inputs 5`).
+  // Combinational 2..8 default 2; DFF/DLATCH/T/SR default 2 (D + CLK/EN,
+  // T + CLK, S + R); JK defaults to 3 (J + K + CLK). The DFF full control
+  // set is opt-in (`add DFF --inputs 5`).
   if (k == GateKind::kJk) {
     return 3;
   }
@@ -127,7 +130,8 @@ struct BlockPin {
 // future appended kinds stay stateless until their own task wires them —
 // never silently DFF-shaped.
 [[nodiscard]] constexpr bool is_sequential_kind(GateKind k) noexcept {
-  return k == GateKind::kDff || k == GateKind::kDlatch || k == GateKind::kJk || k == GateKind::kT;
+  return k == GateKind::kDff || k == GateKind::kDlatch || k == GateKind::kJk || k == GateKind::kT ||
+         k == GateKind::kSrlatch;
 }
 
 namespace detail {
@@ -188,14 +192,14 @@ namespace detail {
 }
 
 // Case-insensitive ("and", "AND", "And" all match). Exact full match.
-// Sequential kinds (DFF/DLATCH/JK/T) parse here; creation validates
+// Sequential kinds (DFF/DLATCH/JK/T/SRLATCH) parse here; creation validates
 // fan-in via valid_fanin and state attaches via init_seq_state.
 [[nodiscard]] inline core::Result<GateKind> parse_gate_kind(std::string_view text) noexcept {
   if (text.empty()) {
     return core::Result<GateKind>::failure("bad gate kind: empty");
   }
   // Append-only table: keep every known (name, kind) pair here so the
-  // persisted byte values (DFF=16, DLATCH=17, JK=18, T=19) never shift.
+  // persisted byte values (DFF=16, DLATCH=17, JK=18, T=19, SR=20) never shift.
   struct KindEntry {
     std::string_view name;
     GateKind kind;
@@ -213,6 +217,7 @@ namespace detail {
       {"DLATCH", GateKind::kDlatch},
       {"JK", GateKind::kJk},
       {"T", GateKind::kT},
+      {"SRLATCH", GateKind::kSrlatch},
   };
   for (const KindEntry &e : kKinds) {
     if (text.size() != e.name.size()) {
@@ -229,12 +234,12 @@ namespace detail {
       return core::Result<GateKind>::success(e.kind);
     }
   }
-  return core::Result<GateKind>::failure("bad gate kind: want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T");
+  return core::Result<GateKind>::failure("bad gate kind: want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T|SRLATCH");
 }
 
 // Find a live gate by display name (e.g. "AND1", "DFF1", case-insensitive
 // kind). Linear slot-order scan: deterministic, first (only) match wins.
-// Covers all sequential kinds (DFF/DLATCH/JK/T); no Netlist shape change
+// Covers all sequential kinds (DFF/DLATCH/JK/T/SRLATCH); no Netlist shape change
 // (ordinals compare by value).
 [[nodiscard]] inline core::Result<std::uint16_t> resolve_gate(const Netlist &nl, std::string_view name) noexcept {
   if (name.empty()) {
@@ -244,6 +249,7 @@ namespace detail {
       GateKind::kAnd, GateKind::kOr, GateKind::kNand, GateKind::kNor,
       GateKind::kXor, GateKind::kXnor, GateKind::kNot, GateKind::kBuf,
       GateKind::kDff, GateKind::kDlatch, GateKind::kJk, GateKind::kT,
+      GateKind::kSrlatch,
   };
   for (GateKind kind : kAllKinds) {
     const std::uint8_t o = kind_ordinal(kind);
@@ -271,7 +277,8 @@ namespace detail {
 // Sequential gates additionally accept named pins (FR-010/FR-011,
 // case-insensitive): DFF `D`/`CLK`/`Q`/`NQ` on every flop, plus `RST`/
 // `SET`/`EN` on full-control (5-input) flops only; DLATCH `D`/`EN`/`Q`/
-// `NQ`; JK `J`/`K`/`CLK`/`Q`/`NQ`; T `T`/`CLK`/`Q`/`NQ`. Numeric aliases
+// `NQ`; JK `J`/`K`/`CLK`/`Q`/`NQ`; T `T`/`CLK`/`Q`/`NQ`; SRLATCH `S`/
+// `R`/`Q`/`NQ`. Numeric aliases
 // keep working for all kinds; names on combinational gates are rejected;
 // kind-foreign names (e.g. `D` on a JK flop, `J` on a DFF) fall through
 // to the numeric parser and fail there.
@@ -332,6 +339,21 @@ namespace detail {
         return core::Result<PinRef>::success(ref);
       }
       if (match_pin_name(suffix, "CLK")) {
+        PinRef ref{};
+        ref.slot = slot;
+        ref.is_output = false;
+        ref.input = 1;
+        return core::Result<PinRef>::success(ref);
+      }
+    } else if (g.kind == GateKind::kSrlatch) {
+      if (match_pin_name(suffix, "S")) {
+        PinRef ref{};
+        ref.slot = slot;
+        ref.is_output = false;
+        ref.input = 0;
+        return core::Result<PinRef>::success(ref);
+      }
+      if (match_pin_name(suffix, "R")) {
         PinRef ref{};
         ref.slot = slot;
         ref.is_output = false;
@@ -424,7 +446,7 @@ namespace detail {
   }
   const std::uint8_t ord = kind_ordinal(kind);
   if (ord >= 8 && !is_sequential_kind(kind)) {
-    // No such kind exists today (ordinals are 0..7 + 16..19); the guard
+    // No such kind exists today (ordinals are 0..7 + 16..20); the guard
     // stays so future appended kinds fail loudly until wired up.
     return core::Result<std::uint16_t>::failure("bad gate kind");
   }

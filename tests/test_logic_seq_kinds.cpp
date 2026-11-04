@@ -26,10 +26,12 @@ void test_ordinal_values() {
   static_assert(static_cast<std::uint8_t>(GateKind::kDlatch) == 17);
   static_assert(static_cast<std::uint8_t>(GateKind::kJk) == 18);
   static_assert(static_cast<std::uint8_t>(GateKind::kT) == 19);
+  static_assert(static_cast<std::uint8_t>(GateKind::kSrlatch) == 20);
   assert(logic::kind_ordinal(GateKind::kDff) == 16);
   assert(logic::kind_ordinal(GateKind::kDlatch) == 17);
   assert(logic::kind_ordinal(GateKind::kJk) == 18);
   assert(logic::kind_ordinal(GateKind::kT) == 19);
+  assert(logic::kind_ordinal(GateKind::kSrlatch) == 20);
   assert(logic::kind_ordinal(GateKind::kAnd) == 0);
   assert(logic::kind_ordinal(GateKind::kBuf) == 7);
 }
@@ -47,6 +49,7 @@ void test_names() {
   assert(logic::gate_kind_name(GateKind::kDlatch) == "DLATCH");
   assert(logic::gate_kind_name(GateKind::kJk) == "JK");
   assert(logic::gate_kind_name(GateKind::kT) == "T");
+  assert(logic::gate_kind_name(GateKind::kSrlatch) == "SRLATCH");
   assert(logic::gate_kind_name(static_cast<GateKind>(99)) == "?");
 }
 
@@ -70,7 +73,17 @@ void test_parse_sequential() {
   // T: case-insensitive exact match (single letter, no collisions).
   assert(logic::parse_gate_kind("T").value == GateKind::kT);
   assert(logic::parse_gate_kind("t").value == GateKind::kT);
+  // SRLATCH: case-insensitive exact match.
+  assert(logic::parse_gate_kind("SRLATCH").value == GateKind::kSrlatch);
+  assert(logic::parse_gate_kind("srlatch").value == GateKind::kSrlatch);
+  assert(logic::parse_gate_kind("SrLatch").value == GateKind::kSrlatch);
   // Near-misses stay loud.
+  assert(!logic::parse_gate_kind("S").ok());
+  assert(!logic::parse_gate_kind("R").ok());
+  assert(!logic::parse_gate_kind("SR").ok());
+  assert(!logic::parse_gate_kind("SRLATCH1").ok());
+  assert(!logic::parse_gate_kind("SRLATCH ").ok());
+  assert(!logic::parse_gate_kind(" SRLATCH").ok());
   assert(!logic::parse_gate_kind("J").ok());
   assert(!logic::parse_gate_kind("K").ok());
   assert(!logic::parse_gate_kind("JK1").ok());
@@ -104,6 +117,7 @@ void test_round_trip() {
       GateKind::kAnd, GateKind::kOr, GateKind::kNand, GateKind::kNor,
       GateKind::kXor, GateKind::kXnor, GateKind::kNot, GateKind::kBuf,
       GateKind::kDff, GateKind::kDlatch, GateKind::kJk, GateKind::kT,
+      GateKind::kSrlatch,
   };
   for (GateKind k : kAll) {
     const std::string_view name = logic::gate_kind_name(k);
@@ -139,9 +153,17 @@ void test_fanin() {
   assert(!logic::valid_fanin(GateKind::kT, 3));
   assert(!logic::valid_fanin(GateKind::kT, 8));
   assert(logic::default_fanin(GateKind::kT) == 2);
+  // SRLATCH: S+R, exactly 2 (default 2).
+  assert(logic::valid_fanin(GateKind::kSrlatch, 2));
+  assert(!logic::valid_fanin(GateKind::kSrlatch, 0));
+  assert(!logic::valid_fanin(GateKind::kSrlatch, 1));
+  assert(!logic::valid_fanin(GateKind::kSrlatch, 3));
+  assert(!logic::valid_fanin(GateKind::kSrlatch, 8));
+  assert(logic::default_fanin(GateKind::kSrlatch) == 2);
   // Both new kinds are sequential (share the stepper/state pool).
   assert(logic::is_sequential_kind(GateKind::kJk));
   assert(logic::is_sequential_kind(GateKind::kT));
+  assert(logic::is_sequential_kind(GateKind::kSrlatch));
   assert(!logic::is_sequential_kind(GateKind::kAnd));
   // Combinational rules unchanged.
   assert(logic::valid_fanin(GateKind::kAnd, 2));
@@ -196,6 +218,18 @@ void test_creation() {
   assert(!logic::add_gate(nl, GateKind::kT, 1).ok());
   assert(!logic::add_gate(nl, GateKind::kT, 3).ok());
   assert(nl.live_count == 4);
+  // SRLATCH creation: fixed fan-in with per-kind never-reused counters.
+  auto s1 = logic::add_gate(nl, GateKind::kSrlatch); // default fan-in is 2
+  assert(s1.ok());
+  assert(nl.gates[s1.value].counter == 1);
+  assert(nl.gates[s1.value].input_count == 2);
+  assert(logic::resolve_gate(nl, "SRLATCH1").value == s1.value);
+  assert(logic::resolve_gate(nl, "srlatch1").value == s1.value);
+  assert(!logic::resolve_gate(nl, "SRLATCH2").ok());
+  // Wrong fan-in stays loud, state untouched.
+  assert(!logic::add_gate(nl, GateKind::kSrlatch, 1).ok());
+  assert(!logic::add_gate(nl, GateKind::kSrlatch, 3).ok());
+  assert(nl.live_count == 5);
   // Counters never reused: remove DFF1, the next DFF is DFF2.
   assert(logic::remove_gate(nl, d1.value).ok());
   auto d2 = logic::add_gate(nl, GateKind::kDff, 2);
@@ -258,6 +292,38 @@ void test_jk_t_pins() {
   assert(logic::parse_pin(nl, "DFF1.CLK").value.input == 1);
 }
 
+void test_sr_pins() {
+  // Named pins resolve to fixed indices; Q/NQ read outputs; wrong-kind
+  // names and out-of-range numerics stay loud.
+  Netlist nl;
+  auto sr = logic::add_gate(nl, GateKind::kSrlatch, 2);
+  assert(sr.ok());
+  auto d = logic::add_gate(nl, GateKind::kDff, 2);
+  assert(d.ok());
+  // SR rows (case-insensitive).
+  auto s = logic::parse_pin(nl, "SRLATCH1.S");
+  assert(s.ok() && !s.value.is_output && s.value.input == 0);
+  auto r = logic::parse_pin(nl, "srlatch1.r");
+  assert(r.ok() && !r.value.is_output && r.value.input == 1);
+  auto q = logic::parse_pin(nl, "SRLATCH1.Q");
+  assert(q.ok() && q.value.is_output && !q.value.negated);
+  auto nq = logic::parse_pin(nl, "SRLATCH1.NQ");
+  assert(nq.ok() && nq.value.is_output && nq.value.negated);
+  // Numeric aliases keep working; range validates against fan-in.
+  assert(logic::parse_pin(nl, "SRLATCH1.1").value.input == 0);
+  assert(logic::parse_pin(nl, "SRLATCH1.2").value.input == 1);
+  assert(!logic::parse_pin(nl, "SRLATCH1.3").ok());
+  // Kind-foreign names rejected (fall through to the numeric parser).
+  assert(!logic::parse_pin(nl, "SRLATCH1.D").ok());
+  assert(!logic::parse_pin(nl, "SRLATCH1.EN").ok());
+  assert(!logic::parse_pin(nl, "SRLATCH1.CLK").ok());
+  assert(!logic::parse_pin(nl, "SRLATCH1.J").ok());
+  assert(!logic::parse_pin(nl, "SRLATCH1.K").ok());
+  assert(!logic::parse_pin(nl, "SRLATCH1.T").ok());
+  assert(!logic::parse_pin(nl, "DFF1.S").ok());
+  assert(!logic::parse_pin(nl, "DFF1.R").ok());
+}
+
 } // namespace
 
 int main() {
@@ -268,6 +334,7 @@ int main() {
   test_fanin();
   test_creation();
   test_jk_t_pins();
+  test_sr_pins();
   std::cout << "test_logic_seq_kinds: OK\n";
   return 0;
 }

@@ -680,6 +680,7 @@ inline void classify(const Netlist &nl, Constness *label) noexcept {
     case GateKind::kDlatch:
     case GateKind::kJk:
     case GateKind::kT:
+    case GateKind::kSrlatch:
       break; // SEQ11 owns optimizer preservation; classify stays kV until then.
     }
     label[s] = out;
@@ -921,6 +922,7 @@ inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Co
     case GateKind::kDlatch:
     case GateKind::kJk:
     case GateKind::kT:
+    case GateKind::kSrlatch:
       want = base; // SEQ11 owns optimizer preservation; no reduction until then.
       break;
     }
@@ -999,6 +1001,7 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
     case GateKind::kDlatch:
     case GateKind::kJk:
     case GateKind::kT:
+    case GateKind::kSrlatch:
       break; // SEQ11 owns optimizer preservation; no folding until then.
     }
   }
@@ -1114,6 +1117,7 @@ inline bool fusion_sweep(Netlist &nl) noexcept {
       case GateKind::kDlatch:
       case GateKind::kJk:
       case GateKind::kT:
+      case GateKind::kSrlatch:
         break; // SEQ11 owns optimizer preservation; no bubble-push until then.
       }
       if (nk == GateKind::kNot) {
@@ -1411,6 +1415,7 @@ inline std::uint16_t emit_gate(ConvertCtx &ctx, const Netlist &src, std::uint16_
   case GateKind::kDlatch:
   case GateKind::kJk:
   case GateKind::kT:
+  case GateKind::kSrlatch:
     break; // SEQ11 owns optimizer preservation; O2 conversion refuses loudly.
   }
   return kNoDriver; // unreachable (all kinds handled); defensive

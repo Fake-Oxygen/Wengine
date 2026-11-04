@@ -28,14 +28,14 @@ int LogicAddSpec::run(ArgCursor &args, std::ostream &out) {
   std::optional<std::string_view> inputs_text = args.take_option({"--inputs"});
   std::optional<std::string_view> kind_text = args.next_positional();
   if (!kind_text) {
-    return cli::usage_error(out, "add needs a gate kind (AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T)", kUsage);
+    return cli::usage_error(out, "add needs a gate kind (AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T|SRLATCH)", kUsage);
   }
   if (args.has_remaining()) {
     return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
   const auto kind = wengine::logic::parse_gate_kind(*kind_text);
   if (!kind.ok()) {
-    return cli::usage_error(out, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T)", kUsage);
+    return cli::usage_error(out, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T|SRLATCH)", kUsage);
   }
   std::uint8_t inputs = wengine::logic::default_fanin(kind.value);
   if (inputs_text) {
@@ -49,7 +49,7 @@ int LogicAddSpec::run(ArgCursor &args, std::ostream &out) {
   const auto added = wengine::logic::add_gate(nl, kind.value, inputs);
   if (!added.ok()) {
     if (added.error == std::string_view("bad fan-in for kind")) {
-      return cli::usage_error(out, "bad fan-in for kind (NOT/BUF take 1, DLATCH/T exactly 2, JK exactly 3, DFF 2 or 5, the rest 2..8)", kUsage);
+      return cli::usage_error(out, "bad fan-in for kind (NOT/BUF take 1, DLATCH/T/SRLATCH exactly 2, JK exactly 3, DFF 2 or 5, the rest 2..8)", kUsage);
     }
     return cli::runtime_error(out, "netlist full (max 1024 gates)");
   }
@@ -94,6 +94,7 @@ void LogicAddSpec::complete(std::span<const std::string_view> prior_args, std::s
       GateKind::kAnd, GateKind::kOr, GateKind::kNand, GateKind::kNor,
       GateKind::kXor, GateKind::kXnor, GateKind::kNot, GateKind::kBuf,
       GateKind::kDff, GateKind::kDlatch, GateKind::kJk, GateKind::kT,
+      GateKind::kSrlatch,
   };
   for (GateKind kind : kCompleteKinds) {
     const std::string_view k = wengine::logic::gate_kind_name(kind);

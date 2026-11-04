@@ -46,12 +46,17 @@ int LogicLoadSpec::run(ArgCursor &args, std::ostream &out) {
   }
   const std::uint16_t gates = tmp.live_count;
   const std::size_t wires = support::wire_count(tmp);
+  // Swap first, then probe the live controls: an illegal SR net (S=R=1)
+  // in the file restores the backup so the refused load keeps the
+  // workspace (and pool, via the apply snapshot) exactly as before.
+  Netlist backup = workspace();
   workspace() = tmp;
-  out << "loaded " << gates << " gates " << wires << " wires <- '" << *path << "'\n";
   // Controls stored live in the file act at once; report forced flops below.
   if (!support::apply_async_and_report(workspace(), out).ok()) {
-    return cli::runtime_error(out, "load failed");
+    workspace() = backup;
+    return cli::usage_error(out, "load: S=1,R=1 is illegal (SR latch holds state, workspace kept)", kUsage);
   }
+  out << "loaded " << gates << " gates " << wires << " wires <- '" << *path << "'\n";
   return core::kExitOk;
 }
 

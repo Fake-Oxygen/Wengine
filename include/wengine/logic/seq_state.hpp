@@ -2,7 +2,7 @@
 
 // Parallel clocked-state pool beside the Netlist (LOGIC-V2-SEQ2).
 //
-// Sequential gates (DFF/DLATCH/JK/T) carry state across steps, but
+// Sequential gates (DFF/DLATCH/JK/T/SRLATCH) carry state across steps, but
 // `Netlist` never reshapes (docs/logic.md §12): clocked Q values live
 // here, indexed by Netlist slot — the same pattern as `world::Signals`
 // beside `Particles`. The future stepper (SEQ4) owns both objects and
@@ -101,7 +101,7 @@ inline void reset_seq_state(SeqState &st) noexcept { st = SeqState{}; }
 // Whole-graph cycle validation over COMBINATIONAL edges only
 // (LOGIC-V2-SEQ3): Kahn's algorithm in slot order (same determinism as
 // ensure_topology), except driver edges into sequential-gate inputs
-// (DFF.D/CLK, DLATCH.D/EN, JK.J/K/CLK, T.T/CLK) are excluded from the
+// (DFF.D/CLK, DLATCH.D/EN, JK.J/K/CLK, T.T/CLK, SRLATCH.S/R) are excluded from the
 // cycle edge set — flop Q outputs break loops, so feedback through
 // flops (counters, shift
 // registers) validates while pure combinational cycles still fail loudly.

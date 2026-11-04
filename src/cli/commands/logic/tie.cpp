@@ -54,14 +54,20 @@ int LogicTieSpec::run(ArgCursor &args, std::ostream &out) {
       ((gb.ignored_mask & static_cast<std::uint8_t>(1u << b.value.input)) != 0)) {
     return cli::usage_error(out, "tie needs non-ignored pins (use first)", kUsage);
   }
+  // Snapshot the tie table: tie_pins can merge two existing classes, so
+  // pin-level untie would not exactly revert a merge — restore wholesale.
+  const auto tie_before = nl.tie_rep;
   if (!wengine::logic::tie_pins(nl, a.value, b.value).ok()) {
     return cli::usage_error(out, "tie failed", kUsage);
   }
   out << "tied " << support::pin_text(nl, a.value.slot, false, a.value.input) << " = "
       << support::pin_text(nl, b.value.slot, false, b.value.input) << '\n';
-  // A freshly tied RST/SET net acts at once; report forced flops below.
+  // A freshly tied RST/SET net acts at once (report forced flops below),
+  // as do level latches. An illegal SR tie (S=R=1 through the class)
+  // fails here: the tie is reverted so the refused net changes no state.
   if (!support::apply_async_and_report(nl, out).ok()) {
-    return cli::runtime_error(out, "tie failed");
+    nl.tie_rep = tie_before;
+    return cli::usage_error(out, "tie: S=1,R=1 is illegal (SR latch holds state, tie reverted)", kUsage);
   }
   return core::kExitOk;
 }

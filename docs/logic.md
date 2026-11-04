@@ -78,17 +78,18 @@ both raster paths consume it without changing it.
 - `GateKind`: `AND OR NAND NOR XOR XNOR NOT BUF` (append-only enum;
   `XNOR` = `NOT(XOR)` internally, `BUF` needed as an optimizer output)
   plus sequential `DFF` (=16, edge-triggered D+CLK), `DLATCH`
-  (=17, level-sensitive D+EN vocabulary; SEQ4 steps both on the edge),
-  `JK` (=18, edge-triggered J+K+CLK) and `T` (=19, edge-triggered
-  T+CLK; SEQ4 steps all four on the edge).
-  `add DFF`/`add DLATCH`/`add JK`/`add T` create them with per-kind never-reused
-  counters, same as combinational gates. `add DFF` makes a bare 2-input
-  flop by default; `add DFF --inputs 5` makes the full control set
-  (D/CLK/RST/SET/EN: async reset/set + clock enable) for counters/FSMs;
-  `add JK` makes a fixed 3-input flop, `add T` a fixed 2-input flop.
+  (=17, level-sensitive D+EN: transparent/frozen, see below), `JK`
+  (=18, edge-triggered J+K+CLK), `T` (=19, edge-triggered T+CLK) and
+  `SRLATCH` (=20, level-sensitive S+R: set/reset/hold, S=R=1 illegal).
+  `add DFF`/`add DLATCH`/`add JK`/`add T`/`add SRLATCH` create them with
+  per-kind never-reused counters, same as combinational gates.
+  `add DFF` makes a bare 2-input flop by default; `add DFF --inputs 5`
+  makes the full control set (D/CLK/RST/SET/EN: async reset/set + clock
+  enable) for counters/FSMs; `add JK` makes a fixed 3-input flop,
+  `add T` and `add SRLATCH` fixed 2-input latches/flops.
 - `kMaxInputs = 8`. `NOT`/`BUF` take exactly 1 input; `DLATCH`
   takes exactly 2; `DFF` takes 2 or 5; `T` takes exactly 2; `JK` takes
-  exactly 3; the rest 2..8.
+  exactly 3; `SRLATCH` takes exactly 2; the rest 2..8.
 - Identity: per-kind monotonic counters, never reused
   (`AND1, AND2, …`, `NOT5, …`), slots recycle — same convention as
   signal serials (AGENTS.md §8). Display names use kind+counter;
@@ -98,7 +99,8 @@ both raster paths consume it without changing it.
   Sequential gates additionally accept named pins (case-insensitive):
   `DFF1.D`, `DFF1.CLK`, `DFF1.Q`, `DLATCH1.D`, `DLATCH1.EN`, `DFF1.NQ`,
   `JK1.J`, `JK1.K`, `JK1.CLK`, `JK1.Q`, `JK1.NQ`, `T1.T`, `T1.CLK`,
-  `T1.Q`, `T1.NQ`,
+  `T1.Q`, `T1.NQ`, `SRLATCH1.S`, `SRLATCH1.R`, `SRLATCH1.Q`,
+  `SRLATCH1.NQ`,
   plus `DFF1.RST`, `DFF1.SET`, `DFF1.EN` on full-control (5-input) flops;
   numeric aliases (`DFF1.1`, `DFF1.Y`, `DFF1.3`) keep working, and canonical
   display (`list`, YAML, step/poke/peek reports) uses the named forms.
@@ -124,8 +126,18 @@ both raster paths consume it without changing it.
   edges; unconnected RST/SET read 0 (inactive) and unconnected EN reads
   1 (enabled), so bare and dangling-control flops behave exactly as
   before. Async forces are global (every live flop, slot order);
-  EN-hold/D-capture stay per stepped clock-domain member. `DLATCH`
-  keeps its 2-input D/EN behavior unchanged.
+  EN-hold/D-capture stay per stepped clock-domain member.
+  Level latches (no clock advance required, no clock domain): 2-input
+  DLATCH (`D`=0, `EN`=1) is transparent while `EN` is active (Q follows
+  D at once) and frozen while `EN` is released (Q holds across input
+  changes and advances; re-asserting EN resumes tracking); 2-input
+  SRLATCH (`S`=0, `R`=1) sets on `S` alone (Q=1), resets on `R` alone
+  (Q=0), and holds on neither (memory). `S=R=1` is illegal and refused
+  loudly with state unchanged on every entry path (direct drive, wired
+  net, tied class, loaded file). Both resolve outside advances
+  (`poke`/`wire`/`tie`/`load` settle them at once; `step` re-settles
+  before edging), hold through `step` per the rule, read dangling pins
+  as 0 (hold), and power on at Q=0.
 - JK/T flop kinds (classic counters/dividers without DFF emulation):
   3-input JK flops (`J`=0, `K`=1, `CLK`=2) resolve per edge from pre-edge
   Q as `J=0,K=0` hold / `J=0,K=1` reset (Q=0) / `J=1,K=0` set (Q=1) /
@@ -133,7 +145,8 @@ both raster paths consume it without changing it.
   toggle on `T=1`. Both are synchronous-only (no async pins; hold is
   `J=K=0` / `T=0`), ride the same stepper and verbs as DFF/DLATCH
   (poke/wire/peek/save-load, NQ polarity, dangling-reads-inactive, X/Z
-  loud), and power on at Q=0.
+  loud), and power on at Q=0. Level latches ride the same verbs with
+  immediate (no-advance) visibility and the S=R=1 refusal above.
 - Wires: single-driver rule (one wire per destination input, like real
   hardware); re-wiring an occupied input is a loud usage error, never a
   silent overwrite. Fan-out is unlimited (one output → many inputs).
@@ -338,17 +351,23 @@ peek [GATE]
 
 Sequential session verbs (all headless: REPL session, one-shot, pipes,
 scripts — zero GUI dependency):
-`step` advances one clock domain (flops sharing a CLK/EN driver net;
-dangling CLK/EN pins form the implicit `clk`) or all flops globally,
-reporting the cycle count, per-flop Q transitions, and settled outputs;
+`step` advances one clock domain (edge flops sharing a CLK driver net;
+dangling CLK pins form the implicit `clk`) or all edge flops globally,
+reporting the cycle count, per-flop Q transitions, and settled outputs.
+Level latches belong to no domain: they settle outside advances (visible
+in the next `peek` with no `step`) and their frozen Q survives any
+advance; a latch-only workspace reports Q lines with no cycle line.
 `poke` drives/releases dangling block inputs (sticky across steps);
-`peek` prints flop Q+NQ with stable serials in slot order. Poked or wired
-RST/SET force Q at once (visible in the next `peek` with no `step`);
-`step` applies pending async controls before edging, and forced moves
-report in the same `DFF1.Q: a->b` form as captures. Poke maps
-and cycle counters are session state beside the workspace, cleared by
-`reset`, never serialized. Wire D-inputs before Q fanout (the
-incremental cycle check trips on Q-first wiring).
+`peek` prints flop/latch Q+NQ with stable serials in slot order. Poked
+or wired RST/SET force Q at once (visible in the next `peek` with no
+`step`); poked or wired latch nets settle at once the same way, while
+an illegal SR net (S=R=1 via drive, wire, tie, or file) is refused as
+a usage error with the workspace kept;
+`step` applies pending async controls and the level settle before
+edging, and forced/set moves report in the same `DFF1.Q: a->b` form as
+captures. Poke maps and cycle counters are session state beside the
+workspace, cleared by `reset`, never serialized. Wire D-inputs before Q
+fanout (the incremental cycle check trips on Q-first wiring).
 
 All verbs: `kName/kDescription/kUsage/run/complete` + module-registry
 entry + `static_assert` size check (same recipe as AGENTS.md §9).
@@ -377,25 +396,32 @@ append-only, schema bumps carry fallback loaders.
 - **Sequential / clocks (shipped).** `GateKind` values 0..7 are combinational;
   sequential kinds append at ≥16, pinned: `DFF`=16 (D+CLK,
   edge-triggered; 2 inputs bare, or 5 with the RST/SET/EN control set),
-  `DLATCH`=17 (D+EN, level-sensitive),
+  `DLATCH`=17 (D+EN, level-sensitive: EN=1 transparent, EN=0 frozen),
   `JK`=18 (J+K+CLK, edge-triggered; exactly 3 inputs),
-  `T`=19 (T+CLK, edge-triggered; exactly 2 inputs) — never
-  renumber, never reuse persisted bytes. DFF priority is total:
+  `T`=19 (T+CLK, edge-triggered; exactly 2 inputs),
+  `SRLATCH`=20 (S+R, level-sensitive: set/reset/hold, S=R=1 illegal) —
+  never renumber, never reuse persisted bytes. DFF priority is total:
   `RST (async) > SET (async) > EN-hold (sync) > D`, reset wins
   simultaneous assertion; controls resolve in slot order with X/Z loud.
   JK excitation is total: `J=0,K=0` hold / `J=0,K=1` reset / `J=1,K=0`
   set / `J=1,K=1` toggle from pre-edge Q; T excitation is total: `T=0`
   hold / `T=1` toggle; both resolve in slot order with X/Z loud.
+  Level rule is total: DLATCH `EN=1` follows D, `EN=0` holds; SRLATCH
+  `S=1,R=0` sets, `S=0,R=1` resets, `S=0,R=0` holds, `S=1,R=1` is
+  refused loudly with state unchanged on every entry path (direct drive,
+  wired net, tied class, loaded file); latches resolve in slot order
+  with X/Z loud, outside advances, and belong to no clock domain.
   Clocked state lives in a **parallel pool beside
   the netlist** (`logic::SeqState` in `seq_state.hpp`: per-slot Q + valid +
   never-reused serials, synced by `init_seq_state`, cleared by `reset_seq_state` —
   same pattern as `Signals` beside `Particles`), stepped per edge by
-  `seq_step`/`seq_step_filtered` (global edge or one named clock domain;
+  `seq_step`/`seq_step_filtered` (global edge or one named clock domain
+  over edge kinds only; level latches re-settle at every step top;
   the combinational evaluator only gained NQ-polarity reads at existing
   resolution funnels). Cycle validation is flop-aware: `validate_sequential` runs Kahn over
   combinational edges only (drivers into sequential-gate inputs
   excluded — all five DFF inputs, both DLATCH inputs, all three JK
-  inputs, and both T inputs; Q outputs
+  inputs, both T inputs, and both SR inputs; Q outputs
   break loops), and `wire()` / the `wire` verb take that path whenever
   sequential gates are present (pure-comb netlists keep the old path).
   Session verbs `step`/`poke`/`peek` expose control and readback

@@ -920,6 +920,81 @@ void test_cli_jk_t_help_completion() {
   }
 }
 
+void test_cli_sr_latch_help_completion() {
+  // US4 (004-sr-d-latches T020): help names the latch pair with the pin
+  // tables and the normative level sentences (contracts C6 verbatim);
+  // kind + pin completion suggest SRLATCH forms.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic add --help", out) == 0);
+  assert(contains(out.str(), "SRLATCH"));
+  assert(contains(out.str(), "S/R)"));
+  assert(contains(out.str(), "pins D/EN"));
+  assert(contains(out.str(), "EN=1 transparent"));
+  assert(contains(out.str(), "EN=0 frozen"));
+  assert(contains(out.str(), "S=1,R=0 set"));
+  assert(contains(out.str(), "S=1,R=1 is illegal"));
+  assert(contains(out.str(), "no clock domain"));
+  // Kind-name completion.
+  std::vector<std::string> names;
+  {
+    const std::span<const std::string_view> no_prior{};
+    cli::logic::LogicAddSpec::complete(no_prior, "SR", names);
+    bool saw_sr = false;
+    for (const std::string &n : names) {
+      if (n == "SRLATCH") {
+        saw_sr = true;
+      }
+    }
+    assert(saw_sr);
+  }
+  // Pin-name completion after `SRLATCHn.` (generic collect_pins path
+  // via pin_text).
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add SRLATCH", out) == 0);
+  assert(sh.execute("logic add BUF", out) == 0);
+  {
+    const std::array<std::string_view, 1> prior{"BUF1.Y"};
+    const std::span<const std::string_view> prior_span(prior);
+    names.clear();
+    cli::logic::LogicWireSpec::complete(prior_span, "SRLATCH1.", names);
+    bool s = false;
+    bool r = false;
+    for (const std::string &n : names) {
+      if (n == "SRLATCH1.S") {
+        s = true;
+      }
+      if (n == "SRLATCH1.R") {
+        r = true;
+      }
+    }
+    assert(s && r);
+  }
+  {
+    const std::span<const std::string_view> no_prior{};
+    names.clear();
+    cli::logic::LogicPokeSpec::complete(no_prior, "SRLATCH1.S", names);
+    bool seen = false;
+    for (const std::string &n : names) {
+      if (n == "SRLATCH1.S=1" || n == "SRLATCH1.S=0" || n == "SRLATCH1.S=release") {
+        seen = true;
+      }
+    }
+    assert(seen);
+  }
+  // Poke/step help name the level rules and the illegal combination.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke --help", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.S"));
+  assert(contains(out.str(), "S=1,R=1 is illegal"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step --help", out) == 0);
+  assert(contains(out.str(), "no domain"));
+}
+
 void test_cli_determinism_replay() {  // SC-005: reset -> preset -> stall -> advance -> readback, replayed
   // twice byte-identically (async assertion lands between advances).
   const std::vector<std::string> script = {
@@ -1074,6 +1149,7 @@ int main() {
   cli_session::test_cli_conflict_matrix();
   cli_session::test_cli_control_completion();
   cli_session::test_cli_jk_t_help_completion();
+  cli_session::test_cli_sr_latch_help_completion();
   cli_session::test_cli_determinism_replay();
   cli_session::test_cli_wired_control_session();
   cli_session::test_cli_step_zero_live_controls();

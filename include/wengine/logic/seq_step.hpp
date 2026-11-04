@@ -1,33 +1,46 @@
 #pragma once
 
-// Scalar single-step sequential eval (LOGIC-V2-SEQ4).
+// Scalar single-step sequential eval (LOGIC-V2-SEQ4 + 004-sr-d-latches).
 //
-// Zero-delay single-clock-edge stepper for DFF/DLATCH/JK/T with
-// deterministic end-of-step evaluation. One call advances every flop by one rising edge
-// (global clock — CLK/EN pins are validated Low/High but do not gate; the
-// edge itself is the call, same as the signals two-phase convention where
-// generators evaluate at time T and sums commit at T+1).
+// Zero-delay stepper for edge-triggered DFF/JK/T plus level-sensitive
+// DLATCH/SRLATCH, with deterministic end-of-step evaluation. One call
+// advances every edge flop by one rising edge and re-settles every latch
+// from the current nets:
+//   edge kinds (DFF/JK/T): CLK pins are validated Low/High but do not
+//   gate; the edge itself is the call (same as the signals two-phase
+//   convention where generators evaluate at time T and sums commit at T+1).
+//   level kinds (DLATCH/SRLATCH): Q resolves immediately from the settled
+//   nets with no advance (transparent D follows D while EN is High and
+//   holds while EN is Low; SR sets/resets/holds, S=R=1 refused loudly).
+//   Advances never gate level Q.
 //
 // Two-phase (mirrors signals: generators then sums):
 //   Phase 1: combinational eval at time T with OLD Qs + block inputs.
-//   Snapshot: every flop's D (input 0) resolved from phase 1, in slot order.
+//   Level settle: every latch's inputs resolved from phase 1, in slot
+//     order; DLATCH Q follows/holds, SR holds (US2 adds set/reset plus
+//     the S=R=1 refusal). Committed in slot order (parallel update).
+//   Snapshot: every edge flop's D (input 0) resolved from the
+//     level-settled phase 1, in slot order.
 //   Commit: all Qs updated from snapshots, in slot order (parallel update —
 //     no ordering dependency, swaps and counters behave synchronously).
 //   Phase 2: combinational re-eval with NEW Qs for block outputs (zero-delay
 //     settling, so outputs are end-of-step values at T+1).
 //
-// Rules (SEQ4):
-// - Rising-edge only. CLK (DFF input 1, JK input 2, T input 1) / EN
-//   (DLATCH input 1) must resolve to kLow/kHigh; HighZ/Unknown fail
-//   loudly. The value does not gate the update in SEQ4 — level-sensitive
-//   DLATCH semantics arrive in SEQ8, which refines this same function.
-// - DFF and DLATCH both capture D on the edge in SEQ4 (documented
-//   simplification; SEQ8 gives DLATCH transparent-when-EN behavior).
+// Rules (SEQ4 + 004):
+// - Rising-edge only for edge kinds. CLK (DFF input 1, JK input 2, T
+//   input 1) must resolve to kLow/kHigh; HighZ/Unknown fail loudly. The
+//   value does not gate the update. DLATCH/SR never snapshot from an
+//   edge (level-exempt); their frozen Q holds across any number of
+//   advances while a transparent D latch re-tracks D at every step top.
+// - DLATCH (004): EN=1 transparent (Q follows D), EN=0 frozen (Q holds,
+//   D ignored). Resolved in the level settle, visible with no advance.
+// - SRLATCH (004, US2): S/R level arm lands with set/reset plus the loud
+//   S=R=1 refusal; until then the level settle validates S/R and holds Q.
+// - Full-control DFFs (5 inputs: D/CLK/RST/SET/EN) resolve with total
+//   priority RST > SET > EN-hold > D (reset wins simultaneous RST+SET).
 //   JK/T resolve their excitation tables instead (003-jk-t-flops):
 //   JK J=0,K=0 hold / J=0,K=1 reset / J=1,K=0 set / J=1,K=1 toggle from
 //   pre-edge Q; T=0 hold, T=1 toggle.
-// - Full-control DFFs (5 inputs: D/CLK/RST/SET/EN) resolve with total
-//   priority RST > SET > EN-hold > D (reset wins simultaneous RST+SET).
 //   RST/SET are asynchronous (see apply_async_controls below); EN gates
 //   only the edge capture. Unconnected RST/SET read inactive (kLow);
 //   unconnected EN reads asserted (kHigh, FR-008). Bare 2-input flops
@@ -306,6 +319,70 @@ namespace detail {
   return true;
 }
 
+// Level-sensitive kinds (004-sr-d-latches): DLATCH (D + EN) and SRLATCH
+// (S + R). The edge snapshot never touches these; they resolve here, in
+// slot order, from the phase-1 settled nets + OLD Q, then commit in slot
+// order (parallel update among latches, same discipline as the edge
+// commit). Resolve-all-then-commit: any X/Z (or, from US2, S=R=1)
+// fails with state untouched. Committed Qs are re-seeded into gate_out
+// so edge flops wired from latch Q see end-of-level values.
+[[nodiscard]] inline bool is_level_kind(GateKind k) noexcept {
+  return k == GateKind::kDlatch || k == GateKind::kSrlatch;
+}
+
+[[nodiscard]] inline core::Status apply_level_resolve(const Netlist &nl, SeqState &st, const LogicValue *resolved,
+                                                     LogicValue *gate_out) noexcept {
+  LogicValue next_q[kMaxGates];
+  for (std::size_t s = 0; s < kMaxGates; ++s) {
+    next_q[s] = LogicValue::kLow;
+  }
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live || !is_level_kind(g.kind)) {
+      continue;
+    }
+    LogicValue a = LogicValue::kLow;
+    LogicValue b = LogicValue::kLow;
+    if (!resolve_step_input(nl, s, 0, gate_out, resolved, a)) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    if (!resolve_step_input(nl, s, 1, gate_out, resolved, b)) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    if ((a != LogicValue::kLow && a != LogicValue::kHigh) ||
+        (b != LogicValue::kLow && b != LogicValue::kHigh)) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    if (g.kind == GateKind::kDlatch) {
+      // EN=1 transparent (Q follows D), EN=0 frozen (Q holds, D ignored).
+      next_q[s] = (b == LogicValue::kHigh) ? a : st.q[s];
+    } else {
+      // SRLATCH (US2): S=1,R=0 set; S=0,R=1 reset; S=R=0 hold (memory);
+      // S=R=1 is illegal — refused loudly with nothing committed, on
+      // every entry path (direct drive, wired comb, tied leader, load).
+      const bool set = (a == LogicValue::kHigh);
+      const bool rst = (b == LogicValue::kHigh);
+      if (set && rst) {
+        return core::Status::failure(core::StatusCode::kInvalidArgument);
+      }
+      if (set) {
+        next_q[s] = LogicValue::kHigh;
+      } else if (rst) {
+        next_q[s] = LogicValue::kLow;
+      } else {
+        next_q[s] = st.q[s];
+      }
+    }
+  }
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (nl.gates[s].live && is_level_kind(nl.gates[s].kind)) {
+      st.q[s] = next_q[s];
+      gate_out[s] = next_q[s]; // seed phase-1-with-level-Qs for edge use
+    }
+  }
+  return core::Status::success();
+}
+
 } // namespace detail
 
 // Single rising edge over a flop subset (T013: selective clock domains).
@@ -349,11 +426,21 @@ namespace detail {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
 
-  // Snapshot: D (input 0) for every flop + CLK/EN (input 1) validation, in
-  // slot order. Full-control DFFs additionally resolve RST/SET/EN with
-  // priority RST > SET > EN-hold > D (reset wins RST+SET; EN=Low holds Q).
-  // D/CLK resolve first so X/Z there fails loudly even for held flops.
-  // X/Z anywhere fails before any commit (state untouched).
+  // Level settle (004-sr-d-latches): latches resolve from the phase-1
+  // nets and commit before any edge snapshot, so edge flops wired from
+  // latch Q see end-of-level values. Fails with state untouched on X/Z
+  // (or, from US2, S=R=1). Unconditional: domain filtering is edge-only.
+  if (!detail::apply_level_resolve(nl, st, resolved, gate_out).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+
+  // Snapshot: D (input 0) for every edge flop + CLK (input 1) validation,
+  // in slot order. Level kinds (DLATCH/SRLATCH) are exempt — settled
+  // above; advances never gate their Q. Full-control DFFs additionally
+  // resolve RST/SET/EN with priority RST > SET > EN-hold > D (reset wins
+  // RST+SET; EN=Low holds Q). D/CLK resolve first so X/Z there fails
+  // loudly even for held flops. X/Z anywhere fails before any commit
+  // (state untouched).
   LogicValue next_q[kMaxGates];
   for (std::size_t s = 0; s < kMaxGates; ++s) {
     next_q[s] = LogicValue::kLow;
@@ -362,6 +449,9 @@ namespace detail {
     const Gate &g = nl.gates[s];
     if (!g.live || !is_sequential_kind(g.kind)) {
       continue;
+    }
+    if (detail::is_level_kind(g.kind)) {
+      continue; // level-settled above; advances never gate level Q
     }
     if (!detail::is_step_member(members, n_members, s)) {
       continue; // selective domain: this flop holds its Q this edge
@@ -438,16 +528,17 @@ namespace detail {
         continue;
       }
     }
-    // SEQ4: edge capture for the D-capture kinds (bare DFFs and DLATCH;
-    // DLATCH level semantics arrive in SEQ8). CLK/EN validated above; the
-    // edge itself is the call. T/JK flops take their own branches earlier
-    // (003-jk-t-flops).
+    // Edge capture for bare DFFs (004: DLATCH/SRLATCH are level-exempt
+    // and never reach here). CLK validated above; the edge itself is the
+    // call. T/JK flops take their own branches earlier (003-jk-t-flops).
     next_q[s] = d;
   }
 
-  // Commit: parallel Q update in slot order (members only for subsets).
+  // Commit: parallel Q update in slot order (members only for subsets;
+  // level kinds already committed by the level settle and stay exempt).
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && is_sequential_kind(nl.gates[s].kind) && detail::is_step_member(members, n_members, s)) {
+    if (nl.gates[s].live && is_sequential_kind(nl.gates[s].kind) && !detail::is_level_kind(nl.gates[s].kind) &&
+        detail::is_step_member(members, n_members, s)) {
       st.q[s] = next_q[s];
       gate_out[s] = next_q[s]; // seed phase 2 with NEW Qs
     }
@@ -558,6 +649,44 @@ namespace detail {
     }
   }
   return core::Status::success();
+}
+
+// Immediate level-settle for DLATCH/SRLATCH (004-sr-d-latches): resolves
+// latch nets and commits Q per the level rule (transparent D follows D
+// while EN is High, frozen hold otherwise; SR holds in US1, set/reset
+// plus S=R=1 refusal from US2), in slot order — taking effect with no
+// clock advance. Session calls this after every control-net mutation
+// (poke/wire/tie/load) and at step top; it never touches cycle counters
+// or edge-flop state, and is a success no-op on nets without latches.
+// Resolve-all-then-commit: X/Z on any resolved latch input fails loudly
+// with state untouched. Same validation/size contract as
+// apply_async_controls.
+[[nodiscard]] inline core::Status apply_level_latches(Netlist &nl, SeqState &st,
+                                                      std::span<const LogicValue> block_inputs) noexcept {
+  init_seq_state(st, nl);
+  if (!validate_sequential(nl).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  const std::size_t n_in = block_input_count(nl);
+  if (block_inputs.size() != n_in) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (st.valid[s] != 0 && st.q[s] != LogicValue::kLow && st.q[s] != LogicValue::kHigh) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+  }
+  LogicValue resolved[kMaxGates * kMaxInputs];
+  if (!detail::compose_resolved(nl, block_inputs, resolved).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  LogicValue gate_out[kMaxGates];
+  std::uint16_t comb_order[kMaxGates];
+  std::size_t n_comb = 0;
+  if (!detail::eval_comb_phase1(nl, st, resolved, gate_out, comb_order, n_comb).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  return detail::apply_level_resolve(nl, st, resolved, gate_out);
 }
 
 // Convenience: step with block outputs discarded (state observed via

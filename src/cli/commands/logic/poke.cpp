@@ -142,9 +142,20 @@ int LogicPokeSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
   auto &pokes = support::poke_map();
+  // Record pre-poke values so an illegal level combination (S=R=1) can
+  // revert every entry below: the poke changes no state on refusal.
+  struct Prior {
+    std::size_t leader;
+    bool had;
+    LogicValue old;
+  };
+  std::vector<Prior> priors;
+  priors.reserve(entries.size());
   for (const Entry &e : entries) {
     const std::string name = leader_text(nl, e.leader);
     const auto it = pokes.find(e.leader);
+    priors.push_back(Prior{e.leader, it != pokes.end(),
+                           it == pokes.end() ? LogicValue::kLow : it->second});
     if (!e.value.has_value()) {
       if (it != pokes.end()) {
         pokes.erase(it);
@@ -166,10 +177,21 @@ int LogicPokeSpec::run(ArgCursor &args, std::ostream &out) {
     }
     pokes[e.leader] = *e.value;
   }
-  // Live async controls act at once (RST/SET force Q with no clock);
-  // forced flops report in step form below the poke confirmations.
+  // Live async controls act at once (RST/SET force Q with no clock),
+  // as do level latches (transparent D tracks, SR sets/resets/holds);
+  // forced/set levels report in step form below the poke confirmations.
+  // An illegal SR drive (S=R=1) fails here: priors restore the map so
+  // the refused poke changes no state (exit 2, combination named).
   if (!support::apply_async_and_report(nl, out).ok()) {
-    return cli::runtime_error(out, "poke failed");
+    for (std::size_t i = priors.size(); i > 0; --i) {
+      const Prior &p = priors[i - 1];
+      if (p.had) {
+        pokes[p.leader] = p.old;
+      } else {
+        pokes.erase(p.leader);
+      }
+    }
+    return cli::usage_error(out, "poke: S=1,R=1 is illegal (SR latch holds state, drive reverted)", kUsage);
   }
   return core::kExitOk;
 }

@@ -73,6 +73,7 @@ namespace wengine::logic {
   case GateKind::kDlatch:
   case GateKind::kJk:
   case GateKind::kT:
+  case GateKind::kSrlatch:
     break; // SEQ4 owns sequential stepping; combinational eval never sees
            // these (creation is guarded until SEQ2). Falls to kLow below.
   }
@@ -518,6 +519,7 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
     case GateKind::kDlatch:
     case GateKind::kJk:
     case GateKind::kT:
+    case GateKind::kSrlatch:
       break; // SEQ4 owns sequential stepping; combinational word eval never
              // sees these (creation is guarded until SEQ2). acc stays 0.
     }

@@ -77,11 +77,15 @@ wengine::core::Status compose_block_inputs(const wengine::logic::Netlist &nl, st
 // report it loudly.
 std::size_t reap_stale_pokes(const wengine::logic::Netlist &nl);
 
-// Apply pending async controls (RST/SET) after a control-net mutation:
-// composes block inputs, forces Qs via apply_async_controls, and reports
-// each forced flop in step-report form (`DFF1.Q: a->b (NQ ...)`); quiet
-// when nothing moved. Never touches cycle counters. Returns failure on
-// engine refusal (engine contract: state untouched).
+// Apply pending async controls (RST/SET) plus the level-latch settle
+// after a control-net mutation: composes block inputs, forces Qs via
+// apply_async_controls, settles latches via apply_level_latches, and
+// reports each moved flop in step-report form
+// (`DFF1.Q: a->b (NQ ...)`); quiet when nothing moved. Never touches
+// cycle counters. Returns failure on engine refusal (engine contract:
+// state untouched — the pool is snapshotted and restored, so a level
+// refusal also rolls back async forces; callers revert their own
+// map/topology mutation on top).
 wengine::core::Status apply_async_and_report(wengine::logic::Netlist &nl, std::ostream &out);
 
 // Truth streaming over the bit-parallel word evaluator (bit-exact vs solve).

@@ -8,6 +8,9 @@
 #include "wengine/core/status.hpp"
 
 #include <cassert>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <span>
 #include <sstream>
@@ -427,6 +430,314 @@ void test_complete() {
   }
 }
 
+void test_dlatch_level_session() {
+  // US1 (004-sr-d-latches, quickstart §1): transparent follow with no
+  // advance, frozen hold across drives and advances, re-enable tracking.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DLATCH", out) == 0);
+  // Transparent: EN=1, then D=1 moves Q at once (level settle at poke).
+  assert(sh.execute("logic poke DLATCH1.EN=1", out) == 0);
+  assert(contains(out.str(), "poked DLATCH1.EN=1"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DLATCH1.D=1", out) == 0);
+  assert(contains(out.str(), "DLATCH1.Q: 0->1"));
+  // Transparent: D=0 follows back at once.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DLATCH1.D=0", out) == 0);
+  assert(contains(out.str(), "DLATCH1.Q: 1->0"));
+  // Back to 1, then freeze: EN=0 holds Q across D toggles, no advance.
+  assert(sh.execute("logic poke DLATCH1.D=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DLATCH1.EN=0", out) == 0);
+  assert(!contains(out.str(), "DLATCH1.Q:")); // hold: no transition
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DLATCH1.D=0", out) == 0);
+  assert(!contains(out.str(), "DLATCH1.Q:")); // frozen: D ignored
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DLATCH1.D=1", out) == 0);
+  assert(!contains(out.str(), "DLATCH1.Q:"));
+  // Frozen across advances: a latch-only workspace has no clock domain,
+  // so `step` reports no cycle line but still shows the held Q.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 3", out) == 0);
+  assert(!contains(out.str(), "cycle"));
+  assert(contains(out.str(), "DLATCH1.Q: 1 (no change)"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DLATCH1.Q=1 NQ=0"));
+  // Re-enable with D parked at 0 while frozen: Q follows down at once.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DLATCH1.D=0", out) == 0);
+  assert(!contains(out.str(), "DLATCH1.Q:")); // still frozen
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke DLATCH1.EN=1", out) == 0);
+  assert(contains(out.str(), "DLATCH1.Q: 1->0")); // resumes tracking
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  // Deterministic replay: identical rebuild + sequence reads back equal.
+  const std::string held = out.str();
+  assert(contains(held, "DLATCH1.Q=0 NQ=1"));
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DLATCH", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.EN=1", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.D=1", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.D=0", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.D=1", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.EN=0", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.D=0", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.D=1", out) == 0);
+  assert(sh.execute("logic step 3", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.D=0", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.EN=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(out.str() == held);
+}
+
+void test_sr_latch_session() {
+  // US2 (004-sr-d-latches, quickstart §2): set/reset/hold with no
+  // advance, plus loud S=R=1 refusal with state untouched on the direct,
+  // wired, and tied entry paths.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add SRLATCH", out) == 0);
+  // Set with no advance; hold across release.
+  assert(sh.execute("logic poke SRLATCH1.S=1", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q: 0->1"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke SRLATCH1.S=release", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q=1 NQ=0"));
+  // Reset with no advance; hold across release.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke SRLATCH1.R=1", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q: 1->0"));
+  assert(sh.execute("logic poke SRLATCH1.R=release", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q=0 NQ=1"));
+  // Illegal via direct drive: exit 2 naming the combination, Q untouched,
+  // drive reverted (release reports it was never poked).
+  assert(sh.execute("logic poke SRLATCH1.S=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke SRLATCH1.R=1", out) == 2);
+  assert(contains(out.str(), "S=1,R=1 is illegal"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q=1 NQ=0")); // set held, not cleared
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke SRLATCH1.R=release", out) == 0);
+  assert(contains(out.str(), "(was not poked)")); // drive was reverted
+  // Illegal via wired comb: BUF fans out to both S and R.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add SRLATCH", out) == 0);
+  assert(sh.execute("logic add BUF", out) == 0);
+  assert(sh.execute("logic poke BUF1.1=1", out) == 0);
+  assert(sh.execute("logic wire BUF1.Y SRLATCH1.S", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q: 0->1")); // wired set acts at once
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic wire BUF1.Y SRLATCH1.R", out) == 2);
+  assert(contains(out.str(), "S=1,R=1 is illegal"));
+  assert(contains(out.str(), "wire reverted"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q=1 NQ=0")); // set held
+  // The R wire is gone: unwire S, then the same R wire is legal (reset).
+  assert(sh.execute("logic unwire SRLATCH1.S", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic wire BUF1.Y SRLATCH1.R", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q: 1->0"));
+  // Illegal via tie merge: poked S=1, then tying S=R completes S=R=1.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add SRLATCH", out) == 0);
+  assert(sh.execute("logic poke SRLATCH1.S=1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic tie SRLATCH1.S SRLATCH1.R", out) == 2);
+  assert(contains(out.str(), "S=1,R=1 is illegal"));
+  assert(contains(out.str(), "tie reverted"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q=1 NQ=0"));
+  // The tie is gone: release S, then R drives alone (legal reset).
+  assert(sh.execute("logic poke SRLATCH1.S=release", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke SRLATCH1.R=1", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q: 1->0"));
+  // Wrong-kind pins are usage errors that change no state.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic poke SRLATCH1.D=1", out) == 2);
+  assert(sh.execute("logic poke SRLATCH1.CLK=1", out) == 2);
+  assert(sh.execute("logic poke SRLATCH1.J=1", out) == 2);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q=0 NQ=1"));
+  // Hold across advances: no clock domain for latches, Q frozen.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 2", out) == 0);
+  assert(!contains(out.str(), "cycle"));
+  assert(contains(out.str(), "SRLATCH1.Q: 0 (no change)"));
+  // Deterministic replay: identical rebuild + script reads back equal.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add SRLATCH", out) == 0);
+  assert(sh.execute("logic poke SRLATCH1.S=1", out) == 0);
+  assert(sh.execute("logic poke SRLATCH1.S=release", out) == 0);
+  assert(sh.execute("logic poke SRLATCH1.R=1", out) == 0);
+  assert(sh.execute("logic poke SRLATCH1.R=release", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q=0 NQ=1"));
+}
+
+void test_sr_illegal_file_load_keeps_workspace() {
+  // US2 illegal-load path (004-sr-d-latches T014): a hand-written file
+  // whose nets resolve S=R=1 (NOT with dangling input reads 0, so Y=1
+  // fans out to both S and R) is refused with exit 2 and the prior
+  // workspace — gates, wires, and Q — is kept exactly.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  assert(sh.execute("logic step 1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=1 NQ=0"));
+  const std::string tmp =
+      (std::filesystem::temp_directory_path() / "wengine_sr_illegal.yaml").string();
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    assert(f.good());
+    f << "version: 2\n"
+         "gates:\n"
+         "  - {id: SRLATCH1, kind: srlatch, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
+         "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+         "wires:\n"
+         "  - {from: NOT1.Y, to: SRLATCH1.S}\n"
+         "  - {from: NOT1.Y, to: SRLATCH1.R}\n"
+         "ties:\n"
+         "meta:\n"
+         "  tool: wengine-logic\n";
+  }
+  out.str("");
+  out.clear();
+  assert(sh.execute(std::string("logic load ") + tmp, out) == 2);
+  assert(contains(out.str(), "S=1,R=1 is illegal"));
+  assert(contains(out.str(), "workspace kept"));
+  // Prior workspace kept: DFF shape, wires, and Q all intact.
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=1 NQ=0"));
+  assert(!contains(out.str(), "SRLATCH1"));
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic list --wires", out) == 0);
+  assert(!contains(out.str(), "SRLATCH1"));
+  std::remove(tmp.c_str());
+}
+
+void test_mixed_edge_level_session() {
+  // US3 (004-sr-d-latches, quickstart §3): one DFF + one SR latch + one
+  // D latch in one workspace — level Q resolves at once while the DFF
+  // captures at the edge, all under one shared cycle count; replay is
+  // byte-identical.
+  cli::Shell sh;
+  no_history(sh);
+  std::ostringstream out;
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF", out) == 0);
+  assert(sh.execute("logic add SRLATCH", out) == 0);
+  assert(sh.execute("logic add DLATCH", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  assert(sh.execute("logic poke SRLATCH1.S=1", out) == 0);
+  assert(contains(out.str(), "SRLATCH1.Q: 0->1")); // level: at once
+  assert(sh.execute("logic poke DLATCH1.EN=1", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.D=1", out) == 0);
+  assert(contains(out.str(), "DLATCH1.Q: 0->1")); // level: at once
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(contains(out.str(), "clk: cycle 1 (1 edges)")); // edge domain only
+  assert(contains(out.str(), "DFF1.Q: 0->1"));           // edge capture
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  const std::string first = out.str();
+  assert(contains(first, "DFF1.Q=1"));
+  assert(contains(first, "SRLATCH1.Q=1 NQ=0"));
+  assert(contains(first, "DLATCH1.Q=1 NQ=0"));
+  // Freeze the DLATCH and re-step: only the edge kind moves.
+  assert(sh.execute("logic poke DLATCH1.EN=0", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=0", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.D=0", out) == 0); // frozen: no line
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic step 1", out) == 0);
+  assert(sh.execute("logic peek", out) == 0);
+  assert(contains(out.str(), "DFF1.Q=0"));
+  assert(contains(out.str(), "SRLATCH1.Q=1 NQ=0")); // held, not stepped
+  assert(contains(out.str(), "DLATCH1.Q=1 NQ=0")); // frozen, not stepped
+  // Identical rebuild + sequence reads back byte-identically.
+  assert(sh.execute("logic reset", out) == 0);
+  assert(sh.execute("logic add DFF", out) == 0);
+  assert(sh.execute("logic add SRLATCH", out) == 0);
+  assert(sh.execute("logic add DLATCH", out) == 0);
+  assert(sh.execute("logic ignore DFF1.CLK", out) == 0);
+  assert(sh.execute("logic poke DFF1.D=1", out) == 0);
+  assert(sh.execute("logic poke SRLATCH1.S=1", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.EN=1", out) == 0);
+  assert(sh.execute("logic poke DLATCH1.D=1", out) == 0);
+  assert(sh.execute("logic step 1", out) == 0);
+  out.str("");
+  out.clear();
+  assert(sh.execute("logic peek", out) == 0);
+  assert(out.str() == first);
+}
+
 } // namespace
 
 int main() {
@@ -437,6 +748,10 @@ int main() {
   test_determinism_replay();
   test_nq_ignored_by_default();
   test_t_divider_session();
+  test_dlatch_level_session();
+  test_sr_latch_session();
+  test_sr_illegal_file_load_keeps_workspace();
+  test_mixed_edge_level_session();
   test_jk_counter_session();
   test_mixed_kinds_session();
   test_complete();

@@ -59,11 +59,13 @@ namespace {
     s += 'Y';
   } else if (wengine::logic::is_sequential_kind(g.kind)) {
     // Canonical named inputs: DFF D/CLK (+RST/SET/EN on full-control
-    // flops), DLATCH D/EN, JK J/K/CLK, T T/CLK (003-jk-t-flops).
+    // flops), DLATCH D/EN, JK J/K/CLK, T T/CLK, SR S/R (004-sr-d-latches).
     if (g.kind == GateKind::kJk) {
       s += (input == 0) ? "J" : (input == 1) ? "K" : "CLK";
     } else if (g.kind == GateKind::kT) {
       s += (input == 0) ? "T" : "CLK";
+    } else if (g.kind == GateKind::kSrlatch) {
+      s += (input == 0) ? "S" : "R";
     } else if (input == 0) {
       s += 'D';
     } else if (g.kind == GateKind::kDff && input >= 2) {
@@ -162,6 +164,10 @@ std::vector<ClockDomain> clock_domains(const Netlist &nl) {
     if (!g.live || !wengine::logic::is_sequential_kind(g.kind)) {
       continue;
     }
+    if (g.kind != GateKind::kDff && g.kind != GateKind::kJk && g.kind != GateKind::kT) {
+      continue; // 004: level latches (DLATCH/SRLATCH) belong to no clock
+                // domain — advances never gate their level-resolved Q.
+    }
     // CLK/EN is input 1. A live driver names the domain by its source
     // pin (NQ-driven clocks keep the NQ spelling); dangling CLK/EN pins
     // join the implicit "clk" domain.
@@ -255,7 +261,18 @@ core::Status apply_async_and_report(Netlist &nl, std::ostream &out) {
   if (!compose_block_inputs(nl, inputs).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
+  // Snapshot the pool: the async apply commits before the level apply
+  // runs, so a level refusal (S=R=1) must roll back async forces too —
+  // callers additionally revert their own topology/map mutation.
+  const wengine::logic::SeqState committed = st;
   if (!wengine::logic::apply_async_controls(nl, st, std::span<const wengine::logic::LogicValue>(inputs.data(), inputs.size())).ok()) {
+    st = committed;
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  // Level latches settle at once (transparent D follows D while EN is
+  // active, frozen latches hold); same report shape as async forces below.
+  if (!wengine::logic::apply_level_latches(nl, st, std::span<const wengine::logic::LogicValue>(inputs.data(), inputs.size())).ok()) {
+    st = committed;
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {

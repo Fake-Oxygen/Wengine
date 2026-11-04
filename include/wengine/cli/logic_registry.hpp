@@ -69,17 +69,27 @@ struct LogicAddSpec {
       "  add DFF --inputs 5\n"
       "  add JK\n"
       "  add T\n"
-      "Kinds: AND OR NAND NOR XOR XNOR NOT BUF DFF DLATCH JK T (case-insensitive).\n"
+      "  add SRLATCH\n"
+      "Kinds: AND OR NAND NOR XOR XNOR NOT BUF DFF DLATCH JK T SRLATCH\n"
+      "(case-insensitive).\n"
       "NOT/BUF take exactly 1 input; DLATCH exactly 2 (pins D/EN); T exactly\n"
-      "2 (pins T/CLK); JK exactly 3 (pins J/K/CLK); DFF 2 (pins D/CLK, the\n"
-      "default) or 5 (full control set D/CLK/RST/SET/EN); the rest 2..8\n"
-      "(default 2, NOT/BUF default 1).\n"
+      "2 (pins T/CLK); JK exactly 3 (pins J/K/CLK); SRLATCH exactly 2 (pins\n"
+      "S/R); DFF 2 (pins D/CLK, the default) or 5 (full control set\n"
+      "D/CLK/RST/SET/EN); the rest 2..8 (default 2, NOT/BUF default 1).\n"
       "DFF priority: RST (async) > SET (async) > EN-hold (sync) > D;\n"
       "RST+SET -> Q=0. Unconnected RST/SET read 0 (inactive), EN reads 1\n"
       "(enabled).\n"
       "JK: J=0,K=0 hold; J=0,K=1 reset (Q=0); J=1,K=0 set (Q=1); J=1,K=1\n"
       "toggle. T: T=0 hold; T=1 toggle (Q=NOT Q). Evaluated at the clock\n"
-      "edge from pre-edge Q. Unconnected J/K/T read 0 (hold).";
+      "edge from pre-edge Q. Unconnected J/K/T read 0 (hold).\n"
+      "DLATCH: D (data) + EN (level enable, not a clock). SRLATCH: S (async\n"
+      "set) + R (async reset).\n"
+      "DLATCH: EN=1 transparent (Q follows D); EN=0 frozen (Q holds, D\n"
+      "ignored). No clock advance required.\n"
+      "SRLATCH: S=1,R=0 set (Q=1); S=0,R=1 reset (Q=0); S=0,R=0 hold.\n"
+      "S=1,R=1 is illegal and refused with state unchanged.\n"
+      "Level latches belong to no clock domain: advances never gate their\n"
+      "Q. Unconnected D/EN/S/R read 0 (hold).";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
@@ -111,8 +121,9 @@ struct LogicWireSpec {
       "  wire DFF1.NQ AND1.2\n"
       "Single-driver: the destination input must be unwired; cycles are rejected.\n"
       "Sequential gates use named pins (DFF1.D, DFF1.CLK, DFF1.Q, DFF1.NQ;\n"
-      "DFF1.RST, DFF1.SET, DFF1.EN on --inputs 5 flops; JK1.J, JK1.K,\n"
-      "JK1.CLK; T1.T, T1.CLK).";
+      "DFF1.RST, DFF1.SET, DFF1.EN on --inputs 5 flops; DLATCH1.D,\n"
+      "DLATCH1.EN; JK1.J, JK1.K, JK1.CLK; T1.T, T1.CLK; SRLATCH1.S,\n"
+      "SRLATCH1.R).";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
@@ -328,10 +339,11 @@ struct LogicStepSpec {
       "  step BUF1.Y 3\n"
       "  step --cycles 100\n"
       "Advances one rising edge per count: globally with no DOMAIN, else\n"
-      "only flops clocked by DOMAIN (dangling CLK/EN pins form domain\n"
-      "`clk`). Reports the cycle count, stepped flop transitions, and\n"
-      "settled block outputs. Zero count reports without stepping; errors\n"
-      "change no state.";
+      "only flops clocked by DOMAIN (dangling CLK pins form domain\n"
+      "`clk`). Level latches (DLATCH/SRLATCH) belong to no domain:\n"
+      "they settle outside advances and never gate on them. Reports the\n"
+      "cycle count, stepped flop transitions, and settled block outputs.\n"
+      "Zero count reports without stepping; errors change no state.";
 
   static int run(ArgCursor &args, std::ostream &out);
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
@@ -350,10 +362,14 @@ struct LogicPokeSpec {
       "Drives a dangling block input to 0/1 (sticky across steps) or\n"
       "releases it back to wired behavior. Bare `poke` lists the map;\n"
       "`--clear` drops every entry. Named seq pins work (DFF1.D, DFF1.RST,\n"
-      "DFF1.SET, DFF1.EN on --inputs 5 flops; JK1.J, JK1.K, JK1.CLK; T1.T,\n"
-      "T1.CLK); numeric aliases too (DFF1.1).\n"
+      "DFF1.SET, DFF1.EN on --inputs 5 flops; DLATCH1.D, DLATCH1.EN; JK1.J,\n"
+      "JK1.K, JK1.CLK; T1.T, T1.CLK; SRLATCH1.S, SRLATCH1.R); numeric\n"
+      "aliases too (DFF1.1).\n"
       "Poked RST/SET force Q at once (async); poked EN=0 holds Q across\n"
       "steps. Priority: RST > SET > EN-hold > D; RST+SET -> Q=0.\n"
+      "Poked DLATCH.EN=1 tracks D at once (transparent); EN=0 freezes Q.\n"
+      "Poked SRLATCH.S/R set/reset Q at once; S=1,R=1 is illegal and\n"
+      "refused (drive reverted, Q unchanged).\n"
       "Errors change no state.";
 
   static int run(ArgCursor &args, std::ostream &out);

@@ -191,6 +191,12 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
   if (!wengine::logic::apply_async_controls(nl, st, std::span<const LogicValue>(inputs.data(), inputs.size())).ok()) {
     return cli::runtime_error(out, "step failed");
   }
+  // Level latches settle before edges too (transparent D re-tracks D at
+  // every step top; frozen latches hold); the baseline below therefore
+  // shows edge-caused changes only.
+  if (!wengine::logic::apply_level_latches(nl, st, std::span<const LogicValue>(inputs.data(), inputs.size())).ok()) {
+    return cli::runtime_error(out, "step failed");
+  }
   // Old Q for the transition report (stepped flops only).
   std::vector<LogicValue> old_q(wengine::logic::kMaxGates, LogicValue::kLow);
   for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {

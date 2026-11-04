@@ -297,6 +297,60 @@ void test_jk_round_trip() {
   assert(again == text); // byte-identical
 }
 
+void test_dlatch_round_trip() {
+  // DLATCH rows persist canonically (kind: dlatch, inputs: 2) with
+  // `DLATCHn.D|EN` wire endpoints and `ignore:` indices; reload is
+  // netlist-equal and re-saves byte-identically (004-sr-d-latches T009).
+  logic::Netlist nl;
+  assert(logic::add_gate(nl, logic::GateKind::kDlatch, 2).ok()); // DLATCH1 @0
+  assert(logic::add_gate(nl, logic::GateKind::kBuf, 1).ok());    // BUF1 @1
+  auto p = logic::parse_pin(nl, "DLATCH1.EN");
+  assert(p.ok());
+  assert(logic::ignore_pin(nl, p.value).ok());
+  assert(logic::wire(nl, 1, 0, 0).ok()); // BUF1.Y -> DLATCH1.D
+  std::string text;
+  logic::yaml::save_text(nl, text);
+  assert(contains(text, "{id: DLATCH1, kind: dlatch, inputs: 2, ignore: [2]"));
+  assert(contains(text, "{from: BUF1.Y, to: DLATCH1.D}"));
+
+  logic::Netlist back;
+  std::string err;
+  assert(logic::yaml::load_text(text, back, err));
+  assert(netlists_equal(nl, back));
+  std::string again;
+  logic::yaml::save_text(back, again);
+  assert(again == text); // byte-identical
+}
+
+void test_sr_round_trip() {
+  // SR rows persist canonically (kind: srlatch, inputs: 2) with
+  // `SRLATCHn.S|R` wire endpoints and `ignore:` indices; reload is
+  // netlist-equal and re-saves byte-identically (004-sr-d-latches T014).
+  // A legacy file without SR rows loads unchanged (structural check in
+  // test_canonical_bytes covers the shape; SR-free nets step identically
+  // per the engine tests).
+  logic::Netlist nl;
+  assert(logic::add_gate(nl, logic::GateKind::kSrlatch, 2).ok()); // SRLATCH1 @0
+  assert(logic::add_gate(nl, logic::GateKind::kSrlatch, 2).ok()); // SRLATCH2 @1
+  auto p = logic::parse_pin(nl, "SRLATCH1.R");
+  assert(p.ok());
+  assert(logic::ignore_pin(nl, p.value).ok());
+  assert(logic::wire(nl, 0, 1, 0).ok()); // SRLATCH1.Q -> SRLATCH2.S
+  std::string text;
+  logic::yaml::save_text(nl, text);
+  assert(contains(text, "{id: SRLATCH1, kind: srlatch, inputs: 2, ignore: [2]"));
+  assert(contains(text, "{id: SRLATCH2, kind: srlatch, inputs: 2, ignore: []"));
+  assert(contains(text, "{from: SRLATCH1.Q, to: SRLATCH2.S}"));
+
+  logic::Netlist back;
+  std::string err;
+  assert(logic::yaml::load_text(text, back, err));
+  assert(netlists_equal(nl, back));
+  std::string again;
+  logic::yaml::save_text(back, again);
+  assert(again == text); // byte-identical
+}
+
 void test_malformed_line_numbers() {
   const std::string head =
       "version: 1\n"
@@ -524,6 +578,8 @@ int main() {
   test_tie_round_trip();
   test_t_round_trip();
   test_jk_round_trip();
+  test_dlatch_round_trip();
+  test_sr_round_trip();
   test_malformed_line_numbers();
   test_examples();
   std::cout << "test_logic_yaml: OK\n";

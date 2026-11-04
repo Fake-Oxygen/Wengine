@@ -77,9 +77,12 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
   }
   out << "wired " << support::pin_text(nl, from.value.slot, true, 0, from.value.negated) << " -> "
       << support::pin_text(nl, to.value.slot, false, to.value.input) << '\n';
-  // A freshly driven RST/SET acts at once; report forced flops below.
+  // A freshly driven RST/SET acts at once (report forced flops below), as
+  // do level latches. An illegal SR net (S=R=1 through the new wire)
+  // fails here: the wire is reverted so the refused net changes no state.
   if (!support::apply_async_and_report(nl, out).ok()) {
-    return cli::runtime_error(out, "wire failed");
+    (void)wengine::logic::unwire_pin(nl, to.value);
+    return cli::usage_error(out, "wire: S=1,R=1 is illegal (SR latch holds state, wire reverted)", kUsage);
   }
   return core::kExitOk;
 }

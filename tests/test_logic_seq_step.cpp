@@ -153,22 +153,245 @@ void test_swap_proves_snapshot_isolation() {
   assert(st.q[1] == LogicValue::kLow);
 }
 
-void test_dlatch_edge_capture_seq4() {
-  // SEQ4 simplification: DLATCH captures D on the edge like a DFF
-  // (level-transparent behavior arrives in SEQ8 and refines this path).
+void test_dlatch_level_transparent_frozen() {
+  // Hand-derived reference (research R3, 004-sr-d-latches): EN=1
+  // transparent (Q follows D with no advance), EN=0 frozen (Q holds
+  // across D changes and advances). Replaces the SEQ4 edge-capture
+  // golden (test_dlatch_edge_capture_seq4): the documented refinement.
   Netlist nl;
   place_seq(nl, 0, GateKind::kDlatch, 1);
-  ignore_input(nl, 0, 1); // EN ignored (edge assumed, validated only)
-  assert(logic::block_input_count(nl) == 1); // D
+  assert(logic::block_input_count(nl) == 2); // D, EN (slot order)
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
-  LogicValue d = kH;
-  assert(logic::seq_step(nl, st, std::span<const LogicValue>(&d, 1)).ok());
-  assert(st.q[0] == kH);
-  d = kL;
-  assert(logic::seq_step(nl, st, std::span<const LogicValue>(&d, 1)).ok());
+  assert(st.q[0] == kL); // power-on 0
+  // Frozen at power-on (EN=0): D toggles move nothing, with or without
+  // an advance.
+  LogicValue frozen[2] = {kH, kL};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(frozen, 2)).ok());
   assert(st.q[0] == kL);
+  // Transparent: EN=1 follows D at once (level settle inside the step).
+  LogicValue follow[2] = {kH, kH};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(follow, 2)).ok());
+  assert(st.q[0] == kH);
+  LogicValue follow0[2] = {kL, kH};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(follow0, 2)).ok());
+  assert(st.q[0] == kL);
+  // Freeze at 1: enable, drive 1, release, then toggle D across advances.
+  LogicValue en1[2] = {kH, kH};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(en1, 2)).ok());
+  assert(st.q[0] == kH);
+  LogicValue fr0[2] = {kL, kL};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(fr0, 2)).ok());
+  assert(st.q[0] == kH);
+  LogicValue fr1[2] = {kH, kL};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(fr1, 2)).ok());
+  assert(st.q[0] == kH);
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(fr1, 2)).ok());
+  assert(st.q[0] == kH);
+  // Re-asserting EN resumes tracking the current D at once.
+  LogicValue re[2] = {kL, kH};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(re, 2)).ok());
+  assert(st.q[0] == kL);
+  // X/Z on D or EN fails loudly with committed Q untouched.
+  const LogicValue kZ = LogicValue::kHighZ;
+  const LogicValue kX = LogicValue::kUnknown;
+  LogicValue bad[2] = {kZ, kH};
+  assert(!logic::seq_step(nl, st, std::span<const LogicValue>(bad, 2)).ok());
+  assert(st.q[0] == kL);
+  bad[0] = kL;
+  bad[1] = kX;
+  assert(!logic::seq_step(nl, st, std::span<const LogicValue>(bad, 2)).ok());
+  assert(st.q[0] == kL);
+  // Determinism replay: the same drive sequence twice is identical.
+  // Fresh pool each round (same starting workspace) yields identical Q.
+  const LogicValue seq[4][2] = {{kH, kH}, {kL, kL}, {kH, kL}, {kL, kH}};
+  const LogicValue want[4] = {kH, kH, kH, kL};
+  for (int round = 0; round < 2; ++round) {
+    SeqState fresh;
+    for (int i = 0; i < 4; ++i) {
+      LogicValue cur[2] = {seq[i][0], seq[i][1]};
+      assert(logic::seq_step(nl, fresh, std::span<const LogicValue>(cur, 2)).ok());
+      assert(fresh.q[0] == want[i]);
+    }
+  }
+}
+
+void test_sr_level_table_and_refusal() {
+  // Hand-derived reference (research R3, 004-sr-d-latches US2): set/reset/
+  // hold resolve with no advance; S=R=1 is refused loudly with state
+  // untouched on every entry path (direct drive, wired comb, tied leader).
+  Netlist nl;
+  const std::uint16_t s = logic::add_gate(nl, GateKind::kSrlatch, 2).value; // SR1: direct drive
+  const std::uint16_t w = logic::add_gate(nl, GateKind::kSrlatch, 2).value; // SR2: wired inputs
+  const std::uint16_t b = logic::add_gate(nl, GateKind::kBuf, 1).value;      // BUF1: shared driver
+  const std::uint16_t t = logic::add_gate(nl, GateKind::kSrlatch, 2).value; // SR3: tied inputs
+  assert(logic::wire(nl, b, w, 0).ok());                                     // BUF1.Y -> SR2.S
+  assert(logic::wire(nl, b, w, 1).ok());                                     // BUF1.Y -> SR2.R
+  auto ps = logic::parse_pin(nl, "SRLATCH3.S");
+  assert(ps.ok());
+  auto pr = logic::parse_pin(nl, "SRLATCH3.R");
+  assert(pr.ok());
+  assert(logic::tie_pins(nl, ps.value, pr.value).ok());
+  assert(logic::validate_sequential(nl).ok());
+  // Slot order: SR1.S, SR1.R, BUF1.0, SR3 leader (SR3.R shares it).
+  assert(logic::block_input_count(nl) == 4);
+  SeqState st;
+  const LogicValue kL = LogicValue::kLow;
+  const LogicValue kH = LogicValue::kHigh;
+  const LogicValue kZ = LogicValue::kHighZ;
+  const LogicValue kX = LogicValue::kUnknown;
+  assert(st.q[s] == kL && st.q[w] == kL && st.q[t] == kL); // power-on 0
+  // Hold from 0 (released S=R=0).
+  LogicValue hold[4] = {kL, kL, kL, kL};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(hold, 4)).ok());
+  assert(st.q[s] == kL && st.q[w] == kL && st.q[t] == kL);
+  // Set SR1 (S=1, R=0): Q becomes 1 with no advance.
+  LogicValue set[4] = {kH, kL, kL, kL};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(set, 4)).ok());
+  assert(st.q[s] == kH && st.q[w] == kL && st.q[t] == kL);
+  // Hold after release: S=R=0 keeps Q=1.
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(hold, 4)).ok());
+  assert(st.q[s] == kH);
+  // Reset SR1 (S=0, R=1): Q becomes 0 with no advance.
+  LogicValue reset[4] = {kL, kH, kL, kL};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(reset, 4)).ok());
+  assert(st.q[s] == kL);
+  // Set is idempotent from 1; reset is idempotent from 0.
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(set, 4)).ok());
+  assert(st.q[s] == kH);
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(set, 4)).ok());
+  assert(st.q[s] == kH);
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(reset, 4)).ok());
+  assert(st.q[s] == kL);
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(reset, 4)).ok());
+  assert(st.q[s] == kL);
+  // Hold across N advances from 1.
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(set, 4)).ok());
+  for (int i = 0; i < 5; ++i) {
+    assert(logic::seq_step(nl, st, std::span<const LogicValue>(hold, 4)).ok());
+    assert(st.q[s] == kH && st.q[w] == kL && st.q[t] == kL);
+  }
+  // Illegal via direct drive (S=R=1): loud refusal, everything untouched.
+  LogicValue bad_direct[4] = {kH, kH, kL, kL};
+  assert(!logic::seq_step(nl, st, std::span<const LogicValue>(bad_direct, 4)).ok());
+  assert(st.q[s] == kH && st.q[w] == kL && st.q[t] == kL);
+  // Illegal via wired comb (BUF=1 fans out to SR2.S and SR2.R).
+  LogicValue bad_wired[4] = {kL, kL, kH, kL};
+  assert(!logic::seq_step(nl, st, std::span<const LogicValue>(bad_wired, 4)).ok());
+  assert(st.q[s] == kH && st.q[w] == kL && st.q[t] == kL);
+  // Illegal via tied leader (SR3.S = SR3.R = 1 through the tie class).
+  LogicValue bad_tied[4] = {kL, kL, kL, kH};
+  assert(!logic::seq_step(nl, st, std::span<const LogicValue>(bad_tied, 4)).ok());
+  assert(st.q[s] == kH && st.q[w] == kL && st.q[t] == kL);
+  // Legal wired/tied holds still work after the refusals (no wedging).
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(hold, 4)).ok());
+  assert(st.q[s] == kH && st.q[w] == kL && st.q[t] == kL);
+  // X/Z on S fails loudly with committed Q untouched.
+  LogicValue bad_xz[4] = {kZ, kL, kL, kL};
+  assert(!logic::seq_step(nl, st, std::span<const LogicValue>(bad_xz, 4)).ok());
+  assert(st.q[s] == kH);
+  bad_xz[0] = kL;
+  bad_xz[1] = kX;
+  assert(!logic::seq_step(nl, st, std::span<const LogicValue>(bad_xz, 4)).ok());
+  assert(st.q[s] == kH);
+  // Determinism replay: the same set/hold/reset script twice is identical.
+  const LogicValue script[5][4] = {
+      {kH, kL, kL, kL}, {kL, kL, kL, kL}, {kL, kH, kL, kL},
+      {kL, kL, kL, kL}, {kH, kL, kL, kL},
+  };
+  const LogicValue want[5] = {kH, kH, kL, kL, kH};
+  for (int round = 0; round < 2; ++round) {
+    SeqState fresh;
+    for (int i = 0; i < 5; ++i) {
+      LogicValue cur[4] = {script[i][0], script[i][1], script[i][2], script[i][3]};
+      assert(logic::seq_step(nl, fresh, std::span<const LogicValue>(cur, 4)).ok());
+      assert(fresh.q[s] == want[i]);
+      assert(fresh.q[w] == kL && fresh.q[t] == kL);
+    }
+  }
+}
+
+void test_mixed_edge_level_share_stepper() {
+  // US3 (004-sr-d-latches): one DFF + one DLATCH + one SR + one JK + one
+  // T in a single workspace — one advance steps every edge flop per its
+  // own table while latches hold/track per the level rule; subset
+  // stepping holds non-members; NQ is live NOT Q across kinds.
+  Netlist nl;
+  assert(logic::add_gate(nl, logic::GateKind::kDff, 2).ok());    // @0 DFF1
+  assert(logic::add_gate(nl, logic::GateKind::kDlatch, 2).ok()); // @1 DLATCH1
+  assert(logic::add_gate(nl, logic::GateKind::kSrlatch, 2).ok()); // @2 SR1
+  assert(logic::add_gate(nl, logic::GateKind::kJk, 3).ok());     // @3 JK1
+  assert(logic::add_gate(nl, logic::GateKind::kT, 2).ok());      // @4 T1
+  ignore_input(nl, 0, 1); // DFF1.CLK ignored (edge assumed)
+  ignore_input(nl, 3, 2); // JK1.CLK ignored (edge assumed)
+  ignore_input(nl, 4, 1); // T1.CLK ignored (edge assumed)
+  assert(logic::validate_sequential(nl).ok());
+  // Slot order block inputs: DFF.D, DLATCH.D, DLATCH.EN, SR.S, SR.R,
+  // JK.J, JK.K, T.T.
+  assert(logic::block_input_count(nl) == 8);
+  SeqState st;
+  const LogicValue kL = LogicValue::kLow;
+  const LogicValue kH = LogicValue::kHigh;
+  // DFF.D=1, DLATCH transparent 0, SR set, JK toggle, T toggle.
+  LogicValue drive[8] = {kH, kL, kH, kH, kL, kH, kH, kH};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(drive, 8)).ok());
+  assert(st.q[0] == kH); // DFF captured 1
+  assert(st.q[1] == kL); // DLATCH transparent 0
+  assert(st.q[2] == kH); // SR set
+  assert(st.q[3] == kH); // JK toggled 0->1
+  assert(st.q[4] == kH); // T toggled 0->1
+  // Second edge: JK/T toggle back, DFF holds 1, latches unchanged.
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(drive, 8)).ok());
+  assert(st.q[0] == kH);
+  assert(st.q[1] == kL);
+  assert(st.q[2] == kH);
+  assert(st.q[3] == kL);
+  assert(st.q[4] == kL);
+  // Freeze the DLATCH (EN=0, D=1): it holds 0 while edges keep stepping.
+  drive[1] = kH;
+  drive[2] = kL;
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(drive, 8)).ok());
+  assert(st.q[0] == kH && st.q[1] == kL && st.q[2] == kH);
+  assert(st.q[3] == kH && st.q[4] == kH);
+  // Selective domain (DFF member only): DFF steps, JK/T hold, latches
+  // re-settle (DLATCH frozen, SR held) regardless of membership.
+  const std::uint16_t members[1] = {0};
+  drive[0] = kL; // DFF.D=0
+  LogicValue outs[5] = {kL, kL, kL, kL, kL};
+  assert(logic::seq_step_filtered(nl, st, std::span<const LogicValue>(drive, 8),
+                                  std::span<LogicValue>(outs, 5), members, 1)
+             .ok());
+  assert(st.q[0] == kL); // DFF captured 0
+  assert(st.q[1] == kL); // DLATCH frozen
+  assert(st.q[2] == kH); // SR held
+  assert(st.q[3] == kH && st.q[4] == kH); // non-members held
+  // NQ polarity: expose NQ as block outputs, drive all-High nets.
+  for (std::uint16_t s = 0; s <= 4; ++s) {
+    nl.gates[s].ignore_nq_output = false;
+  }
+  LogicValue outs2[10];
+  for (std::size_t i = 0; i < 10; ++i) {
+    outs2[i] = kL;
+  }
+  LogicValue all_hold[8] = {kL, kL, kL, kL, kL, kL, kL, kL};
+  assert(logic::seq_step(nl, st, std::span<const LogicValue>(all_hold, 8), std::span<LogicValue>(outs2, 10)).ok());
+  // Qs: DFF 0 (captured 0 above, D=0 holds it), DLATCH frozen 0 (EN=0, D=0),
+  // SR held 1, JK held (0,0), T held 0.
+  assert(st.q[0] == kL && st.q[1] == kL && st.q[2] == kH && st.q[3] == kH && st.q[4] == kH);
+  for (std::size_t i = 0; i < 5; ++i) {
+    const LogicValue q = (i == 0) ? st.q[0] : (i == 1) ? st.q[1] : (i == 2) ? st.q[2] : (i == 3) ? st.q[3] : st.q[4];
+    assert(outs2[2 * i] == q); // Q outputs, interleaved per slot
+    assert(outs2[2 * i + 1] == ((q == kH) ? kL : kH)); // NQ = NOT Q
+  }
+  // Determinism replay: the script twice is identical.
+  for (int round = 0; round < 2; ++round) {
+    SeqState fresh;
+    LogicValue d1[8] = {kH, kL, kH, kH, kL, kH, kH, kH};
+    assert(logic::seq_step(nl, fresh, std::span<const LogicValue>(d1, 8)).ok());
+    assert(fresh.q[0] == kH && fresh.q[1] == kL && fresh.q[2] == kH);
+    assert(fresh.q[3] == kH && fresh.q[4] == kH);
+  }
 }
 
 void test_xz_and_size_rejected_state_untouched() {
@@ -446,11 +669,13 @@ int main() {
   test_counter_2bit();
   test_shift_register_parallel_update();
   test_swap_proves_snapshot_isolation();
-  test_dlatch_edge_capture_seq4();
+  test_dlatch_level_transparent_frozen();
+  test_sr_level_table_and_refusal();
   test_t_excitation_table();
   test_jk_excitation_table();
   test_jk_sync_counter_2bit();
   test_mixed_kinds_share_one_edge();
+  test_mixed_edge_level_share_stepper();
   test_subset_stepping_holds_non_members();
   test_xz_and_size_rejected_state_untouched();
   test_comb_cycle_still_rejected();
