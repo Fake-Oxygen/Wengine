@@ -258,4 +258,112 @@ namespace wengine::logic {
   return core::Status::success();
 }
 
+// Single-input resolution (scalar): wired inputs read gate_out (old-Q
+// phase, new-Q phase, or combinational settle); dangling inputs read the
+// pre-resolved block vector (leaders only — caller fans ties out first);
+// ignored dangling pins tie to kLow (netlist rule). Returns false on X/Z
+// or on a resolve_net refusal (wired X/Z driver) — loud, never silent.
+// The one funnel every scalar evaluator (solve, stepper phases, async and
+// level apply) resolves through.
+[[nodiscard]] inline bool resolve_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
+                                        const LogicValue *gate_out, const LogicValue *resolved,
+                                        LogicValue &out) noexcept {
+  const Gate &g = nl.gates[slot];
+  const std::uint16_t drv = g.drivers[input];
+  if (drv != kNoDriver) {
+    if (drv >= kMaxGates) {
+      return false;
+    }
+    LogicValue sunk = LogicValue::kLow;
+    if (!resolve_net(&gate_out[drv], 1, sunk)) {
+      return false;
+    }
+    // NQ source: the sink reads the negated value (T005).
+    out = apply_polarity(sunk, nl.driver_inv[static_cast<std::size_t>(slot) * kMaxInputs + input]);
+    return true;
+  }
+  if ((g.ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
+    out = LogicValue::kLow;
+    return true;
+  }
+  const LogicValue v =
+      resolved[static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input)];
+  if (v != LogicValue::kLow && v != LogicValue::kHigh) {
+    return false;
+  }
+  out = v;
+  return true;
+}
+
+// Bit-parallel word geometry. Row convention (shared with scalar `solve`
+// and the `truth` verb): truth row r drives block input j with bit
+// (r>>j)&1, where j is the derived interface order. Word w covers rows
+// [w*64, w*64+63]; lane b holds row w*64+b as bit b.
+inline constexpr std::size_t kBitWordSize = 64;
+inline constexpr std::size_t kBitScratchWords = kMaxGates;
+
+// Full-truth word count for n block inputs: ceil(2^n / 64). Returns 0
+// when n >= 31 (2^n rows exceed sane streaming; slice eval stays valid,
+// full enumeration is the caller's refusal, like `truth --limit`).
+[[nodiscard]] constexpr std::size_t bit_words_for_inputs(std::size_t n_inputs) noexcept {
+  if (n_inputs >= 31) {
+    return 0;
+  }
+  const auto rows = static_cast<std::size_t>(1ULL << n_inputs);
+  return (rows + (kBitWordSize - 1)) / kBitWordSize;
+}
+
+// Procedural input column for block input `input_pos` over word
+// `word_index`. For positions < 6 the 64-row tile is word-independent
+// (base w*64 is a multiple of 2^(pos+1)); for positions >= 6 the whole
+// word is constant (2^pos rows per bit value covers the tile).
+[[nodiscard]] constexpr std::uint64_t input_column_word(std::size_t input_pos, std::uint64_t word_index) noexcept {
+  if (input_pos == 0) {
+    return 0xAAAAAAAAAAAAAAAAULL;
+  }
+  if (input_pos == 1) {
+    return 0xCCCCCCCCCCCCCCCCULL;
+  }
+  if (input_pos == 2) {
+    return 0xF0F0F0F0F0F0F0F0ULL;
+  }
+  if (input_pos == 3) {
+    return 0xFF00FF00FF00FF00ULL;
+  }
+  if (input_pos == 4) {
+    return 0xFFFF0000FFFF0000ULL;
+  }
+  if (input_pos == 5) {
+    return 0xFFFFFFFF00000000ULL;
+  }
+  const auto shift = static_cast<unsigned>(input_pos - 6);
+  const std::uint64_t bit = (shift >= 64) ? 0ULL : ((word_index >> shift) & 1ULL);
+  return (bit != 0ULL) ? ~static_cast<std::uint64_t>(0ULL) : static_cast<std::uint64_t>(0ULL);
+}
+
+// Bit-parallel twin of resolve_input: wired inputs read the source word
+// (with NQ polarity, T005); ignored dangling pins read word 0 (same rule
+// as scalar kLow); dangling block inputs read their procedural interface
+// column. `in_pos` maps (slot, input) to the block-input ordinal
+// (kNoDriver for wired/ignored pins — never read on those paths).
+[[nodiscard]] inline std::uint64_t resolve_word(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
+                                                const std::uint64_t *gate_scratch,
+                                                const std::uint16_t *in_pos,
+                                                std::uint64_t word_index) noexcept {
+  const std::uint16_t drv = nl.gates[slot].drivers[input];
+  if (drv != kNoDriver) {
+    const std::uint64_t v = gate_scratch[drv];
+    if (nl.driver_inv[static_cast<std::size_t>(slot) * kMaxInputs + input] != 0) {
+      return ~v;
+    }
+    return v;
+  }
+  if ((nl.gates[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
+    return 0;
+  }
+  const std::size_t p =
+      static_cast<std::size_t>(in_pos[static_cast<std::size_t>(slot) * kMaxInputs + input]);
+  return input_column_word(p, word_index);
+}
+
 } // namespace wengine::logic

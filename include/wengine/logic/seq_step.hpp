@@ -91,48 +91,13 @@ namespace detail {
   return false;
 }
 
-// Resolve one gate input to a Low/High value. Wired inputs read gate_out
-// (old-Q phase or new-Q phase); dangling inputs read the pre-resolved
-// block vector (leaders only — caller fans ties out first); ignored
-// dangling pins tie to kLow (netlist rule). Returns false on X/Z or on a
-// resolve_net refusal (wired X/Z driver) — loud, never silent.
-[[nodiscard]] inline bool resolve_step_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
-                                            const LogicValue *gate_out, const LogicValue *resolved,
-                                            LogicValue &out) noexcept {
-  const Gate &g = nl.gates[slot];
-  const std::uint16_t drv = g.drivers[input];
-  if (drv != kNoDriver) {
-    if (drv >= kMaxGates) {
-      return false;
-    }
-    LogicValue sunk = LogicValue::kLow;
-    if (!resolve_net(&gate_out[drv], 1, sunk)) {
-      return false;
-    }
-    // NQ source: the sink reads the negated value (T005).
-    out = apply_polarity(sunk, nl.driver_inv[static_cast<std::size_t>(slot) * kMaxInputs + input]);
-    return true;
-  }
-  if ((g.ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
-    out = LogicValue::kLow;
-    return true;
-  }
-  const LogicValue v =
-      resolved[static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input)];
-  if (v != LogicValue::kLow && v != LogicValue::kHigh) {
-    return false;
-  }
-  out = v;
-  return true;
-}
-
 // Phase 1 combinational eval at time T with OLD Qs (shared): seeds
 // gate_out with flop Qs, then settles combinational gates in the
 // deterministic comb order. Used by the stepper snapshot and the
 // async-apply path alike so wired RST/SET resolve identically.
 [[nodiscard]] inline core::Status eval_comb_phase1(const Netlist &nl, const SeqState &st, const LogicValue *resolved,
-                                                  LogicValue *gate_out, std::uint16_t *comb_order,
-                                                  std::size_t &n_comb) noexcept {
+                                                   LogicValue *gate_out, std::uint16_t *comb_order,
+                                                   std::size_t &n_comb) noexcept {
   if (!topo::compile_comb_order(nl, comb_order, n_comb)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
@@ -149,7 +114,7 @@ namespace detail {
     const std::uint16_t s = comb_order[oi];
     const Gate &g = nl.gates[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (!resolve_step_input(nl, s, i, gate_out, resolved, ins[i])) {
+      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i])) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
     }
@@ -177,15 +142,10 @@ namespace detail {
     out = LogicValue::kHigh;
     return true;
   }
-  if (g.drivers[input] != kNoDriver) {
-    return resolve_step_input(nl, slot, input, gate_out, resolved, out);
-  }
-  const LogicValue v = resolved[static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input)];
-  if (v != LogicValue::kLow && v != LogicValue::kHigh) {
-    return false;
-  }
-  out = v;
-  return true;
+  // Shared scalar funnel (BlockInterface seam): wired/dangling/ignored
+  // dispatch plus NQ polarity live in resolve_input; the EN-default arms
+  // above are the only control-specific rules.
+  return resolve_input(nl, slot, input, gate_out, resolved, out);
 }
 
 // Level-sensitive kinds (004-sr-d-latches): DLATCH (D + EN) and SRLATCH
@@ -212,10 +172,10 @@ namespace detail {
     }
     LogicValue a = LogicValue::kLow;
     LogicValue b = LogicValue::kLow;
-    if (!resolve_step_input(nl, s, 0, gate_out, resolved, a)) {
+    if (!resolve_input(nl, s, 0, gate_out, resolved, a)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
-    if (!resolve_step_input(nl, s, 1, gate_out, resolved, b)) {
+    if (!resolve_input(nl, s, 1, gate_out, resolved, b)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
     if ((a != LogicValue::kLow && a != LogicValue::kHigh) ||
@@ -327,10 +287,10 @@ namespace detail {
     }
     LogicValue d = LogicValue::kLow;
     LogicValue clk = LogicValue::kLow;
-    if (!detail::resolve_step_input(nl, s, 0, gate_out, resolved, d)) {
+    if (!resolve_input(nl, s, 0, gate_out, resolved, d)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
-    if (!detail::resolve_step_input(nl, s, 1, gate_out, resolved, clk)) {
+    if (!resolve_input(nl, s, 1, gate_out, resolved, clk)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
     if ((d != LogicValue::kLow && d != LogicValue::kHigh) ||
@@ -354,7 +314,7 @@ namespace detail {
       // Resolve the clock (input 2) here; per the SEQ4 rule it is
       // validated, not gating. Excitation resolves from pre-edge Q.
       LogicValue jk_clk = LogicValue::kLow;
-      if (!detail::resolve_step_input(nl, s, 2, gate_out, resolved, jk_clk)) {
+      if (!resolve_input(nl, s, 2, gate_out, resolved, jk_clk)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
       if (jk_clk != LogicValue::kLow && jk_clk != LogicValue::kHigh) {
@@ -419,7 +379,7 @@ namespace detail {
     const std::uint16_t s = comb_order[oi];
     const Gate &g = nl.gates[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (!detail::resolve_step_input(nl, s, i, gate_out, resolved, ins[i])) {
+      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i])) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
     }

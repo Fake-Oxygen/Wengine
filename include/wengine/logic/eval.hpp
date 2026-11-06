@@ -119,19 +119,8 @@ namespace wengine::logic {
     const std::uint16_t s = nl.topo_order[oi];
     const Gate &g = nl.gates[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t drv = g.drivers[i];
-      if (drv != kNoDriver) {
-        LogicValue v = gate_out[drv];
-        LogicValue sunk = LogicValue::kLow;
-        if (!resolve_net(&v, 1, sunk)) {
-          return core::Status::failure(core::StatusCode::kInvalidArgument);
-        }
-        // NQ source: the sink reads the negated value (T005).
-        ins[i] = apply_polarity(sunk, nl.driver_inv[static_cast<std::size_t>(s) * kMaxInputs + i]);
-      } else if ((g.ignored_mask & (1u << i)) != 0) {
-        ins[i] = LogicValue::kLow;
-      } else {
-        ins[i] = resolved[static_cast<std::size_t>(s) * kMaxInputs + i];
+      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i])) {
+        return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
     }
     gate_out[s] = eval_gate(g.kind, ins, g.input_count);
@@ -181,59 +170,6 @@ namespace wengine::logic {
 // block_output_count words) are caller-owned, same pattern as
 // `fill_snapshot`. No SIMD intrinsics: scalar words carry the speedup
 // and stay portable; vectorize only on a measured hot path.
-
-inline constexpr std::size_t kBitWordSize = 64;
-inline constexpr std::size_t kBitScratchWords = kMaxGates;
-
-// Full-truth word count for n block inputs: ceil(2^n / 64). Returns 0
-// when n >= 31 (2^n rows exceed sane streaming; slice eval stays valid,
-// full enumeration is the caller's refusal, like `truth --limit`).
-[[nodiscard]] constexpr std::size_t bit_words_for_inputs(std::size_t n_inputs) noexcept {
-  if (n_inputs >= 31) {
-    return 0;
-  }
-  const auto rows = static_cast<std::size_t>(1ULL << n_inputs);
-  return (rows + (kBitWordSize - 1)) / kBitWordSize;
-}
-
-// Procedural input column for block input `input_pos` over word
-// `word_index`. For positions < 6 the 64-row tile is word-independent
-// (base w*64 is a multiple of 2^(pos+1)); for positions >= 6 the whole
-// word is constant (2^pos rows per bit value covers the tile).
-[[nodiscard]] constexpr std::uint64_t input_column_word(std::size_t input_pos, std::uint64_t word_index) noexcept {
-  if (input_pos == 0) {
-    return 0xAAAAAAAAAAAAAAAAULL;
-  }
-  if (input_pos == 1) {
-    return 0xCCCCCCCCCCCCCCCCULL;
-  }
-  if (input_pos == 2) {
-    return 0xF0F0F0F0F0F0F0F0ULL;
-  }
-  if (input_pos == 3) {
-    return 0xFF00FF00FF00FF00ULL;
-  }
-  if (input_pos == 4) {
-    return 0xFFFF0000FFFF0000ULL;
-  }
-  if (input_pos == 5) {
-    return 0xFFFFFFFF00000000ULL;
-  }
-  const auto shift = static_cast<unsigned>(input_pos - 6);
-  const std::uint64_t bit = (shift >= 64) ? 0ULL : ((word_index >> shift) & 1ULL);
-  return (bit != 0ULL) ? ~static_cast<std::uint64_t>(0ULL) : static_cast<std::uint64_t>(0ULL);
-}
-
-// Read one wired sink word with NQ polarity applied (T005): inverted
-// sinks see the bitwise complement of the source word.
-[[nodiscard]] inline std::uint64_t sink_word(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
-                                            std::uint16_t drv, std::span<const std::uint64_t> gate_scratch) noexcept {
-  const std::uint64_t v = gate_scratch[drv];
-  if (nl.driver_inv[static_cast<std::size_t>(slot) * kMaxInputs + input] != 0) {
-    return ~v;
-  }
-  return v;
-}
 
 // Evaluate one 64-row slice starting at row word_index*64.
 // gate_scratch must hold >= kMaxGates words; block_outputs must hold
@@ -285,16 +221,7 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
     case GateKind::kNand:
       acc = ~static_cast<std::uint64_t>(0ULL);
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        std::uint64_t v = 0;
-        const std::uint16_t drv = g.drivers[i];
-        if (drv != kNoDriver) {
-          v = sink_word(nl, s, i, drv, gate_scratch);
-        } else if ((g.ignored_mask & (1u << i)) != 0) {
-          v = 0;
-        } else {
-          const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs + i]);
-          v = input_column_word(p, word_index);
-        }
+        const std::uint64_t v = resolve_word(nl, s, i, gate_scratch.data(), in_pos, word_index);
         acc &= v;
       }
       if (g.kind == GateKind::kNand) {
@@ -305,16 +232,7 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
     case GateKind::kNor:
       acc = 0;
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        std::uint64_t v = 0;
-        const std::uint16_t drv = g.drivers[i];
-        if (drv != kNoDriver) {
-          v = sink_word(nl, s, i, drv, gate_scratch);
-        } else if ((g.ignored_mask & (1u << i)) != 0) {
-          v = 0;
-        } else {
-          const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs + i]);
-          v = input_column_word(p, word_index);
-        }
+        const std::uint64_t v = resolve_word(nl, s, i, gate_scratch.data(), in_pos, word_index);
         acc |= v;
       }
       if (g.kind == GateKind::kNor) {
@@ -325,16 +243,7 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
     case GateKind::kXnor:
       acc = 0;
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        std::uint64_t v = 0;
-        const std::uint16_t drv = g.drivers[i];
-        if (drv != kNoDriver) {
-          v = sink_word(nl, s, i, drv, gate_scratch);
-        } else if ((g.ignored_mask & (1u << i)) != 0) {
-          v = 0;
-        } else {
-          const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs + i]);
-          v = input_column_word(p, word_index);
-        }
+        const std::uint64_t v = resolve_word(nl, s, i, gate_scratch.data(), in_pos, word_index);
         acc ^= v;
       }
       if (g.kind == GateKind::kXnor) {
@@ -342,29 +251,11 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
       }
       break;
     case GateKind::kNot: {
-      std::uint64_t v = 0;
-      const std::uint16_t drv = g.drivers[0];
-      if (drv != kNoDriver) {
-        v = sink_word(nl, s, 0, drv, gate_scratch);
-      } else if ((g.ignored_mask & 1u) != 0) {
-        v = 0;
-      } else {
-        const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs]);
-        v = input_column_word(p, word_index);
-      }
-      acc = ~v;
+      acc = ~resolve_word(nl, s, 0, gate_scratch.data(), in_pos, word_index);
       break;
     }
     case GateKind::kBuf: {
-      const std::uint16_t drv = g.drivers[0];
-      if (drv != kNoDriver) {
-        acc = sink_word(nl, s, 0, drv, gate_scratch);
-      } else if ((g.ignored_mask & 1u) != 0) {
-        acc = 0;
-      } else {
-        const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(s) * kMaxInputs]);
-        acc = input_column_word(p, word_index);
-      }
+      acc = resolve_word(nl, s, 0, gate_scratch.data(), in_pos, word_index);
       break;
     }
     case GateKind::kDff:
