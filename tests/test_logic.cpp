@@ -1903,6 +1903,80 @@ void test_barrier_o2_full_dff_nq_polarity() {
 }
 } // namespace
 
+void test_topo_module_parity() {
+  // C1 contract: rebuild(kAll) stays bit-identical to ensure_topology on
+  // seq-free nets, and rebuild(kCombOnly) agrees with validate_sequential
+  // (ok/fail) on every net shape. Guards the topo Module seam.
+  auto orders_equal = [](const Netlist &a, const Netlist &b) {
+    if (a.topo_size != b.topo_size || a.dirty != b.dirty) {
+      return false;
+    }
+    for (std::size_t i = 0; i < a.topo_size; ++i) {
+      if (a.topo_order[i] != b.topo_order[i]) {
+        return false;
+      }
+    }
+    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+      if (a.topo_level[s] != b.topo_level[s]) {
+        return false;
+      }
+    }
+    return true;
+  };
+  // Seq-free DAG: kAll == ensure_topology and == kCombOnly, order-identical.
+  {
+    Netlist base;
+    const std::uint16_t a = logic::add_gate(base, GateKind::kAnd, 2).value;
+    const std::uint16_t o = logic::add_gate(base, GateKind::kOr, 2).value;
+    const std::uint16_t n = logic::add_gate(base, GateKind::kNot, 1).value;
+    assert(logic::wire(base, a, o, 0).ok());
+    assert(logic::wire(base, o, n, 0).ok());
+    Netlist via_ensure = base;
+    Netlist via_all = base;
+    Netlist via_comb = base;
+    assert(logic::ensure_topology(via_ensure).ok());
+    assert(logic::topo::rebuild(via_all, logic::EdgeFilter::kAll).ok());
+    assert(logic::topo::rebuild(via_comb, logic::EdgeFilter::kCombOnly).ok());
+    assert(orders_equal(via_ensure, via_all));
+    assert(orders_equal(via_ensure, via_comb));
+    assert(logic::validate_sequential(base).ok());
+    // reaches filters agree when no sequential gate exists.
+    assert(logic::topo::reaches(base, a, n, logic::EdgeFilter::kAll));
+    assert(logic::topo::reaches(base, a, n, logic::EdgeFilter::kCombOnly));
+    assert(!logic::topo::reaches(base, n, a, logic::EdgeFilter::kAll));
+    assert(!logic::topo::reaches(base, n, a, logic::EdgeFilter::kCombOnly));
+  }
+  // Pure combinational cycle: every entry point fails loudly.
+  {
+    Netlist nl;
+    const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+    const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+    nl.gates[a].drivers[0] = n;
+    nl.gates[n].drivers[0] = a;
+    nl.dirty = true;
+    assert(!logic::ensure_topology(nl).ok());
+    nl.dirty = true;
+    assert(!logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
+    nl.dirty = true;
+    assert(!logic::topo::rebuild(nl, logic::EdgeFilter::kCombOnly).ok());
+    assert(!logic::validate_sequential(nl).ok());
+  }
+  // Legal flop feedback: kAll sees the loop, kCombOnly + validator accept.
+  {
+    Netlist nl;
+    barrier_place_seq(nl, 0, GateKind::kDff, 1);
+    const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+    assert(logic::wire(nl, a, 0, 0).ok()); // AND.Y -> DFF.D
+    assert(logic::wire(nl, 0, a, 0).ok()); // DFF.Q -> AND.0 (closes the loop)
+    assert(logic::topo::reaches(nl, a, 0, logic::EdgeFilter::kAll));
+    assert(!logic::topo::reaches(nl, a, 0, logic::EdgeFilter::kCombOnly));
+    assert(logic::topo::rebuild(nl, logic::EdgeFilter::kCombOnly).ok());
+    assert(logic::validate_sequential(nl).ok());
+    nl.dirty = true;
+    assert(!logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
+  }
+}
+
 int main() {
   test_kinds();
   test_counters_and_slots();
@@ -1960,6 +2034,7 @@ int main() {
   test_barrier_o2_closed_cluster();
   test_barrier_o2_toggle_converges();
   test_barrier_o2_full_dff_nq_polarity();
+  test_topo_module_parity();
   std::cout << "test_logic: OK\n";
   return 0;
 }

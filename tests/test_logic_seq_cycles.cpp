@@ -75,9 +75,9 @@ void test_flop_feedback_loop() {
   assert(logic::wire(nl, 0, a, 0).ok()); // DFF.Y -> AND.0 (closes the loop)
   assert(logic::has_sequential_gates(nl));
   assert(logic::validate_sequential(nl).ok());
-  // The old predicate still flags it — the Q-boundary is what allows it.
-  assert(logic::detail::reaches(nl, a, 0));
-  assert(!logic::detail::reaches_seq(nl, a, 0));
+  // The all-edges predicate still flags it — the Q-boundary is what allows it.
+  assert(logic::topo::reaches(nl, a, 0, logic::EdgeFilter::kAll));
+  assert(!logic::topo::reaches(nl, a, 0, logic::EdgeFilter::kCombOnly));
 }
 
 void test_clk_and_dlatch_variants() {

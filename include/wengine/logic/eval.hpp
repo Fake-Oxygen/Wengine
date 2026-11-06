@@ -17,6 +17,7 @@
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -80,81 +81,11 @@ namespace wengine::logic {
   return LogicValue::kLow;
 }
 
-// Compile (or reuse) the Kahn level order. Deterministic: zero-indegree
-// seeds scan in slot order; successors of each popped gate scan in slot
-// order; FIFO queue. Levels: 0 for sources, else 1 + max(driver levels).
-// No allocation (fixed stack indegree + queue). Keeps dirty on failure.
+// Compile (or reuse) the Kahn level order over all edges. Canonical body
+// lives in topo::rebuild (the shared topology Module); this stays as the
+// stable entry point used by solvers, CLI, and tests.
 [[nodiscard]] inline core::Status ensure_topology(Netlist &nl) noexcept {
-  if (!nl.dirty && nl.topo_size == nl.live_count) {
-    return core::Status::success();
-  }
-  std::uint8_t indeg[kMaxGates] = {};
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    std::uint8_t d = 0;
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        ++d;
-      }
-    }
-    indeg[s] = d;
-    nl.topo_level[s] = 0;
-  }
-  std::uint16_t queue[kMaxGates];
-  std::size_t head = 0;
-  std::size_t tail = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && indeg[s] == 0) {
-      queue[tail++] = s;
-    }
-  }
-  std::size_t order_idx = 0;
-  while (head < tail) {
-    const std::uint16_t cur = queue[head++];
-    // Depth is final now: every driver popped earlier (topo order).
-    std::uint16_t depth = 0;
-    const Gate &cg = nl.gates[cur];
-    for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-      const std::uint16_t drv = cg.drivers[i];
-      if (drv == kNoDriver) {
-        continue;
-      }
-      const std::uint16_t cand = static_cast<std::uint16_t>(nl.topo_level[drv] + 1);
-      if (cand > depth) {
-        depth = cand;
-      }
-    }
-    nl.topo_level[cur] = depth;
-    nl.topo_order[order_idx++] = cur;
-    // Successors in slot order (deterministic push order).
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      Gate &g = nl.gates[s];
-      if (!g.live || indeg[s] == 0) {
-        continue;
-      }
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] != cur) {
-          continue;
-        }
-        --indeg[s];
-        if (indeg[s] == 0) {
-          queue[tail++] = s;
-          break; // one push per gate (remaining inputs from cur already counted)
-        }
-      }
-    }
-  }
-  if (order_idx != nl.live_count) {
-    nl.topo_size = 0;
-    nl.dirty = true;
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  nl.topo_size = static_cast<std::uint16_t>(order_idx);
-  nl.dirty = false;
-  return core::Status::success();
+  return topo::rebuild(nl, EdgeFilter::kAll);
 }
 
 // Scalar single-assignment solve over the compiled level order.

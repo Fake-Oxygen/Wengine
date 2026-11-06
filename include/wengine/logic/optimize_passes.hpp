@@ -6,6 +6,7 @@
 #include "wengine/logic/optimize_types.hpp"
 #include "wengine/logic/optimize_barrier.hpp"
 #include "wengine/logic/optimize_exact.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -33,10 +34,14 @@ inline void recount_fanout(Netlist &nl) noexcept {
   }
 }
 
-// Sequential-aware recompilation: canonical barrier rebuild (see
-// optimize_barrier.hpp). Kept as a thin forwarder so existing call sites
-// and the O0/O1 fixpoint read unchanged.
-inline bool recompile(Netlist &nl) noexcept { return rebuild_seq_topology(nl); }
+// Sequential-aware recompilation via the shared topology Module (see
+// topo.hpp): nets without sequential gates take the all-edges order,
+// otherwise the comb-only barrier order. Kept as a thin forwarder so
+// existing call sites and the O0/O1 fixpoint read unchanged.
+inline bool recompile(Netlist &nl) noexcept {
+  const EdgeFilter filter = has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll;
+  return topo::rebuild(nl, filter).ok();
+}
 
 // detach_slot_ties lives in tie_set.hpp (the TieSet seam owns all tie_rep
 // writes); this file calls it for constant-collapse paths.

@@ -20,6 +20,7 @@
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <yaml-cpp/yaml.h>
@@ -654,7 +655,7 @@ struct ClockRow {
     // file order never affects acceptance. The whole-graph validator at
     // the end stays authoritative.
     if (!is_sequential_kind(dst.kind) &&
-        detail::reaches_seq(tmp, to.value.slot, from.value.slot)) {
+        topo::reaches(tmp, to.value.slot, from.value.slot, EdgeFilter::kCombOnly)) {
       err = at + "wire closes a combinational cycle '" + w.from + "' -> '" + w.to + "'";
       return false;
     }

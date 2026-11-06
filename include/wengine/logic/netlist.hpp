@@ -15,6 +15,7 @@
 #include "wengine/core/status.hpp"
 #include "wengine/logic/block_interface.hpp"
 #include "wengine/logic/tie_set.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -500,93 +501,6 @@ namespace detail {
   return remove_gate(nl, gate.value);
 }
 
-namespace detail {
-// Reachability over the driver graph: can `from` reach `to` following
-// output->input edges? Iterative DFS on a fixed stack (no alloc). Used
-// to reject cycle-closing wires before mutation.
-[[nodiscard]] inline bool reaches(const Netlist &nl, std::uint16_t from, std::uint16_t to) noexcept {
-  if (from == to) {
-    return true;
-  }
-  bool seen[kMaxGates] = {};
-  std::uint16_t stack[kMaxGates];
-  std::size_t top = 0;
-  stack[top++] = from;
-  seen[from] = true;
-  while (top > 0) {
-    const std::uint16_t cur = stack[--top];
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
-      if (!g.live) {
-        continue;
-      }
-      bool uses_cur = false;
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] == cur) {
-          uses_cur = true;
-          break;
-        }
-      }
-      if (!uses_cur || seen[s]) {
-        continue;
-      }
-      if (s == to) {
-        return true;
-      }
-      seen[s] = true;
-      stack[top++] = s;
-    }
-  }
-  return false;
-}
-
-// Sequential-aware reachability (LOGIC-V2-SEQ3): same DFS as `reaches`,
-// but edges into sequential-gate inputs are excluded from the cycle edge
-// set — flop Q outputs break loops (state updates only on clock edges, so
-// no combinational path continues through a flop). Edges OUT of flops
-// (Q -> comb) still count: traversal expands FROM sequential gates, it
-// just never steps INTO one. On netlists without sequential gates the
-// skip is vacuous, so this is exactly `reaches`.
-[[nodiscard]] inline bool reaches_seq(const Netlist &nl, std::uint16_t from, std::uint16_t to) noexcept {
-  if (from == to) {
-    return true;
-  }
-  bool seen[kMaxGates] = {};
-  std::uint16_t stack[kMaxGates];
-  std::size_t top = 0;
-  stack[top++] = from;
-  seen[from] = true;
-  while (top > 0) {
-    const std::uint16_t cur = stack[--top];
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
-      if (!g.live) {
-        continue;
-      }
-      if (is_sequential_kind(g.kind)) {
-        continue; // Q-boundary: no cycle path continues through a flop
-      }
-      bool uses_cur = false;
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] == cur) {
-          uses_cur = true;
-          break;
-        }
-      }
-      if (!uses_cur || seen[s]) {
-        continue;
-      }
-      if (s == to) {
-        return true;
-      }
-      seen[s] = true;
-      stack[top++] = s;
-    }
-  }
-  return false;
-}
-} // namespace detail
-
 // Single-driver wire: exactly one wire per destination input. Occupied
 // inputs, tied destinations (untie first), and cycle-closing wires are
 // loud errors; the netlist is untouched on failure. Fan-out is unlimited.
@@ -615,7 +529,7 @@ namespace detail {
   // wiring order. The whole-graph validator stays authoritative for
   // combinational destinations (a live-but-uninvolved flop shields
   // nothing).
-  if (!is_sequential_kind(to.kind) && detail::reaches_seq(nl, to_slot, from_slot)) {
+  if (!is_sequential_kind(to.kind) && topo::reaches(nl, to_slot, from_slot, EdgeFilter::kCombOnly)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // cycle
   }
   to.drivers[to_input] = from_slot;

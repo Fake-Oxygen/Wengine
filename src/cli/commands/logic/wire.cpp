@@ -5,6 +5,7 @@
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/topo.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -51,13 +52,13 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::usage_error(out, "input is tied (untie it first)", kUsage);
   }
   if (wengine::logic::has_sequential_gates(nl)) {
-    // Sequential netlist: flop Q outputs break loops, so the comb-only
-    // reachability check would false-positive on legal feedback (DFF Q ->
-    // comb -> D). Tentatively wire, validate the whole graph over comb
-    // edges only, then revert: wire_pins() below stays the single mutation
-    // path (its internal reaches_seq agrees with the validator — both are
-    // exact single-edge cycle tests). Polarity/fanout are untouched by the
-    // probe (validate_sequential reads drivers only), so plain revert is exact.
+  // Sequential netlist: flop Q outputs break loops, so the comb-only
+  // reachability check would false-positive on legal feedback (DFF Q ->
+  // comb -> D). Tentatively wire, validate the whole graph over comb
+  // edges only, then revert: wire_pins() below stays the single mutation
+  // path (its internal topo::reaches agrees with the validator — both are
+  // exact single-edge cycle tests). Polarity/fanout are untouched by the
+  // probe (validate_sequential reads drivers only), so plain revert is exact.
     wengine::logic::Gate &dst_gate = nl.gates[to.value.slot];
     wengine::logic::Gate &src_gate = nl.gates[from.value.slot];
     dst_gate.drivers[to.value.input] = from.value.slot;
@@ -68,7 +69,7 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
     if (!acyclic) {
       return cli::usage_error(out, "wire would close a combinational cycle", kUsage);
     }
-  } else if (wengine::logic::detail::reaches(nl, to.value.slot, from.value.slot)) {
+  } else if (wengine::logic::topo::reaches(nl, to.value.slot, from.value.slot, wengine::logic::EdgeFilter::kAll)) {
     return cli::usage_error(out, "wire would close a combinational cycle", kUsage);
   }
   const core::Status st = wengine::logic::wire_pins(nl, from.value, to.value);

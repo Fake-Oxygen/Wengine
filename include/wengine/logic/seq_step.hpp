@@ -65,6 +65,7 @@
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/optimize_barrier.hpp"
 #include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -88,63 +89,6 @@ namespace detail {
     }
   }
   return false;
-}
-
-// Combinational-only level order for the stepper (SEQ4): Kahn over
-// combinational edges only, same determinism as ensure_topology (slot-order
-// seeds, slot-order successors). Sequential gates act as roots (their Q is
-// the source value) and never appear in the order. Returns false on any
-// combinational cycle or dangling-driver defect (validate_sequential covers
-// the cycle case first; this stays defensive so stepping never silently
-// evaluates a partial order).
-[[nodiscard]] inline bool compile_comb_order(const Netlist &nl, std::uint16_t *order_out,
-                                            std::size_t &n_out) noexcept {
-  std::uint8_t indeg[kMaxGates] = {};
-  std::size_t n_comb = 0;
-  detail::count_comb_indeg(nl, indeg, n_comb);
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && !is_sequential_kind(nl.gates[s].kind) && indeg[s] >= kMaxInputs) {
-      return false; // dangling driver defect: loud, never partial
-    }
-  }
-  std::uint16_t queue[kMaxGates];
-  std::size_t head = 0;
-  std::size_t tail = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    if (is_sequential_kind(g.kind)) {
-      queue[tail++] = s; // roots: Q sources, never emitted
-    } else if (indeg[s] == 0) {
-      queue[tail++] = s;
-    }
-  }
-  std::size_t n_emit = 0;
-  while (head < tail) {
-    const std::uint16_t cur = queue[head++];
-    if (!is_sequential_kind(nl.gates[cur].kind)) {
-      order_out[n_emit++] = cur;
-    }
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
-      if (!g.live || is_sequential_kind(g.kind) || indeg[s] == 0) {
-        continue;
-      }
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] == cur) {
-          --indeg[s];
-          if (indeg[s] == 0) {
-            queue[tail++] = s;
-            break; // one push per gate (remaining inputs counted already)
-          }
-        }
-      }
-    }
-  }
-  n_out = n_emit;
-  return n_emit == n_comb;
 }
 
 // Resolve one gate input to a Low/High value. Wired inputs read gate_out
@@ -189,7 +133,7 @@ namespace detail {
 [[nodiscard]] inline core::Status eval_comb_phase1(const Netlist &nl, const SeqState &st, const LogicValue *resolved,
                                                   LogicValue *gate_out, std::uint16_t *comb_order,
                                                   std::size_t &n_comb) noexcept {
-  if (!compile_comb_order(nl, comb_order, n_comb)) {
+  if (!topo::compile_comb_order(nl, comb_order, n_comb)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   for (std::size_t s = 0; s < kMaxGates; ++s) {

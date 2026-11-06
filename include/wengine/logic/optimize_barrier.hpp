@@ -13,13 +13,9 @@
 //   - compute_feeds_seq: one O(G*fanin) reverse scan per fixpoint
 //     iteration; passes read feeds_seq[s] instead of rescanning all
 //     sequential users per gate (the old has_live_seq_user hot loop).
-//   - collect_barrier_roots / collect_reachable_roots: DCE + O2 reachability
-//     share one root rule.
-//   - rebuild_seq_topology: canonical sequential-aware Kahn order. Nets
-//     without sequential gates delegate to ensure_topology bit-identically;
-//     otherwise validate_sequential + slot-order seq roots + combinational
-//     Kahn over comb-only edges (same determinism as ensure_topology and
-//     seq_step::compile_comb_order: slot-order seeds and successors).
+//   - collect_barrier_roots: DCE + O2 reachability share one root rule.
+//     (Topology itself lives in topo.hpp: rebuild/reaches/compile_comb_order
+//     over the EdgeFilter seam; this header only classifies barrier gates.)
 //   - wire_fresh_with_polarity: fresh-build wiring with Q/NQ accounting
 //     matching wire_pins (Q edges bump output_fanout, NQ edges bump both
 //     output_fanout and nq_fanout to preserve the historical recount
@@ -80,122 +76,6 @@ inline void compute_feeds_seq(const Netlist &nl, bool *feeds_seq) noexcept {
       }
     }
   }
-}
-
-// Combinational indegree over comb-only edges (flop outputs read as
-// always-ready sources, so seq-driven edges cost 0). Shared by the
-// stepper order and the optimizer rebuild below.
-inline void count_comb_indeg(const Netlist &nl, std::uint8_t *indeg, std::size_t &n_comb) noexcept {
-  n_comb = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    indeg[s] = 0;
-    const Gate &g = nl.gates[s];
-    if (!g.live || is_frozen_kind(g.kind)) {
-      continue;
-    }
-    ++n_comb;
-    std::uint8_t d = 0;
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t drv = g.drivers[i];
-      if (drv == kNoDriver) {
-        continue;
-      }
-      if (drv >= kMaxGates || !nl.gates[drv].live) {
-        // Dangling-driver defect marker: saturate so the caller fails
-        // loudly (indeg can never drain to zero for this gate).
-        d = kMaxInputs;
-        break;
-      }
-      if (!is_frozen_kind(nl.gates[drv].kind)) {
-        ++d;
-      }
-    }
-    indeg[s] = d;
-  }
-}
-
-// Canonical sequential-aware rebuild. Returns false on genuine defects
-// (validate_sequential failure, dangling driver, combinational cycle);
-// never leaves a partial order on failure paths the caller treats as loud.
-inline bool rebuild_seq_topology(Netlist &nl) noexcept {
-  if (!has_sequential_gates(nl)) {
-    return ensure_topology(nl).ok();
-  }
-  if (!validate_sequential(nl).ok()) {
-    return false;
-  }
-  std::uint16_t n_out = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    if (is_frozen_kind(g.kind)) {
-      nl.topo_order[n_out++] = s;
-      nl.topo_level[s] = 0;
-    }
-  }
-  std::uint8_t indeg[kMaxGates] = {};
-  std::size_t n_comb = 0;
-  count_comb_indeg(nl, indeg, n_comb);
-  // Surface dangling-driver defects loudly (saturated marker above).
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && !is_frozen_kind(nl.gates[s].kind) && indeg[s] >= kMaxInputs) {
-      return false;
-    }
-  }
-  std::uint16_t queue[kMaxGates];
-  std::size_t head = 0;
-  std::size_t tail = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live || is_frozen_kind(g.kind)) {
-      continue;
-    }
-    if (indeg[s] == 0) {
-      queue[tail++] = s;
-    }
-  }
-  std::size_t n_emit = 0;
-  while (head < tail) {
-    const std::uint16_t cur = queue[head++];
-    nl.topo_order[n_out++] = cur;
-    ++n_emit;
-    std::uint16_t depth = 0;
-    const Gate &cg = nl.gates[cur];
-    for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-      const std::uint16_t drv = cg.drivers[i];
-      if (drv == kNoDriver) {
-        continue;
-      }
-      const std::uint16_t cand = static_cast<std::uint16_t>(nl.topo_level[drv] + 1);
-      if (cand > depth) {
-        depth = cand;
-      }
-    }
-    nl.topo_level[cur] = depth;
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      Gate &g = nl.gates[s];
-      if (!g.live || is_frozen_kind(g.kind) || indeg[s] == 0) {
-        continue;
-      }
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] == cur) {
-          --indeg[s];
-          if (indeg[s] == 0) {
-            queue[tail++] = s;
-            break; // one push per gate (remaining inputs counted already)
-          }
-        }
-      }
-    }
-  }
-  if (n_emit != n_comb) {
-    return false; // combinational cycle: loud, never partial
-  }
-  nl.topo_size = n_out;
-  nl.dirty = false;
-  return true;
 }
 
 // Fresh-build wiring with polarity accounting (mirrors wire_pins without
