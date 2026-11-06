@@ -187,20 +187,10 @@ namespace wengine::logic {
   }
   // Dangling-input -> block position map via the BlockInterface seam
   // (same leader order scalar `solve` consumes; members share the leader's
-  // column). kNoDriver = wired/ignored.
+  // column). kNoDriver = wired/ignored. Single pass: one O(G) query per
+  // pin would be quadratic per word.
   std::uint16_t in_pos[kMaxGates * kMaxInputs];
-  for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
-    in_pos[i] = kNoDriver;
-  }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      in_pos[static_cast<std::size_t>(s) * kMaxInputs + i] = input_index(nl, s, i);
-    }
-  }
+  build_input_positions(nl, in_pos);
   const std::size_t n_inputs = block_input_count(nl);
   std::size_t n_outputs = block_output_count(nl);
   if (block_outputs.size() != n_outputs) {
