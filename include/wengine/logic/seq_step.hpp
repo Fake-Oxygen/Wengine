@@ -63,6 +63,7 @@
 #include "wengine/core/status.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/optimize_barrier.hpp"
 #include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/types.hpp"
 
@@ -100,26 +101,11 @@ namespace detail {
                                             std::size_t &n_out) noexcept {
   std::uint8_t indeg[kMaxGates] = {};
   std::size_t n_comb = 0;
+  detail::count_comb_indeg(nl, indeg, n_comb);
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live || is_sequential_kind(g.kind)) {
-      continue;
+    if (nl.gates[s].live && !is_sequential_kind(nl.gates[s].kind) && indeg[s] >= kMaxInputs) {
+      return false; // dangling driver defect: loud, never partial
     }
-    ++n_comb;
-    std::uint8_t d = 0;
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t drv = g.drivers[i];
-      if (drv == kNoDriver) {
-        continue;
-      }
-      if (drv >= kMaxGates || !nl.gates[drv].live) {
-        return false; // dangling driver defect: loud, never partial
-      }
-      if (!is_sequential_kind(nl.gates[drv].kind)) {
-        ++d;
-      }
-    }
-    indeg[s] = d;
   }
   std::uint16_t queue[kMaxGates];
   std::size_t head = 0;
