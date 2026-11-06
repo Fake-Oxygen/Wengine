@@ -47,8 +47,11 @@ bool netlists_equal_full(const Netlist &a, const Netlist &b) {
       return false;
     }
   }
+  if (!logic::ties_equal(a, b)) {
+    return false;
+  }
   for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
-    if (a.tie_rep[f] != b.tie_rep[f] || a.driver_inv[f] != b.driver_inv[f]) {
+    if (a.driver_inv[f] != b.driver_inv[f]) {
       return false;
     }
   }

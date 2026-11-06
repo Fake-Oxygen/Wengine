@@ -47,7 +47,7 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
   if (dst.drivers[to.value.input] != wengine::logic::kNoDriver) {
     return cli::usage_error(out, "input already wired (unwire it first)", kUsage);
   }
-  if (nl.tie_rep[wengine::logic::tie_flat(to.value.slot, to.value.input)] != 0) {
+  if (wengine::logic::is_tied(nl, to.value.slot, to.value.input)) {
     return cli::usage_error(out, "input is tied (untie it first)", kUsage);
   }
   if (wengine::logic::has_sequential_gates(nl)) {

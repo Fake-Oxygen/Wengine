@@ -147,7 +147,7 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
         if (wengine::logic::tie_leader_flat(nl, flat) != flat) {
           continue;
         }
-        if (nl.tie_rep[flat] == 0) {
+        if (!wengine::logic::is_tied(nl, s, i)) {
           continue;
         }
         std::string line;

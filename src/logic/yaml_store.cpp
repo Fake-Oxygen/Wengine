@@ -866,7 +866,7 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
         continue;
       }
       const std::size_t flat = tie_flat(s, i);
-      if (nl.tie_rep[flat] == 0) {
+      if (!is_tied(nl, s, i)) {
         continue;
       }
       const std::size_t leader = tie_leader_flat(nl, flat);

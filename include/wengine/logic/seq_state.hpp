@@ -36,8 +36,9 @@
 
 namespace wengine::logic {
 
-// (is_sequential_kind lives in netlist.hpp beside valid_fanin — vocabulary
-// with vocabulary — and is used here and by wire()'s cycle check.)
+// (is_sequential_kind lives in types.hpp beside the GateKind enum — kind
+// vocabulary with kind vocabulary — and is used here, by the TieSet and
+// BlockInterface seams, and by wire()'s cycle check.)
 
 struct SeqState {
   std::array<LogicValue, kMaxGates> q{};       // latched Q per slot (kLow at fresh attach)

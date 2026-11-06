@@ -21,9 +21,9 @@ enum class Constness : std::uint8_t {
   kV = 2, // varies with block inputs
 };
 
-// Forward declarations for exact pass (defined below).
+// Forward declarations for exact pass (defined in optimize_passes.hpp;
+// detach_slot_ties lives in tie_set.hpp).
 inline void recount_fanout(Netlist &nl) noexcept;
-inline void detach_slot_ties(Netlist &nl, std::uint16_t s) noexcept;
 inline void retag(Netlist &nl, std::uint16_t slot, GateKind kind) noexcept;
 
 // Exact truth-table simplification (semantic, not just structural):
@@ -161,27 +161,10 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
     if (tie_leader_flat(nl, leader) != leader) {
       continue;
     }
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      Gate &g = nl.gates[s];
-      if (!g.live) {
-        continue;
-      }
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] != kNoDriver) {
-          continue;
-        }
-        if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
-          continue;
-        }
-        const std::size_t flat = tie_flat(s, i);
-        if (tie_leader_flat(nl, flat) != leader) {
-          continue;
-        }
-        nl.tie_rep[flat] = 0;
-        g.ignored_mask = static_cast<std::uint8_t>(g.ignored_mask | static_cast<std::uint8_t>(1u << i));
-        changed = true;
-      }
-    }
+    // Dissolve via the TieSet seam: untie every member, mark ignored.
+    // The class always holds at least its leader pin, so this changes the net.
+    ignore_tie_class(nl, leader);
+    changed = true;
   }
   // Constant outputs: collapse to canonical form (same as structural
   // const-fold roots: C0 = AND(0,0), C1 = NAND(0,0)).
@@ -198,7 +181,7 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
       const bool canonical = g.kind == GateKind::kAnd && g.input_count == 2 && g.ignored_mask == 0x03u &&
                              g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
       if (!canonical) {
-        detail::detach_slot_ties(nl, s);
+        detach_slot_ties(nl, s);
         if (g.kind != GateKind::kAnd) {
           retag(nl, s, GateKind::kAnd);
         }
@@ -215,7 +198,7 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
       const bool canonical = g.kind == GateKind::kNand && g.input_count == 2 && g.ignored_mask == 0x03u &&
                              g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
       if (!canonical) {
-        detail::detach_slot_ties(nl, s);
+        detach_slot_ties(nl, s);
         if (g.kind != GateKind::kNand) {
           retag(nl, s, GateKind::kNand);
         }

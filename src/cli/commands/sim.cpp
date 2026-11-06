@@ -347,9 +347,8 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
   std::vector<logic::LogicValue> stimulus;
   stimulus.reserve(n_in);
   for (const logic::BlockPin &p : in_pins) {
-    const std::size_t flat = static_cast<std::size_t>(p.slot) * logic::kMaxInputs + p.input;
     const logic::Gate &g = nl.gates[p.slot];
-    if (g.kind == logic::GateKind::kDff && p.input == 4 && nl.tie_rep[flat] == 0) {
+    if (g.kind == logic::GateKind::kDff && p.input == 4 && !logic::is_tied(nl, p.slot, p.input)) {
       stimulus.push_back(logic::LogicValue::kHigh); // FR-008: unconnected EN asserted
     } else {
       stimulus.push_back(logic::LogicValue::kLow);

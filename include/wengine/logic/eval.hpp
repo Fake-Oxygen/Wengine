@@ -172,60 +172,11 @@ namespace wengine::logic {
     return st;
   }
   // Resolved value per (slot, input); only dangling entries are read.
+  // Shared prelude via the BlockInterface seam (leaders consume inputs in
+  // slot order, ignored tie to Low, ties fan out, X/Z loud).
   LogicValue resolved[kMaxGates * kMaxInputs];
-  for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
-    resolved[i] = LogicValue::kLow;
-  }
-  std::size_t cursor = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        resolved[static_cast<std::size_t>(s) * kMaxInputs + i] = LogicValue::kLow;
-        continue;
-      }
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
-      if (tie_leader_flat(nl, flat) != flat) {
-        continue; // non-leader members share the leader's value below
-      }
-      if (cursor >= block_inputs.size()) {
-        return core::Status::failure(core::StatusCode::kInvalidArgument);
-      }
-      const LogicValue v = block_inputs[cursor++];
-      if (v != LogicValue::kLow && v != LogicValue::kHigh) {
-        return core::Status::failure(core::StatusCode::kInvalidArgument);
-      }
-      resolved[flat] = v;
-    }
-  }
-  if (cursor != block_inputs.size()) {
+  if (!fill_resolved(nl, block_inputs, resolved).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  // Fan tied member values out from their leaders.
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
-      const std::size_t leader = tie_leader_flat(nl, flat);
-      if (leader != flat) {
-        resolved[flat] = resolved[leader];
-      }
-    }
   }
 
   LogicValue gate_out[kMaxGates];
@@ -367,53 +318,23 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
   if (gate_scratch.size() < kMaxGates) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  // Dangling-input -> block position map (slot order, then input index,
-  // one entry per tie class leader: same order scalar `solve` consumes;
-  // tied members share their leader's column word). kNoDriver = wired/ignored.
+  // Dangling-input -> block position map via the BlockInterface seam
+  // (same leader order scalar `solve` consumes; members share the leader's
+  // column). kNoDriver = wired/ignored.
   std::uint16_t in_pos[kMaxGates * kMaxInputs];
   for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
     in_pos[i] = kNoDriver;
   }
-  std::size_t n_inputs = 0;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     const Gate &g = nl.gates[s];
     if (!g.live) {
       continue;
     }
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
-      if (tie_leader_flat(nl, flat) != flat) {
-        continue; // resolved to the leader's column below
-      }
-      in_pos[flat] = static_cast<std::uint16_t>(n_inputs);
-      ++n_inputs;
+      in_pos[static_cast<std::size_t>(s) * kMaxInputs + i] = input_index(nl, s, i);
     }
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
-      const std::size_t leader = tie_leader_flat(nl, flat);
-      if (leader != flat) {
-        in_pos[flat] = in_pos[leader];
-      }
-    }
-  }
+  const std::size_t n_inputs = block_input_count(nl);
   std::size_t n_outputs = block_output_count(nl);
   if (block_outputs.size() != n_outputs) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);

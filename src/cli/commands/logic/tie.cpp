@@ -56,7 +56,7 @@ int LogicTieSpec::run(ArgCursor &args, std::ostream &out) {
   }
   // Snapshot the tie table: tie_pins can merge two existing classes, so
   // pin-level untie would not exactly revert a merge — restore wholesale.
-  const auto tie_before = nl.tie_rep;
+  const auto tie_before = wengine::logic::snapshot_ties(nl);
   if (!wengine::logic::tie_pins(nl, a.value, b.value).ok()) {
     return cli::usage_error(out, "tie failed", kUsage);
   }
@@ -66,7 +66,7 @@ int LogicTieSpec::run(ArgCursor &args, std::ostream &out) {
   // as do level latches. An illegal SR tie (S=R=1 through the class)
   // fails here: the tie is reverted so the refused net changes no state.
   if (!support::apply_async_and_report(nl, out).ok()) {
-    nl.tie_rep = tie_before;
+    wengine::logic::restore_ties(nl, tie_before);
     return cli::usage_error(out, "tie: S=1,R=1 is illegal (SR latch holds state, tie reverted)", kUsage);
   }
   return core::kExitOk;

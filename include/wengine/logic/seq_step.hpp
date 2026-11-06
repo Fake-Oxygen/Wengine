@@ -182,67 +182,6 @@ namespace detail {
   return true;
 }
 
-// Dangling-input resolution (shared prelude for stepping and async-apply):
-// leaders consume block_inputs in slot order, X/Z rejected; ignored pins
-// tie to kLow. Callee zeroes resolved[kMaxGates * kMaxInputs] first.
-[[nodiscard]] inline core::Status compose_resolved(const Netlist &nl, std::span<const LogicValue> block_inputs,
-                                                  LogicValue *resolved) noexcept {
-  for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
-    resolved[i] = LogicValue::kLow;
-  }
-  std::size_t cursor = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        resolved[static_cast<std::size_t>(s) * kMaxInputs + i] = LogicValue::kLow;
-        continue;
-      }
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
-      if (tie_leader_flat(nl, flat) != flat) {
-        continue; // non-leader members share the leader's value below
-      }
-      if (cursor >= block_inputs.size()) {
-        return core::Status::failure(core::StatusCode::kInvalidArgument);
-      }
-      const LogicValue v = block_inputs[cursor++];
-      if (v != LogicValue::kLow && v != LogicValue::kHigh) {
-        return core::Status::failure(core::StatusCode::kInvalidArgument);
-      }
-      resolved[flat] = v;
-    }
-  }
-  if (cursor != block_inputs.size()) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
-      const std::size_t leader = tie_leader_flat(nl, flat);
-      if (leader != flat) {
-        resolved[flat] = resolved[leader];
-      }
-    }
-  }
-  return core::Status::success();
-}
-
 // Phase 1 combinational eval at time T with OLD Qs (shared): seeds
 // gate_out with flop Qs, then settles combinational gates in the
 // deterministic comb order. Used by the stepper snapshot and the
@@ -401,7 +340,7 @@ namespace detail {
   // Dangling-input resolution (same order/rules as solve): leaders consume
   // block_inputs in slot order, X/Z rejected; ignored pins tie to kLow.
   LogicValue resolved[kMaxGates * kMaxInputs];
-  if (!detail::compose_resolved(nl, block_inputs, resolved).ok()) {
+  if (!fill_resolved(nl, block_inputs, resolved).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
 
@@ -599,7 +538,7 @@ namespace detail {
     }
   }
   LogicValue resolved[kMaxGates * kMaxInputs];
-  if (!detail::compose_resolved(nl, block_inputs, resolved).ok()) {
+  if (!fill_resolved(nl, block_inputs, resolved).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   LogicValue gate_out[kMaxGates];
@@ -663,7 +602,7 @@ namespace detail {
     }
   }
   LogicValue resolved[kMaxGates * kMaxInputs];
-  if (!detail::compose_resolved(nl, block_inputs, resolved).ok()) {
+  if (!fill_resolved(nl, block_inputs, resolved).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   LogicValue gate_out[kMaxGates];

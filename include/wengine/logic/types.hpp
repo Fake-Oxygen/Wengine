@@ -48,6 +48,16 @@ enum class GateKind : std::uint8_t {
   kSrlatch = 20,
 };
 
+// Sequential kinds own clocked state (see seq_state.hpp); combinational
+// gates never appear in the state pool. Explicit (not `ordinal >= 16`) so
+// future appended kinds stay stateless until their own task wires them —
+// never silently DFF-shaped. Lives here (kind vocabulary, beside the enum)
+// so the TieSet and BlockInterface seams can use it without including
+// netlist.hpp.
+[[nodiscard]] constexpr bool is_sequential_kind(GateKind k) noexcept {
+  return k == GateKind::kDff || k == GateKind::kDlatch || k == GateKind::kJk || k == GateKind::kT || k == GateKind::kSrlatch;
+}
+
 // Net value. V1 produces/consumes only kLow/kHigh; kHighZ/kUnknown exist
 // now so tri-state buses (V2, docs/logic.md §12) need no type change —
 // eval rejects them loudly until then.
@@ -116,6 +126,23 @@ inline constexpr std::size_t kMaxGates = 1024; // slot cap, loud on overflow
   }
   return "?";
 }
+
+// Pin vocabulary (moved from netlist.hpp so the TieSet seam in tie_set.hpp
+// can take pins without a netlist.hpp include cycle; unification of the two
+// near-identical structs is a tracked follow-up, not this change).
+struct PinRef {
+  std::uint16_t slot = 0;
+  bool is_output = false;
+  std::uint8_t input = 0; // 0-based, valid iff !is_output
+  bool negated = false;   // valid iff is_output: NQ source on sequential gates
+};
+
+struct BlockPin {
+  std::uint16_t slot = 0;
+  std::uint8_t input = 0; // valid iff !is_output
+  bool is_output = false;
+  bool negated = false; // valid iff is_output: the NQ (rather than Q) block output
+};
 
 // One gate slot. `live` false => free-list entry. `counter` is the
 // per-kind monotonic id (display: AND<counter>); `input_count` the

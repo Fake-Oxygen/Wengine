@@ -241,7 +241,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
       detail::put_u8(out, s.netlist.driver_inv[static_cast<std::size_t>(slot) * logic::kMaxInputs + k]);
     }
     for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
-      detail::put_u16_le(out, s.netlist.tie_rep[static_cast<std::size_t>(slot) * logic::kMaxInputs + k]);
+      detail::put_u16_le(out, logic::tie_rep_entry(s.netlist, static_cast<std::size_t>(slot) * logic::kMaxInputs + k));
     }
     detail::put_u64_le(out, g.propagation_delay_ps);
   }
@@ -650,7 +650,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
             rep > logic::kMaxGates * logic::kMaxInputs) {
           return invalid();
         }
-        tmp.netlist.tie_rep[static_cast<std::size_t>(slot) * logic::kMaxInputs + k] = rep;
+        logic::set_tie_rep_entry(tmp.netlist, static_cast<std::size_t>(slot) * logic::kMaxInputs + k, rep);
       }
       std::uint64_t delay = 0;
       if (!detail::get_u64_le(in, delay)) {
@@ -699,25 +699,12 @@ inline bool get_f64_le(std::istream &in, double &v) {
             return invalid();
           }
         }
-        const std::uint16_t rep = tmp.netlist.tie_rep[flat];
-        if (rep != 0) {
-          if (drv != logic::kNoDriver || (g.ignored_mask & (1u << i)) != 0) {
-            return invalid();
-          }
-          const std::size_t leader = static_cast<std::size_t>(rep - 1u);
-          if (leader >= logic::kMaxGates * logic::kMaxInputs ||
-              tmp.netlist.tie_rep[leader] != rep) {
-            return invalid();
-          }
-          const std::uint16_t ls = static_cast<std::uint16_t>(leader / logic::kMaxInputs);
-          const std::uint8_t li = static_cast<std::uint8_t>(leader % logic::kMaxInputs);
-          const logic::Gate &lg = tmp.netlist.gates[ls];
-          if (!lg.live || li >= lg.input_count || lg.drivers[li] != logic::kNoDriver ||
-              (lg.ignored_mask & (1u << li)) != 0) {
-            return invalid();
-          }
-        }
       }
+    }
+    // Star-consistency of tie classes (TieSet seam owns the encoding;
+    // covers wired+tied and ignored+tied too).
+    if (!logic::validate_ties(tmp.netlist)) {
+      return invalid();
     }
     // Recompute derived data (fanouts, topo), never stored.
     for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {

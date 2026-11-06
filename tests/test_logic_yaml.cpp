@@ -60,10 +60,8 @@ bool netlists_equal(const logic::Netlist &a, const logic::Netlist &b) {
       return false;
     }
   }
-  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
-    if (a.tie_rep[f] != b.tie_rep[f]) {
-      return false;
-    }
+  if (!logic::ties_equal(a, b)) {
+    return false;
   }
   for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
     const logic::Gate &x = a.gates[s];

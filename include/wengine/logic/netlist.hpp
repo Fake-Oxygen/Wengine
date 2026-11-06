@@ -13,6 +13,8 @@
 // wins). `use` clears the mark. Both are idempotent.
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/block_interface.hpp"
+#include "wengine/logic/tie_set.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -22,67 +24,9 @@
 
 namespace wengine::logic {
 
-struct PinRef {
-  std::uint16_t slot = 0;
-  bool is_output = false;
-  std::uint8_t input = 0; // 0-based, valid iff !is_output
-  bool negated = false;   // valid iff is_output: NQ source on sequential gates
-};
-
-struct BlockPin {
-  std::uint16_t slot = 0;
-  std::uint8_t input = 0; // valid iff !is_output
-  bool is_output = false;
-  bool negated = false; // valid iff is_output: the NQ (rather than Q) block output
-};
-
-// Tied-input equivalence (LOGIC-14): input-input shorts as first-class
-// nets. Only dangling (unwired, non-ignored) input pins may be tied.
-// Canonical rep is the lowest (slot, input) in the class; enumeration is
-// slot order, then input index. Star encoding in Netlist::tie_rep:
-// 0 == singleton, else leader_flat + 1.
-[[nodiscard]] constexpr std::size_t tie_flat(std::uint16_t slot, std::uint8_t input) noexcept {
-  return static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input);
-}
-
-[[nodiscard]] inline std::size_t tie_leader_flat(const Netlist &nl, std::size_t flat) noexcept {
-  const std::uint16_t rep = nl.tie_rep[flat];
-  if (rep == 0) {
-    return flat;
-  }
-  return static_cast<std::size_t>(rep - 1u);
-}
-
-[[nodiscard]] inline bool is_tied(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || input >= kMaxInputs) {
-    return false;
-  }
-  return nl.tie_rep[tie_flat(slot, input)] != 0;
-}
-
-[[nodiscard]] inline bool is_tie_leader(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  const std::size_t flat = tie_flat(slot, input);
-  return tie_leader_flat(nl, flat) == flat;
-}
-
-// Number of tied peers in the class (1 == singleton-or-leader-alone).
-[[nodiscard]] inline std::size_t tie_group_size(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  const std::size_t flat = tie_flat(slot, input);
-  const std::size_t leader = tie_leader_flat(nl, flat);
-  std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (tie_leader_flat(nl, tie_flat(s, i)) == leader) {
-        ++n;
-      }
-    }
-  }
-  return n;
-}
+// Pin vocabulary lives in types.hpp (so tie_set.hpp can take pins without
+// including this header); tie math + block-interface derivation live in
+// tie_set.hpp / block_interface.hpp. This header owns mutation + parsing.
 
 [[nodiscard]] constexpr std::uint8_t kind_ordinal(GateKind k) noexcept {
   return static_cast<std::uint8_t>(k);
@@ -123,15 +67,6 @@ struct BlockPin {
     return 3;
   }
   return 2;
-}
-
-// Sequential kinds own clocked state (see seq_state.hpp); combinational
-// gates never appear in the state pool. Explicit (not `ordinal >= 16`) so
-// future appended kinds stay stateless until their own task wires them —
-// never silently DFF-shaped.
-[[nodiscard]] constexpr bool is_sequential_kind(GateKind k) noexcept {
-  return k == GateKind::kDff || k == GateKind::kDlatch || k == GateKind::kJk || k == GateKind::kT ||
-         k == GateKind::kSrlatch;
 }
 
 namespace detail {
@@ -480,7 +415,8 @@ namespace detail {
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     g.drivers[i] = kNoDriver;
     nl.driver_inv[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0;
-    nl.tie_rep[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0;
+    // tie_rep entries are already 0 by the remove/reset invariant
+    // (detach_slot_ties clears on remove, reset_all_ties on reset).
   }
   if (nl.live_count < kMaxGates) {
     ++nl.live_count;
@@ -507,60 +443,8 @@ namespace detail {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   // Detach ties first (while input_count is still valid): each tied pin
-  // of this gate leaves its class; survivors re-elect below via untie.
-  for (std::uint8_t i = 0; i < g.input_count; ++i) {
-    const std::size_t flat = tie_flat(slot, i);
-    if (nl.tie_rep[flat] == 0) {
-      continue;
-    }
-    const std::size_t leader = tie_leader_flat(nl, flat);
-    // Collect surviving members (live pins in the same class, excluding
-    // every pin of the gate being removed).
-    std::size_t survivors[kMaxGates * kMaxInputs];
-    std::size_t n_surv = 0;
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      if (s == slot) {
-        continue;
-      }
-      const Gate &o = nl.gates[s];
-      if (!o.live) {
-        continue;
-      }
-      for (std::uint8_t j = 0; j < o.input_count; ++j) {
-        const std::size_t f = tie_flat(s, j);
-        if (tie_leader_flat(nl, f) == leader) {
-          survivors[n_surv++] = f;
-        }
-      }
-    }
-    // Clear the whole class, then re-star survivors around their minimum.
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &o = nl.gates[s];
-      if (!o.live && s != slot) {
-        continue;
-      }
-      const std::uint8_t lim = (s == slot) ? g.input_count : (o.live ? o.input_count : 0);
-      for (std::uint8_t j = 0; j < lim; ++j) {
-        const std::size_t f = tie_flat(s, j);
-        if (tie_leader_flat(nl, f) == leader) {
-          nl.tie_rep[f] = 0;
-        }
-      }
-    }
-    if (n_surv > 1) {
-      std::size_t new_leader = survivors[0];
-      for (std::size_t k = 1; k < n_surv; ++k) {
-        if (survivors[k] < new_leader) {
-          new_leader = survivors[k];
-        }
-      }
-      for (std::size_t k = 0; k < n_surv; ++k) {
-        nl.tie_rep[survivors[k]] = static_cast<std::uint16_t>(new_leader + 1u);
-      }
-    } else if (n_surv == 1) {
-      nl.tie_rep[survivors[0]] = 0; // lone survivor back to singleton
-    }
-  }
+  // of this gate leaves its class via the TieSet seam; survivors re-elect.
+  detach_slot_ties(nl, slot);
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     const std::uint16_t drv = g.drivers[i];
     if (drv != kNoDriver && drv < kMaxGates && nl.gates[drv].live) {
@@ -598,7 +482,7 @@ namespace detail {
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     g.drivers[i] = kNoDriver;
     nl.driver_inv[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0;
-    nl.tie_rep[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0;
+    // tie entries already cleared by detach_slot_ties above.
   }
   if (nl.live_count > 0) {
     --nl.live_count;
@@ -721,7 +605,7 @@ namespace detail {
   if (to.drivers[to_input] != kNoDriver) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // occupied
   }
-  if (nl.tie_rep[tie_flat(to_slot, to_input)] != 0) {
+  if (is_tied(nl, to_slot, to_input)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
   }
   // Q-boundary: an edge into a sequential-gate input can never close a
@@ -841,7 +725,7 @@ namespace detail {
   if (pin.input >= g.input_count) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (nl.tie_rep[tie_flat(pin.slot, pin.input)] != 0) {
+  if (is_tied(nl, pin.slot, pin.input)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
   }
   g.ignored_mask = static_cast<std::uint8_t>(g.ignored_mask | (1u << pin.input));
@@ -887,9 +771,9 @@ inline void reset_netlist(Netlist &nl) noexcept {
     }
     for (std::size_t i = 0; i < kMaxInputs; ++i) {
       nl.driver_inv[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
-      nl.tie_rep[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
     }
   }
+  reset_all_ties(nl);
   for (std::size_t i = 0; i < nl.next_counter.size(); ++i) {
     nl.next_counter[i] = 1;
   }
@@ -898,121 +782,7 @@ inline void reset_netlist(Netlist &nl) noexcept {
   nl.topo_size = 0;
 }
 
-// Tie two dangling input pins to the same net (LOGIC-14). Both pins must
-// be live inputs, unwired, non-ignored; outputs are rejected. Tying is
-// idempotent within a class (re-tying members succeeds); merging two
-// classes elects the lowest (slot, input) as canonical leader and
-// re-stars every member. Same-pin ties fail loudly.
-[[nodiscard]] inline core::Status tie_pins(Netlist &nl, PinRef a, PinRef b) noexcept {
-  if (a.is_output || b.is_output) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  if (a.slot >= kMaxGates || b.slot >= kMaxGates) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  const Gate &ga = nl.gates[a.slot];
-  const Gate &gb = nl.gates[b.slot];
-  if (!ga.live || !gb.live) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  if (a.input >= ga.input_count || b.input >= gb.input_count) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  if (a.slot == b.slot && a.input == b.input) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  if (ga.drivers[a.input] != kNoDriver || gb.drivers[b.input] != kNoDriver) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument); // wired
-  }
-  if (((ga.ignored_mask & (1u << a.input)) != 0) || ((gb.ignored_mask & (1u << b.input)) != 0)) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument); // ignored
-  }
-  const std::size_t fa = tie_flat(a.slot, a.input);
-  const std::size_t fb = tie_flat(b.slot, b.input);
-  const std::size_t la = tie_leader_flat(nl, fa);
-  const std::size_t lb = tie_leader_flat(nl, fb);
-  if (la == lb) {
-    return core::Status::success(); // idempotent
-  }
-  const std::size_t new_leader = (la < lb) ? la : lb;
-  // Re-star every member of both classes around the new leader.
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::size_t f = tie_flat(s, i);
-      const std::size_t l = tie_leader_flat(nl, f);
-      if (l == la || l == lb) {
-        nl.tie_rep[f] = static_cast<std::uint16_t>(new_leader + 1u);
-      }
-    }
-  }
-  return core::Status::success();
-}
-
-// Untie one input pin from its class (LOGIC-14). Singleton (untied),
-// wired, ignored, output, or dead pins fail loudly. Removing the leader
-// re-elects the lowest surviving member; removing a non-leader leaves
-// the class otherwise intact. A two-member class dissolves back to two
-// singletons.
-[[nodiscard]] inline core::Status untie_pin(Netlist &nl, PinRef pin) noexcept {
-  if (pin.is_output) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  if (pin.slot >= kMaxGates || !nl.gates[pin.slot].live) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  const Gate &g = nl.gates[pin.slot];
-  if (pin.input >= g.input_count) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  if (g.drivers[pin.input] != kNoDriver) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument); // wired
-  }
-  if ((g.ignored_mask & (1u << pin.input)) != 0) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument); // ignored
-  }
-  const std::size_t flat = tie_flat(pin.slot, pin.input);
-  if (nl.tie_rep[flat] == 0) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument); // not tied
-  }
-  const std::size_t leader = tie_leader_flat(nl, flat);
-  std::size_t survivors[kMaxGates * kMaxInputs];
-  std::size_t n_surv = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &o = nl.gates[s];
-    if (!o.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < o.input_count; ++i) {
-      const std::size_t f = tie_flat(s, i);
-      if (f == flat) {
-        continue;
-      }
-      if (tie_leader_flat(nl, f) == leader) {
-        survivors[n_surv++] = f;
-      }
-    }
-  }
-  nl.tie_rep[flat] = 0;
-  if (n_surv > 1) {
-    std::size_t new_leader = survivors[0];
-    for (std::size_t k = 1; k < n_surv; ++k) {
-      if (survivors[k] < new_leader) {
-        new_leader = survivors[k];
-      }
-    }
-    for (std::size_t k = 0; k < n_surv; ++k) {
-      nl.tie_rep[survivors[k]] = static_cast<std::uint16_t>(new_leader + 1u);
-    }
-  } else if (n_surv == 1) {
-    nl.tie_rep[survivors[0]] = 0;
-  }
-  return core::Status::success();
-}
-
+// Text adapters over the TieSet seam: parse pins, then delegate.
 [[nodiscard]] inline core::Status tie_text(Netlist &nl, std::string_view a_text, std::string_view b_text) noexcept {
   auto a = parse_pin(nl, a_text);
   if (!a.ok()) {
@@ -1031,159 +801,6 @@ inline void reset_netlist(Netlist &nl) noexcept {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   return untie_pin(nl, p.value);
-}
-
-// Count of tie groups with >= 2 members (for list/YAML).
-[[nodiscard]] inline std::size_t tie_group_count(const Netlist &nl) noexcept {
-  std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t flat = tie_flat(s, i);
-      if (tie_leader_flat(nl, flat) != flat) {
-        continue; // non-leaders don't start groups
-      }
-      if (nl.tie_rep[flat] == 0) {
-        continue; // singleton
-      }
-      ++n;
-    }
-  }
-  return n;
-}
-
-// Total tied pairs for canonical YAML (one entry per non-leader member).
-[[nodiscard]] inline std::size_t tie_pair_count(const Netlist &nl) noexcept {
-  std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t flat = tie_flat(s, i);
-      if (nl.tie_rep[flat] != 0 && tie_leader_flat(nl, flat) != flat) {
-        ++n;
-      }
-    }
-  }
-  return n;
-}
-
-// Derived block interface (never stored): one input per tie class
-// (canonical leader in slot order) plus dangling outputs in slot order.
-// Fixed caller buffers, loud kOutOfRange when too small.
-[[nodiscard]] inline std::size_t block_input_count(const Netlist &nl) noexcept {
-  std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t flat = tie_flat(s, i);
-      if (tie_leader_flat(nl, flat) != flat) {
-        continue; // non-leader members share the leader's column
-      }
-      ++n;
-    }
-  }
-  return n;
-}
-
-[[nodiscard]] inline std::size_t block_output_count(const Netlist &nl) noexcept {
-  std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    if (g.output_fanout == 0 && !g.ignore_output) {
-      ++n; // Q (or the single output on combinational gates)
-    }
-    if (is_sequential_kind(g.kind) && g.nq_fanout == 0 && !g.ignore_nq_output) {
-      ++n; // NQ second output
-    }
-  }
-  return n;
-}
-
-[[nodiscard]] inline core::Status block_interface(const Netlist &nl, BlockPin *in_buf, std::size_t in_cap,
-                                                  std::size_t *in_n, BlockPin *out_buf,
-                                                  std::size_t out_cap, std::size_t *out_n) noexcept {
-  std::size_t need_in = 0;
-  std::size_t need_out = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & (1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t flat = tie_flat(s, i);
-      if (tie_leader_flat(nl, flat) != flat) {
-        continue;
-      }
-      if (in_buf != nullptr && need_in < in_cap) {
-        in_buf[need_in] = BlockPin{.slot = s, .input = i, .is_output = false};
-      }
-      ++need_in;
-    }
-  }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    if (g.output_fanout == 0 && !g.ignore_output) {
-      if (out_buf != nullptr && need_out < out_cap) {
-        out_buf[need_out] = BlockPin{.slot = s, .input = 0, .is_output = true, .negated = false};
-      }
-      ++need_out;
-    }
-    if (is_sequential_kind(g.kind) && g.nq_fanout == 0 && !g.ignore_nq_output) {
-      if (out_buf != nullptr && need_out < out_cap) {
-        out_buf[need_out] = BlockPin{.slot = s, .input = 0, .is_output = true, .negated = true};
-      }
-      ++need_out;
-    }
-  }
-  if (in_n != nullptr) {
-    *in_n = need_in;
-  }
-  if (out_n != nullptr) {
-    *out_n = need_out;
-  }
-  if (need_in > in_cap || need_out > out_cap) {
-    return core::Status::failure(core::StatusCode::kOutOfRange);
-  }
-  return core::Status::success();
 }
 
 } // namespace wengine::logic

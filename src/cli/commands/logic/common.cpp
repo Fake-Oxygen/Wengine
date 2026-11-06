@@ -172,34 +172,28 @@ std::vector<ClockDomain> clock_domains(const Netlist &nl) {
 }
 
 core::Status compose_block_inputs(const Netlist &nl, std::vector<wengine::logic::LogicValue> &out) {
+  // Block order via the BlockInterface seam (one entry per tie leader);
+  // poke lookup by leader flat, FR-008 untied/unpoked EN defaults High.
   out.clear();
   const auto &pokes = poke_map();
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+  const std::size_t n = wengine::logic::block_input_count(nl);
+  for (std::size_t ord = 0; ord < n; ++ord) {
+    std::uint16_t s = 0;
+    std::uint8_t i = 0;
+    if (!wengine::logic::block_input_pin(nl, ord, s, i)) {
+      return core::Status::failure(core::StatusCode::kInternal);
+    }
     const auto &g = nl.gates[s];
-    if (!g.live) {
+    const std::size_t flat = wengine::logic::tie_flat(s, i);
+    const auto it = pokes.find(flat);
+    if (it == pokes.end() && g.kind == wengine::logic::GateKind::kDff && i == 4 && !wengine::logic::is_tied(nl, s, i)) {
+      // FR-008: untied, unpoked enable reads asserted. Tied EN follows its
+      // tie net via the generic rule below; ignored EN is skipped by the
+      // seam and reads asserted via resolve_control.
+      out.push_back(wengine::logic::LogicValue::kHigh);
       continue;
     }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
-      if (wengine::logic::tie_leader_flat(nl, flat) != flat) {
-        continue; // members share the leader's value (same order as solve)
-      }
-      const auto it = pokes.find(flat);
-      if (it == pokes.end() && g.kind == wengine::logic::GateKind::kDff && i == 4 && nl.tie_rep[flat] == 0) {
-        // FR-008 (see R8): untied, unpoked enable reads asserted. Tied EN
-        // follows its tie net via the generic rule below; ignored EN is
-        // skipped above and reads asserted via resolve_control.
-        out.push_back(wengine::logic::LogicValue::kHigh);
-        continue;
-      }
-      out.push_back(it == pokes.end() ? wengine::logic::LogicValue::kLow : it->second);
-    }
+    out.push_back(it == pokes.end() ? wengine::logic::LogicValue::kLow : it->second);
   }
   return core::Status::success();
 }

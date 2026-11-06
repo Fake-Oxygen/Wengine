@@ -33,8 +33,7 @@ int LogicIgnoreSpec::run(ArgCursor &args, std::ostream &out) {
   if (!pin.ok()) {
     return cli::usage_error(out, std::string("bad pin '") + std::string(*pin_text_arg) + "' (want NAME.Y|NAME.i)", kUsage);
   }
-  if (!pin.value.is_output &&
-      nl.tie_rep[wengine::logic::tie_flat(pin.value.slot, pin.value.input)] != 0) {
+  if (!pin.value.is_output && wengine::logic::is_tied(nl, pin.value.slot, pin.value.input)) {
     return cli::usage_error(out, "pin is tied (untie it first)", kUsage);
   }
   if (!wengine::logic::ignore_pin(nl, pin.value).ok()) {
