@@ -1,6 +1,8 @@
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/optimize.hpp"
+#include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/seq_step.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <array>
@@ -1577,6 +1579,655 @@ void test_tie_survives_o0() {
   assert(logic::tie_group_count(opt) == 1);
   check_bit_matches_scalar(opt);
 }
+
+// ---- SEQ11 flop/latch opaque barrier (007-flop-latch-barrier) -----------
+// Helpers shared by every barrier test (T002). Builders hand-place
+// sequential gates (add_gate stages sequential-kind creation, so tests use
+// the same white-box placement as test_logic_seq_step.cpp). Per-kind
+// counters are assigned in slot order so O2's fresh build reproduces the
+// same display names.
+void barrier_place_seq(Netlist &nl, std::uint16_t slot, GateKind kind, std::uint32_t counter, std::uint8_t inputs = 2) {
+  assert(slot < logic::kMaxGates);
+  assert(logic::is_sequential_kind(kind));
+  assert(logic::valid_fanin(kind, inputs));
+  logic::Gate &g = nl.gates[slot];
+  assert(!g.live);
+  g.live = true;
+  g.kind = kind;
+  g.counter = counter;
+  g.input_count = inputs;
+  g.ignored_mask = 0;
+  g.ignore_output = false;
+  g.ignore_nq_output = true;
+  g.output_fanout = 0;
+  g.nq_fanout = 0;
+  g.propagation_delay_ps = 0;
+  for (std::size_t i = 0; i < logic::kMaxInputs; ++i) {
+    g.drivers[i] = logic::kNoDriver;
+  }
+  ++nl.live_count;
+  nl.dirty = true;
+  nl.topo_size = 0;
+}
+
+void barrier_ignore(Netlist &nl, std::uint16_t slot, std::uint8_t input) {
+  logic::PinRef pin{};
+  pin.slot = slot;
+  pin.is_output = false;
+  pin.input = input;
+  assert(logic::ignore_pin(nl, pin).ok());
+}
+
+// Closed 2-bit counter, no block I/O (DCE trap: zero fanout-0 sinks).
+// Same excitation as test_logic_seq_step.cpp: Q0 toggles, Q1 carries.
+Netlist barrier_closed_counter() {
+  Netlist nl;
+  barrier_place_seq(nl, 0, GateKind::kDff, 1); // DFF1 = Q0 (LSB)
+  barrier_place_seq(nl, 1, GateKind::kDff, 2); // DFF2 = Q1 (MSB)
+  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const std::uint16_t x = logic::add_gate(nl, GateKind::kXor, 2).value;
+  assert(logic::wire(nl, n, 0, 0).ok()); // NOT.Y -> DFF1.D
+  assert(logic::wire(nl, 0, n, 0).ok()); // Q0 -> NOT.1
+  assert(logic::wire(nl, x, 1, 0).ok()); // XOR.Y -> DFF2.D
+  assert(logic::wire(nl, 0, x, 0).ok()); // Q0 -> XOR.1
+  assert(logic::wire(nl, 1, x, 1).ok()); // Q1 -> XOR.2
+  barrier_ignore(nl, 0, 1);              // DFF1.CLK ignored (edge assumed)
+  barrier_ignore(nl, 1, 1);              // DFF2.CLK ignored
+  assert(logic::validate_sequential(nl).ok());
+  assert(logic::block_input_count(nl) == 0);
+  assert(logic::block_output_count(nl) == 0);
+  return nl;
+}
+
+// Counter plus observable glue: AND3(Q0,Q1,EXT) block output plus a DLATCH
+// sampling Q0 with EN frozen (ignored). One block input, two outputs.
+Netlist barrier_counter_glue() {
+  Netlist nl;
+  barrier_place_seq(nl, 0, GateKind::kDff, 1);   // DFF1 = Q0
+  barrier_place_seq(nl, 1, GateKind::kDff, 2);   // DFF2 = Q1
+  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const std::uint16_t x = logic::add_gate(nl, GateKind::kXor, 2).value;
+  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 3).value;
+  barrier_place_seq(nl, 5, GateKind::kDlatch, 1); // DLATCH1
+  assert(logic::wire(nl, n, 0, 0).ok());          // NOT.Y -> DFF1.D
+  assert(logic::wire(nl, 0, n, 0).ok());          // Q0 -> NOT.1
+  assert(logic::wire(nl, x, 1, 0).ok());          // XOR.Y -> DFF2.D
+  assert(logic::wire(nl, 0, x, 0).ok());          // Q0 -> XOR.1
+  assert(logic::wire(nl, 1, x, 1).ok());          // Q1 -> XOR.2
+  assert(logic::wire(nl, 0, a, 0).ok());          // Q0 -> AND.1
+  assert(logic::wire(nl, 1, a, 1).ok());          // Q1 -> AND.2 (AND.3 = EXT)
+  assert(logic::wire(nl, 0, 5, 0).ok());          // Q0 -> DLATCH1.D
+  barrier_ignore(nl, 0, 1);                       // CLKs ignored
+  barrier_ignore(nl, 1, 1);
+  barrier_ignore(nl, 5, 1); // DLATCH1.EN ignored: frozen (hold row)
+  assert(logic::validate_sequential(nl).ok());
+  assert(logic::block_input_count(nl) == 1);  // EXT
+  assert(logic::block_output_count(nl) == 2); // AND1.Y, DLATCH1.Q
+  return nl;
+}
+
+// Acyclic pipeline SER -> BUF -> DFF -> DFF -> OUT. The exact-simplify
+// trap: solve() reads flop outputs as kLow, so a truth-table pass sees
+// "constant" state. One block input, one output.
+Netlist barrier_pipeline() {
+  Netlist nl;
+  const std::uint16_t b = logic::add_gate(nl, GateKind::kBuf, 1).value; // BUF1 @0
+  barrier_place_seq(nl, 1, GateKind::kDff, 1);                          // DFF1 @1
+  barrier_place_seq(nl, 2, GateKind::kDff, 2);                          // DFF2 @2
+  assert(logic::wire(nl, b, 1, 0).ok()); // BUF.Y -> DFF1.D
+  assert(logic::wire(nl, 1, 2, 0).ok()); // Q1 -> DFF2.D
+  barrier_ignore(nl, 1, 1);              // CLKs ignored
+  barrier_ignore(nl, 2, 1);
+  assert(logic::validate_sequential(nl).ok());
+  assert(logic::block_input_count(nl) == 1);  // SER (BUF.1 dangling)
+  assert(logic::block_output_count(nl) == 1); // DFF2.Q
+  return nl;
+}
+
+// JK flop with a NOT(Q) consumer feeding an output AND, plus an NQ-fed
+// output AND: the O1/O2 polarity trap. J/K are the only block inputs (both
+// land on verbatim sequential pins, so O2 never duplicates them); the ANDs
+// close over Q/NQ so converted glue carries no dangling pins of its own.
+Netlist barrier_jk_nq() {
+  Netlist nl;
+  barrier_place_seq(nl, 0, GateKind::kJk, 1, 3); // JK1: J=0 K=1 CLK=2
+  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const std::uint16_t q = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  assert(logic::wire(nl, 0, n, 0).ok());  // Q -> NOT.1
+  assert(logic::wire(nl, n, a, 0).ok());  // NOT.Y -> AND1.1
+  assert(logic::wire(nl, 0, a, 1).ok());  // Q -> AND1.2 (AND1 = Q & ~Q)
+  logic::PinRef nq{};                     // NQ -> AND2.1
+  nq.slot = 0;
+  nq.is_output = true;
+  nq.negated = true;
+  logic::PinRef dst{};
+  dst.slot = q;
+  dst.is_output = false;
+  dst.input = 0;
+  assert(logic::wire_pins(nl, nq, dst).ok());
+  assert(logic::wire(nl, 0, q, 1).ok());  // Q -> AND2.2 (AND2 = ~Q & Q)
+  barrier_ignore(nl, 0, 2); // JK1.CLK ignored (edge assumed)
+  assert(logic::validate_sequential(nl).ok());
+  assert(logic::block_input_count(nl) == 2);  // J K
+  assert(logic::block_output_count(nl) == 2); // AND1.Y AND2.Y
+  return nl;
+}
+
+// Full-control 5-input DFF (D+CLK+RST+SET+EN) with every control pin
+// ignored (inactive): no control pin may be dropped as dead.
+Netlist barrier_full_dff() {
+  Netlist nl;
+  barrier_place_seq(nl, 0, GateKind::kDff, 1, 5); // DFF1: D=0 rest ignored
+  barrier_ignore(nl, 0, 1);                       // CLK
+  barrier_ignore(nl, 0, 2);                       // RST
+  barrier_ignore(nl, 0, 3);                       // SET
+  barrier_ignore(nl, 0, 4);                       // EN
+  assert(logic::validate_sequential(nl).ok());
+  assert(logic::block_input_count(nl) == 1);  // D
+  assert(logic::block_output_count(nl) == 1); // Q
+  return nl;
+}
+
+std::string barrier_gate_name(const Netlist &nl, std::uint16_t s) {
+  const logic::Gate &g = nl.gates[s];
+  std::string n(logic::gate_kind_name(g.kind));
+  n += std::to_string(g.counter);
+  return n;
+}
+
+// Oracle core: every sequential gate in `before` resolves by display name
+// in `after` with identical kind, pin count, flags, and per-pin shape
+// (wired-vs-dangling, same Q/NQ polarity). With check_drivers, wired pins
+// must also read the same source gate by name — valid for the in-place
+// O0/O1 levels; O2 converts upstream glue, so O2 tests use the shape-only
+// form and rely on run parity for functional equivalence.
+void assert_seq_equal_impl(const Netlist &before, const Netlist &after, bool check_drivers) {
+  std::size_t n_before = 0;
+  std::size_t n_after = 0;
+  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+    if (after.gates[s].live && logic::is_sequential_kind(after.gates[s].kind)) {
+      ++n_after;
+    }
+  }
+  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+    const logic::Gate &g = before.gates[s];
+    if (!g.live || !logic::is_sequential_kind(g.kind)) {
+      continue;
+    }
+    ++n_before;
+    auto r = logic::resolve_gate(after, barrier_gate_name(before, s));
+    assert(r.ok());
+    const logic::Gate &h = after.gates[r.value];
+    assert(h.live && h.kind == g.kind);
+    assert(h.input_count == g.input_count);
+    assert(h.ignored_mask == g.ignored_mask);
+    assert(h.ignore_output == g.ignore_output);
+    assert(h.ignore_nq_output == g.ignore_nq_output);
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      const std::uint16_t d0 = g.drivers[i];
+      const std::uint16_t d1 = h.drivers[i];
+      const std::size_t f0 = static_cast<std::size_t>(s) * logic::kMaxInputs + i;
+      const std::size_t f1 = static_cast<std::size_t>(r.value) * logic::kMaxInputs + i;
+      if (d0 == logic::kNoDriver) {
+        assert(d1 == logic::kNoDriver);
+        continue;
+      }
+      assert(d1 != logic::kNoDriver);
+      assert(after.gates[d1].live);
+      if (check_drivers) {
+        assert(barrier_gate_name(after, d1) == barrier_gate_name(before, d0));
+      }
+      assert(after.driver_inv[f1] == before.driver_inv[f0]); // Q/NQ polarity
+    }
+  }
+  assert(n_before > 0);
+  assert(n_after == n_before);
+}
+
+// Oracle: every sequential gate in `before` resolves by display name in
+// `after` with identical kind, pin count, flags, and logical per-pin
+// drivers (same source gate by name, same Q/NQ polarity); no sequential
+// gate appears or disappears.
+void assert_seq_sets_equal(const Netlist &before, const Netlist &after) {
+  assert_seq_equal_impl(before, after, true);
+}
+
+// Oracle: same as above but without the driver-name check, for O2's fresh
+// build where upstream combinational glue is converted and renamed.
+void assert_seq_shape_equal(const Netlist &before, const Netlist &after) {
+  assert_seq_equal_impl(before, after, false);
+}
+
+// Oracle: for each sequential output pin, the same number of consumer pins
+// read it with the same polarity before and after. Name-agnostic (holds
+// for O2's fresh build where combinational consumers are renamed); the
+// 10-step run-parity check is the functional backstop.
+void assert_seq_fanout_equal(const Netlist &before, const Netlist &after) {
+  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+    const logic::Gate &g = before.gates[s];
+    if (!g.live || !logic::is_sequential_kind(g.kind)) {
+      continue;
+    }
+    auto r = logic::resolve_gate(after, barrier_gate_name(before, s));
+    assert(r.ok());
+    for (std::uint8_t pol = 0; pol <= 1; ++pol) {
+      std::size_t c0 = 0;
+      std::size_t c1 = 0;
+      for (std::uint16_t u = 0; u < logic::kMaxGates; ++u) {
+        const logic::Gate &gu = before.gates[u];
+        if (!gu.live) {
+          continue;
+        }
+        for (std::uint8_t i = 0; i < gu.input_count; ++i) {
+          if (gu.drivers[i] == s &&
+              before.driver_inv[static_cast<std::size_t>(u) * logic::kMaxInputs + i] == pol) {
+            ++c0;
+          }
+        }
+        const logic::Gate &hu = after.gates[u];
+        if (!hu.live) {
+          continue;
+        }
+        for (std::uint8_t i = 0; i < hu.input_count; ++i) {
+          // Map the after-side driver slot back through its display name:
+          // sequential names are stable, combinational slots are not.
+          if (hu.drivers[i] >= logic::kMaxGates || !after.gates[hu.drivers[i]].live) {
+            continue;
+          }
+          if (barrier_gate_name(after, hu.drivers[i]) != barrier_gate_name(before, s)) {
+            continue;
+          }
+          if (after.driver_inv[static_cast<std::size_t>(u) * logic::kMaxInputs + i] == pol) {
+            ++c1;
+          }
+        }
+      }
+      assert(c0 == c1);
+    }
+  }
+}
+
+// Oracle: fixed-step runs of two nets from power-on agree on every stored
+// flop value at every step. `stim` holds steps*nin_a row-major block inputs
+// for `a`; `proj` maps each block input of `b` onto the block input of `a`
+// it replicates (O2 duplicates dangling pins for inversion, so `b` may
+// expose more pins than `a` — the same projection idea as check_equiv_proj).
+void assert_seq_run_parity_proj(const Netlist &a, const Netlist &b, std::uint16_t steps,
+                               const std::vector<LogicValue> &stim, const std::vector<std::size_t> &proj) {
+  const std::size_t nin_a = logic::block_input_count(a);
+  const std::size_t nin_b = logic::block_input_count(b);
+  assert(proj.size() == nin_b);
+  assert(stim.size() == static_cast<std::size_t>(steps) * nin_a);
+  for (std::size_t j = 0; j < nin_b; ++j) {
+    assert(proj[j] < nin_a);
+  }
+  Netlist ca = a;
+  Netlist cb = b;
+  logic::SeqState sa;
+  logic::SeqState sb;
+  std::vector<LogicValue> row_a(nin_a == 0 ? 1 : nin_a, kL);
+  std::vector<LogicValue> row_b(nin_b == 0 ? 1 : nin_b, kL);
+  for (std::uint16_t step = 0; step < steps; ++step) {
+    for (std::size_t j = 0; j < nin_a; ++j) {
+      row_a[j] = stim[static_cast<std::size_t>(step) * nin_a + j];
+    }
+    for (std::size_t j = 0; j < nin_b; ++j) {
+      row_b[j] = row_a[proj[j]];
+    }
+    assert(logic::seq_step(ca, sa, std::span<const LogicValue>(row_a.data(), nin_a)).ok());
+    assert(logic::seq_step(cb, sb, std::span<const LogicValue>(row_b.data(), nin_b)).ok());
+    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+      const logic::Gate &g = a.gates[s];
+      if (!g.live || !logic::is_sequential_kind(g.kind)) {
+        continue;
+      }
+      auto r = logic::resolve_gate(cb, barrier_gate_name(a, s));
+      assert(r.ok());
+      assert(sa.q[s] == sb.q[r.value]);
+    }
+  }
+}
+
+void assert_seq_run_parity(const Netlist &a, const Netlist &b, std::uint16_t steps, const std::vector<LogicValue> &stim) {
+  const std::size_t nin = logic::block_input_count(a);
+  assert(logic::block_input_count(b) == nin);
+  std::vector<std::size_t> ident(nin, 0);
+  for (std::size_t j = 0; j < nin; ++j) {
+    ident[j] = j;
+  }
+  assert_seq_run_parity_proj(a, b, steps, stim, ident);
+}
+
+// All-zero projection: every block input of `b` replicates input 0 of `a`
+// (single-source nets at O2, where duplication only clones one signal).
+std::vector<std::size_t> barrier_proj_all_zero(const Netlist &b) {
+  const std::size_t nin_b = logic::block_input_count(b);
+  return std::vector<std::size_t>(nin_b, 0);
+}
+
+void test_barrier_o0_closed_cluster() {
+  // Closed counter: zero fanout-0 sinks, so fanout-only DCE roots vanish
+  // and pre-fix optimization deletes the whole net (4 -> 0).
+  Netlist orig = barrier_closed_counter();
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(orig, o0);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert(opt.live_count == orig.live_count);
+  assert_seq_sets_equal(orig, opt);
+  assert_seq_fanout_equal(orig, opt);
+  assert_seq_run_parity(orig, opt, 10, {});
+}
+
+void test_barrier_o0_unobserved_flop() {
+  // A flop with no fanout and an ignored output stays observable through
+  // state readback: lack of fanout never counts as dead.
+  Netlist nl;
+  barrier_place_seq(nl, 0, GateKind::kDff, 1);
+  barrier_ignore(nl, 0, 1); // CLK ignored (edge assumed); D = block input
+  assert(logic::validate_sequential(nl).ok());
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(nl, o0);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert_seq_sets_equal(nl, opt);
+  assert(opt.live_count == nl.live_count);
+  assert_seq_run_parity(nl, opt, 4, {kL, kH, kH, kL});
+}
+
+void test_barrier_o0_counter_glue() {
+  // Counter plus observable glue: combinational AND output plus a frozen
+  // latch. Nothing may be folded; AND/DLATCH outputs stay live.
+  Netlist orig = barrier_counter_glue();
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(orig, o0);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert(opt.live_count == orig.live_count);
+  assert(netlists_equal(orig, opt));
+  assert_seq_sets_equal(orig, opt);
+  assert_seq_fanout_equal(orig, opt);
+  assert_seq_run_parity(orig, opt, 10, {kL, kH, kL, kH, kH, kL, kL, kH, kL, kH});
+}
+
+void test_barrier_o0_pipeline_exact_skip() {
+  // Acyclic pipeline: solve() fabricates kLow state reads, so a
+  // truth-table pass sees "constant" flops. The barrier skips exact
+  // entirely; the BUF feeding DFF.D is not bypassed either (pin freeze).
+  Netlist orig = barrier_pipeline();
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(orig, o0);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert(netlists_equal(orig, opt));
+  assert_seq_sets_equal(orig, opt);
+  assert_seq_fanout_equal(orig, opt);
+  assert_seq_run_parity(orig, opt, 10, {kH, kL, kH, kL, kH, kH, kL, kL, kH, kL});
+}
+
+void test_barrier_o0_idempotent() {
+  Netlist orig = barrier_counter_glue();
+  logic::OptimizeOptions o0;
+  auto r1 = logic::optimize(orig, o0);
+  assert(r1.ok());
+  auto r2 = logic::optimize(r1.value, o0);
+  assert(r2.ok());
+  assert(netlists_equal(r1.value, r2.value));
+  auto r3 = logic::optimize(r1.value, o0);
+  assert(r3.ok());
+  assert(netlists_equal(r1.value, r3.value));
+}
+
+void test_barrier_o0_identical_flops() {
+  // FR-006 edge case: two identically wired flops (same shared driver,
+  // same ignored CLKs) are distinct observable stores and must never
+  // merge — at O0/O1 (in-place) or O2 (dedup only merges the universal
+  // kind; both flops stay DCE roots). The shared BUF also exercises the
+  // multi-sequential-user freeze: it feeds only flops, yet survives.
+  Netlist nl;
+  barrier_place_seq(nl, 0, GateKind::kDff, 1); // DFF1: D <- BUF1.Y
+  barrier_place_seq(nl, 1, GateKind::kDff, 2); // DFF2: D <- BUF1.Y (identical)
+  const std::uint16_t b = logic::add_gate(nl, GateKind::kBuf, 1).value;
+  assert(logic::wire(nl, b, 0, 0).ok()); // BUF.Y -> DFF1.D (BUF.1 = EXT)
+  assert(logic::wire(nl, b, 1, 0).ok()); // BUF.Y -> DFF2.D
+  barrier_ignore(nl, 0, 1);              // CLKs ignored
+  barrier_ignore(nl, 1, 1);
+  assert(logic::validate_sequential(nl).ok());
+  assert(logic::block_input_count(nl) == 1);  // EXT
+  assert(logic::block_output_count(nl) == 2); // DFF1.Q DFF2.Q
+  const std::vector<LogicValue> stim = {kL, kH, kL, kH, kH, kL, kL, kH, kL, kH};
+  for (int level = 0; level <= 2; ++level) {
+    logic::OptimizeOptions o;
+    o.level = static_cast<logic::OptLevel>(level);
+    if (level == 2) {
+      o.target = logic::OptTarget::kNand;
+    }
+    auto r = logic::optimize(nl, o);
+    assert(r.ok());
+    Netlist opt = r.value;
+    if (level < 2) {
+      assert(opt.live_count == nl.live_count);
+      assert(netlists_equal(nl, opt));
+      assert_seq_sets_equal(nl, opt);
+    } else {
+      assert_seq_shape_equal(nl, opt);
+    }
+    assert_seq_run_parity_proj(nl, opt, 10, stim, barrier_proj_all_zero(opt));
+  }
+}
+
+void test_barrier_o0_wired_constant_flop() {
+  // Story 2 AC3 / edge case: a flop whose data input is wired to a
+  // constant gate keeps the pin (never folded into the flop, never
+  // dropped as dead). The constant source itself follows the normal
+  // rules (pool-shared at O2, kept as the flop's driver cone at O0/O1).
+  Netlist nl;
+  const std::uint16_t c = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  barrier_place_seq(nl, 1, GateKind::kDff, 1); // DFF1: D <- AND1.Y (const 0)
+  assert(logic::wire(nl, c, 1, 0).ok());
+  barrier_ignore(nl, 0, 0); // AND.1 ignored: ties low
+  barrier_ignore(nl, 0, 1); // AND.2 ignored: ties low (AND reads 0,0)
+  barrier_ignore(nl, 1, 1); // CLK ignored
+  assert(logic::validate_sequential(nl).ok());
+  assert(logic::block_input_count(nl) == 0);
+  assert(logic::block_output_count(nl) == 1); // DFF1.Q
+  for (int level = 0; level <= 2; ++level) {
+    logic::OptimizeOptions o;
+    o.level = static_cast<logic::OptLevel>(level);
+    if (level == 2) {
+      o.target = logic::OptTarget::kNand;
+    }
+    auto r = logic::optimize(nl, o);
+    assert(r.ok());
+    Netlist opt = r.value;
+    if (level < 2) {
+      assert(netlists_equal(nl, opt));
+      assert_seq_sets_equal(nl, opt);
+    } else {
+      assert_seq_shape_equal(nl, opt);
+    }
+    // D stays constant 0: Q never sets over 4 steps, before and after.
+    assert_seq_run_parity(nl, opt, 4, {});
+  }
+}
+
+void test_barrier_o0_report_counts() {
+  // Story 4: total-count reduction comes exclusively from combinational
+  // glue (a redundant double negation over block inputs), while the
+  // sequential census stays flat at 3 (2 DFF + 1 DLATCH).
+  Netlist nl;
+  barrier_place_seq(nl, 0, GateKind::kDff, 1);   // DFF1 = Q0
+  barrier_place_seq(nl, 1, GateKind::kDff, 2);   // DFF2 = Q1
+  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const std::uint16_t x = logic::add_gate(nl, GateKind::kXor, 2).value;
+  const std::uint16_t na = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const std::uint16_t nb = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 4).value;
+  barrier_place_seq(nl, 7, GateKind::kDlatch, 1); // DLATCH1
+  assert(logic::wire(nl, n, 0, 0).ok());   // NOT.Y -> DFF1.D
+  assert(logic::wire(nl, 0, n, 0).ok());   // Q0 -> NOT.1
+  assert(logic::wire(nl, x, 1, 0).ok());   // XOR.Y -> DFF2.D
+  assert(logic::wire(nl, 0, x, 0).ok());   // Q0 -> XOR.1
+  assert(logic::wire(nl, 1, x, 1).ok());   // Q1 -> XOR.2
+  assert(logic::wire(nl, na, nb, 0).ok()); // NOT_a.Y -> NOT_b.1 (EXT2 -> NOT_a.1)
+  assert(logic::wire(nl, nb, a, 3).ok());  // NOT_b.Y -> AND.4
+  assert(logic::wire(nl, 0, a, 0).ok());   // Q0 -> AND.1
+  assert(logic::wire(nl, 1, a, 1).ok());   // Q1 -> AND.2 (AND.3 = EXT)
+  assert(logic::wire(nl, 0, 7, 0).ok());   // Q0 -> DLATCH1.D
+  barrier_ignore(nl, 0, 1);                // CLKs ignored
+  barrier_ignore(nl, 1, 1);
+  barrier_ignore(nl, 7, 1); // DLATCH1.EN ignored: frozen
+  assert(logic::validate_sequential(nl).ok());
+  assert(nl.live_count == 8);
+  logic::OptimizeOptions o0;
+  auto r = logic::optimize(nl, o0);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert(opt.live_count == 6); // double negation dissolved, nothing else touched
+  assert_seq_sets_equal(nl, opt);
+  assert_seq_fanout_equal(nl, opt);
+}
+
+void test_barrier_o1_not_through_flop() {
+  // O1 bubble-push must not fuse through a flop boundary: NOT(Q) stays a
+  // NOT driven by the same JK flop (fusion skips sequential drivers, and
+  // in-place fusion would keep the slot anyway).
+  Netlist orig = barrier_jk_nq();
+  logic::OptimizeOptions o1;
+  o1.level = logic::OptLevel::kO1;
+  auto r = logic::optimize(orig, o1);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert_seq_sets_equal(orig, opt);
+  assert_seq_fanout_equal(orig, opt);
+  auto n = logic::resolve_gate(opt, "NOT1");
+  assert(n.ok());
+  assert(opt.gates[n.value].kind == GateKind::kNot);
+  assert_seq_run_parity(orig, opt, 10,
+                        {kL, kL, kH, kL, kL, kH, kH, kH, kL, kL,
+                         kH, kL, kL, kH, kH, kH, kL, kL, kH, kL});
+}
+
+void test_barrier_o1_buf_feeding_flop() {
+  // The BUF feeding DFF.D is redundant combinationally but survives: the
+  // pin freeze beats one gate of savings. Net is otherwise fully stable.
+  Netlist orig = barrier_pipeline();
+  logic::OptimizeOptions o1;
+  o1.level = logic::OptLevel::kO1;
+  auto r = logic::optimize(orig, o1);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert(netlists_equal(orig, opt));
+  assert_seq_sets_equal(orig, opt);
+  assert_seq_fanout_equal(orig, opt);
+  assert_seq_run_parity(orig, opt, 10, {kH, kL, kH, kL, kH, kH, kL, kL, kH, kL});
+}
+
+void test_barrier_o2_pipeline_carry() {
+  // O2 over an acyclic sequential net: succeeds (pre-fix: loud budget
+  // failure), carries both flops verbatim, converts the glue.
+  Netlist orig = barrier_pipeline();
+  logic::OptimizeOptions o2;
+  o2.level = logic::OptLevel::kO2;
+  o2.target = logic::OptTarget::kNand;
+  auto r = logic::optimize(orig, o2);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert_seq_shape_equal(orig, opt);
+  assert_seq_run_parity_proj(orig, opt, 10, {kH, kL, kH, kL, kH, kH, kL, kL, kH, kL},
+                             barrier_proj_all_zero(opt));
+}
+
+void test_barrier_o2_glue_nor_carry() {
+  // O2/nor over counter + glue: AND/NOT/XOR glue converts, all four
+  // state elements (2 DFF + DLATCH) carry verbatim with flags intact.
+  Netlist orig = barrier_counter_glue();
+  logic::OptimizeOptions o2;
+  o2.level = logic::OptLevel::kO2;
+  o2.target = logic::OptTarget::kNor;
+  auto r = logic::optimize(orig, o2);
+  assert(r.ok());
+  Netlist opt = r.value;
+  assert_seq_shape_equal(orig, opt);
+  assert_seq_run_parity_proj(orig, opt, 10, {kL, kH, kL, kH, kH, kL, kL, kH, kL, kH},
+                             barrier_proj_all_zero(opt));
+}
+
+void test_barrier_o2_closed_cluster() {
+  // Closed cluster at O2: no fanout-0 sinks, so the reach set must be
+  // seeded from the flops themselves (else the fresh net comes back empty).
+  Netlist orig = barrier_closed_counter();
+  logic::OptimizeOptions o2;
+  o2.level = logic::OptLevel::kO2;
+  o2.target = logic::OptTarget::kNand;
+  auto r = logic::optimize(orig, o2);
+  assert(r.ok());
+  Netlist opt = r.value;
+  // O2 legitimately grows the net (XOR -> multi-NAND network); the barrier
+  // pins the state-element set, not the total.
+  assert_seq_shape_equal(orig, opt);
+  assert_seq_run_parity(orig, opt, 10, {});
+}
+
+void test_barrier_o2_toggle_converges() {
+  // User report: nand->nor->nand->nor on AND(a,b)+DFF grew 3->6->9->18
+  // gates with ever-more block inputs. Same-source dangling pins now tie
+  // (one variable per pin, like the minimized path), tied duplicates merge
+  // in dedup, and inverter pairs cancel — so toggles reach a bounded
+  // steady state with stable pins instead of multiplying.
+  Netlist nl;
+  assert(logic::add_gate(nl, GateKind::kAnd, 2).ok()); // AND1 @0 (a, b dangle)
+  barrier_place_seq(nl, 1, GateKind::kDff, 1);         // DFF1 @1 (D dangles)
+  barrier_ignore(nl, 1, 1);                           // CLK ignored
+  assert(logic::validate_sequential(nl).ok());
+  std::uint16_t gates[6] = {};
+  std::size_t nins[6] = {};
+  for (int t = 0; t < 6; ++t) {
+    logic::OptimizeOptions o2;
+    o2.level = logic::OptLevel::kO2;
+    o2.target = (t % 2 == 0) ? logic::OptTarget::kNand : logic::OptTarget::kNor;
+    auto r = logic::optimize(nl, o2);
+    assert(r.ok());
+    nl = r.value;
+    gates[t] = nl.live_count;
+    nins[t] = logic::block_input_count(nl);
+    assert(nins[t] == 3); // a, b, D: pin count never moves (was 3,3,5,9,17,33)
+  }
+  for (int t = 0; t < 6; ++t) {
+    assert(gates[t] <= 7); // small net stays small (was 66 by the 6th toggle)
+  }
+  // Steady-state fixpoint: repeat visits reproduce (comb O2 oscillates 2<->3
+  // the same way; exact round-trip is minimized-resynthesis territory).
+  assert(gates[2] == gates[4]);
+  assert(gates[3] == gates[5]);
+}
+
+void test_barrier_o2_full_dff_nq_polarity() {
+  // Full-control DFF (5 control/data pins) plus an NQ consumer at O2:
+  // pin count, ignored controls, and NQ polarity survive the rebuild.
+  Netlist jk = barrier_jk_nq();
+  logic::OptimizeOptions o2;
+  o2.level = logic::OptLevel::kO2;
+  o2.target = logic::OptTarget::kNand;
+  auto rj = logic::optimize(jk, o2);
+  assert(rj.ok());
+  Netlist optj = rj.value;
+  assert_seq_shape_equal(jk, optj);
+  assert_seq_run_parity(jk, optj, 8,
+                        {kL, kL, kH, kL, kL, kH, kH, kH, kH, kL, kL, kH, kL, kL, kH, kH});
+
+  Netlist fd = barrier_full_dff();
+  auto rf = logic::optimize(fd, o2);
+  assert(rf.ok());
+  Netlist optf = rf.value;
+  assert_seq_shape_equal(fd, optf);
+  auto d = logic::resolve_gate(optf, "DFF1");
+  assert(d.ok());
+  assert(optf.gates[d.value].input_count == 5);
+  assert(optf.gates[d.value].ignored_mask == 0x1Eu);
+  assert_seq_run_parity(fd, optf, 4, {kL, kH, kH, kL});
+}
 } // namespace
 
 int main() {
@@ -1621,6 +2272,21 @@ int main() {
   test_tie_validation();
   test_tie_transitive_and_remove();
   test_tie_survives_o0();
+  test_barrier_o0_closed_cluster();
+  test_barrier_o0_unobserved_flop();
+  test_barrier_o0_counter_glue();
+  test_barrier_o0_pipeline_exact_skip();
+  test_barrier_o0_idempotent();
+  test_barrier_o0_identical_flops();
+  test_barrier_o0_wired_constant_flop();
+  test_barrier_o0_report_counts();
+  test_barrier_o1_not_through_flop();
+  test_barrier_o1_buf_feeding_flop();
+  test_barrier_o2_pipeline_carry();
+  test_barrier_o2_glue_nor_carry();
+  test_barrier_o2_closed_cluster();
+  test_barrier_o2_toggle_converges();
+  test_barrier_o2_full_dff_nq_polarity();
   std::cout << "test_logic: OK\n";
   return 0;
 }

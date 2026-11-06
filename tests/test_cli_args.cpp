@@ -1136,6 +1136,31 @@ void test_logic_verbs() {
     assert(run("logic reset").first == 0);
   }
 
+  // SEQ11 barrier (007-flop-latch-barrier): optimize over a sequential
+  // workspace succeeds at O0/O1/O2 with the state element intact.
+  {
+    assert(run("logic reset").first == 0);
+    assert(run("logic add DFF").first == 0);
+    assert(run("logic add NOT").first == 0);
+    assert(run("logic wire DFF1.Q NOT1.1").first == 0);
+    assert(run("logic wire NOT1.Y DFF1.D").first == 0);
+    assert(run("logic ignore DFF1.CLK").first == 0);
+    for (const char *level : {"O0", "O1"}) {
+      auto [rc, s] = run(std::string("logic optimize --level ") + level);
+      assert(rc == 0);
+      assert(s.find("2 -> 2 gates") != std::string::npos);
+    }
+    {
+      auto [rc, s] = run("logic optimize --level O2");
+      assert(rc == 0);
+      assert(s.find("level=O2") != std::string::npos);
+    }
+    auto [lrc, ls] = run("logic list");
+    assert(lrc == 0);
+    assert(ls.find("DFF1") != std::string::npos);
+    assert(run("logic reset").first == 0);
+  }
+
   // save / load round-trip is byte-identical; load is atomic.
   {
     assert(run("logic reset").first == 0);

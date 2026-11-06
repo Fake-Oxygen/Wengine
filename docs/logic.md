@@ -229,7 +229,28 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   before/after counts so the trade-off is visible, never hidden.
 - Optimizer is pure: `optimize(netlist, opts) -> Netlist` (new object,
   input untouched). Loud on overflow (>existing slot cap); never
-  silently drops gates.
+  silently drops gates. Optimizing twice is idempotent.
+- Sequential nets (flop/latch gates) are opaque barriers at every level:
+  no pass reads through, folds through, rewrites, or deletes a state
+  element (`DFF`/`DLATCH`/`JK`/`T`/`SRLATCH`). DCE roots include every
+  live sequential gate (an unobserved flop is never dead — state readback
+  observes it outside the block interface, so closed state clusters with
+  no block-output path survive). Constant reasoning stops at barrier pins
+  (flop outputs always classify as varying, never constant). `BUF`/`NOT`
+  bypass, bubble-push fusion, structural dedup, and double-inverter
+  cancellation never rewire a sequential-gate input pin (a redundant gate
+  feeding only a flop survives). The exact truth-table pass skips
+  sequential nets entirely (block tables are history-dependent; `solve`
+  reads flop outputs as `kLow`). O2 carries state elements verbatim
+  through its fresh build (same kind, pin count, flags, Q/NQ polarity)
+  and converts only the combinational glue around them — O2 accepts
+  sequential nets instead of refusing them; same-source dangling pins
+  duplicated per use are re-tied (one variable per pin) and tied
+  duplicates merge in cleanup, so repeated nand<->nor toggles converge
+  instead of multiplying gates and pins. Reader multiplicity may still
+  differ from the original net; the loud interface report covers it. A fixed-step run of the
+  optimized net reproduces the original stored values and settled outputs
+  step-for-step.
 - Interface caveat: folding drops dead pins, exact simplification drops
   dead inputs and collapses constants, O2 structural may duplicate pins
   for inversion (`NAND(a,a)` untied is NOT with two pins) while O2

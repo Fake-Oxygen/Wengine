@@ -38,11 +38,13 @@
 //   relative order (O2 emits output networks in original slot order), so
 //   truth-equivalence checks can map outputs positionally.
 // - DCE roots are the ORIGINAL sinks (live fanout-0 gates captured before
-//   any pass, ignored outputs included). Optimization orphans (bypassed
-//   inners, fused-away drivers, dropped constant gates) are removed, but
-//   user logic feeding an ignored output is never deleted: ignore means
-//   "hidden", not "dead", and the optimizer must not destroy circuitry
-//   the user only hid.
+//   any pass, ignored outputs included) plus every live sequential gate:
+//   state readback observes flops outside the block interface, so lack of
+//   fanout never makes a state element dead (opaque barrier). Optimization
+//   orphans (bypassed inners, fused-away drivers, dropped constant gates)
+//   are removed, but user logic feeding an ignored output is never deleted:
+//   ignore means "hidden", not "dead", and the optimizer must not destroy
+//   circuitry the user only hid.
 // - Ignored dangling inputs tie to kLow during eval (netlist.hpp rule).
 //   O0 reasons about them as constant-0; O2 materializes a shared
 //   target-kind constant pool for them. O2 resets propagation_delay_ps
@@ -55,6 +57,7 @@
 #include "wengine/core/status.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -132,6 +135,15 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
   const std::size_t m = block_output_count(nl);
   if (n == 0 || n > 10 || m == 0 || m > 16) {
     return false;
+  }
+  // Opaque barrier: block truth tables are undefined for stateful nets
+  // (outputs depend on history, and solve() reads flop outputs as kLow),
+  // so the exact pass skips sequential nets entirely. Structural passes
+  // still simplify the combinational glue around the barriers.
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (nl.gates[s].live && is_sequential_kind(nl.gates[s].kind)) {
+      return false;
+    }
   }
   // Hidden outputs must be preserved exactly: if the user hid logic via
   // `ignore`, dead-input analysis over block outputs alone could break
@@ -528,6 +540,112 @@ inline void recount_fanout(Netlist &nl) noexcept {
   }
 }
 
+// Sequential-aware recompilation for the O0/O1 fixpoint and the O2
+// post-cleanup (opaque barrier). Combinational nets use ensure_topology
+// exactly as before (bit-identical behavior). Nets with live sequential
+// gates validate via validate_sequential (loud on genuine defects, same
+// contract as stepping) and order with sequential gates as slot-order
+// roots followed by combinational Kahn order over comb-only edges — the
+// same determinism as ensure_topology (slot-order seeds and successors),
+// mirroring seq_step's compile_comb_order without including the stepper.
+// Sequential labels stay pinned kV by classify, so root order is exact,
+// and combinational drivers precede combinational users across the
+// barrier (flop outputs read as always-ready kV sources).
+inline bool recompile(Netlist &nl) noexcept {
+  if (!has_sequential_gates(nl)) {
+    return ensure_topology(nl).ok();
+  }
+  if (!validate_sequential(nl).ok()) {
+    return false;
+  }
+  std::uint16_t n_out = 0;
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live) {
+      continue;
+    }
+    if (is_sequential_kind(g.kind)) {
+      nl.topo_order[n_out++] = s;
+      nl.topo_level[s] = 0;
+    }
+  }
+  std::uint8_t indeg[kMaxGates] = {};
+  std::size_t n_comb = 0;
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live || is_sequential_kind(g.kind)) {
+      continue;
+    }
+    ++n_comb;
+    std::uint8_t d = 0;
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      const std::uint16_t drv = g.drivers[i];
+      if (drv == kNoDriver) {
+        continue;
+      }
+      if (drv >= kMaxGates || !nl.gates[drv].live) {
+        return false; // dangling-driver defect: loud, never partial
+      }
+      if (!is_sequential_kind(nl.gates[drv].kind)) {
+        ++d;
+      }
+    }
+    indeg[s] = d;
+  }
+  std::uint16_t queue[kMaxGates];
+  std::size_t head = 0;
+  std::size_t tail = 0;
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live || is_sequential_kind(g.kind)) {
+      continue;
+    }
+    if (indeg[s] == 0) {
+      queue[tail++] = s;
+    }
+  }
+  std::size_t n_emit = 0;
+  while (head < tail) {
+    const std::uint16_t cur = queue[head++];
+    nl.topo_order[n_out++] = cur;
+    ++n_emit;
+    std::uint16_t depth = 0;
+    const Gate &cg = nl.gates[cur];
+    for (std::uint8_t i = 0; i < cg.input_count; ++i) {
+      const std::uint16_t drv = cg.drivers[i];
+      if (drv == kNoDriver) {
+        continue;
+      }
+      const std::uint16_t cand = static_cast<std::uint16_t>(nl.topo_level[drv] + 1);
+      if (cand > depth) {
+        depth = cand;
+      }
+    }
+    nl.topo_level[cur] = depth;
+    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+      Gate &g = nl.gates[s];
+      if (!g.live || is_sequential_kind(g.kind) || indeg[s] == 0) {
+        continue;
+      }
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        if (g.drivers[i] == cur) {
+          --indeg[s];
+          if (indeg[s] == 0) {
+            queue[tail++] = s;
+            break; // one push per gate (remaining inputs counted already)
+          }
+        }
+      }
+    }
+  }
+  if (n_emit != n_comb) {
+    return false; // combinational cycle: loud, never partial
+  }
+  nl.topo_size = n_out;
+  nl.dirty = false;
+  return true;
+}
+
 // Detach every tied pin of slot `s` from its class (used when a gate is
 // collapsed to a constant: the varying tied pins disappear, outside
 // survivors re-elect). Leaves slot `s` with no tie entries.
@@ -681,7 +799,7 @@ inline void classify(const Netlist &nl, Constness *label) noexcept {
     case GateKind::kJk:
     case GateKind::kT:
     case GateKind::kSrlatch:
-      break; // SEQ11 owns optimizer preservation; classify stays kV until then.
+      break; // opaque barrier: sequential outputs always classify as kV
     }
     label[s] = out;
   }
@@ -746,9 +864,28 @@ inline void rewire_users(Netlist &nl, std::uint16_t from_slot, std::uint16_t tar
   }
 }
 
+// True when any live sequential gate reads gate `s` (opaque barrier:
+// bypass/fusion/dedup must never rewire a sequential-gate input pin, so a
+// gate feeding a flop or latch survives even when otherwise redundant).
+inline bool has_live_seq_user(const Netlist &nl, std::uint16_t s) noexcept {
+  for (std::uint16_t u = 0; u < kMaxGates; ++u) {
+    const Gate &user = nl.gates[u];
+    if (!user.live || !is_sequential_kind(user.kind)) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < user.input_count; ++i) {
+      if (user.drivers[i] == s) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // BUF(x) -> x and NOT(NOT(x)) -> x for internal gates (fanout > 0; block
 // outputs are preserved for interface stability). Single ascending sweep
-// collapses chains regardless of slot order.
+// collapses chains regardless of slot order. Gates feeding a sequential
+// gate are never removed (opaque barrier: flop/latch input pins freeze).
 inline bool bypass_pass(Netlist &nl) noexcept {
   recount_fanout(nl);
   bool changed = false;
@@ -756,6 +893,9 @@ inline bool bypass_pass(Netlist &nl) noexcept {
     Gate &g = nl.gates[s];
     if (!g.live || g.output_fanout == 0) {
       continue;
+    }
+    if (has_live_seq_user(nl, s)) {
+      continue; // opaque barrier: never rewire a sequential-gate input pin
     }
     std::uint16_t target = kNoDriver;
     bool fire = false;
@@ -923,7 +1063,7 @@ inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Co
     case GateKind::kJk:
     case GateKind::kT:
     case GateKind::kSrlatch:
-      want = base; // SEQ11 owns optimizer preservation; no reduction until then.
+      want = base; // opaque barrier: sequential gates are never re-typed
       break;
     }
   }
@@ -1002,7 +1142,7 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
     case GateKind::kJk:
     case GateKind::kT:
     case GateKind::kSrlatch:
-      break; // SEQ11 owns optimizer preservation; no folding until then.
+      break; // opaque barrier: flop/latch inputs are never folded or dropped
     }
   }
   // Collapse constant roots in place (same slot: outputs stay positional).
@@ -1013,6 +1153,9 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
     Gate &g = nl.gates[s];
     if (!g.live) {
       continue;
+    }
+    if (is_sequential_kind(g.kind)) {
+      continue; // opaque barrier: labels stay kV, but never collapse state
     }
     if (label[s] == Constness::kC0) {
       const bool canonical = g.kind == GateKind::kAnd && g.input_count == 2 && g.ignored_mask == 0x03u &&
@@ -1079,6 +1222,9 @@ inline bool fusion_sweep(Netlist &nl) noexcept {
       if (g.output_fanout == 0) {
         continue; // output double-negation preserved
       }
+      if (has_live_seq_user(nl, s)) {
+        continue; // opaque barrier: never rewire a sequential-gate input pin
+      }
       const std::uint16_t t = nl.gates[h].drivers[0];
       if (t == s) {
         continue; // defensive: never rewire a gate into itself
@@ -1118,7 +1264,7 @@ inline bool fusion_sweep(Netlist &nl) noexcept {
       case GateKind::kJk:
       case GateKind::kT:
       case GateKind::kSrlatch:
-        break; // SEQ11 owns optimizer preservation; no bubble-push until then.
+        break; // opaque barrier: never fuse through a state-element driver
       }
       if (nk == GateKind::kNot) {
         continue;
@@ -1168,6 +1314,9 @@ struct PendingWire {
   std::uint16_t orig = kNoDriver; // original driver slot (kNoDriver = dangling)
   std::uint8_t input = 0;
   bool use_pool = false; // ignored original input: wire the shared C0 pool gate
+  std::uint8_t inv = 0;  // Q/NQ polarity of the original sink pin (verbatim seq carry)
+  std::uint16_t osrc = kNoDriver; // original sink gate of a dangling wire (for post-pass tying)
+  std::uint8_t oisrc = 0;         // original sink input of a dangling wire
 };
 
 struct ConvertCtx {
@@ -1210,6 +1359,12 @@ inline void record_input(ConvertCtx &ctx, const Netlist &src, std::uint16_t orig
   PendingWire w{};
   w.fresh = fresh;
   w.input = input_idx;
+  // Tie key is the source pin's tie leader (own flat when untied), so every
+  // member of a source tie class maps to one fresh class instead of
+  // splitting it again on the next toggle.
+  const std::size_t lflat = tie_leader_flat(src, tie_flat(orig_s, orig_i));
+  w.osrc = static_cast<std::uint16_t>(lflat / kMaxInputs);
+  w.oisrc = static_cast<std::uint8_t>(lflat % kMaxInputs);
   if ((g.ignored_mask & static_cast<std::uint8_t>(1u << orig_i)) != 0) {
     w.use_pool = true;
     w.orig = ctx.pool_c0;
@@ -1223,6 +1378,113 @@ inline void record_input(ConvertCtx &ctx, const Netlist &src, std::uint16_t orig
 
 inline GateKind universal_kind(OptTarget t) noexcept {
   return (t == OptTarget::kNand) ? GateKind::kNand : GateKind::kNor;
+}
+
+// Recompute NQ fanout from per-pin polarity (the O2 verbatim path is the
+// only fresh-build producer of NQ edges; post-cleanup merges never touch
+// sequential pins, so one recount after wiring suffices).
+inline void recount_nq_fanout(Netlist &nl) noexcept {
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    nl.gates[s].nq_fanout = 0;
+  }
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      const std::uint16_t d = g.drivers[i];
+      if (d != kNoDriver && d < kMaxGates && nl.gates[d].live &&
+          nl.driver_inv[static_cast<std::size_t>(s) * kMaxInputs + i] != 0) {
+        ++nl.gates[d].nq_fanout;
+      }
+    }
+  }
+}
+
+// Tie same-source dangling pins in the O2 fresh build (opaque-barrier
+// convergence): the structural path mints one fresh dangling pin per USE,
+// so a dangling variable fanned to k converted inputs becomes k block
+// inputs — and repeated nand<->nor toggles multiply pins (and gates)
+// exponentially. Tying pins derived from the same original pin restores
+// one variable per pin (the minimized path's discipline), which is
+// semantics-preserving by construction and lets toggles converge.
+// Runs only for sequential nets (minimized resynthesis refuses state, so
+// only barrier nets can reach this blowup); pure-combinational O2 output
+// stays bit-identical.
+inline void tie_duplicate_dangling(Netlist &out, const PendingWire *pend, std::size_t npend) noexcept {
+  for (std::size_t j = 0; j < npend; ++j) {
+    const PendingWire &w = pend[j];
+    if (w.use_pool || w.orig != kNoDriver || w.osrc == kNoDriver) {
+      continue; // wired or pool-routed: nothing to tie
+    }
+    if (w.fresh >= kMaxGates || w.input >= kMaxInputs) {
+      continue; // wiring pass already failed loudly on these; stay quiet
+    }
+    if (out.gates[w.fresh].drivers[w.input] != kNoDriver) {
+      continue; // no longer dangling (defensive); stay safe
+    }
+    for (std::size_t i = 0; i < j; ++i) {
+      const PendingWire &v = pend[i];
+      if (v.use_pool || v.orig != kNoDriver || v.osrc != w.osrc || v.oisrc != w.oisrc) {
+        continue;
+      }
+      if (v.fresh >= kMaxGates || v.input >= kMaxInputs) {
+        continue;
+      }
+      PinRef dst{};
+      dst.slot = w.fresh;
+      dst.is_output = false;
+      dst.input = w.input;
+      PinRef src{};
+      src.slot = v.fresh;
+      src.is_output = false;
+      src.input = v.input;
+      // Both pins are fresh, dangling, non-ignored by construction
+      // (ignored originals route through the pool, verbatim sequential
+      // pins never enter pend); tie_pins is idempotent and later
+      // duplicates join the same class through any member.
+      (void)tie_pins(out, dst, src);
+      break;
+    }
+  }
+}
+
+// Verbatim carry of one sequential gate into the O2 fresh build (opaque
+// barrier): same kind, pin count, and flags; ignored dangling pins stay
+// ignored and dangling (never pool-routed); wired inputs resolve through
+// the emit map in the deferred wiring pass with per-pin Q/NQ polarity
+// preserved. Fresh slot/counter discipline matches add_gate.
+inline std::uint16_t emit_seq_verbatim(ConvertCtx &ctx, const Netlist &src, std::uint16_t s) noexcept {
+  const Gate &g = src.gates[s];
+  const std::uint16_t o = fresh_gate(ctx, g.kind, g.input_count);
+  if (o == kNoDriver || ctx.failed) {
+    ctx.failed = true;
+    return kNoDriver;
+  }
+  Gate &fresh = ctx.out->gates[o];
+  fresh.ignored_mask = g.ignored_mask;
+  fresh.ignore_output = g.ignore_output;
+  fresh.ignore_nq_output = g.ignore_nq_output;
+  fresh.propagation_delay_ps = 0; // fresh build reshapes the network (comb emit drops it too)
+  for (std::uint8_t i = 0; i < g.input_count; ++i) {
+    if (g.drivers[i] == kNoDriver) {
+      continue; // stays dangling (ignored or block input); add_gate zeroed the polarity
+    }
+    if (*ctx.npend >= ctx.pend_cap) {
+      ctx.failed = true; // defensive: bounded by reachable*8 by construction
+      return kNoDriver;
+    }
+  PendingWire w{};
+  w.fresh = o;
+  w.input = i;
+  w.use_pool = false;
+  w.orig = g.drivers[i];
+  w.inv = src.driver_inv[static_cast<std::size_t>(s) * kMaxInputs + i];
+  ctx.pend[*ctx.npend] = w;
+    ++(*ctx.npend);
+  }
+  return o;
 }
 
 // NOT(a) in the target vocabulary: one universal gate over (a, a).
@@ -1416,19 +1678,48 @@ inline std::uint16_t emit_gate(ConvertCtx &ctx, const Netlist &src, std::uint16_
   case GateKind::kJk:
   case GateKind::kT:
   case GateKind::kSrlatch:
-    break; // SEQ11 owns optimizer preservation; O2 conversion refuses loudly.
+    break; // opaque barrier: sequential gates travel via emit_seq_verbatim,
+           // never through conversion; this stays as a defensive refusal.
   }
   return kNoDriver; // unreachable (all kinds handled); defensive
 }
 
 // --- O2 post-cleanup (vocabulary-preserving) ---------------------------
-// Merge identical universal gates (non-sinks, all inputs wired) and cancel
+// Merge identical universal gates (non-sinks, all inputs wired — plus tied
+// dangling inputs when merge_tied_dangling is set, see below) and cancel
 // double inverters U(U(E,E),U(E,E)) == E for internal gates. Both preserve
 // the target vocabulary (all gates stay U) and block output count (sinks
 // are never merged). Deterministic (slot order), allocation-free, noexcept.
 // Dangling inputs are never merged (two [NoDriver,NoDriver] inverters may be
 // distinct variables ~a vs ~b; merging would equate them).
-inline bool dedup_universal_pass(Netlist &nl, GateKind u) noexcept {
+// Normalized dedup key for one input pin: live wired drivers key by slot;
+// dangling pins key by tie leader when merging tied dangling pins is on
+// (else a per-pin unique key that never matches). Dead drivers key 0
+// (never match — the gate is skipped).
+inline std::uint32_t dedup_key(const Netlist &nl, std::uint16_t s, std::uint8_t i, bool merge_tied_dangling) noexcept {
+  const std::uint16_t d = nl.gates[s].drivers[i];
+  if (d != kNoDriver) {
+    return (d < kMaxGates && nl.gates[d].live) ? (static_cast<std::uint32_t>(d) + 1u) : 0u;
+  }
+  if (!merge_tied_dangling) {
+    return 0x20000u + static_cast<std::uint32_t>(tie_flat(s, i)); // unique: never merge
+  }
+  return 0x10000u + static_cast<std::uint32_t>(tie_leader_flat(nl, tie_flat(s, i)));
+}
+
+// Merge identical universal gates (non-sinks) and cancel double inverters
+// U(U(E,E),U(E,E)) == E for internal gates. Both preserve the target
+// vocabulary (all gates stay U) and block output count (sinks are never
+// merged). Deterministic (slot order), allocation-free, noexcept.
+// Dangling inputs are never merged (two [NoDriver,NoDriver] inverters may be
+// distinct variables ~a vs ~b; merging would equate them) — except when
+// merge_tied_dangling is set: tied dangling pins provably read the same net
+// (the O2 structural build ties same-source duplicates), so gates whose
+// dangling inputs share tie leaders merge soundly. That flag runs only on
+// sequential nets, where the minimized path refuses and structural
+// duplication would otherwise multiply pins and gates on every nand<->nor
+// toggle; pure-combinational O2 output stays bit-identical.
+inline bool dedup_universal_pass(Netlist &nl, GateKind u, bool merge_tied_dangling) noexcept {
   recount_fanout(nl);
   bool changed = false;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
@@ -1439,27 +1730,21 @@ inline bool dedup_universal_pass(Netlist &nl, GateKind u) noexcept {
     if (a.ignored_mask != 0) {
       continue;
     }
-    bool a_wired = true;
+    // Sorted key multiset for order-insensitive (commutative) compare.
+    std::uint32_t a_sorted[kMaxInputs];
+    bool a_matchable = true;
     for (std::uint8_t i = 0; i < a.input_count; ++i) {
-      if (a.drivers[i] == kNoDriver) {
-        a_wired = false;
-        break;
-      }
-      if (a.drivers[i] >= kMaxGates || !nl.gates[a.drivers[i]].live) {
-        a_wired = false;
+      a_sorted[i] = dedup_key(nl, s, i, merge_tied_dangling);
+      if (a_sorted[i] == 0) {
+        a_matchable = false;
         break;
       }
     }
-    if (!a_wired) {
-      continue; // dangling: distinct variables, never merge
-    }
-    // Sorted driver multiset for order-insensitive (commutative) compare.
-    std::uint16_t a_sorted[kMaxInputs];
-    for (std::uint8_t i = 0; i < a.input_count; ++i) {
-      a_sorted[i] = a.drivers[i];
+    if (!a_matchable) {
+      continue; // dead driver (or dangling with merging off): never merge
     }
     for (std::uint8_t i = 1; i < a.input_count; ++i) {
-      std::uint16_t key = a_sorted[i];
+      std::uint32_t key = a_sorted[i];
       std::uint8_t j = i;
       while (j > 0 && a_sorted[j - 1] > key) {
         a_sorted[j] = a_sorted[j - 1];
@@ -1475,22 +1760,20 @@ inline bool dedup_universal_pass(Netlist &nl, GateKind u) noexcept {
       if (b.input_count != a.input_count || b.ignored_mask != 0) {
         continue;
       }
-      bool b_wired = true;
+      std::uint32_t b_sorted[kMaxInputs];
+      bool b_matchable = true;
       for (std::uint8_t i = 0; i < b.input_count; ++i) {
-        if (b.drivers[i] == kNoDriver || b.drivers[i] >= kMaxGates || !nl.gates[b.drivers[i]].live) {
-          b_wired = false;
+        b_sorted[i] = dedup_key(nl, t, i, merge_tied_dangling);
+        if (b_sorted[i] == 0) {
+          b_matchable = false;
           break;
         }
       }
-      if (!b_wired) {
+      if (!b_matchable) {
         continue;
       }
-      std::uint16_t b_sorted[kMaxInputs];
-      for (std::uint8_t i = 0; i < b.input_count; ++i) {
-        b_sorted[i] = b.drivers[i];
-      }
       for (std::uint8_t i = 1; i < b.input_count; ++i) {
-        std::uint16_t key = b_sorted[i];
+        std::uint32_t key = b_sorted[i];
         std::uint8_t j = i;
         while (j > 0 && b_sorted[j - 1] > key) {
           b_sorted[j] = b_sorted[j - 1];
@@ -1509,6 +1792,10 @@ inline bool dedup_universal_pass(Netlist &nl, GateKind u) noexcept {
         continue;
       }
       // Merge higher (t) into lower (s): rewire users, remove duplicate.
+      // Never merge a gate feeding a sequential gate (opaque barrier).
+      if (has_live_seq_user(nl, t)) {
+        continue;
+      }
       rewire_users(nl, t, s);
       (void)remove_gate(nl, t);
       changed = true;
@@ -1549,7 +1836,11 @@ inline bool double_inv_universal_pass(Netlist &nl, GateKind u) noexcept {
       continue;
     }
     // G == E: rewire users, remove G (D becomes orphan if it only drove G;
-    // later DCE removes it).
+    // later DCE removes it). Never cancel a gate feeding a sequential
+    // gate (opaque barrier).
+    if (has_live_seq_user(nl, s)) {
+      continue;
+    }
     rewire_users(nl, s, e);
     (void)remove_gate(nl, s);
     changed = true;
@@ -2396,7 +2687,10 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
 
   bool roots[kMaxGates] = {};
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && nl.gates[s].output_fanout == 0) {
+    // DCE roots are the original sinks plus every live sequential gate
+    // (opaque barrier: state readback observes flops outside the block
+    // interface, so lack of fanout never makes a state element dead).
+    if (nl.gates[s].live && (nl.gates[s].output_fanout == 0 || is_sequential_kind(nl.gates[s].kind))) {
       roots[s] = true;
     }
   }
@@ -2409,32 +2703,32 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
       return core::Result<Netlist>::failure("optimize: internal iteration bound", core::StatusCode::kInternal);
     }
     ++iter;
-    if (!ensure_topology(nl).ok()) {
+    if (!detail::recompile(nl)) {
       return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     bool changed = false;
     if (detail::bypass_pass(nl)) {
       changed = true;
     }
-    if (!ensure_topology(nl).ok()) {
+    if (!detail::recompile(nl)) {
       return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     if (want_fuse && detail::fusion_sweep(nl)) {
       changed = true;
     }
-    if (!ensure_topology(nl).ok()) {
+    if (!detail::recompile(nl)) {
       return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     if (detail::const_fold_pass(nl, roots)) {
       changed = true;
     }
-    if (!ensure_topology(nl).ok()) {
+    if (!detail::recompile(nl)) {
       return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     if (detail::exact_simplify_pass(nl)) {
       changed = true;
     }
-    if (!ensure_topology(nl).ok()) {
+    if (!detail::recompile(nl)) {
       return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     if (detail::dce_pass(nl, roots)) {
@@ -2446,20 +2740,23 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
   }
 
   if (opts.level != OptLevel::kO2) {
-    if (!ensure_topology(nl).ok()) {
+    if (!detail::recompile(nl)) {
       return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     return core::Result<Netlist>::success(nl);
   }
 
   // --- O2: fresh universal build -----------------------------------------
-  // Reachable set (reverse DFS from every current sink, ignored or not).
+  // Reachable set (reverse DFS from every current sink, ignored or not,
+  // plus every live sequential gate so closed state clusters with no
+  // block-output path still carry through; driver cones of kept flops
+  // follow via the DFS below).
   bool reach[kMaxGates] = {};
   {
     std::uint16_t stack[kMaxGates];
     std::size_t top = 0;
     for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      if (nl.gates[s].live && nl.gates[s].output_fanout == 0) {
+      if (nl.gates[s].live && (nl.gates[s].output_fanout == 0 || is_sequential_kind(nl.gates[s].kind))) {
         reach[s] = true;
         stack[top++] = s;
       }
@@ -2550,9 +2847,18 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
 
   // Creation pass in original slot order (fresh slots follow it).
   // Constant gates reuse the pool (internal share, sinks get dedicated
-  // outputs); all other gates emit via De Morgan as before.
+  // outputs); sequential gates carry verbatim (opaque barrier); all other
+  // gates emit via De Morgan as before.
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     if (!nl.gates[s].live || !reach[s]) {
+      continue;
+    }
+    if (is_sequential_kind(nl.gates[s].kind)) {
+      const std::uint16_t o = detail::emit_seq_verbatim(ctx, nl, s);
+      if (o == kNoDriver || ctx.failed) {
+        return core::Result<Netlist>::failure("optimize: gate budget exceeded (kMaxGates)", core::StatusCode::kInternal);
+      }
+      emit_map[s] = o;
       continue;
     }
     const detail::Constness lc = clabel[s];
@@ -2623,6 +2929,14 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
       return core::Result<Netlist>::failure("optimize: internal wiring error", core::StatusCode::kInternal);
     }
     out.gates[w.fresh].drivers[w.input] = drv;
+    out.driver_inv[tie_flat(w.fresh, w.input)] = w.inv; // Q/NQ polarity (comb pins stay 0)
+  }
+  detail::recount_nq_fanout(out); // NQ fanout for verbatim-carried sequential edges
+  if (has_sequential_gates(nl)) {
+    // Structural duplication would otherwise multiply dangling pins (and
+    // gates) on every nand<->nor toggle; tying restores one variable per
+    // pin so sequential O2 toggles converge like minimized ones do.
+    detail::tie_duplicate_dangling(out, pend, npend);
   }
   // Restore ignored marks on fresh dangling pins that mirror ignored
   // original pins (they stay excluded from the block interface).
@@ -2652,8 +2966,10 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
   // Vocabulary-preserving post-cleanup: share identical wired gates and
   // cancel internal double inverters (both keep all-NAND/all-NOR and never
   // merge sinks, so output count is stable). Runs to fixpoint with DCE for
-  // orphans (roots = original fresh outputs, hidden included, so orphans
-  // that become sinks are removed, not kept as extra outputs).
+  // orphans (roots = original fresh outputs, hidden included, plus every
+  // verbatim-carried sequential gate — the same opaque-barrier rule as the
+  // O0/O1 fixpoint roots — so orphans that become sinks are removed, not
+  // kept as extra outputs).
   {
     const GateKind u = detail::universal_kind(opts.target);
     bool post_roots[kMaxGates] = {};
@@ -2661,7 +2977,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
       if (!nl.gates[s].live || !reach[s]) {
         continue;
       }
-      if (nl.gates[s].output_fanout == 0) {
+      if (nl.gates[s].output_fanout == 0 || is_sequential_kind(nl.gates[s].kind)) {
         const std::uint16_t o = emit_map[s];
         if (o != kNoDriver && o < kMaxGates) {
           post_roots[o] = true;
@@ -2671,22 +2987,22 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
     constexpr std::size_t kPostIters = 2 * kMaxGates + 16;
     for (std::size_t it = 0; it < kPostIters; ++it) {
       bool pchanged = false;
-      if (detail::dedup_universal_pass(out, u)) {
+      if (detail::dedup_universal_pass(out, u, has_sequential_gates(nl))) {
         pchanged = true;
       }
-      if (!ensure_topology(out).ok()) {
+      if (!detail::recompile(out)) {
         return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
       }
       if (detail::double_inv_universal_pass(out, u)) {
         pchanged = true;
       }
-      if (!ensure_topology(out).ok()) {
+      if (!detail::recompile(out)) {
         return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
       }
       if (detail::dce_pass(out, post_roots)) {
         pchanged = true;
       }
-      if (!ensure_topology(out).ok()) {
+      if (!detail::recompile(out)) {
         return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
       }
       if (!pchanged) {
@@ -2717,7 +3033,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
   detail::recount_fanout(out);
   out.dirty = true;
   out.topo_size = 0;
-  if (!ensure_topology(out).ok()) {
+  if (!detail::recompile(out)) {
     return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
   }
   return core::Result<Netlist>::success(out);
