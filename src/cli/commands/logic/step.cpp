@@ -179,8 +179,8 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
   if (!support::compose_block_inputs(nl, inputs).ok()) {
     return cli::runtime_error(out, "step failed");
   }
-  std::vector<wengine::logic::BlockPin> out_pins;
-  std::vector<wengine::logic::BlockPin> in_pins;
+  std::vector<wengine::logic::PinRef> out_pins;
+  std::vector<wengine::logic::PinRef> in_pins;
   support::interface_pins(nl, in_pins, out_pins);
   if (inputs.size() != in_pins.size()) {
     return cli::runtime_error(out, "step failed");

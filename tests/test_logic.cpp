@@ -16,7 +16,7 @@
 #include <vector>
 
 using namespace wengine;
-using wengine::logic::BlockPin;
+using wengine::logic::PinRef;
 using wengine::logic::GateKind;
 using wengine::logic::LogicValue;
 using wengine::logic::Netlist;
@@ -376,8 +376,8 @@ void test_solve_xnor_chain_parity() {
   assert(logic::wire(nl, 0, 1, 0).ok());
   // Iface: XOR1.1, XOR1.2, XOR2.2 (XOR2.1 wired). Order is slot order.
   assert(logic::block_input_count(nl) == 3);
-  std::array<BlockPin, 4> pins{};
-  std::array<BlockPin, 4> outs{};
+  std::array<PinRef, 4> pins{};
+  std::array<PinRef, 4> outs{};
   std::size_t nin = 0;
   std::size_t nout = 0;
   assert(logic::block_interface(nl, pins.data(), pins.size(), &nin, outs.data(), outs.size(), &nout).ok());
@@ -468,8 +468,8 @@ void test_ignore_use_iface() {
   assert(logic::block_output_count(nl) == 2);
 
   // Interface listing is slot-ordered and cap-checked.
-  std::array<BlockPin, 8> ib{};
-  std::array<BlockPin, 8> ob{};
+  std::array<PinRef, 8> ib{};
+  std::array<PinRef, 8> ob{};
   std::size_t nin = 0;
   std::size_t nout = 0;
   assert(logic::block_interface(nl, ib.data(), ib.size(), &nin, ob.data(), ob.size(), &nout).ok());
@@ -477,7 +477,7 @@ void test_ignore_use_iface() {
   assert(ib[0].slot == 0 && ib[0].input == 0);
   assert(ob[0].slot == 0 && ob[0].is_output);
   assert(ob[1].slot == 1 && ob[1].is_output);
-  std::array<BlockPin, 1> tiny{};
+  std::array<PinRef, 1> tiny{};
   std::size_t need_in = 0;
   std::size_t need_out = 0;
   assert(!logic::block_interface(nl, tiny.data(), tiny.size(), &need_in, tiny.data(), tiny.size(),

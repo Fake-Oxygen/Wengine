@@ -335,8 +335,8 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
   }
   // Stimulus in block-interface order with session defaults.
   const std::size_t n_in = logic::block_input_count(nl);
-  std::vector<logic::BlockPin> in_pins(n_in);
-  std::vector<logic::BlockPin> out_pins(logic::block_output_count(nl));
+  std::vector<logic::PinRef> in_pins(n_in);
+  std::vector<logic::PinRef> out_pins(logic::block_output_count(nl));
   std::size_t nin_got = n_in;
   std::size_t nout_got = out_pins.size();
   if (!logic::block_interface(nl, in_pins.data(), in_pins.size(), &nin_got, out_pins.data(),
@@ -346,7 +346,7 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
   }
   std::vector<logic::LogicValue> stimulus;
   stimulus.reserve(n_in);
-  for (const logic::BlockPin &p : in_pins) {
+  for (const logic::PinRef &p : in_pins) {
     const logic::Gate &g = nl.gates[p.slot];
     if (g.kind == logic::GateKind::kDff && p.input == 4 && !logic::is_tied(nl, p.slot, p.input)) {
       stimulus.push_back(logic::LogicValue::kHigh); // FR-008: unconnected EN asserted

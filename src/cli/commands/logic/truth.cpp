@@ -17,7 +17,7 @@
 
 namespace wengine::cli::logic {
 
-using wengine::logic::BlockPin;
+using wengine::logic::PinRef;
 using wengine::logic::Netlist;
 
 int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
@@ -31,8 +31,8 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
   Netlist &nl = workspace();
-  std::vector<BlockPin> in_pins;
-  std::vector<BlockPin> out_pins;
+  std::vector<PinRef> in_pins;
+  std::vector<PinRef> out_pins;
   support::interface_pins(nl, in_pins, out_pins);
   const std::size_t nin = in_pins.size();
   bool have_limit = false;

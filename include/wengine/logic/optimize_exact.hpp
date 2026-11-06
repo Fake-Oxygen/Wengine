@@ -58,8 +58,8 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
       return false;
     }
   }
-  BlockPin in_buf[10];
-  BlockPin out_buf[16];
+  PinRef in_buf[10];
+  PinRef out_buf[16];
   std::size_t in_n = 0;
   std::size_t out_n = 0;
   if (!block_interface(nl, in_buf, 10, &in_n, out_buf, 16, &out_n).ok()) {

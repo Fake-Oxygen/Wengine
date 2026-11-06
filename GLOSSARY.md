@@ -5,6 +5,7 @@ new deepened modules take their names from this file.
 
 ## Logic module
 
+- **PinRef**: the single pin address (`slot` + `is_output` + `input` + `NQ negated`). Parsed references, mutation targets, tie members, and block boundary entries are all PinRefs (the former `BlockPin` was the same shape under another name).
 - **TieSet**: input-input short equivalence classes over dangling input
   pins. Stored as a star in `Netlist::tie_rep` (`0` == singleton, else
   `leader_flat + 1`). Canonical rep is the lowest `(slot, input)`; enumeration

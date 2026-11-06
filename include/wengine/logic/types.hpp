@@ -128,20 +128,14 @@ inline constexpr std::size_t kMaxGates = 1024; // slot cap, loud on overflow
 }
 
 // Pin vocabulary (moved from netlist.hpp so the TieSet seam in tie_set.hpp
-// can take pins without a netlist.hpp include cycle; unification of the two
-// near-identical structs is a tracked follow-up, not this change).
+// can take pins without a netlist.hpp include cycle). One struct for every
+// pin address — parsed references, mutation targets, tie members, and block
+// boundary entries alike (WENGI-43 unified the former BlockPin here).
 struct PinRef {
   std::uint16_t slot = 0;
   bool is_output = false;
   std::uint8_t input = 0; // 0-based, valid iff !is_output
-  bool negated = false;   // valid iff is_output: NQ source on sequential gates
-};
-
-struct BlockPin {
-  std::uint16_t slot = 0;
-  std::uint8_t input = 0; // valid iff !is_output
-  bool is_output = false;
-  bool negated = false; // valid iff is_output: the NQ (rather than Q) block output
+  bool negated = false;   // valid iff is_output: NQ source/output on sequential gates
 };
 
 // One gate slot. `live` false => free-list entry. `counter` is the

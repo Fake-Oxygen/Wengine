@@ -617,8 +617,8 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
       return false; // O2 refuses sequential loudly; let structural fail
     }
   }
-  BlockPin in_buf[8];
-  BlockPin out_buf[8];
+  PinRef in_buf[8];
+  PinRef out_buf[8];
   std::size_t in_n = 0;
   std::size_t out_n = 0;
   if (!block_interface(src, in_buf, 8, &in_n, out_buf, 8, &out_n).ok()) {
@@ -768,8 +768,8 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
     return false;
   }
   // Interface + proj mapping (minimized inputs -> original inputs).
-  BlockPin min_in[8];
-  BlockPin min_out[8];
+  PinRef min_in[8];
+  PinRef min_out[8];
   std::size_t min_in_n = 0;
   std::size_t min_out_n = 0;
   if (!block_interface(built, min_in, 8, &min_in_n, min_out, 8, &min_out_n).ok()) {

@@ -15,7 +15,7 @@
 
 namespace wengine::cli::logic {
 
-using wengine::logic::BlockPin;
+using wengine::logic::PinRef;
 using wengine::logic::GateKind;
 using wengine::logic::kMaxGates;
 using wengine::logic::kMaxInputs;
@@ -147,11 +147,11 @@ void collect_block_inputs(const Netlist &nl, std::string_view partial, std::vect
   }
 }
 
-void interface_pins(const Netlist &nl, std::vector<BlockPin> &in_pins, std::vector<BlockPin> &out_pins) {
+void interface_pins(const Netlist &nl, std::vector<PinRef> &in_pins, std::vector<PinRef> &out_pins) {
   const std::size_t nin = wengine::logic::block_input_count(nl);
   const std::size_t nout = wengine::logic::block_output_count(nl);
-  in_pins.assign(nin, BlockPin{});
-  out_pins.assign(nout, BlockPin{});
+  in_pins.assign(nin, PinRef{});
+  out_pins.assign(nout, PinRef{});
   std::size_t nin_got = nin;
   std::size_t nout_got = nout;
   const core::Status st = wengine::logic::block_interface(nl, in_pins.data(), in_pins.size(), &nin_got, out_pins.data(), out_pins.size(), &nout_got);
@@ -265,18 +265,18 @@ core::Status apply_async_and_report(Netlist &nl, std::ostream &out) {
   return core::Status::success();
 }
 
-core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<BlockPin> &in_pins,
-                             const std::vector<BlockPin> &out_pins, std::ostream &os) {
+core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<PinRef> &in_pins,
+                             const std::vector<PinRef> &out_pins, std::ostream &os) {
   // Header: input pins then output pins.
   bool first = true;
-  for (const BlockPin &p : in_pins) {
+  for (const PinRef &p : in_pins) {
     if (!first) {
       os << ',';
     }
     first = false;
     os << pin_text(nl, p.slot, false, p.input);
   }
-  for (const BlockPin &p : out_pins) {
+  for (const PinRef &p : out_pins) {
     if (!first) {
       os << ',';
     }
@@ -327,7 +327,7 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
 }
 
 core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t total_rows,
-                                const std::vector<BlockPin> &in_pins, const std::vector<BlockPin> &out_pins,
+                                const std::vector<PinRef> &in_pins, const std::vector<PinRef> &out_pins,
                                 std::ostream &os) {
   const std::size_t nin = in_pins.size();
   const std::size_t nout = out_pins.size();
@@ -341,10 +341,10 @@ core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t t
   }
   std::vector<std::string> headers;
   headers.reserve(ncols);
-  for (const BlockPin &p : in_pins) {
+  for (const PinRef &p : in_pins) {
     headers.push_back(pin_text(nl, p.slot, false, p.input));
   }
-  for (const BlockPin &p : out_pins) {
+  for (const PinRef &p : out_pins) {
     headers.push_back(pin_text(nl, p.slot, true, 0, p.negated));
   }
   std::vector<std::size_t> widths;

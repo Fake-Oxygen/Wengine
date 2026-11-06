@@ -15,16 +15,16 @@
 
 namespace wengine::cli::logic {
 
-using wengine::logic::BlockPin;
+using wengine::logic::PinRef;
 using wengine::logic::Netlist;
 
 namespace {
 
 // Space-joined display names of an interface pin list (slot order,
 // deterministic). Empty stays empty (the caller brackets it).
-[[nodiscard]] std::string join_pins(const Netlist &nl, const std::vector<BlockPin> &pins, bool is_output) {
+[[nodiscard]] std::string join_pins(const Netlist &nl, const std::vector<PinRef> &pins, bool is_output) {
   std::string text;
-  for (const BlockPin &p : pins) {
+  for (const PinRef &p : pins) {
     if (!text.empty()) {
       text += ' ';
     }
@@ -70,8 +70,8 @@ int LogicOptimizeSpec::run(ArgCursor &args, std::ostream &out) {
   // duplicates pins for inversion (NAND(a,a) = NOT a), and gates are
   // renamed — so the new truth table only matches the old one under pin
   // replication. Any interface change is reported loudly below.
-  std::vector<BlockPin> before_in;
-  std::vector<BlockPin> before_out;
+  std::vector<PinRef> before_in;
+  std::vector<PinRef> before_out;
   support::interface_pins(nl, before_in, before_out);
   const std::string before_in_text = join_pins(nl, before_in, false);
   const std::string before_out_text = join_pins(nl, before_out, true);
@@ -81,8 +81,8 @@ int LogicOptimizeSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::runtime_error(out, std::string("optimize failed (") + std::string(r.error) + ")");
   }
   nl = r.value;
-  std::vector<BlockPin> after_in;
-  std::vector<BlockPin> after_out;
+  std::vector<PinRef> after_in;
+  std::vector<PinRef> after_out;
   support::interface_pins(nl, after_in, after_out);
   const std::string after_in_text = join_pins(nl, after_in, false);
   const std::string after_out_text = join_pins(nl, after_out, true);

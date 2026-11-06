@@ -15,7 +15,7 @@
 
 namespace wengine::cli::logic {
 
-using wengine::logic::BlockPin;
+using wengine::logic::PinRef;
 using wengine::logic::kMaxGates;
 using wengine::logic::Netlist;
 
@@ -86,21 +86,21 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
   if (show_iface) {
-    std::vector<BlockPin> in_pins;
-    std::vector<BlockPin> out_pins;
+    std::vector<PinRef> in_pins;
+    std::vector<PinRef> out_pins;
     support::interface_pins(nl, in_pins, out_pins);
     out << "inputs (" << in_pins.size() << "):\n";
     if (in_pins.empty()) {
       out << "  (none)\n";
     }
-    for (const BlockPin &p : in_pins) {
+    for (const PinRef &p : in_pins) {
       out << "  " << support::pin_text(nl, p.slot, false, p.input) << '\n';
     }
     out << "outputs (" << out_pins.size() << "):\n";
     if (out_pins.empty()) {
       out << "  (none)\n";
     }
-    for (const BlockPin &p : out_pins) {
+    for (const PinRef &p : out_pins) {
       out << "  " << support::pin_text(nl, p.slot, true, 0, p.negated) << '\n';
     }
     std::vector<std::string> ignored;

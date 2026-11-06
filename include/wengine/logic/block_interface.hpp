@@ -66,8 +66,8 @@ namespace wengine::logic {
   return n;
 }
 
-[[nodiscard]] inline core::Status block_interface(const Netlist &nl, BlockPin *in_buf, std::size_t in_cap,
-                                                  std::size_t *in_n, BlockPin *out_buf,
+[[nodiscard]] inline core::Status block_interface(const Netlist &nl, PinRef *in_buf, std::size_t in_cap,
+                                                  std::size_t *in_n, PinRef *out_buf,
                                                   std::size_t out_cap, std::size_t *out_n) noexcept {
   std::size_t need_in = 0;
   std::size_t need_out = 0;
@@ -88,7 +88,7 @@ namespace wengine::logic {
         continue;
       }
       if (in_buf != nullptr && need_in < in_cap) {
-        in_buf[need_in] = BlockPin{.slot = s, .input = i, .is_output = false};
+        in_buf[need_in] = PinRef{.slot = s, .is_output = false, .input = i};
       }
       ++need_in;
     }
@@ -100,13 +100,13 @@ namespace wengine::logic {
     }
     if (g.output_fanout == 0 && !g.ignore_output) {
       if (out_buf != nullptr && need_out < out_cap) {
-        out_buf[need_out] = BlockPin{.slot = s, .input = 0, .is_output = true, .negated = false};
+        out_buf[need_out] = PinRef{.slot = s, .is_output = true, .input = 0, .negated = false};
       }
       ++need_out;
     }
     if (is_sequential_kind(g.kind) && g.nq_fanout == 0 && !g.ignore_nq_output) {
       if (out_buf != nullptr && need_out < out_cap) {
-        out_buf[need_out] = BlockPin{.slot = s, .input = 0, .is_output = true, .negated = true};
+        out_buf[need_out] = PinRef{.slot = s, .is_output = true, .input = 0, .negated = true};
       }
       ++need_out;
     }

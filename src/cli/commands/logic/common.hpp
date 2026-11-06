@@ -43,8 +43,8 @@ void collect_pins(const wengine::logic::Netlist &nl, bool want_out, bool want_in
 void collect_block_inputs(const wengine::logic::Netlist &nl, std::string_view partial, std::vector<std::string> &out);
 
 // Ordered interface (slot order, then input index) for solve/truth/export.
-void interface_pins(const wengine::logic::Netlist &nl, std::vector<wengine::logic::BlockPin> &in_pins,
-                    std::vector<wengine::logic::BlockPin> &out_pins);
+void interface_pins(const wengine::logic::Netlist &nl, std::vector<wengine::logic::PinRef> &in_pins,
+                    std::vector<wengine::logic::PinRef> &out_pins);
 
 // Sequential session state (US1, data-model §2/§3/§5): process-wide beside
 // workspace(), cleared by `reset`. Sticky poke values keyed by tie-leader
@@ -92,8 +92,8 @@ wengine::core::Status apply_async_and_report(wengine::logic::Netlist &nl, std::o
 
 // Truth streaming over the bit-parallel word evaluator (bit-exact vs solve).
 core::Status write_truth_csv(wengine::logic::Netlist &nl, std::uint64_t rows,
-                             const std::vector<wengine::logic::BlockPin> &in_pins,
-                             const std::vector<wengine::logic::BlockPin> &out_pins, std::ostream &os);
+                             const std::vector<wengine::logic::PinRef> &in_pins,
+                             const std::vector<wengine::logic::PinRef> &out_pins, std::ostream &os);
 
 // Pretty terminal table over the same bit-parallel evaluator (same rows,
 // same row convention as write_truth_csv; bit-exact vs solve). Column
@@ -101,8 +101,8 @@ core::Status write_truth_csv(wengine::logic::Netlist &nl, std::uint64_t rows,
 // (a --limit truncation) a loud footer names the shown/total counts.
 // --csv files stay raw CSV via write_truth_csv; the terminal never is.
 core::Status write_truth_pretty(wengine::logic::Netlist &nl, std::uint64_t rows, std::uint64_t total_rows,
-                                const std::vector<wengine::logic::BlockPin> &in_pins,
-                                const std::vector<wengine::logic::BlockPin> &out_pins, std::ostream &os);
+                                const std::vector<wengine::logic::PinRef> &in_pins,
+                                const std::vector<wengine::logic::PinRef> &out_pins, std::ostream &os);
 
 // Canonical YAML workspace (byte-identical save/load round-trip). The
 // saver captures live pool Q as the file's per-element inits (006: save
