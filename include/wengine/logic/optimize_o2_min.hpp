@@ -46,15 +46,20 @@ inline bool mini_add_dang(MiniDang *list, std::size_t *n, std::size_t cap,
   return true;
 }
 
-// Build NAND-NAND from SOP covers (one cover per output, greedy order).
-// `covers[o][k]` are QmCubes for output o (SOP, lit = x_j if bits=1 else ~x_j).
-// Returns false on budget/tie failure.
-inline bool build_nand_sop(Netlist &out, std::uint8_t n, std::uint8_t m,
-                           const QmCube *covers, const std::size_t *ncover,
-                           const bool *is_const, const std::uint8_t *const_val,
-                           MiniDang *dangs, std::size_t *ndangs, std::size_t dang_cap) noexcept {
-  const GateKind u = GateKind::kNand;
-  // Shared C1 for constant-0 sinks (dedicated C0 per sink).
+// Minimized two-level build from QM covers (one cover per output, greedy
+// order). SOP for NAND (lit = x_j if bits=1 else ~x_j), POS for NOR (lit =
+// x_j if bits=0 else ~x_j): the two forms are duals, so a single builder
+// parameterized by target serves both — only the lit-polarity reading
+// differs. Shared input inverters, globally tied dangling pins (one block
+// input per variable). Returns false on budget/tie failure.
+inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
+                            const QmCube *covers, const std::size_t *ncover,
+                            const bool *is_const, const std::uint8_t *const_val,
+                            OptTarget target, MiniDang *dangs, std::size_t *ndangs,
+                            std::size_t dang_cap) noexcept {
+  const GateKind u = universal_kind(target);
+  // Shared C1 for constant-0 sinks (dedicated C0 per sink). U(0,0)=1 and
+  // U(C1,C1)=0 hold in both vocabularies, so the pool is target-neutral.
   bool need_c1 = false;
   for (std::uint8_t o = 0; o < m; ++o) {
     if (is_const[o] && const_val[o] == 0) {
@@ -92,7 +97,7 @@ inline bool build_nand_sop(Netlist &out, std::uint8_t n, std::uint8_t m,
             break;
           }
         }
-        const bool positive = (((c.bits >> jk) & 1u) != 0u);
+        const bool positive = ((((c.bits >> jk) & 1u) != 0u) != (target == OptTarget::kNor));
         if (positive) {
           // P=x_j, q=~x_j needs inverter.
           need_inv[jk] = true;
@@ -106,7 +111,7 @@ inline bool build_nand_sop(Netlist &out, std::uint8_t n, std::uint8_t m,
           if (((c.mask >> j) & 1u) != 0u) {
             continue;
           }
-          const bool positive = (((c.bits >> j) & 1u) != 0u);
+          const bool positive = ((((c.bits >> j) & 1u) != 0u) != (target == OptTarget::kNor));
           if (!positive) {
             need_inv[j] = true;
           }
@@ -174,9 +179,9 @@ inline bool build_nand_sop(Netlist &out, std::uint8_t n, std::uint8_t m,
             break;
           }
         }
-        const bool positive = (((c.bits >> jk) & 1u) != 0u);
+        const bool positive = ((((c.bits >> jk) & 1u) != 0u) != (target == OptTarget::kNor));
         if (positive) {
-          // f=x_j: buffer via shared inv + dedicated NAND.
+          // f=x_j: buffer via shared inv + dedicated output gate.
           if (inv_slot[jk] == kNoDriver) {
             return false;
           }
@@ -200,7 +205,7 @@ inline bool build_nand_sop(Netlist &out, std::uint8_t n, std::uint8_t m,
           }
         }
       } else {
-        // f=AND lits: product NAND + output NOT.
+        // f=AND lits: product gate + output inverter.
         auto rp = add_gate(out, u, width);
         if (!rp.ok()) {
           return false;
@@ -210,7 +215,7 @@ inline bool build_nand_sop(Netlist &out, std::uint8_t n, std::uint8_t m,
           if (((c.mask >> j) & 1u) != 0u) {
             continue;
           }
-          const bool positive = (((c.bits >> j) & 1u) != 0u);
+          const bool positive = ((((c.bits >> j) & 1u) != 0u) != (target == OptTarget::kNor));
           if (positive) {
             if (!mini_add_dang(dangs, ndangs, dang_cap, rp.value, idx, j)) {
               return false;
@@ -247,7 +252,7 @@ inline bool build_nand_sop(Netlist &out, std::uint8_t n, std::uint8_t m,
             break;
           }
         }
-        const bool positive = (((c.bits >> jk) & 1u) != 0u);
+        const bool positive = ((((c.bits >> jk) & 1u) != 0u) != (target == OptTarget::kNor));
         if (positive) {
           if (inv_slot[jk] == kNoDriver) {
             return false;
@@ -268,298 +273,7 @@ inline bool build_nand_sop(Netlist &out, std::uint8_t n, std::uint8_t m,
           if (((c.mask >> j) & 1u) != 0u) {
             continue;
           }
-          const bool positive = (((c.bits >> j) & 1u) != 0u);
-          if (positive) {
-            if (!mini_add_dang(dangs, ndangs, dang_cap, rp.value, idx, j)) {
-              return false;
-            }
-          } else {
-            if (inv_slot[j] == kNoDriver) {
-              return false;
-            }
-            out.gates[rp.value].drivers[idx] = inv_slot[j];
-          }
-          ++idx;
-        }
-        q_slot[k] = rp.value;
-        q_wired[k] = true;
-      }
-    }
-    auto rf = add_gate(out, u, static_cast<std::uint8_t>(p));
-    if (!rf.ok()) {
-      return false;
-    }
-    for (std::size_t k = 0; k < p; ++k) {
-      if (q_wired[k]) {
-        out.gates[rf.value].drivers[k] = q_slot[k];
-      } else {
-        if (!mini_add_dang(dangs, ndangs, dang_cap, rf.value, static_cast<std::uint8_t>(k), q_dang_j[k])) {
-          return false;
-        }
-      }
-    }
-  }
-  return true;
-}
-
-// Build NOR-NOR from POS covers (sums). Dual of NAND-SOP: lit = x_j if
-// maxterm bit=0 else ~x_j; sums via NOR, final via NOR.
-inline bool build_nor_pos(Netlist &out, std::uint8_t n, std::uint8_t m,
-                          const QmCube *covers, const std::size_t *ncover,
-                          const bool *is_const, const std::uint8_t *const_val,
-                          MiniDang *dangs, std::size_t *ndangs, std::size_t dang_cap) noexcept {
-  const GateKind u = GateKind::kNor;
-  bool need_c1 = false;
-  for (std::uint8_t o = 0; o < m; ++o) {
-    if (is_const[o] && const_val[o] == 1) {
-      need_c1 = true;
-      break;
-    }
-  }
-  // Shared C0 for constant-1 sinks? NOR C1 needs 2 gates (C0 shared +
-  // dedicated C1). C0 = NOR(0,0)=1? Wait NOR(0,0)=1 (C1). Let's define:
-  // shared C1 = NOR(0,0)=1 (1 gate, ignored). Shared C0? For NOR, C0 needs
-  // C1? NOR(C1,C1)=~(1|1)=0 (C0). Good same pattern as NAND (swap roles?
-  // Actually same: C1=U(0,0)=1, C0=U(C1,C1)=0 in both vocabularies).
-  std::uint16_t pool_c1 = kNoDriver;
-  if (need_c1) {
-    // Need shared C0? No, C1 sinks need shared C0? C1 sink = NOR(C0_shared,C0_shared)?
-    // C0_shared = ??? Let's use same pattern as NAND but swapped:
-    // For NOR, const-1 sink needs 2 gates (shared C1? No). Simpler: mirror
-    // NAND logic with C0/C1 swapped? Actually U(0,0)=1 in both, U(1,1)=0 in
-    // both. So same pool structure works: shared C1 (1 gate) + dedicated
-    // C0/C1 sinks as in NAND, but with NOR gates. For const-1 sink in NOR:
-    // needs 2 gates (shared C1? No, const-1 = 1 needs... Let's reuse same
-    // scheme as NAND: const-1 sink = dedicated U(0,0) (1 gate, no shared);
-    // const-0 sink = dedicated U(C1_shared,C1_shared) (needs shared C1).
-    // Wait const-0 in NOR: 0 needs... U(0,0)=1 (C1), U(1,1)=0 (C0). So const-0
-    // sink needs 2 gates (shared C1 + dedicated C0). Const-1 sink needs 1
-    // gate (dedicated C1). Same as NAND! Good, same as NAND (since U(0,0)=1
-    // in both). So need shared C1 iff any const-0 output exists (not const-1).
-    // Our need_c1 above checks const-1, wrong. Fix: need shared C1 iff any
-    // const-0 output exists.
-  }
-  // Recompute correctly: shared C1 needed for const-0 sinks.
-  need_c1 = false;
-  for (std::uint8_t o = 0; o < m; ++o) {
-    if (is_const[o] && const_val[o] == 0) {
-      need_c1 = true;
-      break;
-    }
-  }
-  if (need_c1) {
-    auto r = add_gate(out, u, 2);
-    if (!r.ok()) {
-      return false;
-    }
-    out.gates[r.value].ignored_mask = 0x03u;
-    pool_c1 = r.value;
-  }
-  // Shared inverters for positive lits? For POS sums: sum = OR lits where
-  // lit = x_j if maxterm bit=0 (positive) else ~x_j (negative, needs inv).
-  // Product (NAND) needed inv for negative lits; sum (NOR) needs inv for
-  // positive? Let's derive: sum S = OR lits, r = ~S = NOR(lits). Lits:
-  // positive x_j direct wire (dangling), negative ~x_j via inverter.
-  // For POS, lit polarity: bit=0 => positive x_j (direct), bit=1 =>
-  // negative ~x_j (needs inv). Good (opposite of SOP where bit=1 positive).
-  bool need_inv[8] = {};
-  for (std::uint8_t o = 0; o < m; ++o) {
-    if (is_const[o]) {
-      continue;
-    }
-    for (std::size_t k = 0; k < ncover[o]; ++k) {
-      const QmCube c = covers[static_cast<std::size_t>(o) * 8 + k];
-      const std::uint8_t width = static_cast<std::uint8_t>(n - qm_popcount(c.mask));
-      if (width == 0) {
-        continue;
-      }
-      if (width == 1) {
-        std::uint8_t jk = 0;
-        for (std::uint8_t j = 0; j < n; ++j) {
-          if (((c.mask >> j) & 1u) == 0u) {
-            jk = j;
-            break;
-          }
-        }
-        const bool positive = (((c.bits >> jk) & 1u) == 0u); // POS: bit 0 => positive
-        if (positive) {
-          // Single-lit sum S=x_j (positive): r=~x_j needs inverter (shared).
-          // Single-negative S=~x_j needs no shared inv (r=x_j wire; f itself
-          // uses a dedicated output inverter below).
-          need_inv[jk] = true;
-        }
-      } else {
-        for (std::uint8_t j = 0; j < n; ++j) {
-          if (((c.mask >> j) & 1u) != 0u) {
-            continue;
-          }
-          const bool positive = (((c.bits >> j) & 1u) == 0u);
-          if (!positive) {
-            need_inv[j] = true;
-          }
-        }
-      }
-    }
-  }
-  // Note: single-sum single-negative (S=~x_j) needs no shared inv for r
-  // (r=x_j wire), but f itself (single sum) needs special handling below
-  // with dedicated gates. Good.
-  std::uint16_t inv_slot[8];
-  for (std::uint8_t j = 0; j < 8; ++j) {
-    inv_slot[j] = kNoDriver;
-  }
-  for (std::uint8_t j = 0; j < n; ++j) {
-    if (!need_inv[j]) {
-      continue;
-    }
-    auto r = add_gate(out, u, 2);
-    if (!r.ok()) {
-      return false;
-    }
-    if (!mini_add_dang(dangs, ndangs, dang_cap, r.value, 0, j)) {
-      return false;
-    }
-    if (!mini_add_dang(dangs, ndangs, dang_cap, r.value, 1, j)) {
-      return false;
-    }
-    inv_slot[j] = r.value;
-  }
-  for (std::uint8_t o = 0; o < m; ++o) {
-    if (is_const[o]) {
-      if (const_val[o] == 1) {
-        auto r = add_gate(out, u, 2);
-        if (!r.ok()) {
-          return false;
-        }
-        out.gates[r.value].ignored_mask = 0x03u;
-      } else {
-        if (pool_c1 == kNoDriver) {
-          return false;
-        }
-        auto r = add_gate(out, u, 2);
-        if (!r.ok()) {
-          return false;
-        }
-        out.gates[r.value].drivers[0] = pool_c1;
-        out.gates[r.value].drivers[1] = pool_c1;
-      }
-      continue;
-    }
-    const std::size_t p = ncover[o];
-    if (p == 0 || p > 8) {
-      return false;
-    }
-    if (p == 1) {
-      const QmCube c = covers[static_cast<std::size_t>(o) * 8 + 0];
-      const std::uint8_t width = static_cast<std::uint8_t>(n - qm_popcount(c.mask));
-      if (width == 1) {
-        std::uint8_t jk = 0;
-        for (std::uint8_t j = 0; j < n; ++j) {
-          if (((c.mask >> j) & 1u) == 0u) {
-            jk = j;
-            break;
-          }
-        }
-        const bool positive = (((c.bits >> jk) & 1u) == 0u);
-        if (positive) {
-          // f=x_j: buffer via shared inv? S=x_j, r=~x_j (shared inv), f=~r=x_j
-          // needs final NOR(inv,inv). Use shared inv + dedicated final.
-          if (inv_slot[jk] == kNoDriver) {
-            return false;
-          }
-          auto r = add_gate(out, u, 2);
-          if (!r.ok()) {
-            return false;
-          }
-          out.gates[r.value].drivers[0] = inv_slot[jk];
-          out.gates[r.value].drivers[1] = inv_slot[jk];
-        } else {
-          // f=~x_j: dedicated output inverter.
-          auto r = add_gate(out, u, 2);
-          if (!r.ok()) {
-            return false;
-          }
-          if (!mini_add_dang(dangs, ndangs, dang_cap, r.value, 0, jk)) {
-            return false;
-          }
-          if (!mini_add_dang(dangs, ndangs, dang_cap, r.value, 1, jk)) {
-            return false;
-          }
-        }
-      } else {
-        // f=AND? No, POS single sum: f=S=OR lits. S via NOR + NOT?
-        // S=OR lits, r=~S=NOR(lits) (1 gate), f=~r=NOT(r) (1 gate).
-        auto rp = add_gate(out, u, width);
-        if (!rp.ok()) {
-          return false;
-        }
-        std::uint8_t idx = 0;
-        for (std::uint8_t j = 0; j < n; ++j) {
-          if (((c.mask >> j) & 1u) != 0u) {
-            continue;
-          }
-          const bool positive = (((c.bits >> j) & 1u) == 0u);
-          if (positive) {
-            if (!mini_add_dang(dangs, ndangs, dang_cap, rp.value, idx, j)) {
-              return false;
-            }
-          } else {
-            if (inv_slot[j] == kNoDriver) {
-              return false;
-            }
-            out.gates[rp.value].drivers[idx] = inv_slot[j];
-          }
-          ++idx;
-        }
-        auto ro = add_gate(out, u, 2);
-        if (!ro.ok()) {
-          return false;
-        }
-        out.gates[ro.value].drivers[0] = rp.value;
-        out.gates[ro.value].drivers[1] = rp.value;
-      }
-      continue;
-    }
-    std::uint16_t q_slot[8];
-    bool q_wired[8] = {};
-    std::uint8_t q_dang_j[8] = {};
-    for (std::size_t k = 0; k < p; ++k) {
-      const QmCube c = covers[static_cast<std::size_t>(o) * 8 + k];
-      const std::uint8_t width = static_cast<std::uint8_t>(n - qm_popcount(c.mask));
-      if (width == 1) {
-        std::uint8_t jk = 0;
-        for (std::uint8_t j = 0; j < n; ++j) {
-          if (((c.mask >> j) & 1u) == 0u) {
-            jk = j;
-            break;
-          }
-        }
-        const bool positive = (((c.bits >> jk) & 1u) == 0u);
-        if (positive) {
-          // S=x_j single, r=~x_j needs inv (shared) as q? For multi-sum,
-          // final AND? Wait NOR-NOR: f=AND_i S_i, r_i=~S_i=NOR(lits), final= NOR(r_i)= AND(S_i).
-          // For single-lit sum S=x_j, r=~x_j (inv) as q (wired). Good.
-          if (inv_slot[jk] == kNoDriver) {
-            return false;
-          }
-          q_slot[k] = inv_slot[jk];
-          q_wired[k] = true;
-        } else {
-          // S=~x_j, r=x_j wire (dangling).
-          q_wired[k] = false;
-          q_dang_j[k] = jk;
-        }
-      } else {
-        auto rp = add_gate(out, u, width);
-        if (!rp.ok()) {
-          return false;
-        }
-        std::uint8_t idx = 0;
-        for (std::uint8_t j = 0; j < n; ++j) {
-          if (((c.mask >> j) & 1u) != 0u) {
-            continue;
-          }
-          const bool positive = (((c.bits >> j) & 1u) == 0u);
+          const bool positive = ((((c.bits >> j) & 1u) != 0u) != (target == OptTarget::kNor));
           if (positive) {
             if (!mini_add_dang(dangs, ndangs, dang_cap, rp.value, idx, j)) {
               return false;
@@ -649,7 +363,9 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
       tt_src[r * m + o] = (out_vals[o] == LogicValue::kHigh) ? 1u : 0u;
     }
   }
-  // QM covers per output.
+  // QM covers per output. SOP (NAND): minterms where output=1.
+  // POS (NOR): maxterms where output=0 — the dual collection.
+  const std::uint8_t collect = (target == OptTarget::kNand) ? 1u : 0u;
   QmCube covers[8 * 8];
   std::size_t ncover[8] = {};
   bool is_const[8] = {};
@@ -657,19 +373,9 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
   for (std::size_t o = 0; o < m; ++o) {
     std::uint16_t terms[256];
     std::size_t nterms = 0;
-    if (target == OptTarget::kNand) {
-      // SOP: minterms where output=1.
-      for (std::size_t r = 0; r < rows; ++r) {
-        if (tt_src[r * m + o] != 0u) {
-          terms[nterms++] = static_cast<std::uint16_t>(r);
-        }
-      }
-    } else {
-      // POS: maxterms where output=0.
-      for (std::size_t r = 0; r < rows; ++r) {
-        if (tt_src[r * m + o] == 0u) {
-          terms[nterms++] = static_cast<std::uint16_t>(r);
-        }
+    for (std::size_t r = 0; r < rows; ++r) {
+      if (tt_src[r * m + o] == collect) {
+        terms[nterms++] = static_cast<std::uint16_t>(r);
       }
     }
     if (nterms == 0) {
@@ -715,14 +421,8 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
   Netlist built{};
   MiniDang dangs[1024];
   std::size_t ndangs = 0;
-  bool built_ok = false;
-  if (target == OptTarget::kNand) {
-    built_ok = build_nand_sop(built, static_cast<std::uint8_t>(n), static_cast<std::uint8_t>(m),
-                              covers, ncover, is_const, const_val, dangs, &ndangs, 1024);
-  } else {
-    built_ok = build_nor_pos(built, static_cast<std::uint8_t>(n), static_cast<std::uint8_t>(m),
-                             covers, ncover, is_const, const_val, dangs, &ndangs, 1024);
-  }
+  bool built_ok = build_two_level(built, static_cast<std::uint8_t>(n), static_cast<std::uint8_t>(m), covers,
+                                      ncover, is_const, const_val, target, dangs, &ndangs, 1024);
   if (!built_ok) {
     return false;
   }
