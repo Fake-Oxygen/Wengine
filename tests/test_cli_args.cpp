@@ -1498,6 +1498,165 @@ void test_logic_verbs() {
     std::remove(bmp.c_str());
   }
 
+  // draw: sequential symbols render in the BMP path (008-seq-schematic-symbols).
+  // Net: AND1.Y -> DFF1.D + DLATCH1.D (one flop, one latch, one comb gate).
+  assert(run("logic reset").first == 0);
+  assert(run("logic add DFF").first == 0);
+  assert(run("logic add DLATCH").first == 0);
+  assert(run("logic add AND").first == 0);
+  assert(run("logic wire AND1.Y DFF1.D").first == 0);
+  assert(run("logic wire AND1.Y DLATCH1.D").first == 0);
+  {
+    const std::string bmp = "/tmp/opencode/logic_seq_schem.bmp";
+    std::remove(bmp.c_str());
+    auto [rc, s] = run(std::string("logic draw --out ") + bmp);
+    assert(rc == 0);
+    assert(s.find("drew 3 gates") != std::string::npos);
+    wengine::logic::Netlist &ws = logic::workspace();
+    assert(wengine::logic::topo::rebuild(ws, wengine::logic::EdgeFilter::kAll).ok());
+    const wengine::logic::Schematic sc = wengine::logic::layout_schematic(ws);
+    assert(s.find("(" + std::to_string(sc.width * 2) + "x" + std::to_string(sc.height * 2) + ")") !=
+           std::string::npos);
+    std::ifstream f(bmp, std::ios::binary);
+    assert(!!f);
+    char magic[2] = {};
+    f.read(magic, 2);
+    assert(f.gcount() == 2 && magic[0] == 'B' && magic[1] == 'M');
+    // 32-bit BMP pixel reader (top-left origin). Data offset at byte 10,
+    // width/height (signed 32 LE) at bytes 18/22; rows are bottom-up.
+    auto rd32le_at = [&](std::streamoff off) {
+      unsigned char b[4] = {};
+      f.clear();
+      f.seekg(off);
+      f.read(reinterpret_cast<char *>(b), 4);
+      assert(f.gcount() == 4);
+      return static_cast<std::uint32_t>(b[0]) | (static_cast<std::uint32_t>(b[1]) << 8) |
+             (static_cast<std::uint32_t>(b[2]) << 16) | (static_cast<std::uint32_t>(b[3]) << 24);
+    };
+    const std::uint32_t data_off = rd32le_at(10);
+    const std::uint32_t bw = rd32le_at(18);
+    const std::uint32_t bh = rd32le_at(22);
+    assert(bw == static_cast<std::uint32_t>(sc.width * 2) && bh == static_cast<std::uint32_t>(sc.height * 2));
+    auto is_dark = [&](std::uint32_t px, std::uint32_t py) {
+      unsigned char b[4] = {};
+      const std::uint32_t stride = bw * 4;
+      f.clear();
+      f.seekg(static_cast<std::streamoff>(data_off + (bh - 1 - py) * stride + px * 4));
+      f.read(reinterpret_cast<char *>(b), 4);
+      assert(f.gcount() == 4);
+      return b[0] < 128 && b[1] < 128 && b[2] < 128; // near-black core ink (halo gray is 200)
+    };
+    // Pre-feature these boxes drew nothing: every sequential body must now
+    // show its rectangle outline. AND1 @ level 0, DFF1 + DLATCH1 @ level 1
+    // (slot order): boxes (52,30) / (172,30) / (172,116); body top edge at
+    // layout y = box.y + 4, left edge at layout x = box.x + 10 (2x raster).
+    for (const wengine::logic::Placed &p : sc.gates) {
+      if (!wengine::logic::is_sequential_kind(ws.gates[p.slot].kind)) {
+        continue;
+      }
+      const std::uint32_t top_y = static_cast<std::uint32_t>((p.y + 4) * 2);
+      const std::uint32_t mid_x = static_cast<std::uint32_t>((p.x + 38) * 2);
+      const std::uint32_t left_x = static_cast<std::uint32_t>((p.x + 10) * 2);
+      const std::uint32_t mid_y = static_cast<std::uint32_t>((p.y + 28) * 2);
+      assert(is_dark(mid_x, top_y));   // rectangle top edge
+      assert(is_dark(left_x, mid_y));  // rectangle left edge
+    }
+    // Clock wedge: DFF1 CLK anchor at row 2/6 (layout y = box.y + 18);
+    // the wedge apex sits just inside the box at box.x + 9.
+    {
+      const wengine::logic::Placed *dff = nullptr;
+      for (const wengine::logic::Placed &p : sc.gates) {
+        if (ws.gates[p.slot].kind == wengine::logic::GateKind::kDff) {
+          dff = &p;
+          break;
+        }
+      }
+      assert(dff != nullptr);
+      const std::uint32_t apex_x = static_cast<std::uint32_t>((dff->x + 9) * 2);
+      const std::uint32_t apex_y = static_cast<std::uint32_t>((dff->y + 18) * 2);
+      assert(is_dark(apex_x, apex_y));
+    }
+    std::remove(bmp.c_str());
+  }
+  // Restore the AND + NOT workspace the export block below expects.
+  assert(run("logic reset").first == 0);
+  assert(run("logic add AND").first == 0);
+  assert(run("logic add NOT").first == 0);
+  assert(run("logic wire AND1.Y NOT1.1").first == 0);
+
+  // draw: painted wires follow the shared layout routes, not per-path
+  // geometry (008 parity). Net: BUF1.Y -> DFF1.CLK, DFF1.NQ -> NOT1.1.
+  // BUF1 @ level 0 (52,30); DFF1 @ level 1 (172,30); NOT1 @ level 2.
+  // CLK anchor y = 30+18 = 48; NQ anchor y = 30+46 = 76; Q/mid y = 58.
+  assert(run("logic reset").first == 0);
+  assert(run("logic add BUF").first == 0);
+  assert(run("logic add DFF").first == 0);
+  assert(run("logic add NOT").first == 0);
+  assert(run("logic wire BUF1.Y DFF1.CLK").first == 0);
+  assert(run("logic wire DFF1.NQ NOT1.1").first == 0);
+  {
+    const std::string bmp = "/tmp/opencode/logic_seq_parity.bmp";
+    std::remove(bmp.c_str());
+    auto [rc, s] = run(std::string("logic draw --out ") + bmp);
+    assert(rc == 0);
+    assert(s.find("drew 3 gates") != std::string::npos);
+    wengine::logic::Netlist &ws = logic::workspace();
+    assert(wengine::logic::topo::rebuild(ws, wengine::logic::EdgeFilter::kAll).ok());
+    const wengine::logic::Schematic sc = wengine::logic::layout_schematic(ws);
+    std::ifstream f(bmp, std::ios::binary);
+    assert(!!f);
+    auto rd32le_at2 = [&](std::streamoff off) {
+      unsigned char b[4] = {};
+      f.clear();
+      f.seekg(off);
+      f.read(reinterpret_cast<char *>(b), 4);
+      assert(f.gcount() == 4);
+      return static_cast<std::uint32_t>(b[0]) | (static_cast<std::uint32_t>(b[1]) << 8) |
+             (static_cast<std::uint32_t>(b[2]) << 16) | (static_cast<std::uint32_t>(b[3]) << 24);
+    };
+    const std::uint32_t data_off = rd32le_at2(10);
+    const std::uint32_t bw = rd32le_at2(18);
+    const std::uint32_t bh = rd32le_at2(22);
+    assert(bw == static_cast<std::uint32_t>(sc.width * 2) && bh == static_cast<std::uint32_t>(sc.height * 2));
+    assert(sc.wires.size() == 2);
+    // Every painted wire must pass through its layout route corners:
+    // assert ink (core or halo — endpoints under a wedge/notch mark show
+    // halo gray where the mark's stroke overlaps the wire end) at each
+    // route point (2x raster) of both wires. Plain paper fails.
+    for (const wengine::logic::WireRoute &r : sc.wires) {
+      for (int q = 0; q < 4; ++q) {
+        const std::uint32_t px = static_cast<std::uint32_t>(r.p[q].x * 2);
+        const std::uint32_t py = static_cast<std::uint32_t>(r.p[q].y * 2);
+        unsigned char b[4] = {};
+        const std::uint32_t stride = bw * 4;
+        f.clear();
+        f.seekg(static_cast<std::streamoff>(data_off + (bh - 1 - py) * stride + px * 4));
+        f.read(reinterpret_cast<char *>(b), 4);
+        assert(f.gcount() == 4);
+        assert(b[0] < 240 || b[1] < 240 || b[2] < 240);
+      }
+    }
+    // Spot-check the semantic anchors behind those routes: the clock wire
+    // ends at the wedge row (48) and the NQ wire starts at the NQ row (76).
+    bool saw_clk_end = false;
+    bool saw_nq_start = false;
+    for (const wengine::logic::WireRoute &r : sc.wires) {
+      if (r.to_input == 1 && r.p[3].y == 48) {
+        saw_clk_end = true;
+      }
+      if (r.p[0].y == 76) {
+        saw_nq_start = true;
+      }
+    }
+    assert(saw_clk_end && saw_nq_start);
+    std::remove(bmp.c_str());
+  }
+  // Restore the AND + NOT workspace the export block below expects.
+  assert(run("logic reset").first == 0);
+  assert(run("logic add AND").first == 0);
+  assert(run("logic add NOT").first == 0);
+  assert(run("logic wire AND1.Y NOT1.1").first == 0);
+
   // export: one command, three artifacts (byte-pinned + re-import equality).
   {
     const std::string t = "/tmp/opencode/logic_exp_t.csv";

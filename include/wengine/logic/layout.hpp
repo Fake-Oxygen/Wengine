@@ -15,6 +15,7 @@
 // result is an empty schematic (levels = 0); the verbs report the error
 // themselves before calling here.
 
+#include "wengine/logic/pins.hpp"
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
@@ -60,6 +61,184 @@ struct Schematic {
   int height = 0;
 };
 
+// Sequential pin anchors (008-seq-schematic-symbols, contract C2/C3).
+// Single owner: the pins.hpp KindPin table (anchor_row/is_clock/is_notch
+// per pin, face per kind). The queries below are thin constexpr Adapters
+// over that table so layout, parse, and raster never drift apart.
+// Roles (row numerators, denominator kSeqAnchorDenom):
+// DFF: D0->1 CLK1->2 RST2->3 SET3->4 EN4->5; DLATCH: D0->1 EN1->2;
+// JK: J0->1 K1->4 CLK2->2; T: T0->1 CLK1->2; SRLATCH: S0->1 R1->4.
+// Returns the row numerator (denominator kSeqAnchorDenom), or -1 for
+// non-sequential kinds.
+inline constexpr int kSeqAnchorDenom = 6;
+
+[[nodiscard]] constexpr int seq_input_row(GateKind kind, std::uint8_t input) noexcept {
+  for (const KindInfo &e : kKinds) {
+    if (e.kind != kind) {
+      continue;
+    }
+    for (std::uint8_t p = 0; p < e.pin_count; ++p) {
+      if (e.pins[p].input == input) {
+        return e.pins[p].anchor_row;
+      }
+    }
+    return -1;
+  }
+  return -1;
+}
+
+// Clock-wedge pins (edge-triggered flops) and the latch-enable notch
+// pin (level-sensitive DLATCH). SRLATCH has neither mark.
+[[nodiscard]] constexpr bool is_clock_pin(GateKind kind, std::uint8_t input) noexcept {
+  for (const KindInfo &e : kKinds) {
+    if (e.kind != kind) {
+      continue;
+    }
+    for (std::uint8_t p = 0; p < e.pin_count; ++p) {
+      if (e.pins[p].input == input) {
+        return e.pins[p].is_clock;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
+[[nodiscard]] constexpr bool is_latch_enable_pin(GateKind kind, std::uint8_t input) noexcept {
+  for (const KindInfo &e : kKinds) {
+    if (e.kind != kind) {
+      continue;
+    }
+    for (std::uint8_t p = 0; p < e.pin_count; ++p) {
+      if (e.pins[p].input == input) {
+        return e.pins[p].is_notch;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
+// Face letters painted on sequential bodies (contract C5).
+[[nodiscard]] constexpr std::string_view seq_face(GateKind kind) noexcept {
+  for (const KindInfo &e : kKinds) {
+    if (e.kind == kind) {
+      return e.face.empty() ? std::string_view{"?"} : e.face;
+    }
+  }
+  return "?";
+}
+
+// Anchor points for one placed box. Input anchors sit on the left edge
+// at the role row; Q keeps the mid convention; NQ sits at row 5 with
+// the inversion bubble (contract C2/C3).
+[[nodiscard]] constexpr WirePt seq_input_anchor(const Placed &box, GateKind kind, std::uint8_t input) noexcept {
+  const int row = seq_input_row(kind, input);
+  const int y = (row < 0) ? (box.y + kLayoutBoxH / 2) : (box.y + row * kLayoutBoxH / kSeqAnchorDenom);
+  return WirePt{box.x, y};
+}
+
+[[nodiscard]] constexpr WirePt seq_q_anchor(const Placed &box) noexcept {
+  return WirePt{box.x + kLayoutBoxW, box.y + kLayoutBoxH / 2};
+}
+
+[[nodiscard]] constexpr WirePt seq_nq_anchor(const Placed &box) noexcept {
+  return WirePt{box.x + kLayoutBoxW, box.y + 5 * kLayoutBoxH / kSeqAnchorDenom};
+}
+
+// True when the sink input reads the negated (NQ) source value.
+// Index mirrors tie_flat(slot, input); only wire_pins() from an NQ
+// source ever sets the flag (see types.hpp Gate::driver_inv).
+[[nodiscard]] inline bool sink_reads_nq(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+  const std::size_t flat = static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input);
+  return nl.driver_inv[flat] != 0;
+}
+
+// Wire-lane stagger (follow-up: coincident vertical trunks). Wires
+// spanning the same column gap share the midpoint (x0+x1)/2, so two
+// unrelated nets collapse into one unreadable trunk. Each wire takes a
+// deterministic lane by its ordinal among same-gap wires (slot-order
+// enumeration, so repeat layouts are identical): lane 0 stays on the
+// midpoint, later lanes alternate sides in 8-unit steps. Same-driver
+// branches still meet exactly at the source anchor (where the fanout
+// dot marks the connection); unrelated nets never share a vertical.
+inline constexpr int kWireLaneStep = 8;
+
+[[nodiscard]] constexpr int wire_lane_offset(std::size_t lane) noexcept {
+  const int half = static_cast<int>((lane + 1u) / 2u);
+  const int mag = half * kWireLaneStep;
+  return ((lane & 1u) != 0u) ? mag : -mag; // 0, +8, -8, +16, -16, ...
+}
+
+namespace detail {
+// Internal Seams for layout_schematic (never public): placement, canvas,
+// anchors, and lane ownership. The public Interface stays
+// `Netlist& -> Schematic`.
+
+inline void place_gates(Netlist &nl, Schematic &sc, std::vector<int> &per_level) {
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (!nl.gates[s].live) {
+      continue;
+    }
+    const int lvl = nl.topo_level[s];
+    const int idx = per_level[static_cast<std::size_t>(lvl)]++;
+    Placed p;
+    p.slot = s;
+    p.level = lvl;
+    p.x = kLayoutMargin + lvl * kLayoutColW + (kLayoutColW - kLayoutBoxW) / 2;
+    p.y = kLayoutMargin + idx * (kLayoutBoxH + kLayoutGapY);
+    sc.gates.push_back(p);
+  }
+}
+
+inline void canvas_extents(const std::vector<int> &per_level, int levels, int &w, int &h) {
+  int max_count = 1;
+  for (int c : per_level) {
+    if (c > max_count) {
+      max_count = c;
+    }
+  }
+  w = kLayoutMargin * 2 + levels * kLayoutColW;
+  h = kLayoutMargin * 2 + max_count * (kLayoutBoxH + kLayoutGapY);
+}
+
+// Sequential endpoints use role anchors (contract C4); combinational
+// endpoints keep the legacy spread so existing goldens hold.
+// Sources: NQ-reading sinks start at the NQ anchor, everything else
+// at the Q anchor (the mid convention, unchanged for combinational
+// sources since driver_inv is only ever set from NQ sources).
+inline int source_y(const Netlist &nl, const Placed &src, std::uint16_t dst_slot, std::uint8_t input) {
+  if (is_sequential_kind(nl.gates[src.slot].kind) && sink_reads_nq(nl, dst_slot, input)) {
+    return seq_nq_anchor(src).y;
+  }
+  return seq_q_anchor(src).y;
+}
+
+inline int sink_y(const Placed &dst, const Gate &g, std::uint8_t input) {
+  if (seq_input_row(g.kind, input) >= 0) {
+    return seq_input_anchor(dst, g.kind, input).y;
+  }
+  const int n = g.input_count;
+  return dst.y + (static_cast<int>(input) + 1) * kLayoutBoxH / (n + 1);
+}
+
+// Per-gap lane ownership: (src_level, dst_level) -> wires seen so far.
+// Linear scan over distinct gaps (a handful in practice); the wire loop
+// enumerates in destination slot order, so lanes are deterministic.
+struct Lanes {
+  std::vector<std::pair<std::pair<int, int>, std::size_t>> use;
+  std::size_t next(const std::pair<int, int> &gap) {
+    for (std::pair<std::pair<int, int>, std::size_t> &e : use) {
+      if (e.first == gap) {
+        return e.second++;
+      }
+    }
+    use.emplace_back(gap, 1);
+    return 0;
+  }
+};
+} // namespace detail
+
 [[nodiscard]] inline Schematic layout_schematic(Netlist &nl) {
   Schematic sc;
   if (nl.live_count == 0) {
@@ -78,33 +257,15 @@ struct Schematic {
   }
   sc.levels = max_level + 1;
   std::vector<int> per_level(static_cast<std::size_t>(sc.levels), 0);
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live) {
-      continue;
-    }
-    const int lvl = nl.topo_level[s];
-    const int idx = per_level[static_cast<std::size_t>(lvl)]++;
-    Placed p;
-    p.slot = s;
-    p.level = lvl;
-    p.x = kLayoutMargin + lvl * kLayoutColW + (kLayoutColW - kLayoutBoxW) / 2;
-    p.y = kLayoutMargin + idx * (kLayoutBoxH + kLayoutGapY);
-    sc.gates.push_back(p);
-  }
-  int max_count = 1;
-  for (int c : per_level) {
-    if (c > max_count) {
-      max_count = c;
-    }
-  }
-  sc.width = kLayoutMargin * 2 + sc.levels * kLayoutColW;
-  sc.height = kLayoutMargin * 2 + max_count * (kLayoutBoxH + kLayoutGapY);
+  detail::place_gates(nl, sc, per_level);
+  detail::canvas_extents(per_level, sc.levels, sc.width, sc.height);
 
   // Slot -> Placed lookup for anchor math (live slots only).
   const Placed *by_slot[kMaxGates] = {};
   for (const Placed &p : sc.gates) {
     by_slot[p.slot] = &p;
   }
+  detail::Lanes lanes;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     const Gate &g = nl.gates[s];
     if (!g.live) {
@@ -123,12 +284,12 @@ struct Schematic {
       if (src == nullptr) {
         continue;
       }
-      const int n = g.input_count;
-      const int y0 = src->y + kLayoutBoxH / 2;
-      const int y1 = dst->y + (static_cast<int>(i) + 1) * kLayoutBoxH / (n + 1);
+      const int y0 = detail::source_y(nl, *src, s, i);
+      const int y1 = detail::sink_y(*dst, g, i);
       const int x0 = src->x + kLayoutBoxW;
       const int x1 = dst->x;
-      const int xm = (x0 + x1) / 2;
+      const std::size_t lane = lanes.next(std::pair<int, int>{src->level, dst->level});
+      const int xm = (x0 + x1) / 2 + wire_lane_offset(lane);
       WireRoute r;
       r.from_slot = drv;
       r.to_slot = s;

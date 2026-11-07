@@ -17,3 +17,10 @@ new deepened modules take their names from this file.
   `block_input/output_count`, `block_interface`, `fill_resolved`,
   `input_index`. Scalar `solve`, bit-parallel `eval_block_word`, the
   sequential stepper, and the CLI poke composer are adapters at this seam.
+- **AnchorRow**: role-based sequential input row (1..5 of 6ths of the box
+  height, CLK wedge always row 2). Owned once by the `KindPin` table
+  (`pins.hpp`); `seq_input_row` and the anchor queries are adapters at
+  this seam.
+- **SeqSym**: shared sequential symbol model (rect/face/mark/NQ/dots
+  behind one interface, `seq_symbol.hpp`). Both raster adapters (SDL +
+  ImGui) paint from it; layout anchors stay the router/test seam.

@@ -298,10 +298,27 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   file export stays on the SDL software surface + `SDL_SaveBMP`
   (headless-safe, byte-deterministic; PNG/JPG only via a later
   single-header writer task if a real consumer needs it — do not vendor
-  image codecs for v1). The canvas is independent of `WEngineGui`: it
-  uses the vendored imgui `sdlrenderer2` backend (SDL2 only, no Vulkan),
-  and the TTF is an embedded DejaVu Sans subset (Bitstream Vera license,
-  see below) so no runtime font file is ever located.
+   image codecs for v1). The canvas is independent of `WEngineGui`: it
+   uses the vendored imgui `sdlrenderer2` backend (SDL2 only, no Vulkan),
+   and the TTF is an embedded DejaVu Sans subset (Bitstream Vera license,
+   see below) so no runtime font file is ever located.
+- Sequential symbols: flops and latches render as rectangles (never the
+  curved combinational shapes, never empty boxes) with a centered face
+  letter (`D`, `JK`, `T`, `SR`, `DL`), a clock wedge on the CLK pin of
+  edge-triggered flops, a stepped notch on the DLATCH enable pin, and an
+  inversion bubble on used NQ outputs. Pin anchors are role-based and
+  shared: every clock wedge sits at the same relative height, so shared
+  clocks trace horizontally; full-control flops stack
+  D/CLK/RST/SET/EN top to bottom. Anchors and wire routes are computed
+  once in the shared layout math (`wengine/logic/layout.hpp`) and the
+  symbol model (`wengine/logic/seq_symbol.hpp`) — both backends paint
+  from it and never recompute geometry. Role rows, clock/notch flags,
+  and face letters live once in the `pins.hpp` kind table. Wires spanning
+  the same column gap take deterministic staggered lanes (midpoint,
+  then alternating sides in 8-unit steps), so unrelated nets never
+  collapse into one trunk; branches of one driver still meet exactly at
+  its output anchor. Fanout junction dots are per output (Q and NQ separately); dangling sequential pins
+  show their anchor/mark with no wire.
 - `export --truth t.csv --schema s.yaml [--bmp s.bmp]`: one command,
   three artifacts, loud per-artifact counts. `import`/workspace restore
   is `load <file.yaml>` (round-trip byte-identity pinned by test).

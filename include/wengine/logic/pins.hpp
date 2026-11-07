@@ -92,14 +92,21 @@ namespace detail {
 // One named input pin: `name` resolves to 0-based `input` iff the gate was
 // created with at least `min_inputs` inputs (DFF RST/SET/EN exist only on
 // wider flops; bare 2-input flops reject them like out-of-range numerics).
+// `anchor_row` is the schematic role row (1..5 of 6ths, contract C2;
+// -1 for combinational kinds without role anchors). `is_clock` marks the
+// edge-flop wedge pin (row 2), `is_notch` the DLATCH enable notch (row 2).
 struct KindPin {
   std::string_view name;
   std::uint8_t input = 0;
   std::uint8_t min_inputs = 0;
+  std::int8_t anchor_row = -1;
+  bool is_clock = false;
+  bool is_notch = false;
 };
 
 // One gate kind: parse name, default fan-in, exact allowed fan-in set
-// (bit (n-1) set iff fan-in n valid, n = 1..8), and named input pins.
+// (bit (n-1) set iff fan-in n valid, n = 1..8), named input pins, and the
+// schematic face letters for sequential kinds (empty for combinational).
 struct KindInfo {
   GateKind kind;
   std::string_view name;
@@ -107,6 +114,7 @@ struct KindInfo {
   std::uint16_t allowed_mask = 0;
   std::uint8_t pin_count = 0;
   KindPin pins[5]{};
+  std::string_view face{};
 };
 
 // Append-only: keep every known kind here (same order as the historical
@@ -124,11 +132,11 @@ inline constexpr KindInfo kKinds[] = {
     {GateKind::kNot, "NOT", 1, 0x01u, 0, {}},
     {GateKind::kBuf, "BUF", 1, 0x01u, 0, {}},
     {GateKind::kDff, "DFF", 2, 0x12u, 5,
-     {{"D", 0, 2}, {"CLK", 1, 2}, {"RST", 2, 3}, {"SET", 3, 4}, {"EN", 4, 5}}},
-    {GateKind::kDlatch, "DLATCH", 2, 0x02u, 2, {{"D", 0, 2}, {"EN", 1, 2}}},
-    {GateKind::kJk, "JK", 3, 0x04u, 3, {{"J", 0, 3}, {"K", 1, 3}, {"CLK", 2, 3}}},
-    {GateKind::kT, "T", 2, 0x02u, 2, {{"T", 0, 2}, {"CLK", 1, 2}}},
-    {GateKind::kSrlatch, "SRLATCH", 2, 0x02u, 2, {{"S", 0, 2}, {"R", 1, 2}}},
+     {{"D", 0, 2, 1}, {"CLK", 1, 2, 2, true}, {"RST", 2, 3, 3}, {"SET", 3, 4, 4}, {"EN", 4, 5, 5}}, "D"},
+    {GateKind::kDlatch, "DLATCH", 2, 0x02u, 2, {{"D", 0, 2, 1}, {"EN", 1, 2, 2, false, true}}, "DL"},
+    {GateKind::kJk, "JK", 3, 0x04u, 3, {{"J", 0, 3, 1}, {"K", 1, 3, 4}, {"CLK", 2, 3, 2, true}}, "JK"},
+    {GateKind::kT, "T", 2, 0x02u, 2, {{"T", 0, 2, 1}, {"CLK", 1, 2, 2, true}}, "T"},
+    {GateKind::kSrlatch, "SRLATCH", 2, 0x02u, 2, {{"S", 0, 2, 1}, {"R", 1, 2, 4}}, "SR"},
 };
 
 [[nodiscard]] constexpr bool kind_table_valid() noexcept {
@@ -160,6 +168,44 @@ inline constexpr KindInfo kKinds[] = {
       if (e.pins[p].min_inputs <= e.pins[p].input) {
         return false; // min fan-in always exceeds the 0-based index
       }
+      if (is_sequential_kind(e.kind)) {
+        if (e.pins[p].anchor_row < 1 || e.pins[p].anchor_row > 5) {
+          return false; // role row 1..5 of 6ths (contract C2)
+        }
+        if ((e.pins[p].is_clock && e.pins[p].anchor_row != 2) ||
+            (e.pins[p].is_notch && e.pins[p].anchor_row != 2)) {
+          return false; // clock wedge + latch notch both sit at row 2 (I-CLK)
+        }
+        for (std::uint8_t q = 0; q < p; ++q) {
+          if (e.pins[q].anchor_row == e.pins[p].anchor_row) {
+            return false; // rows unique per kind
+          }
+        }
+      } else if (e.pins[p].anchor_row != -1 || e.pins[p].is_clock || e.pins[p].is_notch) {
+        return false; // combinational pins carry no role anchors
+      }
+    }
+    if (is_sequential_kind(e.kind)) {
+      if (e.face.empty()) {
+        return false; // flops/latches need face letters (contract C5)
+      }
+      int clocks = 0;
+      int notches = 0;
+      for (std::uint8_t p = 0; p < e.pin_count; ++p) {
+        if (e.pins[p].is_clock) {
+          ++clocks;
+        }
+        if (e.pins[p].is_notch) {
+          ++notches;
+        }
+      }
+      const bool want_clock = (e.kind == GateKind::kDff || e.kind == GateKind::kJk || e.kind == GateKind::kT);
+      const bool want_notch = (e.kind == GateKind::kDlatch);
+      if ((want_clock ? clocks != 1 : clocks != 0) || (want_notch ? notches != 1 : notches != 0)) {
+        return false;
+      }
+    } else if (!e.face.empty()) {
+      return false;
     }
   }
   return true;

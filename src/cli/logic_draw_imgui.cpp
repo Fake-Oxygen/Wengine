@@ -12,6 +12,8 @@
 
 #include "wengine/cli/logic_draw.hpp"
 
+#include "wengine/logic/seq_symbol.hpp"
+
 #include "fonts/schematic_font.hpp"
 #include "sdl_gfx.hpp"
 
@@ -39,6 +41,7 @@
 #include <cfloat>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace wengine::cli::logic_draw {
@@ -229,18 +232,65 @@ void draw_gate_body(Scene &s, const wengine::logic::Gate &g, float x, float y, f
   case GateKind::kDlatch:
   case GateKind::kJk:
   case GateKind::kT:
-  case GateKind::kSrlatch:
-    break; // SEQ12 owns flop/latch symbols; nothing drawn until then.
+  case GateKind::kSrlatch: {
+    // Sequential flop/latch bodies (008): geometry from the shared SeqSym
+    // model — inset rectangle, centered face letters, clock wedge or
+    // enable notch at the role anchor, NQ bubble when used. Only raster
+    // mapping lives here. (Input stubs ride the shared post-switch loop,
+    // which reads the same model for sequential kinds.)
+    const wengine::logic::Placed box{0, 0, static_cast<int>(x), static_cast<int>(y)};
+    const wengine::logic::SeqSym sym = wengine::logic::seq_symbol(box, g);
+    const float rx = static_cast<float>(sym.rx);
+    const std::vector<ImVec2> rect{T(static_cast<float>(sym.lx), static_cast<float>(sym.top)),
+                                   T(rx, static_cast<float>(sym.top)), T(rx, static_cast<float>(sym.bot)),
+                                   T(static_cast<float>(sym.lx), static_cast<float>(sym.bot))};
+    for (const ImVec2 &p : rect) {
+      s.dl->PathLineTo(p);
+    }
+    s.dl->PathFillConvex(paper);
+    stroke_smooth(s.dl, rect.data(), static_cast<int>(rect.size()), true, ink, s.out_w);
+    {
+      const std::string fs(sym.face);
+      const float fsize = kLabelPx * s.view.zoom;
+      const ImVec2 fts = s.font->CalcTextSizeA(fsize, FLT_MAX, 0.0f, fs.c_str());
+      const ImVec2 ctr = T((static_cast<float>(sym.lx) + rx) * 0.5f, mid);
+      s.dl->AddText(s.font, fsize, ImVec2(ctr.x - fts.x * 0.5f, ctr.y - fts.y * 0.5f), ink, fs.c_str());
+    }
+    if (sym.mark == wengine::logic::SeqMark::kWedge) {
+      const float cy = static_cast<float>(sym.mark_y);
+      const ImVec2 wedge[3] = {T(x + 1.0f, cy - 5.0f), T(x + 1.0f, cy + 5.0f), T(x + 9.0f, cy)};
+      s.dl->PathLineTo(wedge[0]);
+      s.dl->PathLineTo(wedge[1]);
+      s.dl->PathLineTo(wedge[2]);
+      s.dl->PathFillConvex(paper);
+      stroke_smooth(s.dl, wedge, 3, true, ink, s.out_w);
+    } else if (sym.mark == wengine::logic::SeqMark::kNotch) {
+      const float cy = static_cast<float>(sym.mark_y);
+      const ImVec2 step[4] = {T(x, cy - 6.0f), T(x + 6.0f, cy - 6.0f), T(x + 6.0f, cy + 6.0f), T(x, cy + 6.0f)};
+      stroke_smooth(s.dl, step, 4, false, ink, s.out_w);
+    }
+    s.dl->AddLine(T(rx, mid), T(x + w, mid), ink, s.wire_w);
+    if (sym.nq) {
+      const float nq_y = static_cast<float>(sym.nq_pt.y);
+      s.dl->AddCircleFilled(T(x + w - 8.0f, nq_y), kBubbleR * s.view.zoom, paper);
+      s.dl->AddCircle(T(x + w - 8.0f, nq_y), kBubbleR * s.view.zoom, ink, 0, s.out_w);
+      s.dl->AddLine(T(x + w - 8.0f + kBubbleR, nq_y), T(x + w, nq_y), ink, s.wire_w);
+    }
+    break;
+  }
   } // switch
   // Input stubs land on the symbol border, drawn AFTER the body so the
   // concave OR/XOR back (whose convex fill slightly overfills) can never
   // white-out the joint. AND/BUF/NOT take the straight back at lx; OR/XOR
   // stubs ride the inverted bezier and overshoot 1px into the border.
+  // Sequential stubs ride their role anchors from the shared model.
+  const bool is_seq = wengine::logic::is_sequential_kind(g.kind);
+  const wengine::logic::Placed stub_box{0, 0, static_cast<int>(x), static_cast<int>(y)};
+  const wengine::logic::SeqSym stub_sym = is_seq ? wengine::logic::seq_symbol(stub_box, g) : wengine::logic::SeqSym{};
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
-    const float yi = y + (static_cast<float>(i) + 1.0f) * h / (static_cast<float>(g.input_count) + 1.0f);
+    float yi = y + (static_cast<float>(i) + 1.0f) * h / (static_cast<float>(g.input_count) + 1.0f);
     float x_end = lx + 1.0f;
-    if (g.kind == GateKind::kOr || g.kind == GateKind::kNor || g.kind == GateKind::kXor ||
-        g.kind == GateKind::kXnor) {
+    if (g.kind == GateKind::kOr || g.kind == GateKind::kNor || g.kind == GateKind::kXor || g.kind == GateKind::kXnor) {
       const float ex = xor_extra ? bx - 7.0f : bx;
       const int xi = gfx::qbez_x_at_y(gfx::Pt{static_cast<int>(ex), static_cast<int>(y + kPad)},
                                       gfx::Pt{static_cast<int>(ex + 12.0f), static_cast<int>(mid)},
@@ -250,6 +300,8 @@ void draw_gate_body(Scene &s, const wengine::logic::Gate &g, float x, float y, f
       if (x_end < x) {
         x_end = x;
       }
+    } else if (is_seq) {
+      yi = static_cast<float>(stub_sym.stub_y[i]);
     }
     s.dl->AddLine(T(x, yi), T(x_end, yi), ink, s.wire_w);
   }
@@ -311,11 +363,18 @@ void draw_scene(Scene &s, const wengine::logic::Netlist &nl, const wengine::logi
     draw_gate_body(s, nl.gates[p.slot], static_cast<float>(p.x), static_cast<float>(p.y),
                    static_cast<float>(kLayoutBoxW), static_cast<float>(kLayoutBoxH));
   }
-  // Fanout junction dots.
+  // Fanout junction dots, one per fanning output (Q and NQ have
+  // distinct anchors on sequential gates; combinational gates have no
+  // NQ fanout so their dots render exactly as before).
   for (const auto &p : sc.gates) {
-    if (nl.gates[p.slot].output_fanout > 1) {
-      const ImVec2 c =
-          T(static_cast<float>(p.x + kLayoutBoxW), static_cast<float>(p.y) + kLayoutBoxH * 0.5f);
+    const wengine::logic::Placed box{p.slot, p.level, p.x, p.y};
+    const wengine::logic::SeqSym sym = wengine::logic::seq_symbol(box, nl.gates[p.slot]);
+    if (sym.q_dot) {
+      const ImVec2 c = T(static_cast<float>(sym.q.x), static_cast<float>(sym.q.y));
+      s.dl->AddCircleFilled(c, kDotRPx * s.view.zoom, ink);
+    }
+    if (sym.nq_dot) {
+      const ImVec2 c = T(static_cast<float>(sym.nq_pt.x), static_cast<float>(sym.nq_pt.y));
       s.dl->AddCircleFilled(c, kDotRPx * s.view.zoom, ink);
     }
   }

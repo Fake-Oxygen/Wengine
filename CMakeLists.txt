@@ -756,6 +756,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic_layout PRIVATE wengine_core)
     add_test(NAME logic_layout COMMAND test_logic_layout)
 
+    # 008-seq-schematic-symbols: shared SeqSym model (pure ints, no SDL).
+    add_executable(test_logic_seq_symbol tests/test_logic_seq_symbol.cpp)
+    target_link_libraries(test_logic_seq_symbol PRIVATE wengine_core)
+    add_test(NAME logic_seq_symbol COMMAND test_logic_seq_symbol)
+
     # ROS2 scaffolding: pure mapping/naming/verb vocabulary, no rclcpp.
     add_executable(test_ros2_mapping tests/test_ros2_mapping.cpp)
     target_link_libraries(test_ros2_mapping PRIVATE wengine_core)

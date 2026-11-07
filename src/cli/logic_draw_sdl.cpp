@@ -12,6 +12,8 @@
 
 #include "wengine/cli/logic_draw.hpp"
 
+#include "wengine/logic/seq_symbol.hpp"
+
 #include "sdl_gfx.hpp"
 
 #ifdef WENGINE_HAVE_SDL2
@@ -36,6 +38,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -112,6 +115,65 @@ void halo_circle(SDL_Renderer *ren, int cx, int cy, int r) noexcept {
   std::string s(wengine::logic::gate_kind_name(nl.gates[slot].kind));
   s += std::to_string(nl.gates[slot].counter);
   return s;
+}
+
+// Sequential flop/latch bodies (008-seq-schematic-symbols): inset
+// rectangle (same kLead/kPad as comb bodies so stubs land identically),
+// centered face letters, clock wedge (edge flops) or enable notch
+// (DLATCH) at the role anchor, NQ bubble + stub when the inverted
+// output is used. Geometry comes from the shared SeqSym model — the TU
+// owns only raster mapping (contract C7).
+void draw_seq_body(SDL_Renderer *ren, const wengine::logic::Gate &g, int x, int y, int w, int h) noexcept {
+  const wengine::logic::Placed box{0, 0, x, y};
+  const wengine::logic::SeqSym sym = wengine::logic::seq_symbol(box, g);
+  const int lx = sym.lx;
+  const int rx = sym.rx;
+  const int mid = sym.mid;
+  // Input stubs ride their role anchors (drawn first; body covers joints).
+  (void)SDL_SetRenderDrawColor(ren, 20, 20, 20, 255);
+  for (std::uint8_t i = 0; i < sym.stub_n; ++i) {
+    gfx::hline(ren, x, lx, sym.stub_y[i], 3);
+  }
+  // Rectangular body.
+  const std::vector<Pt> rect{{lx, sym.top}, {rx, sym.top}, {rx, sym.bot}, {lx, sym.bot}};
+  (void)SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+  gfx::fill_poly(ren, rect);
+  stroke_poly(ren, rect);
+  // Face letters centered (5x7 pixel font at 2x: 14px tall).
+  {
+    char fbuf[3] = {};
+    std::size_t fn = 0;
+    for (char c : sym.face) {
+      if (fn >= 2) {
+        break;
+      }
+      fbuf[fn++] = c;
+    }
+    const int tw = gfx::text_width(fbuf, 2);
+    gfx::draw_text(ren, fbuf, (lx + rx) / 2 - tw / 2, mid - 7, 2, 20, 20, 20);
+  }
+  // Clock wedge (edge flops) or enable notch (DLATCH) at the anchor.
+  if (sym.mark == wengine::logic::SeqMark::kWedge) {
+    const int ay = sym.mark_y;
+    const std::vector<Pt> wedge{{x + 1, ay - 5}, {x + 1, ay + 5}, {x + 9, ay}};
+    (void)SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+    gfx::fill_poly(ren, wedge);
+    stroke_poly(ren, wedge);
+  } else if (sym.mark == wengine::logic::SeqMark::kNotch) {
+    const int ay = sym.mark_y;
+    stroke_seg(ren, x, ay - 6, x + 6, ay - 6);
+    stroke_seg(ren, x + 6, ay - 6, x + 6, ay + 6);
+    stroke_seg(ren, x + 6, ay + 6, x, ay + 6);
+  }
+  // Q stub always; NQ bubble + stub when the inverted output is used.
+  (void)SDL_SetRenderDrawColor(ren, 20, 20, 20, 255);
+  gfx::hline(ren, rx, x + w, mid, 3);
+  if (sym.nq) {
+    halo_circle(ren, x + w - 8, sym.nq_pt.y, 4);
+    (void)SDL_SetRenderDrawColor(ren, 20, 20, 20, 255);
+    gfx::hline(ren, x + w - 4, x + w, sym.nq_pt.y, 3);
+  }
+  (void)h;
 }
 
 // One gate body in ANSI symbols. (x, y, w, h) is the layout box. Input
@@ -251,7 +313,8 @@ void draw_gate_body(SDL_Renderer *ren, const wengine::logic::Gate &g, int x, int
   case GateKind::kJk:
   case GateKind::kT:
   case GateKind::kSrlatch:
-    break; // SEQ12 owns flop/latch symbols; nothing drawn until then.
+    draw_seq_body(ren, g, x, y, w, h);
+    break;
   }
 }
 
@@ -307,11 +370,18 @@ void draw_scene(SDL_Renderer *ren, const wengine::logic::Netlist &nl,
 
   // Fanout junction dots: one driver fanning to several inputs branches
   // at the source anchor — the dot marks the branch (T-junctions of
-  // unrelated routes never merge by construction).
+  // unrelated routes never merge by construction). Per output for
+  // sequential gates (Q and NQ have distinct anchors); combinational
+  // gates have no NQ fanout so their dots render exactly as before.
   (void)SDL_SetRenderDrawColor(ren, 20, 20, 20, 255);
   for (const auto &p : sc.gates) {
-    if (nl.gates[p.slot].output_fanout + nl.gates[p.slot].nq_fanout > 1) {
-      gfx::fill_circle(ren, p.x + kLayoutBoxW, p.y + kLayoutBoxH / 2, 4);
+    const wengine::logic::Placed box{p.slot, p.level, p.x, p.y};
+    const wengine::logic::SeqSym sym = wengine::logic::seq_symbol(box, nl.gates[p.slot]);
+    if (sym.q_dot) {
+      gfx::fill_circle(ren, sym.q.x, sym.q.y, 4);
+    }
+    if (sym.nq_dot) {
+      gfx::fill_circle(ren, sym.nq_pt.x, sym.nq_pt.y, 4);
     }
   }
 

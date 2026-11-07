@@ -884,7 +884,7 @@ examples/cli_smoke.cpp + link_sample.cpp (SHM sample reader, built with CLI)
   link_receiver_accounting.py the shared reorder/session accounting)
 include/wengine/{cli,core,emit,link,physics,signal,solvers,units,world}/  (no math dir: glm used directly)
 src/{cli,link,solvers,...}/  (cli + link filled; others reserved for .cpp as needed)
-tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,tmc22xx,sim,solver_registry,signal,logic,logic_layout,logic_yaml,logic_seq_runner,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_choice,tui_async,tui_views}.cpp
+tests/test_{ohm_law,math_units,cli_args,s0,i2c,ldo,led,ic,ap63205,ina219,tmc22xx,sim,solver_registry,signal,logic,logic_layout,logic_seq_symbol,logic_yaml,logic_seq_runner,lua,routing,runner,world,emit,snapshot_reuse,particle_identity,link_protocol,link_shm,link_sockets,tcp_worker,output_health,link_compact,link_sample_block,output_queue,link_receiver,link_bridge,run_config,paced,determinism,gui_sim_control,signal_panel,signal_panel_lua,gui_stream_source,closed_form_panels,viewport3d,frame_source,canvas2d,tui_exec,tui_forms,tui_batches,tui_choice,tui_async,tui_views}.cpp
 plus the headless PTY smoke `tests/tui_pty_smoke.py` (`ctest -R tui_pty_smoke`).
 cmake/ docs/ (reserved/empty)
 external/glm/ (git submodule, pinned 1.0.1 — first third-party dep, see policy above)
