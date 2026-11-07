@@ -6,7 +6,6 @@
 #include "wengine/logic/optimize_types.hpp"
 #include "wengine/logic/optimize_barrier.hpp"
 #include "wengine/logic/optimize_exact.hpp"
-#include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -32,15 +31,6 @@ inline void recount_fanout(Netlist &nl) noexcept {
       }
     }
   }
-}
-
-// Sequential-aware recompilation via the shared topology Module (see
-// topo.hpp): nets without sequential gates take the all-edges order,
-// otherwise the comb-only barrier order. Kept as a thin forwarder so
-// existing call sites and the O0/O1 fixpoint read unchanged.
-inline bool recompile(Netlist &nl) noexcept {
-  const EdgeFilter filter = has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll;
-  return topo::rebuild(nl, filter).ok();
 }
 
 // detach_slot_ties lives in tie_set.hpp (the TieSet seam owns all tie_rep
@@ -133,25 +123,7 @@ inline void classify(const Netlist &nl, Constness *label) noexcept {
 // logic (including ignored-output cones) is never deleted.
 inline bool dce_pass(Netlist &nl, const bool *is_root) noexcept {
   bool keep[kMaxGates] = {};
-  std::uint16_t stack[kMaxGates];
-  std::size_t top = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (is_root[s] && nl.gates[s].live) {
-      keep[s] = true;
-      stack[top++] = s;
-    }
-  }
-  while (top > 0) {
-    const std::uint16_t cur = stack[--top];
-    const Gate &g = nl.gates[cur];
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t d = g.drivers[i];
-      if (d != kNoDriver && d < kMaxGates && nl.gates[d].live && !keep[d]) {
-        keep[d] = true;
-        stack[top++] = d;
-      }
-    }
-  }
+  follow_drivers(nl, is_root, keep);
   bool changed = false;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     if (nl.gates[s].live && !keep[s]) {

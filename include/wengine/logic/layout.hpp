@@ -11,11 +11,11 @@
 // (x0,y0) -> (xm,y0) -> (xm,y1) -> (x1,y1).
 //
 // Precondition: the caller compiles the topology first
-// (`ensure_topology`; draw/export verbs do). On a topology error the
+// (`topo::rebuild`; draw/export verbs do). On a topology error the
 // result is an empty schematic (levels = 0); the verbs report the error
 // themselves before calling here.
 
-#include "wengine/logic/eval.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -67,7 +67,7 @@ struct Schematic {
     sc.height = 2 * kLayoutMargin;
     return sc;
   }
-  if (!ensure_topology(nl).ok()) {
+  if (!topo::rebuild(nl, EdgeFilter::kAll).ok()) {
     return sc; // levels = 0, empty: the verb already reported the error
   }
   int max_level = 0;

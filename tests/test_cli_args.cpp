@@ -5,6 +5,7 @@
 #include "wengine/cli/shell.hpp"
 #include "wengine/cli/subshell.hpp"
 #include "wengine/logic/eval.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/layout.hpp"
 
 #include <array>
@@ -1474,7 +1475,7 @@ void test_logic_verbs() {
     // Byte-pinned BMP: 'BM' magic + dimensions == 2x layout canvas
     // (raster scale lives in the edge TU; layout stays 1x units).
     wengine::logic::Netlist &ws = logic::workspace();
-    assert(wengine::logic::ensure_topology(ws).ok());
+    assert(wengine::logic::topo::rebuild(ws, wengine::logic::EdgeFilter::kAll).ok());
     const wengine::logic::Schematic sc = wengine::logic::layout_schematic(ws);
     assert(s.find("(" + std::to_string(sc.width * 2) + "x" + std::to_string(sc.height * 2) + ")") !=
            std::string::npos);

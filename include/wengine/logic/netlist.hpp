@@ -181,7 +181,7 @@ namespace wengine::logic {
   }
   // Q-boundary: an edge into a sequential-gate input can never close a
   // combinational cycle (flop Q outputs break loops — see
-  // validate_sequential, which excludes exactly these edges), so the
+  // validate via topo::validate(kCombOnly), which excludes exactly these edges), so the
   // incremental check is vacuous there and acceptance never depends on
   // wiring order. The whole-graph validator stays authoritative for
   // combinational destinations (a live-but-uninvolved flop shields

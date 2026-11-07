@@ -1,5 +1,6 @@
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <chrono>
@@ -108,7 +109,7 @@ int main(int argc, char **argv) {
       }
     }
   }
-  if (!setup_ok || !ensure_topology(nl).ok()) {
+  if (!setup_ok || !wengine::logic::topo::rebuild(nl, wengine::logic::EdgeFilter::kAll).ok()) {
     std::cout << "bench_logic: setup failed\n";
     return 1;
   }

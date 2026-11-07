@@ -101,65 +101,13 @@ inline void reset_seq_state(SeqState &st) noexcept { st = SeqState{}; }
   return false;
 }
 
-// Whole-graph cycle validation over COMBINATIONAL edges only
-// (LOGIC-V2-SEQ3): Kahn's algorithm in slot order (same determinism as
-// ensure_topology), except driver edges into sequential-gate inputs
-// (DFF.D/CLK, DLATCH.D/EN, JK.J/K/CLK, T.T/CLK, SRLATCH.S/R) are excluded from the
-// cycle edge set — flop Q outputs break loops, so feedback through
-// flops (counters, shift
-// registers) validates while pure combinational cycles still fail loudly.
-// Pure: no mutation, fixed stack arrays, noexcept. ensure_topology still
-// sees ALL edges, so solve() on sequential loops keeps failing loudly
-// until SEQ4 stepping arrives; loaders/steppers call this instead.
-[[nodiscard]] inline core::Status validate_sequential(const Netlist &nl) noexcept {
-  std::uint8_t indeg[kMaxGates] = {};
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live || is_sequential_kind(g.kind)) {
-      continue; // flops take no cycle-edges: always Kahn roots
-    }
-    std::uint8_t d = 0;
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        ++d;
-      }
-    }
-    indeg[s] = d;
-  }
-  std::uint16_t queue[kMaxGates];
-  std::size_t head = 0;
-  std::size_t tail = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && indeg[s] == 0) {
-      queue[tail++] = s;
-    }
-  }
-  std::size_t order = 0;
-  while (head < tail) {
-    const std::uint16_t cur = queue[head++];
-    ++order;
-    // Successors in slot order (deterministic push order): users of cur
-    // whose inputs are cycle-edges (combinational destinations only).
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
-      if (!g.live || is_sequential_kind(g.kind) || indeg[s] == 0) {
-        continue;
-      }
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] == cur) {
-          --indeg[s];
-          if (indeg[s] == 0) {
-            queue[tail++] = s;
-            break; // one push per gate (remaining inputs counted already)
-          }
-        }
-      }
-    }
-  }
-  if (order != nl.live_count) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  return core::Status::success();
-}
+// Cycle validation lives in topo.hpp (`topo::validate` with
+// EdgeFilter::kCombOnly): driver edges into sequential-gate inputs
+// (DFF.D/CLK, DLATCH.D/EN, JK.J/K/CLK, T.T/CLK, SRLATCH.S/R) are excluded
+// from the cycle edge set — flop Q outputs break loops, so feedback
+// through flops (counters, shift registers) validates while pure
+// combinational cycles still fail loudly. `topo::rebuild(kAll)` still
+// sees ALL edges, so solve() on sequential loops keeps failing loudly;
+// loaders/steppers call `topo::validate` instead.
 
 } // namespace wengine::logic

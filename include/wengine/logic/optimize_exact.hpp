@@ -72,7 +72,7 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
   for (std::size_t o = 0; o < m; ++o) {
     out_slots[o] = out_buf[o].slot;
   }
-  if (!ensure_topology(nl).ok()) {
+  if (!topo::rebuild(nl, EdgeFilter::kAll).ok()) {
     return false;
   }
   const std::size_t rows = static_cast<std::size_t>(1ULL << n);

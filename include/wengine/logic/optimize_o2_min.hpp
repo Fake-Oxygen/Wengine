@@ -341,7 +341,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
   if (in_n != n || out_n != m) {
     return false;
   }
-  if (!ensure_topology(src).ok()) {
+  if (!topo::rebuild(src, EdgeFilter::kAll).ok()) {
     return false;
   }
   const std::size_t rows = static_cast<std::size_t>(1ULL << n);
@@ -464,7 +464,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
   recount_fanout(built);
   built.dirty = true;
   built.topo_size = 0;
-  if (!ensure_topology(built).ok()) {
+  if (!topo::rebuild(built, EdgeFilter::kAll).ok()) {
     return false;
   }
   // Interface + proj mapping (minimized inputs -> original inputs).

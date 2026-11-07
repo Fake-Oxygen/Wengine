@@ -716,11 +716,11 @@ struct ClockRow {
   // Flop-aware cycle check (mirrors the wire verb): combinational loops
   // always fail; feedback through sequential gates validates sequentially.
   if (has_sequential_gates(tmp)) {
-    if (!validate_sequential(tmp).ok()) {
+    if (!topo::validate(tmp, EdgeFilter::kCombOnly).ok()) {
       err = "workspace topology error";
       return false;
     }
-  } else if (!ensure_topology(tmp).ok()) {
+  } else if (!topo::rebuild(tmp, EdgeFilter::kAll).ok()) {
     err = "workspace topology error";
     return false;
   }

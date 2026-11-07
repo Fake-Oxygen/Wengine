@@ -6,6 +6,7 @@
 // the test itself.
 
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/seq_step.hpp"
 #include "wengine/logic/types.hpp"
@@ -69,7 +70,7 @@ wengine::logic::Netlist barrier_closed_counter() {
   assert(wengine::logic::wire(nl, 1, x, 1).ok()); // Q1 -> XOR.2
   barrier_ignore(nl, 0, 1);              // DFF1.CLK ignored (edge assumed)
   barrier_ignore(nl, 1, 1);              // DFF2.CLK ignored
-  assert(wengine::logic::validate_sequential(nl).ok());
+  assert(wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok());
   assert(wengine::logic::block_input_count(nl) == 0);
   assert(wengine::logic::block_output_count(nl) == 0);
   return nl;
@@ -96,7 +97,7 @@ wengine::logic::Netlist barrier_counter_glue() {
   barrier_ignore(nl, 0, 1);                       // CLKs ignored
   barrier_ignore(nl, 1, 1);
   barrier_ignore(nl, 5, 1); // DLATCH1.EN ignored: frozen (hold row)
-  assert(wengine::logic::validate_sequential(nl).ok());
+  assert(wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok());
   assert(wengine::logic::block_input_count(nl) == 1);  // EXT
   assert(wengine::logic::block_output_count(nl) == 2); // AND1.Y, DLATCH1.Q
   return nl;
@@ -114,7 +115,7 @@ wengine::logic::Netlist barrier_pipeline() {
   assert(wengine::logic::wire(nl, 1, 2, 0).ok()); // Q1 -> DFF2.D
   barrier_ignore(nl, 1, 1);              // CLKs ignored
   barrier_ignore(nl, 2, 1);
-  assert(wengine::logic::validate_sequential(nl).ok());
+  assert(wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok());
   assert(wengine::logic::block_input_count(nl) == 1);  // SER (BUF.1 dangling)
   assert(wengine::logic::block_output_count(nl) == 1); // DFF2.Q
   return nl;
@@ -144,7 +145,7 @@ wengine::logic::Netlist barrier_jk_nq() {
   assert(wengine::logic::wire_pins(nl, nq, dst).ok());
   assert(wengine::logic::wire(nl, 0, q, 1).ok());  // Q -> AND2.2 (AND2 = ~Q & Q)
   barrier_ignore(nl, 0, 2); // JK1.CLK ignored (edge assumed)
-  assert(wengine::logic::validate_sequential(nl).ok());
+  assert(wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok());
   assert(wengine::logic::block_input_count(nl) == 2);  // J K
   assert(wengine::logic::block_output_count(nl) == 2); // AND1.Y AND2.Y
   return nl;
@@ -159,7 +160,7 @@ wengine::logic::Netlist barrier_full_dff() {
   barrier_ignore(nl, 0, 2);                       // RST
   barrier_ignore(nl, 0, 3);                       // SET
   barrier_ignore(nl, 0, 4);                       // EN
-  assert(wengine::logic::validate_sequential(nl).ok());
+  assert(wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok());
   assert(wengine::logic::block_input_count(nl) == 1);  // D
   assert(wengine::logic::block_output_count(nl) == 1); // Q
   return nl;

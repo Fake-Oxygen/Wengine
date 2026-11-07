@@ -32,6 +32,7 @@
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_config.hpp"
 #include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/signal/types.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 #include "wengine/world/state.hpp"
@@ -178,7 +179,7 @@ class ConfiguredRun {
       if (!cfg.seq.set) {
         return fail("logic run requires a sequential section (set)");
       }
-      if (!logic::validate_sequential(cfg.seq.netlist).ok()) {
+      if (!logic::topo::validate(cfg.seq.netlist, logic::EdgeFilter::kCombOnly).ok()) {
         return fail("invalid sequential net (combinational cycle or bad topology)");
       }
       if (cfg.seq.stimulus.size() != logic::block_input_count(cfg.seq.netlist)) {

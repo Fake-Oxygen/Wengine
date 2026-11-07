@@ -12,6 +12,7 @@
 #include "wengine/emit/signal_sink.hpp"
 #include "wengine/link/frame.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/topo.hpp"
 #include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/types.hpp"
 #include "wengine/solvers/projectile.hpp"
@@ -269,7 +270,7 @@ void test_logic_csv_exactness() {
     clk.is_output = false;
     clk.input = 1;
     assert(wengine::logic::ignore_pin(nl, clk).ok());
-    assert(wengine::logic::validate_sequential(nl).ok());
+    assert(wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok());
     wengine::core::Runner runner{{.dt = 0.01, .emit_every = 2}};
     wengine::solvers::SequentialSolver solver;
     runner.add_solver(solver);

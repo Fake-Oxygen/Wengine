@@ -16,7 +16,7 @@
 //   Only kLow/kHigh flow; kHighZ/kUnknown inputs fail loudly (V2 slot).
 
 #include "wengine/core/status.hpp"
-#include "wengine/logic/netlist.hpp"
+#include "wengine/logic/block_interface.hpp"
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
@@ -81,13 +81,6 @@ namespace wengine::logic {
   return LogicValue::kLow;
 }
 
-// Compile (or reuse) the Kahn level order over all edges. Canonical body
-// lives in topo::rebuild (the shared topology Module); this stays as the
-// stable entry point used by solvers, CLI, and tests.
-[[nodiscard]] inline core::Status ensure_topology(Netlist &nl) noexcept {
-  return topo::rebuild(nl, EdgeFilter::kAll);
-}
-
 // Scalar single-assignment solve over the compiled level order.
 //
 // block_inputs order == derived interface input order (slot order, then
@@ -98,7 +91,7 @@ namespace wengine::logic {
 // value. Any kHighZ / kUnknown block input fails loudly. Repeated calls
 // with equal inputs are bit-identical. No heap use (fixed stack arrays).
 [[nodiscard]] inline core::Status solve(Netlist &nl, std::span<const LogicValue> block_inputs, std::span<LogicValue> block_outputs) noexcept {
-  core::Status st = ensure_topology(nl);
+  core::Status st = topo::rebuild(nl, EdgeFilter::kAll);
   if (!st.ok()) {
     return st;
   }
@@ -178,7 +171,7 @@ namespace wengine::logic {
 [[nodiscard]] inline core::Status eval_block_word(Netlist &nl, std::uint64_t word_index,
                                                  std::span<std::uint64_t> gate_scratch,
                                                  std::span<std::uint64_t> block_outputs) noexcept {
-  core::Status st = ensure_topology(nl);
+  core::Status st = topo::rebuild(nl, EdgeFilter::kAll);
   if (!st.ok()) {
     return st;
   }

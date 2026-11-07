@@ -53,9 +53,9 @@
 //   init_seq_state is idempotent, so calling seq_step every step (or
 //   sporadically) keeps state. No allocation, no exceptions, noexcept.
 // - solve()/eval_block_word() stay combinational-only (untouched by SEQ4):
-//   do not call them on nets with sequential gates — ensure_topology sees
+//   do not call them on nets with sequential gates — topo::rebuild(kAll) sees
 //   ALL edges and fails loudly on flop feedback loops by design; use
-//   validate_sequential() + seq_step() instead.
+//   validate via topo::validate(kCombOnly) + seq_step() instead.
 //
 // Header-only, allocation-free, exception-free, noexcept throughout.
 // Fixed stack arrays (kMaxGates bounds), no syscalls, no iostream.
@@ -225,7 +225,7 @@ namespace detail {
                                                    std::span<LogicValue> block_outputs, const std::uint16_t *members,
                                                    std::size_t n_members) noexcept {
   init_seq_state(st, nl);
-  if (!validate_sequential(nl).ok()) {
+  if (!topo::validate(nl, EdgeFilter::kCombOnly).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t n_in = block_input_count(nl);
@@ -429,7 +429,7 @@ namespace detail {
 [[nodiscard]] inline core::Status apply_async_controls(Netlist &nl, SeqState &st,
                                                       std::span<const LogicValue> block_inputs) noexcept {
   init_seq_state(st, nl);
-  if (!validate_sequential(nl).ok()) {
+  if (!topo::validate(nl, EdgeFilter::kCombOnly).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t n_in = block_input_count(nl);
@@ -493,7 +493,7 @@ namespace detail {
 [[nodiscard]] inline core::Status apply_level_latches(Netlist &nl, SeqState &st,
                                                       std::span<const LogicValue> block_inputs) noexcept {
   init_seq_state(st, nl);
-  if (!validate_sequential(nl).ok()) {
+  if (!topo::validate(nl, EdgeFilter::kCombOnly).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t n_in = block_input_count(nl);

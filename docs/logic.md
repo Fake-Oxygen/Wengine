@@ -449,7 +449,8 @@ below).
   `seq_step`/`seq_step_filtered` (global edge or one named clock domain
   over edge kinds only; level latches re-settle at every step top;
   the combinational evaluator only gained NQ-polarity reads at existing
-  resolution funnels). Cycle validation is flop-aware: `validate_sequential` runs Kahn over
+   resolution funnels). Cycle validation is flop-aware: `topo::validate`
+   (EdgeFilter::kCombOnly, one Kahn core with `topo::rebuild`) runs Kahn over
   combinational edges only (drivers into sequential-gate inputs
   excluded — all five DFF inputs, both DLATCH inputs, all three JK
   inputs, both T inputs, and both SR inputs; Q outputs

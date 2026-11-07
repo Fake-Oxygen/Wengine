@@ -58,12 +58,12 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
   // edges only, then revert: wire_pins() below stays the single mutation
   // path (its internal topo::reaches agrees with the validator — both are
   // exact single-edge cycle tests). Polarity/fanout are untouched by the
-  // probe (validate_sequential reads drivers only), so plain revert is exact.
+  // probe (topo::validate reads drivers only), so plain revert is exact.
     wengine::logic::Gate &dst_gate = nl.gates[to.value.slot];
     wengine::logic::Gate &src_gate = nl.gates[from.value.slot];
     dst_gate.drivers[to.value.input] = from.value.slot;
     ++src_gate.output_fanout;
-    const bool acyclic = wengine::logic::validate_sequential(nl).ok();
+    const bool acyclic = wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok();
     dst_gate.drivers[to.value.input] = wengine::logic::kNoDriver;
     --src_gate.output_fanout;
     if (!acyclic) {

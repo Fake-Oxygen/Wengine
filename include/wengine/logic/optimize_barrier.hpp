@@ -58,6 +58,44 @@ inline void collect_barrier_roots(const Netlist &nl, bool *roots) noexcept {
   }
 }
 
+// Generic reverse driver-cone DFS: marks every live gate reachable from
+// any seeded gate by following drivers. Shared by DCE keep-sets and O2
+// reachability so the traversal lives once.
+inline void follow_drivers(const Netlist &nl, const bool *seeds, bool *keep) noexcept {
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    keep[s] = false;
+  }
+  std::uint16_t stack[kMaxGates];
+  std::size_t top = 0;
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (seeds[s] && nl.gates[s].live) {
+      keep[s] = true;
+      stack[top++] = s;
+    }
+  }
+  while (top > 0) {
+    const std::uint16_t cur = stack[--top];
+    const Gate &g = nl.gates[cur];
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      const std::uint16_t d = g.drivers[i];
+      if (d != kNoDriver && d < kMaxGates && nl.gates[d].live && !keep[d]) {
+        keep[d] = true;
+        stack[top++] = d;
+      }
+    }
+  }
+}
+
+// Reachable set for the O2 fresh build: reverse DFS from every barrier
+// root (original sinks plus every live sequential gate, so closed state
+// clusters with no block-output path still carry through; driver cones of
+// kept flops follow via the DFS).
+inline void collect_reachable(const Netlist &nl, bool *reach) noexcept {
+  bool seeds[kMaxGates] = {};
+  collect_barrier_roots(nl, seeds);
+  follow_drivers(nl, seeds, reach);
+}
+
 // Single reverse scan: feeds_seq[d] is true when any live sequential gate
 // reads gate d. Passes consult this bit instead of scanning all users.
 inline void compute_feeds_seq(const Netlist &nl, bool *feeds_seq) noexcept {
