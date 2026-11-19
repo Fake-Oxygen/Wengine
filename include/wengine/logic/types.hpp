@@ -116,43 +116,70 @@ enum class GateKind : std::uint8_t {
 /**
  * @brief Net value.
  *
- * V1 produces/consumes only kLow/kHigh; kHighZ/kUnknown exist now so
- * tri-state buses (V2, docs/logic.md §12) need no type change — eval
- * rejects them loudly until then.
+ * kLow/kHigh are the driven levels. kHighZ (undriven / tri-state
+ * off) and kUnknown (conflict marker) carry resolution semantics in
+ * resolve_net (docs/logic.md §12): high-Z contributes nothing,
+ * unknown dominates low/high, and active low+high contention
+ * resolves to unknown. Consumers that need a definite level (gate
+ * inputs, sequential control nets, block sinks) still reject Z/X
+ * loudly at their own seams.
  */
 enum class LogicValue : std::uint8_t {
   /** @brief Logic 0. */
   kLow = 0,
   /** @brief Logic 1. */
   kHigh = 1,
-  /** @brief Undriven / tri-state off (V2). */
-  kHighZ = 2,   // undriven / tri-state off (V2)
-  /** @brief Conflict marker (V2 multi-driver resolution). */
-  kUnknown = 3, // conflict marker (V2 multi-driver resolution)
+  /** @brief Undriven / tri-state off: transparent in resolution. */
+  kHighZ = 2,   // undriven / tri-state off (transparent to resolve_net)
+  /** @brief Conflict marker: dominates low/high in resolution. */
+  kUnknown = 3, // conflict marker (low+high contention, unknown driver)
 };
+
+/**
+ * @brief The net-value numbering is append-only: kHighZ == 2 and
+ *        kUnknown == 3 must never change (persisted vocabulary
+ *        convention, docs/logic.md §12).
+ */
+static_assert(static_cast<int>(LogicValue::kHighZ) == 2 && static_cast<int>(LogicValue::kUnknown) == 3,
+              "LogicValue numbering is append-only");
 
 /**
  * @brief Single funnel every input resolves through.
  *
- * V1: exactly one driver (callers enforce; multi-value spans are a
- * loud error). V2 replaces this body with wired-OR / tri-state
- * resolution — call sites unchanged.
+ * Total four-value wired resolution (docs/logic.md §12): high-Z
+ * drivers are transparent, any kUnknown driver dominates low/high,
+ * active low+high contention resolves to kUnknown, active consensus
+ * resolves to the agreed level, and a span with no active drivers
+ * (empty or all high-Z) resolves to kHighZ. The result depends only
+ * on the driver-value multiset, never on slot order, so identical
+ * spans always resolve identically.
  *
- * @param[in] drivers Span of candidate driver values.
- * @param[in] n Span length; must be 1 in v1 (single-driver rule).
- * @param[out] out Resolved net value on success.
- * @return True on success; false when n is not 1 or the driver value
- *         is not kLow/kHigh (Z/X rejected until V2 tri-state,
- *         docs/logic.md §12).
+ * @param[in] drivers Span of candidate driver values; may be empty.
+ * @param[in] n Span length; 0 means an undriven net (kHighZ).
+ * @param[out] out Resolved net value on success; untouched when the span is ill-formed.
+ * @return True on success: every well-formed span resolves to exactly
+ *         one of the four values. False only for an ill-formed span
+ *         (drivers == nullptr with n > 0). Call sites unchanged from v1.
  */
 [[nodiscard]] constexpr bool resolve_net(const LogicValue *drivers, std::size_t n, LogicValue &out) noexcept {
-  if (n != 1) {
-    return false;
+  if (drivers == nullptr && n > 0) {
+    return false; // ill-formed span: no values where n claims there are
   }
-  if (drivers[0] != LogicValue::kLow && drivers[0] != LogicValue::kHigh) {
-    return false; // Z/X rejected until V2 tri-state (docs/logic.md §12).
+  LogicValue acc = LogicValue::kHighZ; // identity: undriven until proven driven
+  for (std::size_t i = 0; i < n; ++i) {
+    const LogicValue v = drivers[i];
+    if (v == LogicValue::kHighZ) {
+      continue; // transparent: a disabled driver contributes nothing
+    }
+    if (acc == LogicValue::kHighZ) {
+      acc = v; // first active driver sets the running value
+      continue;
+    }
+    if (v == LogicValue::kUnknown || acc == LogicValue::kUnknown || v != acc) {
+      acc = LogicValue::kUnknown; // unknown dominates; low+high contention
+    }
   }
-  out = drivers[0];
+  out = acc;
   return true;
 }
 

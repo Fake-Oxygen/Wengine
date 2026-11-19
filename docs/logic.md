@@ -433,14 +433,21 @@ append-only, schema bumps carry fallback loaders (a generation may still
 be retired without a loader by explicit decision — see Schema evolution
 below).
 
-- **Value system.** Nets carry `LogicValue {kLow, kHigh, kHighZ,
-  kUnknown}` today; v1 produces/consumes only Low/High and rejects
-  Z/X loudly. Tri-state buses later just start producing Z — no type
-  change, no call-site churn.
-- **Drivers.** Every input resolves through `resolve_net(span of
-  driver values)`, which today enforces single-driver. Multi-driver /
-  wired-OR / tri-state resolution later replaces one function body;
-  the `drivers[]` arrays and `wire` verb already store fan-in lists.
+- **Value system (shipped).** Nets carry `LogicValue {kLow, kHigh,
+  kHighZ, kUnknown}`; the funnel resolves all four (see Drivers):
+  Z is transparent, X dominates, and active low+high contention
+  resolves to X. Level consumers (gate inputs, sequential control
+  nets, block sinks) still reject Z/X loudly. No type change, no
+  call-site churn — the reservoir the v1 tri-state non-goal above
+  pointed at.
+- **Drivers (funnel shipped; netlist wiring reserved).** Every input
+  resolves through `resolve_net(span of driver values)`, now a total
+  four-value wired resolution (single-pass fold; empty/all-Z spans
+  resolve to Z). The body replacement landed with call sites
+  unchanged; what stays reserved is *netlist-level* multi-driver
+  authoring (bus primitives, importers, tri-state gate kinds) —
+  `wire` still enforces single-driver per input (§9), and the
+  `drivers[]` arrays still store one driver per input pin.
 - **Sequential / clocks (shipped).** `GateKind` values 0..7 are combinational;
   sequential kinds append at ≥16, pinned: `DFF`=16 (D+CLK,
   edge-triggered; 2 inputs bare, or 5 with the RST/SET/EN control set),

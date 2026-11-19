@@ -257,17 +257,182 @@ void test_eval_gate_goldens() {
   assert(logic::eval_gate(GateKind::kXnor, t011, 3) == kH);
   assert(logic::eval_gate(GateKind::kXnor, t111, 3) == kL);
 
-  // resolve_net: the single-driver funnel (V2 tri-state seam).
+  // resolve_net: the single total four-value funnel (docs/logic.md §12,
+  // contracts/resolve-net.md). The v1 refusal placeholder is superseded
+  // here: every well-formed span below resolves to one of the four values.
   LogicValue one = kH;
   LogicValue sunk = kL;
-  assert(logic::resolve_net(&one, 1, sunk) && sunk == kH);
-  assert(!logic::resolve_net(&one, 0, sunk));
+  assert(logic::resolve_net(&one, 1, sunk) && sunk == kH); // v1 passthrough
+  one = kL;
+  assert(logic::resolve_net(&one, 1, sunk) && sunk == kL); // v1 passthrough
+  assert(logic::resolve_net(&one, 0, sunk) && sunk == LogicValue::kHighZ); // empty → Z (was: refused)
   LogicValue two[2] = {kH, kH};
-  assert(!logic::resolve_net(two, 2, sunk)); // multi-driver refused
+  assert(logic::resolve_net(two, 2, sunk) && sunk == kH); // consensus (was: refused)
   LogicValue z = LogicValue::kHighZ;
-  assert(!logic::resolve_net(&z, 1, sunk)); // Z rejected until V2
+  assert(logic::resolve_net(&z, 1, sunk) && sunk == LogicValue::kHighZ); // lone Z → Z (was: refused)
+
+  // US1: contention — active low+high never picks a winner.
+  LogicValue clh[2] = {kL, kH};
+  assert(logic::resolve_net(clh, 2, sunk) && sunk == LogicValue::kUnknown); // conflict → X
+  LogicValue chl[2] = {kH, kL};
+  assert(logic::resolve_net(chl, 2, sunk) && sunk == LogicValue::kUnknown); // order irrelevant
+  // US1: unknown dominates — never outvoted by a level.
   LogicValue x = LogicValue::kUnknown;
-  assert(!logic::resolve_net(&x, 1, sunk)); // X rejected until V2
+  assert(logic::resolve_net(&x, 1, sunk) && sunk == LogicValue::kUnknown); // lone X poisons (was: refused)
+  LogicValue hx[2] = {kH, LogicValue::kUnknown};
+  assert(logic::resolve_net(hx, 2, sunk) && sunk == LogicValue::kUnknown);
+  LogicValue lhx[3] = {kL, kH, LogicValue::kUnknown};
+  assert(logic::resolve_net(lhx, 3, sunk) && sunk == LogicValue::kUnknown); // conflict and X agree
+  // Ill-formed span still refused (v1 integrity rule, unchanged).
+  assert(!logic::resolve_net(nullptr, 1, sunk));
+
+  // US2: high-Z is transparent — adding/removing Z never changes a span.
+  LogicValue hz[2] = {kH, LogicValue::kHighZ};
+  assert(logic::resolve_net(hz, 2, sunk) && sunk == kH); // {H,Z} → H
+  LogicValue lzz[3] = {kL, LogicValue::kHighZ, LogicValue::kHighZ};
+  assert(logic::resolve_net(lzz, 3, sunk) && sunk == kL); // {L,Z,Z} → L
+  LogicValue zz[2] = {LogicValue::kHighZ, LogicValue::kHighZ};
+  assert(logic::resolve_net(zz, 2, sunk) && sunk == LogicValue::kHighZ); // {Z,Z} → Z
+
+  // US3: wired consensus — agreeing actives mean the level, no false conflict.
+  LogicValue cll[2] = {kL, kL};
+  assert(logic::resolve_net(cll, 2, sunk) && sunk == kL);
+  LogicValue clll[3] = {kL, kL, kL};
+  assert(logic::resolve_net(clll, 3, sunk) && sunk == kL);
+  LogicValue chhz[3] = {kH, kH, LogicValue::kHighZ};
+  assert(logic::resolve_net(chhz, 3, sunk) && sunk == kH); // consensus + Z
+  LogicValue cllh[3] = {kL, kL, kH};
+  assert(logic::resolve_net(cllh, 3, sunk) && sunk == LogicValue::kUnknown); // vs {L,L,L}: conflict → X
+
+  // SC-001/T018: the remaining multisets complete the exhaustive
+  // table — the empty span, the 4 singles, and the pairs/triples
+  // pinned above cover 16 of the 70 spans of size 0..4; the 54 rows
+  // below cover the rest (4 pairs + 15 triples + 35 quads).
+  // Hand-derived from research.md D1 (Z transparent, X dominant,
+  // L+H conflict → X). Row: {nL, nH, nZ, nX} → want.
+  struct MultisetCase {
+    std::uint8_t counts[4]; // L, H, Z, X
+    LogicValue want;
+  };
+  static constexpr MultisetCase kRest[] = {
+      // Missing pairs.
+      {{1, 0, 1, 0}, kL}, // {L,Z}
+      {{1, 0, 0, 1}, LogicValue::kUnknown}, // {L,X}: X dominant
+      {{0, 0, 1, 1}, LogicValue::kUnknown}, // {Z,X}: X dominant
+      {{0, 0, 0, 2}, LogicValue::kUnknown}, // {X,X}
+      // Missing triples.
+      {{2, 0, 1, 0}, kL}, // {L,L,Z}
+      {{2, 0, 0, 1}, LogicValue::kUnknown}, // {L,L,X}
+      {{1, 0, 1, 1}, LogicValue::kUnknown}, // {L,Z,X}
+      {{1, 0, 0, 2}, LogicValue::kUnknown}, // {L,X,X}
+      {{1, 1, 0, 1}, LogicValue::kUnknown}, // {L,H,X}
+      {{1, 2, 0, 0}, LogicValue::kUnknown}, // {L,H,H}: conflict → X
+      {{0, 3, 0, 0}, kH}, // {H,H,H}
+      {{0, 2, 0, 1}, LogicValue::kUnknown}, // {H,H,X}
+      {{0, 1, 2, 0}, kH}, // {H,Z,Z}
+      {{0, 1, 1, 1}, LogicValue::kUnknown}, // {H,Z,X}
+      {{0, 1, 0, 2}, LogicValue::kUnknown}, // {H,X,X}
+      {{0, 0, 3, 0}, LogicValue::kHighZ}, // {Z,Z,Z}
+      {{0, 0, 2, 1}, LogicValue::kUnknown}, // {Z,Z,X}
+      {{0, 0, 1, 2}, LogicValue::kUnknown}, // {Z,X,X}
+      {{0, 0, 0, 3}, LogicValue::kUnknown}, // {X,X,X}
+      // Quads.
+      {{4, 0, 0, 0}, kL}, // {L,L,L,L}
+      {{3, 0, 1, 0}, kL}, // {L,L,L,Z}
+      {{3, 0, 0, 1}, LogicValue::kUnknown}, // {L,L,L,X}
+      {{3, 1, 0, 0}, LogicValue::kUnknown}, // {L,L,L,H}: conflict → X
+      {{2, 0, 2, 0}, kL}, // {L,L,Z,Z}
+      {{2, 0, 1, 1}, LogicValue::kUnknown}, // {L,L,Z,X}
+      {{2, 0, 0, 2}, LogicValue::kUnknown}, // {L,L,X,X}
+      {{2, 1, 1, 0}, LogicValue::kUnknown}, // {L,L,H,Z}: conflict → X
+      {{2, 1, 0, 1}, LogicValue::kUnknown}, // {L,L,H,X}
+      {{2, 2, 0, 0}, LogicValue::kUnknown}, // {L,L,H,H}: conflict → X
+      {{1, 0, 3, 0}, kL}, // {L,Z,Z,Z}
+      {{1, 0, 2, 1}, LogicValue::kUnknown}, // {L,Z,Z,X}
+      {{1, 0, 1, 2}, LogicValue::kUnknown}, // {L,Z,X,X}
+      {{1, 0, 0, 3}, LogicValue::kUnknown}, // {L,X,X,X}
+      {{1, 1, 2, 0}, LogicValue::kUnknown}, // {L,H,Z,Z}: conflict → X
+      {{1, 1, 1, 1}, LogicValue::kUnknown}, // {L,H,Z,X}
+      {{1, 1, 0, 2}, LogicValue::kUnknown}, // {L,H,X,X}
+      {{1, 2, 1, 0}, LogicValue::kUnknown}, // {L,H,H,Z}: conflict → X
+      {{1, 2, 0, 1}, LogicValue::kUnknown}, // {L,H,H,X}
+      {{1, 3, 0, 0}, LogicValue::kUnknown}, // {L,H,H,H}: conflict → X
+      {{0, 4, 0, 0}, kH}, // {H,H,H,H}
+      {{0, 3, 1, 0}, kH}, // {H,H,H,Z}
+      {{0, 3, 0, 1}, LogicValue::kUnknown}, // {H,H,H,X}
+      {{0, 2, 2, 0}, kH}, // {H,H,Z,Z}
+      {{0, 2, 1, 1}, LogicValue::kUnknown}, // {H,H,Z,X}
+      {{0, 2, 0, 2}, LogicValue::kUnknown}, // {H,H,X,X}
+      {{0, 1, 3, 0}, kH}, // {H,Z,Z,Z}
+      {{0, 1, 2, 1}, LogicValue::kUnknown}, // {H,Z,Z,X}
+      {{0, 1, 1, 2}, LogicValue::kUnknown}, // {H,Z,X,X}
+      {{0, 1, 0, 3}, LogicValue::kUnknown}, // {H,X,X,X}
+      {{0, 0, 4, 0}, LogicValue::kHighZ}, // {Z,Z,Z,Z}
+      {{0, 0, 3, 1}, LogicValue::kUnknown}, // {Z,Z,Z,X}
+      {{0, 0, 2, 2}, LogicValue::kUnknown}, // {Z,Z,X,X}
+      {{0, 0, 1, 3}, LogicValue::kUnknown}, // {Z,X,X,X}
+      {{0, 0, 0, 4}, LogicValue::kUnknown}, // {X,X,X,X}
+  };
+  const LogicValue kinds[4] = {kL, kH, LogicValue::kHighZ, LogicValue::kUnknown};
+  for (const MultisetCase c : kRest) {
+    const std::uint8_t n =
+        static_cast<std::uint8_t>(c.counts[0] + c.counts[1] + c.counts[2] + c.counts[3]);
+    LogicValue span[4] = {kL, kL, kL, kL};
+    std::uint8_t k = 0;
+    for (std::uint8_t j = 0; j < 4; ++j) {
+      for (std::uint8_t i = 0; i < c.counts[j]; ++i) {
+        span[k++] = kinds[j];
+      }
+    }
+    assert(k == n);
+    assert(logic::resolve_net(span, n, sunk) && sunk == c.want);
+  }
+
+  // SC-001/T018: every distinct ordering of representative spans.
+  LogicValue lhz[3] = {kL, kH, LogicValue::kHighZ};
+  LogicValue lzh[3] = {kL, LogicValue::kHighZ, kH};
+  LogicValue hlz[3] = {kH, kL, LogicValue::kHighZ};
+  LogicValue hzl[3] = {kH, LogicValue::kHighZ, kL};
+  LogicValue zlh[3] = {LogicValue::kHighZ, kL, kH};
+  LogicValue zhl[3] = {LogicValue::kHighZ, kH, kL};
+  assert(logic::resolve_net(lhz, 3, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(lzh, 3, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(hlz, 3, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(hzl, 3, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(zlh, 3, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(zhl, 3, sunk) && sunk == LogicValue::kUnknown);
+  LogicValue lxh[3] = {kL, LogicValue::kUnknown, kH};
+  LogicValue hlx[3] = {kH, kL, LogicValue::kUnknown};
+  LogicValue hxl[3] = {kH, LogicValue::kUnknown, kL};
+  LogicValue xlh[3] = {LogicValue::kUnknown, kL, kH};
+  LogicValue xhl[3] = {LogicValue::kUnknown, kH, kL};
+  assert(logic::resolve_net(lxh, 3, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(hlx, 3, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(hxl, 3, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(xlh, 3, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(xhl, 3, sunk) && sunk == LogicValue::kUnknown);
+  LogicValue xh[2] = {LogicValue::kUnknown, kH};
+  LogicValue zx[2] = {LogicValue::kHighZ, LogicValue::kUnknown};
+  LogicValue xz[2] = {LogicValue::kUnknown, LogicValue::kHighZ};
+  assert(logic::resolve_net(xh, 2, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(zx, 2, sunk) && sunk == LogicValue::kUnknown);
+  assert(logic::resolve_net(xz, 2, sunk) && sunk == LogicValue::kUnknown);
+
+  // SC-001/T018 edge case: large spans stay exact.
+  LogicValue big[16];
+  for (std::uint8_t i = 0; i < 16; ++i) {
+    big[i] = LogicValue::kHighZ;
+  }
+  assert(logic::resolve_net(big, 16, sunk) && sunk == LogicValue::kHighZ);
+  big[15] = kH;
+  assert(logic::resolve_net(big, 16, sunk) && sunk == kH); // one active in 16
+  for (std::uint8_t i = 0; i < 7; ++i) {
+    big[i] = kL;
+  }
+  big[7] = kH;
+  assert(logic::resolve_net(big, 8, sunk) && sunk == LogicValue::kUnknown); // conflict in 8
+  big[0] = LogicValue::kUnknown;
+  assert(logic::resolve_net(big, 8, sunk) && sunk == LogicValue::kUnknown); // X dominates in 8
 }
 
 void test_solve_single_and() {

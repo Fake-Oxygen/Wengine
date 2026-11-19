@@ -63,9 +63,12 @@ int main() {
 Identity and ordering rules worth knowing up front: gate kinds are
 append-only bytes (persisted in YAML v1 — never renumbered), the
 ignored-pin rule ties ignored dangling inputs to `kLow` during eval
-(wired inputs ignore the mark), and `kHighZ`/`kUnknown` exist in the
-value vocabulary but fail loudly in v1 eval until tri-state buses
-land. Combinational cycles are rejected at wire time (sequential Q
+(wired inputs ignore the mark), and `kHighZ`/`kUnknown` carry
+resolution semantics in the `resolve_net` funnel (Z transparent, X
+dominant, low+high contention → X; empty/all-Z spans read Z) while
+level consumers (gate inputs, sequential control nets, block sinks)
+still reject them loudly. Combinational cycles are rejected at wire
+time (sequential Q
 outputs break loops, so flop feedback validates).
 
 ```{doxygenenum} wengine::logic::GateKind
