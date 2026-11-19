@@ -62,6 +62,18 @@ inline void recount_fanout(Netlist &nl) noexcept {
         ++nl.gates[d].output_fanout;
       }
     }
+    // 011: every extra edge counts exactly like a primary (same
+    // recount semantics the barrier roots rely on).
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      const std::size_t flat = tie_flat(s, i);
+      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
+      for (std::uint8_t j = 0; j < extra_n; ++j) {
+        const std::uint16_t d = nl.extra_drivers[flat * kMaxSharedExtra + j];
+        if (d < kMaxGates && nl.gates[d].live) {
+          ++nl.gates[d].output_fanout;
+        }
+      }
+    }
   }
 }
 
@@ -128,6 +140,13 @@ inline void classify(const Netlist &nl, Constness *label) noexcept {
     Constness out = Constness::kV;
     if (is_frozen_kind(g.kind)) {
       // Opaque barrier: sequential outputs always classify as kV.
+      label[s] = Constness::kV;
+      continue;
+    }
+    if (has_marked_input(nl, s)) {
+      // 011: a marked input can resolve X (contention) regardless of
+      // its drivers' labels — shared sinks always classify as kV so no
+      // downstream fold can mask a loud conflict.
       label[s] = Constness::kV;
       continue;
     }
@@ -260,6 +279,9 @@ inline bool bypass_pass(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
     }
     if (feeds_seq != nullptr && feeds_seq[s]) {
       continue; // opaque barrier: never rewire a sequential-gate input pin
+    }
+    if (drives_shared(nl, s)) {
+      continue; // 011 driver-side freeze: never rewire a shared-net span
     }
     std::uint16_t target = kNoDriver;
     bool fire = false;
@@ -440,6 +462,10 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
     if (is_frozen_kind(g.kind)) {
       continue; // opaque barrier: flop/latch inputs are never folded or dropped
     }
+    if (has_marked_input(nl, s)) {
+      continue; // 011 sink-side skip: never fold, drop, or retag through
+      // a marked input (index shifts would desynchronize flat-keyed extras)
+    }
     switch (g.kind) {
     case GateKind::kAnd:
       if (!has_c0) {
@@ -480,6 +506,9 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
     }
     if (is_frozen_kind(g.kind)) {
       continue; // opaque barrier: labels stay kV, but never collapse state
+    }
+    if (has_marked_input(nl, s)) {
+      continue; // 011 sink-side skip: collapsing would destroy the span
     }
     if (label[s] == Constness::kC0) {
       const bool canonical = g.kind == GateKind::kAnd && g.input_count == 2 && g.ignored_mask == 0x03u &&
@@ -552,6 +581,12 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq = nullptr) noexcept 
     }
     const std::uint16_t h = g.drivers[0];
     if (h == kNoDriver || h == s || !nl.gates[h].live) {
+      continue;
+    }
+    // 011: never fuse through a shared span — driver-side (rewiring s's
+    // users would miss extras) or sink-side (the driver-array copy
+    // below only moves primaries and would corrupt the span).
+    if (drives_shared(nl, s) || has_marked_input(nl, s) || has_marked_input(nl, h)) {
       continue;
     }
     const GateKind hk = nl.gates[h].kind;

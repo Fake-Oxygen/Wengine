@@ -102,6 +102,12 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
   if (has_sequential_gates(nl)) {
     return false;
   }
+  // 011: conservative whole-net skip — the exact pass cannot prove
+  // safety for a shared net (spans, not single drivers), so it leaves
+  // marked netlists untouched.
+  if (any_shared_mark(nl)) {
+    return false;
+  }
   // Hidden outputs must be preserved exactly: if the user hid logic via
   // `ignore`, dead-input analysis over block outputs alone could break
   // the hidden cone (an input dead for visible outputs may be live for

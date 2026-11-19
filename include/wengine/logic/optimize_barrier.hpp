@@ -59,19 +59,83 @@ namespace wengine::logic::detail {
 }
 
 /**
+ * @brief True when slot s drives any shared-marked input (011): a primary or extra attachment into a marked input.
+ *
+ * Driver-side freeze predicate (the feeds_seq pattern): such a gate is
+ * never removed, retagged, or rewired-through — rewire_users only
+ * rewrites primaries, so touching a shared feeder would silently shrink spans.
+ *
+ * @param[in] nl Netlist holding drivers and extras.
+ * @param[in] s Slot to test.
+ * @return True when s feeds a shared input (any attachment).
+ */
+[[nodiscard]] inline bool drives_shared(const Netlist &nl, std::uint16_t s) noexcept {
+  if (s >= kMaxGates) {
+    return false;
+  }
+  for (std::uint16_t u = 0; u < kMaxGates; ++u) {
+    const Gate &g = nl.gates[u];
+    if (!g.live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      const std::size_t flat = tie_flat(u, i);
+      if (!is_shared_flat(nl, flat)) {
+        continue;
+      }
+      if (g.drivers[i] == s) {
+        return true;
+      }
+      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
+      for (std::uint8_t j = 0; j < extra_n; ++j) {
+        if (nl.extra_drivers[flat * kMaxSharedExtra + j] == s) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * @brief True when slot s has any shared-marked input (011).
+ *
+ * Sink-side skip predicate: no pass folds, drops, or retags through a
+ * marked input (index-shifting transforms would desynchronize the
+ * flat-keyed extras).
+ *
+ * @param[in] nl Netlist holding the mark table.
+ * @param[in] s Slot to test.
+ * @return True when any configured input of s carries the mark.
+ */
+[[nodiscard]] inline bool has_marked_input(const Netlist &nl, std::uint16_t s) noexcept {
+  if (s >= kMaxGates || !nl.gates[s].live) {
+    return false;
+  }
+  const Gate &g = nl.gates[s];
+  for (std::uint8_t i = 0; i < g.input_count; ++i) {
+    if (is_shared_flat(nl, tie_flat(s, i))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * @brief DCE / reachability root rule: original sinks plus every live
  *        sequential gate (an unobserved flop stays observable through
- *        state readback).
+ *        state readback), plus every shared feeder (011: driver-side
+ *        freeze — such gates are never removed).
  *
  * @param[in] nl Netlist holding the gate.
  * @param[in] s Slot to test.
- * @return True for live output-fanout-0 gates and live sequential gates.
+ * @return True for live output-fanout-0 gates, live sequential gates, and live shared feeders.
  */
 [[nodiscard]] inline bool is_barrier_root(const Netlist &nl, std::uint16_t s) noexcept {
   if (s >= kMaxGates || !nl.gates[s].live) {
     return false;
   }
-  return nl.gates[s].output_fanout == 0 || is_frozen_kind(nl.gates[s].kind);
+  return nl.gates[s].output_fanout == 0 || is_frozen_kind(nl.gates[s].kind) || drives_shared(nl, s);
 }
 
 /**
@@ -118,6 +182,19 @@ inline void follow_drivers(const Netlist &nl, const bool *seeds, bool *keep) noe
         stack[top++] = d;
       }
     }
+    // 011: extras are driver-graph edges — a pass that dropped an extra
+    // would silently shrink a span (correctness, not policy).
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      const std::size_t flat = tie_flat(cur, i);
+      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
+      for (std::uint8_t j = 0; j < extra_n; ++j) {
+        const std::uint16_t d = nl.extra_drivers[flat * kMaxSharedExtra + j];
+        if (d < kMaxGates && nl.gates[d].live && !keep[d]) {
+          keep[d] = true;
+          stack[top++] = d;
+        }
+      }
+    }
   }
 }
 
@@ -157,6 +234,15 @@ inline void compute_feeds_seq(const Netlist &nl, bool *feeds_seq) noexcept {
       const std::uint16_t d = user.drivers[i];
       if (d < kMaxGates && nl.gates[d].live) {
         feeds_seq[d] = true;
+      }
+      // 011: extras feed the same way primaries do.
+      const std::size_t flat = tie_flat(u, i);
+      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
+      for (std::uint8_t j = 0; j < extra_n; ++j) {
+        const std::uint16_t e = nl.extra_drivers[flat * kMaxSharedExtra + j];
+        if (e < kMaxGates && nl.gates[e].live) {
+          feeds_seq[e] = true;
+        }
       }
     }
   }
@@ -265,8 +351,12 @@ struct DedupKey {
  *            (same-source tied dangling pins merge).
  * @return Key for this input.
  */
-[[nodiscard]] inline DedupKey dedup_key_for(const Netlist &nl, std::uint16_t s, std::uint8_t i,
-                                            MergeTied merge) noexcept {
+[[nodiscard]] inline DedupKey dedup_key_for(const Netlist &nl, std::uint16_t s, std::uint8_t i, MergeTied merge) noexcept {
+  // 011: inputs of a marked sink never merge — the span (primary AND
+  // extras) is the identity, and the key only sees the primary.
+  if (has_marked_input(nl, s)) {
+    return DedupKey::unique(s, i);
+  }
   const std::uint16_t d = nl.gates[s].drivers[i];
   if (d != kNoDriver) {
     return (d < kMaxGates && nl.gates[d].live) ? DedupKey::wired(d) : DedupKey::dead();

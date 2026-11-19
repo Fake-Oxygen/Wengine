@@ -195,6 +195,24 @@ printf 'logic load examples/logic/parity3.yaml\nlogic truth\nlogic solve --from 
 XOR2.2 | XOR2.Y`); the solve echoes `in: 111 ...` and prints
 `XOR2.Y=1` (three highs = odd).
 
+## logic/shared_bus.yaml
+
+**Demonstrates**: an allowlisted 2-driver wired-OR bus — `AND1.Y`
+and `AND2.Y` both drive `OR1.1` under the explicit per-input shared
+mark; agreeing drivers resolve to the level while a disagreeing pair
+resolves X with a visible per-net contention count.
+
+**How to run**:
+
+```sh
+printf 'logic load examples/logic/shared_bus.yaml\nlogic list --wires\nlogic solve --in 11110\nlogic solve --in 11000\nexit\n' | ./build/PhysicsSimApp
+```
+
+**Expected outcome**: `loaded 4 gates 3 wires`; `list` shows
+`OR1 ... shared=OR1.1(2)` plus both `-> OR1.1` wires; the agreeing
+solve prints `OR1.Y=1` with `contention: OR1.1=0 (total 0)`; the
+contended solve refuses loudly with `contention: OR1.1=1 (total 1)`.
+
 ## logic/tied_demorgan.yaml
 
 **Demonstrates**: the tied-input De Morgan mirror — NOT via

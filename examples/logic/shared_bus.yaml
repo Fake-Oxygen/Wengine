@@ -1,0 +1,34 @@
+# shared_bus.yaml: allowlisted multi-driver wired-OR bus (011).
+#
+# AND1.Y and AND2.Y both drive OR1.1 — a shared net with 2 attachments.
+# OR1.1 is marked in `shared:` (the explicit per-input opt-in); the two
+# `to: OR1.1` wire rows are the driver span. BUF1 drives OR1.2 alone.
+# Block inputs are AND1.1, AND1.2, AND2.1, AND2.2, BUF1.1; the block
+# output is OR1.Y, in slot order.
+#
+# Run:
+#   printf 'logic load examples/logic/shared_bus.yaml\nlogic list --wires\nlogic solve --in 11110\nlogic solve --in 11000\nexit\n' | ./build/PhysicsSimApp
+# Expect: `list` shows `shared=OR1.1(2)` plus both `-> OR1.1` wires;
+#   `--in 11110` solves OR1.Y=1 with `contention: OR1.1=0 (total 0)`;
+#   `--in 11000` (AND1=H, AND2=L) refuses loudly with
+#   `contention: OR1.1=1 (total 1)` — the visible bus fight.
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: AND2, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: BUF1, kind: buf, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: OR1, kind: or, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+wires:
+  - {from: AND1.Y, to: OR1.1}
+  - {from: AND2.Y, to: OR1.1}
+  - {from: BUF1.Y, to: OR1.2}
+shared:
+  - {net: OR1.1}
+ties:
+clocks:
+meta:
+  tool: wengine-logic

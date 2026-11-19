@@ -220,13 +220,16 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
       out << support::pin_text(nl, s, true, 0) << '=' << bit_of(st.q[s]) << " NQ="
           << bit_of(st.q[s] == LogicValue::kHigh ? LogicValue::kLow : LogicValue::kHigh) << " (serial " << st.serial[s] << ")\n";
     }
+    // 011: no resolutions ran, but the line stays visible when marked.
+    support::report_contention(nl, support::solve_diag(), out);
     return core::kExitOk;
   }
   for (std::uint64_t e = 0; e < n; ++e) {
     const core::Status step_st = wengine::logic::seq_step_filtered(
         nl, st, std::span<const LogicValue>(inputs.data(), inputs.size()),
-        std::span<LogicValue>(outputs.data(), outputs.size()), members, n_members);
+        std::span<LogicValue>(outputs.data(), outputs.size()), members, n_members, &support::solve_diag());
     if (!step_st.ok()) {
+      support::report_contention(nl, support::solve_diag(), out);
       return cli::runtime_error(out, "step failed");
     }
   }
@@ -251,6 +254,8 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
   for (std::size_t o = 0; o < out_pins.size(); ++o) {
     out << support::pin_text(nl, out_pins[o].slot, true, 0, out_pins[o].negated) << '=' << bit_of(outputs[o]) << '\n';
   }
+  // (011) Contention readback, same line as solve.
+  support::report_contention(nl, support::solve_diag(), out);
   return core::kExitOk;
 }
 

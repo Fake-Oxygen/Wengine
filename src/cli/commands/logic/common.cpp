@@ -267,6 +267,11 @@ core::Status apply_async_and_report(Netlist &nl, std::ostream &out) {
 
 core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<PinRef> &in_pins,
                              const std::vector<PinRef> &out_pins, std::ostream &os) {
+  // (011) Word-loop entry guard (see eval_block_word): four-value nets
+  // refuse loudly once, never per word.
+  if (wengine::logic::shared_word_blocked(nl)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
   // Header: input pins then output pins.
   bool first = true;
   for (const PinRef &p : in_pins) {
@@ -329,6 +334,11 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
 core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t total_rows,
                                 const std::vector<PinRef> &in_pins, const std::vector<PinRef> &out_pins,
                                 std::ostream &os) {
+  // (011) Word-loop entry guard (see eval_block_word): four-value nets
+  // refuse loudly once, never per word.
+  if (wengine::logic::shared_word_blocked(nl)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
   const std::size_t nin = in_pins.size();
   const std::size_t nout = out_pins.size();
   const std::size_t ncols = nin + nout;
@@ -440,9 +450,45 @@ void save_yaml(std::ostream &os, const Netlist &nl) {
       if (g.drivers[i] != kNoDriver) {
         ++n;
       }
+      // Shared extras are wires too (011); zero on unmarked netlists.
+      n += wengine::logic::shared_extra_count(nl, s, i);
     }
   }
   return n;
+}
+
+void report_contention(const Netlist &nl, const wengine::logic::SolveDiag &diag, std::ostream &out) {
+  bool any_mark = false;
+  for (std::uint16_t s = 0; s < kMaxGates && !any_mark; ++s) {
+    if (!nl.gates[s].live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+      if (wengine::logic::is_shared_input(nl, s, i)) {
+        any_mark = true;
+        break;
+      }
+    }
+  }
+  if (!any_mark) {
+    return; // mark-free output stays byte-identical
+  }
+  std::uint64_t total = 0;
+  out << "contention:";
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (!nl.gates[s].live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+      if (!wengine::logic::is_shared_input(nl, s, i)) {
+        continue;
+      }
+      const std::uint32_t n = diag.per_net[static_cast<std::size_t>(s) * kMaxInputs + i];
+      total += n;
+      out << ' ' << pin_text(nl, s, false, i) << '=' << n;
+    }
+  }
+  out << " (total " << total << ")\n";
 }
 
 void complete_from_value(const Netlist &nl, std::string_view val, std::vector<std::string> &out) {

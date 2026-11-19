@@ -686,13 +686,14 @@ void test_history() {
 void test_logic_session() {
   // Module registry shape (LOGIC-8: full v1 verb set, 17 specs;
   // LOGIC-14: + tie/untie, 19 specs).
-  static_assert(logic::LogicRegistry::all().size() == 22);
+  static_assert(logic::LogicRegistry::all().size() == 23);
   static_assert(logic::LogicRegistry::find("help") != nullptr);
   static_assert(logic::LogicRegistry::find("back") != nullptr);
   static_assert(logic::LogicRegistry::find("add") != nullptr);
   static_assert(logic::LogicRegistry::find("list") != nullptr);
   static_assert(logic::LogicRegistry::find("wire") != nullptr);
   static_assert(logic::LogicRegistry::find("unwire") != nullptr);
+  static_assert(logic::LogicRegistry::find("unshare") != nullptr);
   static_assert(logic::LogicRegistry::find("remove") != nullptr);
   static_assert(logic::LogicRegistry::find("ignore") != nullptr);
   static_assert(logic::LogicRegistry::find("use") != nullptr);
@@ -805,18 +806,18 @@ void test_logic_session() {
     const auto verbs = complete_line("logic ", 6, all);
     assert(has(verbs, "help") && has(verbs, "back"));
     assert(has(verbs, "add") && has(verbs, "list") && has(verbs, "wire") &&
-           has(verbs, "unwire") && has(verbs, "remove") && has(verbs, "ignore") &&
+           has(verbs, "unwire") && has(verbs, "unshare") && has(verbs, "remove") && has(verbs, "ignore") &&
            has(verbs, "use") && has(verbs, "tie") && has(verbs, "untie") && has(verbs, "reset") && has(verbs, "solve") &&
            has(verbs, "truth") && has(verbs, "optimize") && has(verbs, "draw") &&
            has(verbs, "save") && has(verbs, "load") && has(verbs, "export") && has(verbs, "step") && has(verbs, "poke") &&
            has(verbs, "peek"));
-    assert(verbs.size() == 22);
+    assert(verbs.size() == 23);
     assert(!has(verbs, "ohm") && !has(verbs, "--help")); // flags need a '-' prefix
     const std::vector<std::string> want_dash_help{"--help"};
     assert(complete_line("logic --h", 9, all) == want_dash_help);
     const std::vector<std::string> want_help{"help"};
     assert(complete_line("logic h", 7, all) == want_help);
-    assert(complete_line("logic help ", 11, all).size() == 22); // every verb
+    assert(complete_line("logic help ", 11, all).size() == 23); // every verb
     // Session help lists module verbs only (never top-level commands).
     {
       std::ostringstream help_out;
@@ -1760,7 +1761,7 @@ void test_logic_completion() {
   assert(complete_line("logic s", 7, all) == want_s);
   const std::vector<std::string> want_p{"poke", "peek"};
   assert(complete_line("logic p", 7, all) == want_p);
-  const std::vector<std::string> want_u{"unwire", "use", "untie"};
+  const std::vector<std::string> want_u{"unwire", "unshare", "use", "untie"};
   assert(complete_line("logic u", 7, all) == want_u);
   const std::vector<std::string> want_t{"tie", "truth"};
   assert(complete_line("logic t", 7, all) == want_t);
@@ -1812,6 +1813,63 @@ void test_logic_completion() {
   assert(has(complete_line("logic solve --", 14, all), "--from"));
   assert(has(complete_line("logic optimize --", 17, all), "--to"));
   assert(has(complete_line("logic list --", 13, all), "--iface"));
+  assert(has(complete_line("logic wire --", 13, all), "--shared"));
+
+  // 011: shared-net vocabulary — verb + option completion, then the
+  // opt-in gate through the session verbs (same refusals as the engine
+  // seam: loud, netlist-untouched, never silent).
+  {
+    const std::vector<std::string> want_unshare{"unshare"};
+    assert(complete_line("logic unsh", 11, all) == want_unshare);
+  }
+  {
+    const auto c = complete_line("logic unshare ", 14, all);
+    assert(has(c, "AND1.1") && has(c, "NOT1.1"));
+  }
+  {
+    const auto c = complete_line("logic unshare --", 16, all);
+    assert(has(c, "--help"));
+  }
+  assert(sh.execute("logic add OR", sink) == 0); // OR1
+  assert(sh.execute("logic wire AND1.Y OR1.1", sink) == 0);
+  {
+    std::ostringstream err;
+    assert(sh.execute("logic wire NOT1.Y OR1.1", err) == 2);
+    assert(err.str().find("already wired") != std::string::npos);
+  }
+  {
+    std::ostringstream ok;
+    assert(sh.execute("logic wire NOT1.Y OR1.1 --shared", ok) == 0);
+    assert(ok.str().find("(shared: 2 drivers)") != std::string::npos);
+  }
+  // 011 US5: O0 succeeds with shared nets frozen; O2 refuses loudly
+  // with the workspace untouched (the mark survives the refusal).
+  {
+    std::ostringstream o0;
+    assert(sh.execute("logic optimize --level O0", o0) == 0);
+  }
+  {
+    std::ostringstream o2;
+    assert(sh.execute("logic optimize --level O2", o2) == 1);
+    assert(o2.str().find("shared nets unsupported") != std::string::npos);
+  }
+  {
+    std::ostringstream listed;
+    assert(sh.execute("logic list", listed) == 0);
+    assert(listed.str().find("shared=OR1.1(2)") != std::string::npos);
+  }
+  {
+    std::ostringstream err;
+    assert(sh.execute("logic unshare OR1.1", err) == 2);
+    assert(err.str().find("unwire extras first") != std::string::npos);
+  }
+  assert(sh.execute("logic unwire NOT1.Y OR1.1", sink) == 0);
+  assert(sh.execute("logic unshare OR1.1", sink) == 0);
+  {
+    std::ostringstream err;
+    assert(sh.execute("logic wire NOT1.Y OR1.1", err) == 2);
+    assert(err.str().find("already wired") != std::string::npos);
+  }
 
   // File paths / numeric values: no candidates, never option leakage.
   assert(complete_line("logic save ", 11, all).empty());
@@ -1820,6 +1878,93 @@ void test_logic_completion() {
   assert(complete_line("logic truth --csv ", 18, all).empty());
   assert(complete_line("logic export --schema ", 22, all).empty());
   assert(complete_line("logic solve --in=", 17, all).empty());
+  logic::reset_logic_workspace();
+}
+
+void test_logic_shared_cli() {
+  // 011 convergence: CLI readback shapes, reset lifecycle, and shared
+  // authoring on sequential netlists — all through the session verbs.
+  Shell sh;
+  sh.set_history_file("");
+  std::ostringstream sink;
+  logic::reset_logic_workspace();
+
+  // T036/T037: solve readback + reset clears the session counts.
+  assert(sh.execute("logic add AND", sink) == 0); // AND1
+  assert(sh.execute("logic add AND", sink) == 0); // AND2
+  assert(sh.execute("logic add OR", sink) == 0);  // OR1
+  assert(sh.execute("logic wire AND1.Y OR1.1", sink) == 0);
+  assert(sh.execute("logic wire AND2.Y OR1.1 --shared", sink) == 0);
+  {
+    std::ostringstream out;
+    assert(sh.execute("logic solve --in 00000", out) == 0);
+    assert(out.str().find("contention: OR1.1=0 (total 0)") != std::string::npos);
+  }
+  {
+    std::ostringstream out;
+    assert(sh.execute("logic solve --in 11000", out) == 1);
+    assert(out.str().find("contention: OR1.1=1 (total 1)") != std::string::npos);
+    assert(out.str().find("solve failed") != std::string::npos);
+  }
+  assert(sh.execute("logic reset", sink) == 0);
+  assert(sh.execute("logic add AND", sink) == 0);
+  assert(sh.execute("logic add AND", sink) == 0);
+  assert(sh.execute("logic add OR", sink) == 0);
+  assert(sh.execute("logic wire AND1.Y OR1.1", sink) == 0);
+  assert(sh.execute("logic wire AND2.Y OR1.1 --shared", sink) == 0);
+  {
+    std::ostringstream out;
+    assert(sh.execute("logic solve --in 00000", out) == 0);
+    assert(out.str().find("contention: OR1.1=0 (total 0)") != std::string::npos);
+  }
+
+  // T037/T040: step + no-op readback and marked-single truth streaming
+  // on a sequential shared workspace.
+  assert(sh.execute("logic reset", sink) == 0);
+  assert(sh.execute("logic add DFF", sink) == 0); // DFF1
+  assert(sh.execute("logic add NOT", sink) == 0); // NOT1
+  assert(sh.execute("logic add NOT", sink) == 0); // NOT2
+  assert(sh.execute("logic wire NOT1.Y DFF1.D", sink) == 0);
+  assert(sh.execute("logic wire NOT2.Y DFF1.D --shared", sink) == 0);
+  {
+    std::ostringstream out;
+    assert(sh.execute("logic step 0", out) == 0);
+    assert(out.str().find("contention: DFF1.D=0 (total 0)") != std::string::npos);
+  }
+  {
+    std::ostringstream out;
+    assert(sh.execute("logic step 1", out) == 0);
+    assert(out.str().find("contention: DFF1.D=0 (total 0)") != std::string::npos);
+  }
+  {
+    std::ostringstream out;
+    assert(sh.execute("logic solve --from NOT1.1=0 --from NOT2.1=1 --from DFF1.CLK=0", out) == 1);
+    assert(out.str().find("contention: DFF1.D=1 (total 1)") != std::string::npos);
+  }
+  // Marked single driver rides the primary word path: truth streams.
+  assert(sh.execute("logic unwire NOT2.Y DFF1.D", sink) == 0);
+  {
+    std::ostringstream out;
+    assert(sh.execute("logic truth", out) == 0);
+    assert(out.str().find("DFF1.Q") != std::string::npos);
+  }
+
+  // T038: sequential tentative-probe cycle refusal through an extra.
+  assert(sh.execute("logic add AND", sink) == 0); // AND1
+  assert(sh.execute("logic wire NOT1.Y AND1.1", sink) == 0);
+  assert(sh.execute("logic wire NOT2.Y AND1.1 --shared", sink) == 0);
+  {
+    std::ostringstream err;
+    assert(sh.execute("logic wire AND1.Y NOT1.1", err) == 2);
+    assert(err.str().find("combinational cycle") != std::string::npos);
+  }
+  {
+    // Refused net left untouched: the shared span is intact.
+    std::ostringstream err;
+    assert(sh.execute("logic unshare AND1.1", err) == 2);
+    assert(err.str().find("unwire extras first") != std::string::npos);
+  }
+  assert(sh.execute("logic reset", sink) == 0);
   logic::reset_logic_workspace();
 }
 
@@ -2018,6 +2163,7 @@ int main() {
   test_logic_session();
   test_logic_verbs();
   test_logic_completion();
+  test_logic_shared_cli();
   test_sim_logic_seq();
   std::cout << "test_cli_args: OK\n";
   return 0;

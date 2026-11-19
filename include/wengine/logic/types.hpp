@@ -205,6 +205,12 @@ static_assert(static_cast<int>(LogicValue::kHighZ) == 2 && static_cast<int>(Logi
 inline constexpr std::size_t kMaxInputs = 8;
 /** @brief Gate slot cap (1024); overflow is loud, never silent. */
 inline constexpr std::size_t kMaxGates = 1024; // slot cap, loud on overflow
+/**
+ * @brief Extra-driver cap per shared input (011): a shared net holds the
+ *        primary driver plus up to kMaxSharedExtra extras — 4 attachments
+ *        total per input. Overflow is loud, never silently truncated.
+ */
+inline constexpr std::size_t kMaxSharedExtra = 3;
 
 /**
  * @brief Display name for a gate kind (e.g. "AND", "DFF").
@@ -364,6 +370,28 @@ struct Netlist {
    *        singleton; otherwise leader_flat + 1.
    */
   std::array<std::uint16_t, kMaxGates * kMaxInputs> tie_rep{};
+  /**
+   * @brief Shared-net mark + extra count per input (011): byte value 0
+   *        is unmarked (the fast test on both eval paths); bit0 is the
+   *        shared mark, bits1..2 hold the extra-attachment count 0..3.
+   *        Indexed by tie_flat(slot, input). Marks are persistent
+   *        topology state; counts are diagnostic session state beside
+   *        this pool (SolveDiag), never stored here.
+   */
+  std::array<std::uint8_t, kMaxGates * kMaxInputs> shared_meta{};
+  /**
+   * @brief Extra source slots per shared input (011): dense entries
+   *        0..count-1 at flat * kMaxSharedExtra + j. The primary
+   *        attachment stays in Gate::drivers (kNoDriver semantics
+   *        preserved); extras never dangle behind a kNoDriver primary.
+   */
+  std::array<std::uint16_t, kMaxGates * kMaxInputs * kMaxSharedExtra> extra_drivers{};
+  /**
+   * @brief Per-extra NQ polarity (011): extra_inv at the same index as
+   *        extra_drivers; nonzero inverts that attachment's value before
+   *        the resolve_net fold (Q+NQ self-contention resolves to X).
+   */
+  std::array<std::uint8_t, kMaxGates * kMaxInputs * kMaxSharedExtra> extra_inv{};
   /** @brief Number of live gate slots. */
   std::uint16_t live_count = 0;
   /** @brief Set by every mutation; cleared by a successful topology rebuild. */
@@ -383,5 +411,40 @@ struct Netlist {
    */
   bool operator==(const Netlist &) const noexcept = default;
 };
+
+/**
+ * @brief True when the flat destination input carries the shared mark
+ *        (011): bit0 of shared_meta[flat].
+ *
+ * Flat-index form of the mark test, usable from headers that cannot
+ * see pin vocabulary (tie_set.hpp): marks and ties are disjoint per
+ * flat — a tied input is never marked and a marked input is never
+ * tied, enforced loudly on both seams.
+ *
+ * @param[in] nl Netlist holding the mark table.
+ * @param[in] flat Flat pin index (slot * kMaxInputs + input).
+ * @return True when the flat position carries the shared mark.
+ */
+[[nodiscard]] inline bool is_shared_flat(const Netlist &nl, std::size_t flat) noexcept {
+  if (flat >= kMaxGates * kMaxInputs) {
+    return false;
+  }
+  return (nl.shared_meta[flat] & 0x01u) != 0;
+}
+
+/**
+ * @brief Extra-attachment count at a flat position, 0..kMaxSharedExtra
+ *        (011): bits1..2 of shared_meta[flat].
+ *
+ * @param[in] nl Netlist holding the mark table.
+ * @param[in] flat Flat pin index (slot * kMaxInputs + input).
+ * @return Extra count (0 when unmarked or out of range).
+ */
+[[nodiscard]] inline std::uint8_t shared_extra_flat(const Netlist &nl, std::size_t flat) noexcept {
+  if (flat >= kMaxGates * kMaxInputs) {
+    return 0;
+  }
+  return static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+}
 
 } // namespace wengine::logic

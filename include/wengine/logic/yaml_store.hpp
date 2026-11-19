@@ -26,6 +26,9 @@
  *        ignore_output: false, delay_ps: 0}
  *   wires:
  *     - {from: AND1.Y, to: NOT1.1}
+ *   shared:                       # optional, 011 additive: one row per
+ *     - {net: BUS.1}              # marked input, slot order; emitted
+ *                                 # iff >= 1 mark exists
  *   ties:
  *     - {a: NAND1.1, b: NAND1.2}
  *   clocks:
@@ -48,6 +51,15 @@
  * re-saving yields the canonical bytes, so save/load/save round-trips
  * byte-identically (a hand-written file missing optional keys
  * stabilizes from the second save).
+ *
+ * Additive 011 policy (no generation retired, marker stays
+ * `version: 1`): the optional `shared:` section lists marked inputs
+ * (one `{net: PIN}` row per marked input, slot order; the attachment
+ * count derives from the repeated `wires:` rows and is never stored).
+ * Absent `shared:` means no marks — pre-011 files load byte-identically.
+ * Repeated `to:` wire rows are legal iff the destination is marked;
+ * an unmarked duplicate keeps the exact pre-011 refusal. Marks and
+ * tied pins are disjoint: tying a marked input fails loudly.
  *
  * Dependency rules: header-only engine seam; logic is a standalone
  * domain — never depends on CLI types. Consumers: the CLI `save`/

@@ -22,11 +22,27 @@
 #include "wengine/logic/tie_set.hpp"
 #include "wengine/logic/types.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 
 namespace wengine::logic {
+
+/**
+ * @brief Per-net contention counters (011): diagnostic session state, never serialized.
+ *
+ * One counter per destination input (tie_flat index). resolve_input
+ * increments per_net[flat] by exactly one per low-vs-high contended
+ * resolution when a channel is attached (defaulted nullptr = no
+ * counting; value streams byte-identical with or without a channel).
+ * Owned beside the other session state at the app edge (CLI logic
+ * session), cleared by reset, never written to workspaces.
+ */
+struct SolveDiag {
+  /** @brief Contended-resolution count per destination input. */
+  std::array<std::uint32_t, kMaxGates * kMaxInputs> per_net{};
+};
 
 namespace detail {
 /**
@@ -376,8 +392,7 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
  *        inputs read the pre-resolved block vector (leaders only —
  *        caller fans ties out first); ignored dangling pins tie to kLow.
  *
- * The one funnel every scalar evaluator (solve, stepper phases, async
- * and level apply) resolves through.
+ * The one funnel every scalar evaluator (solve, stepper phases, async and level apply) resolves through.
  *
  * @param[in] nl Netlist holding drivers and ignore marks.
  * @param[in] slot Gate slot of the sink.
@@ -385,13 +400,68 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
  * @param[in] gate_out Per-slot settled gate outputs.
  * @param[in] resolved Pre-resolved dangling values from fill_resolved.
  * @param[out] out Resolved input value.
- * @return True on success; false on X/Z values or on a resolve_net
- *         refusal (wired X/Z driver) — loud, never silent.
+ * @param[in] diag Optional contention channel (nullptr = no counting; all existing callers compile and behave identically).
+ * @return True on success; false on X/Z values or on a resolve_net refusal (wired X/Z driver) — loud, never silent.
  */
 [[nodiscard]] inline bool resolve_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
                                         const LogicValue *gate_out, const LogicValue *resolved,
-                                        LogicValue &out) noexcept {
+                                        LogicValue &out, SolveDiag *diag = nullptr) noexcept {
   const Gate &g = nl.gates[slot];
+  const std::size_t flat = tie_flat(slot, input);
+  if (is_shared_flat(nl, flat)) {
+    // Shared-net span (011): every attachment contributes its present
+    // value with per-attachment polarity, assembled primary-first in
+    // compact index order, folded through the unchanged single funnel.
+    // Agreement resolves to the level; low-vs-high resolves kUnknown;
+    // no attachments resolve kHighZ. Non-level results fail loudly —
+    // the shipped consumer contract (state and timing untouched).
+    // Marked inputs never take the dangling/block path below, even
+    // when empty: an empty span is kHighZ by contract, never a poked
+    // block value.
+    LogicValue span[1 + kMaxSharedExtra];
+    std::size_t n = 0;
+    const std::uint16_t drv = g.drivers[input];
+    if (drv != kNoDriver) {
+      if (drv >= kMaxGates || !nl.gates[drv].live) {
+        return false;
+      }
+      span[n++] = apply_polarity(gate_out[drv], nl.driver_inv[flat]);
+    }
+    const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+    for (std::uint8_t j = 0; j < extra_n; ++j) {
+      const std::size_t eij = flat * kMaxSharedExtra + j;
+      const std::uint16_t edrv = nl.extra_drivers[eij];
+      if (edrv >= kMaxGates || !nl.gates[edrv].live) {
+        return false;
+      }
+      span[n++] = apply_polarity(gate_out[edrv], nl.extra_inv[eij]);
+    }
+    LogicValue sunk = LogicValue::kLow;
+    if (!resolve_net(span, n, sunk)) {
+      return false;
+    }
+    // (011) Contention counting (SolveDiag): a span presenting both
+    // polarized low and high increments per_net[flat] by exactly one —
+    // computed at span assembly, independent of the funnel's X logic
+    // (future X/Z-presenting drivers must not false-count). Detection
+    // happens at the net, before any downstream consumer refusal below.
+    if (diag != nullptr) {
+      bool saw_low = false;
+      bool saw_high = false;
+      for (std::size_t k = 0; k < n; ++k) {
+        saw_low = saw_low || (span[k] == LogicValue::kLow);
+        saw_high = saw_high || (span[k] == LogicValue::kHigh);
+      }
+      if (saw_low && saw_high) {
+        ++diag->per_net[flat];
+      }
+    }
+    if (sunk != LogicValue::kLow && sunk != LogicValue::kHigh) {
+      return false;
+    }
+    out = sunk;
+    return true;
+  }
   const std::uint16_t drv = g.drivers[input];
   if (drv != kNoDriver) {
     if (drv >= kMaxGates) {
@@ -484,6 +554,57 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
 }
 
 /**
+ * @brief True when the word-parallel path cannot evaluate this netlist (011): any shared input holds >= 2 attachments.
+ *
+ * Single-bit words cannot carry the four-value funnel (X has no
+ * representation); marked inputs with <= 1 attachment ride the primary
+ * word path unchanged. Live-gate scan only — unmarked netlists cost one
+ * byte test per configured input.
+ *
+ * @param[in] nl Netlist to inspect.
+ * @return True when a shared input holds 2+ attachments.
+ */
+[[nodiscard]] inline bool shared_word_blocked(const Netlist &nl) noexcept {
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + i;
+      if (is_shared_flat(nl, flat) && shared_extra_flat(nl, flat) != 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * @brief True when the netlist holds any shared mark (011).
+ *
+ * Conservative whole-net predicate for passes that cannot prove safety
+ * for shared nets (exact_simplify, O2): any input marked, regardless
+ * of attachment count.
+ *
+ * @param[in] nl Netlist to inspect.
+ * @return True when any live gate input carries the mark.
+ */
+[[nodiscard]] inline bool any_shared_mark(const Netlist &nl) noexcept {
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (!nl.gates[s].live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+      if (is_shared_flat(nl, static_cast<std::size_t>(s) * kMaxInputs + i)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * @brief Bit-parallel twin of resolve_input: wired inputs read the
  *        source word (with NQ polarity); ignored dangling pins read
  *        word 0 (same rule as scalar kLow); dangling block inputs read
@@ -502,8 +623,7 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
  * @return 64-bit resolved word for this input over the slice.
  */
 [[nodiscard]] inline std::uint64_t resolve_word(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
-                                                const std::uint64_t *gate_scratch,
-                                                const std::uint16_t *in_pos,
+                                                const std::uint64_t *gate_scratch, const std::uint16_t *in_pos,
                                                 std::uint64_t word_index) noexcept {
   const std::uint16_t drv = nl.gates[slot].drivers[input];
   if (drv != kNoDriver) {
@@ -516,8 +636,7 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
   if ((nl.gates[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
     return 0;
   }
-  const std::size_t p =
-      static_cast<std::size_t>(in_pos[static_cast<std::size_t>(slot) * kMaxInputs + input]);
+  const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(slot) * kMaxInputs + input]);
   return input_column_word(p, word_index);
 }
 

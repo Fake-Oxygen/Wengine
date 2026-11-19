@@ -435,6 +435,127 @@ void test_eval_gate_goldens() {
   assert(logic::resolve_net(big, 8, sunk) && sunk == LogicValue::kUnknown); // X dominates in 8
 }
 
+void test_shared_span_resolution() {
+  // 011 US2: every attached driver contributes its polarized present
+  // value to the shipped funnel; agreement → level, low-vs-high → X
+  // (loud false), empty → Z (loud false). Single-attachment inputs
+  // (marked or not) ride today's path bit-identically.
+  Netlist nl{};
+  const auto n1 = logic::add_gate(nl, GateKind::kNot, 1);
+  const auto n2 = logic::add_gate(nl, GateKind::kNot, 1);
+  const auto o = logic::add_gate(nl, GateKind::kOr, 2);
+  assert(n1.ok() && n2.ok() && o.ok());
+  assert(logic::wire(nl, n1.value, o.value, 0).ok());
+  assert(logic::mark_shared(nl, o.value, 0).ok());
+  assert(logic::wire(nl, n2.value, o.value, 0).ok());
+
+  LogicValue gate_out[logic::kMaxGates];
+  LogicValue resolved[logic::kMaxGates * logic::kMaxInputs] = {};
+  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
+    gate_out[s] = kL;
+  }
+  LogicValue out = kL;
+  // {low, low} → low; {low, low, low} → low; {low, high} → X (loud).
+  gate_out[n1.value] = kL;
+  gate_out[n2.value] = kL;
+  assert(logic::resolve_input(nl, o.value, 0, gate_out, resolved, out) && out == kL);
+  gate_out[n2.value] = kH;
+  assert(!logic::resolve_input(nl, o.value, 0, gate_out, resolved, out)); // conflict → X, loud
+  // Permutation invariance: reversed attachment order resolves identically.
+  Netlist rev{};
+  const auto r1 = logic::add_gate(rev, GateKind::kNot, 1);
+  const auto r2 = logic::add_gate(rev, GateKind::kNot, 1);
+  const auto ro = logic::add_gate(rev, GateKind::kOr, 2);
+  assert(r1.ok() && r2.ok() && ro.ok());
+  assert(logic::wire(rev, r2.value, ro.value, 0).ok());
+  assert(logic::mark_shared(rev, ro.value, 0).ok());
+  assert(logic::wire(rev, r1.value, ro.value, 0).ok());
+  LogicValue rgate_out[logic::kMaxGates];
+  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
+    rgate_out[s] = kL;
+  }
+  rgate_out[r1.value] = kL;
+  rgate_out[r2.value] = kH;
+  LogicValue rout = kL;
+  assert(!logic::resolve_input(rev, ro.value, 0, rgate_out, resolved, rout));
+  // One driver → its level; zero drivers → high-Z (loud).
+  assert(logic::unwire(rev, ro.value, 0).ok()); // removes primary r2, promotes r1
+  rgate_out[r1.value] = kH;
+  assert(logic::resolve_input(rev, ro.value, 0, rgate_out, resolved, rout) && rout == kH);
+  assert(logic::unwire(rev, ro.value, 0).ok());
+  assert(!logic::resolve_input(rev, ro.value, 0, rgate_out, resolved, rout)); // empty → Z, loud
+  // Single-attachment marked == unmarked pre-feature path, bit-identical.
+  Netlist plain{};
+  const auto p1 = logic::add_gate(plain, GateKind::kNot, 1);
+  const auto po = logic::add_gate(plain, GateKind::kOr, 2);
+  assert(p1.ok() && po.ok());
+  assert(logic::wire(plain, p1.value, po.value, 0).ok());
+  LogicValue pgate_out[logic::kMaxGates];
+  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
+    pgate_out[s] = kL;
+  }
+  pgate_out[p1.value] = kH;
+  gate_out[n1.value] = kL;
+  gate_out[n2.value] = kL;
+  assert(logic::unwire(nl, o.value, 0).ok()); // drop primary n1, promote n2
+  gate_out[n2.value] = kH;
+  LogicValue pout = kL;
+  LogicValue sout = kL;
+  assert(logic::resolve_input(plain, po.value, 0, pgate_out, resolved, pout) && pout == kH);
+  assert(logic::resolve_input(nl, o.value, 0, gate_out, resolved, sout) && sout == kH);
+  assert(pout == sout);
+}
+
+void test_shared_self_contention() {
+  // 011 US2.3: a Q and an NQ attachment of the same source present
+  // {low, high} — the net fights itself, resolves X, loudly.
+  Netlist nl{};
+  const auto d = logic::add_gate(nl, GateKind::kDff, 2);
+  const auto o = logic::add_gate(nl, GateKind::kOr, 2);
+  assert(d.ok() && o.ok());
+  assert(logic::wire(nl, d.value, o.value, 0).ok());
+  assert(logic::mark_shared(nl, o.value, 0).ok());
+  const PinRef nq{d.value, true, 0, true};
+  const PinRef dst{o.value, false, 0, false};
+  assert(logic::wire_pins(nl, nq, dst).ok());
+  LogicValue gate_out[logic::kMaxGates];
+  LogicValue resolved[logic::kMaxGates * logic::kMaxInputs] = {};
+  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
+    gate_out[s] = kL;
+  }
+  gate_out[d.value] = kH; // Q=H, NQ=L → span {H, L} → X
+  LogicValue out = kL;
+  assert(!logic::resolve_input(nl, o.value, 0, gate_out, resolved, out));
+  gate_out[d.value] = kL; // Q=L, NQ=H → span {L, H} → X
+  assert(!logic::resolve_input(nl, o.value, 0, gate_out, resolved, out));
+}
+
+void test_shared_solve_end_to_end() {
+  // 011 US2: wired-OR consensus solves to the level; a conflicting bus
+  // fails solve loudly with the workspace untouched.
+  Netlist nl{};
+  const auto n1 = logic::add_gate(nl, GateKind::kNot, 1);
+  const auto n2 = logic::add_gate(nl, GateKind::kNot, 1);
+  const auto c = logic::add_gate(nl, GateKind::kBuf, 1);
+  const auto o = logic::add_gate(nl, GateKind::kOr, 2);
+  assert(n1.ok() && n2.ok() && c.ok() && o.ok());
+  assert(logic::wire(nl, n1.value, o.value, 0).ok());
+  assert(logic::mark_shared(nl, o.value, 0).ok());
+  assert(logic::wire(nl, n2.value, o.value, 0).ok());
+  assert(logic::wire(nl, c.value, o.value, 1).ok());
+  // Block inputs (slot order): N1.1, N2.1, C.1. Output: O.Y.
+  assert(logic::block_input_count(nl) == 3);
+  assert(logic::block_output_count(nl) == 1);
+  const LogicValue agree[3] = {kL, kL, kL}; // N1=L,N2=L,C=L → O.1 {H,H}→H, O.2 H
+  LogicValue out[1] = {kL};
+  assert(logic::solve(nl, std::span<const LogicValue>(agree, 3), std::span<LogicValue>(out, 1)).ok());
+  assert(out[0] == kH);
+  const Netlist before = nl;
+  const LogicValue fight[3] = {kL, kH, kL}; // N1=L→H, N2=H→L: O.1 {H,L}→X
+  assert(!logic::solve(nl, std::span<const LogicValue>(fight, 3), std::span<LogicValue>(out, 1)).ok());
+  assert(nl == before); // failed solve changes no state
+}
+
 void test_solve_single_and() {
   // One AND1, no wires: iface in = [AND1.1, AND1.2], out = [AND1.Y].
   Netlist nl;
@@ -2207,6 +2328,9 @@ int main() {
   test_cycles();
   test_remove_detaches();
   test_eval_gate_goldens();
+  test_shared_span_resolution();
+  test_shared_self_contention();
+  test_shared_solve_end_to_end();
   test_solve_single_and();
   test_solve_nand_chain();
   test_solve_fanout_two_outputs();

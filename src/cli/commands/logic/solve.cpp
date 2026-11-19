@@ -113,9 +113,11 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
     }
   }
   std::vector<LogicValue> outputs(nout == 0 ? 1 : nout, LogicValue::kLow);
-  const core::Status st =
-      wengine::logic::solve(nl, std::span<const LogicValue>{values.data(), nin}, std::span<LogicValue>{outputs.data(), nout});
+  // (011) The session contention channel observes every resolution;
+  // the count increments before any consumer refusal below.
+  const core::Status st = wengine::logic::solve(nl, std::span<const LogicValue>{values.data(), nin}, std::span<LogicValue>{outputs.data(), nout}, &support::solve_diag());
   if (!st.ok()) {
+    support::report_contention(nl, support::solve_diag(), out);
     return cli::runtime_error(out, "solve failed");
   }
   if (nin == 0) {
@@ -142,6 +144,8 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
   for (std::size_t o = 0; o < nout; ++o) {
     out << support::pin_text(nl, out_pins[o].slot, true, 0, out_pins[o].negated) << '=' << ((outputs[o] == LogicValue::kHigh) ? '1' : '0') << '\n';
   }
+  // (011) Contention readback: visible without watching net values.
+  support::report_contention(nl, support::solve_diag(), out);
   return core::kExitOk;
 }
 

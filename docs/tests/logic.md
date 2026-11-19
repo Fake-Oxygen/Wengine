@@ -89,10 +89,15 @@ tolerance (comments, quoting, block style), retired v1/v2 plus foreign
 version refusal with atomic (untouched) failure, bad-`init` refusals,
 `clocks:` derivation-equality refusals with `line N:` diagnostics,
 malformed-file `line N:` diagnostics (multi-driver, unknown gate/pin,
-bad kind/key, unknown section, combinational cycle), and shipped-example
+bad kind/key, unknown section, combinational cycle), shared-net
+round-trips (marks + repeated `to:` rows incl. zero-attachment marks,
+save→load→save byte-identical with identical replay outputs; loud
+rows for unknown `shared:` keys, duplicate marks, dead pins, cap
+overflow, and marked-plus-tied pins), and shipped-example
 goldens (`nand_pair`, `fanout`, `parity3`, `tieoff`,
 `two_clock_counter`, `gated_async_counter`, `jk_t_latch_chain`,
-`tied_demorgan` with a 64-row exhaustive check).
+`tied_demorgan` with a 64-row exhaustive check, `shared_bus` with
+consensus/agree goldens).
 
 **Purpose**: the workspace file is the durable artifact; bytes must be
 canonical, reloads netlist-equal, and every refusal must name its line
@@ -115,6 +120,43 @@ ctest --test-dir build -R logic_yaml
 **Boundaries**: stepping semantics are not covered here (see the
 `test_logic_seq_*` binaries); delay values persist but are not honored
 by evaluation.
+
+## test_logic_shared
+
+**What it checks**: allowlisted multi-driver nets end to end — the
+authoring gate (unmarked occupied refusal with the netlist untouched,
+mark/wire/unshare lifecycle, loud cap, tie refusal, extras-aware cycle
+rejection), span resolution through the shipped funnel (consensus,
+conflict→X, Q+NQ self-contention, permutation invariance, empty→Z,
+marked-single == unmarked-single, solve end-to-end with state untouched
+on failure), loud contention counting (exactly one per contended
+resolution, null-channel byte-identity, determinism, saves byte-identical
+with/without history), named-edge removal and gate-sweep release
+(promotion, compaction, polarity-aware fanout), and optimizer soundness
+(O0/O1 freeze shared feeders with unchanged results and idempotence,
+O2 refuses naming shared nets with the input untouched).
+
+**Purpose**: pins the 011 seam (mark lifecycle, span assembly,
+diagnostic channel) through the session verbs to the YAML round-trip,
+so buses stay explicit, visible, and regression-safe.
+
+**Guards against**: silent overwrites, implied multi-driver modes,
+truncated spans, invisible contention, serialization of session
+diagnostics, optimizer span corruption, and word-path
+misrepresentation.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_shared
+./build/test_logic_shared
+```
+
+**Prerequisites**: standard build only.
+
+**Boundaries**: CLI verb goldens live in `test_cli_args`; the YAML
+schema contract lives in `test_logic_yaml`; span unit tables live in
+`test_logic`.
 
 ## test_logic_seq_kinds
 

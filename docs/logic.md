@@ -150,6 +150,12 @@ both raster paths consume it without changing it.
 - Wires: single-driver rule (one wire per destination input, like real
   hardware); re-wiring an occupied input is a loud usage error, never a
   silent overwrite. Fan-out is unlimited (one output → many inputs).
+  A destination input can be explicitly marked shared
+  (`wire --shared`, cleared by `unshare` once ≤1 driver remains): the
+  per-input opt-in lifts the rule for exactly that input, admitting up
+  to 4 drivers whose present values resolve through the shipped
+  four-value funnel (agreement → level, low-vs-high → X, empty → Z)
+  with per-net contention counted loudly in `solve`/`step` readback.
   Cycles are rejected at `wire` time via incremental DFS that is
   flop-aware: edges into sequential-gate inputs never close a cycle
   (flop Q outputs break loops), so legal feedback (`DFF Q -> comb ->
@@ -352,10 +358,14 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
 - Schema `version: 1` header, new generation (006): the retired
   first- and second-generation files are refused loudly (naming the found
   version), never loaded — no fallback loader, no migration. The loader
-  accepts only `version: 1` files carrying all six sections, with a loud
+  accepts only `  version: 1` files carrying all six sections, with a loud
   found-version refusal otherwise. Sections:
   `gates: [{id: AND1, kind: and, inputs: 2, ignore: [2]}]`,
   `wires: [{from: AND2.Y, to: NOR1.1}]`,
+  plus the optional additive `shared: [{net: BUS.1}]` (011: one row per
+  marked input in slot order, emitted iff ≥1 mark exists; absent means
+  no marks, so pre-011 files load byte-identically; repeated `to:` rows
+  are legal iff the destination is marked),
   `ties: [{a: NAND1.1, b: NAND1.2}]` (one entry per non-leader tied
   member: `a` = class leader, `b` = member, ordered by `b` in slot
   order, so the bytes are canonical),
@@ -375,7 +385,7 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   `ignore_nq` gate key defaulting to false. DFF rows carry `inputs: 2`
   (bare) or `inputs: 5` (full control set).
   Runnable example workspaces live in `examples/logic/`
-  (`nand_pair`, `fanout`, `parity3`, `tieoff`, `tied_demorgan` plus the
+  (`nand_pair`, `fanout`, `parity3`, `tieoff`, `tied_demorgan`, `shared_bus` plus the
   advanced sequential references `two_clock_counter`,
   `gated_async_counter`, `jk_t_latch_chain` — each header shows its run
   command and expected output); `test_logic_yaml` loads every file,
@@ -384,8 +394,9 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
 ## 10. Module verb list (v1)
 
 ```text
-add <KIND> [--inputs N]     list [--wires] [--iface]   wire <FROM.out> <TO.in>
-unwire <TO.i>               remove <GATE>              ignore <PIN> / use <PIN>
+add <KIND> [--inputs N]     list [--wires] [--iface]   wire <FROM.out> <TO.in> [--shared]
+unwire [FROM.out] <TO.i>    unshare <TO.i>             remove <GATE>
+ignore <PIN> / use <PIN>
 tie <A.i> <B.j>             untie <PIN.i>              reset [--force]
 solve [--in bits] [--from pin=0|1 ...]
 truth [--csv p] [--limit N] optimize [--to nand|nor] [--level O0|O1|O2]
@@ -394,6 +405,13 @@ export --truth t --schema s [--bmp b]   help [verb]   back
 step [DOMAIN] [N] [--cycles N]   poke <PIN>=<0|1|release> [--from ...] [--clear]
 peek [GATE]
 ```
+
+`solve`/`step` append `contention: <NET>=<N> [...] (total <T>)` when
+the workspace holds any shared mark (zeros included, so counting is
+visibly live); mark-free output is byte-identical. `truth` refuses
+netlists with 2+ attachments on a shared input (the word path is 1-bit
+per lane) and points at scalar `solve`. `optimize --level O2` refuses
+shared netlists loudly (O0/O1 freeze shared-feeding gates instead).
 
 Sequential session verbs (all headless: REPL session, one-shot, pipes,
 scripts — zero GUI dependency):
@@ -421,7 +439,7 @@ entry + `static_assert` size check (same recipe as AGENTS.md §9).
 ## 11. Non-goals (v1) — each with a named V2 slot in §12
 
 Tri-state buses,
-multi-driver nets, timing/delay simulation, Verilog/VHDL import,
+timing/delay simulation, Verilog/VHDL import,
 PNG/JPG codecs, GUI panel (separate epic, consumes the same headers).
 
 ## 12. V2 extension map (no redesign: every item below is a named slot)
@@ -440,14 +458,23 @@ below).
   nets, block sinks) still reject Z/X loudly. No type change, no
   call-site churn — the reservoir the v1 tri-state non-goal above
   pointed at.
-- **Drivers (funnel shipped; netlist wiring reserved).** Every input
-  resolves through `resolve_net(span of driver values)`, now a total
-  four-value wired resolution (single-pass fold; empty/all-Z spans
-  resolve to Z). The body replacement landed with call sites
-  unchanged; what stays reserved is *netlist-level* multi-driver
-  authoring (bus primitives, importers, tri-state gate kinds) —
-  `wire` still enforces single-driver per input (§9), and the
-  `drivers[]` arrays still store one driver per input pin.
+- **Drivers (funnel + allowlist shipped).** Every input resolves
+  through `resolve_net(span of driver values)`, now a total four-value
+  wired resolution (single-pass fold; empty/all-Z spans resolve to Z).
+  Netlist-level multi-driver authoring shipped in 011: the per-input
+  shared mark (`wire --shared` / `unshare`) lifts the single-driver
+  rule for exactly one input (up to 4 attachments, loud cap); every
+  attachment passes the same validation (live slots, range, untied
+  destination, flop-aware cycle check over primary and extra edges);
+  spans assemble primary-first in compact index order with per-attachment
+  polarity and fold through the unchanged funnel. Contention is a
+  per-net diagnostic channel (`SolveDiag` beside the session state:
+  observation-only, cleared by `reset`, never serialized) surfaced in
+  `solve`/`step` readback. The optimizer freezes shared-feeding gates
+  (driver-side) and skips marked sinks (sink-side); `exact_simplify`
+  skips marked netlists whole; O2 refuses them loudly (a verbatim-carry
+  O2 emitter is the named follow-on). What stays reserved is bus
+  primitives, importers, and tri-state gate kinds.
 - **Sequential / clocks (shipped).** `GateKind` values 0..7 are combinational;
   sequential kinds append at ≥16, pinned: `DFF`=16 (D+CLK,
   edge-triggered; 2 inputs bare, or 5 with the RST/SET/EN control set),

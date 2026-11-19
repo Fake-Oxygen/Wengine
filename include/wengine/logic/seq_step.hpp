@@ -114,8 +114,8 @@ namespace detail {
  *         dangling drivers, or X/Z inputs.
  */
 [[nodiscard]] inline core::Status eval_comb_phase1(const Netlist &nl, const SeqState &st, const LogicValue *resolved,
-                                                   LogicValue *gate_out, std::uint16_t *comb_order,
-                                                   std::size_t &n_comb) noexcept {
+                                                    LogicValue *gate_out, std::uint16_t *comb_order,
+                                                    std::size_t &n_comb, SolveDiag *diag = nullptr) noexcept {
   if (!topo::compile_comb_order(nl, comb_order, n_comb)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
@@ -132,7 +132,7 @@ namespace detail {
     const std::uint16_t s = comb_order[oi];
     const Gate &g = nl.gates[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i])) {
+      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i], diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
     }
@@ -157,11 +157,12 @@ namespace detail {
  * @param[in] gate_out Per-slot settled gate outputs.
  * @param[in] resolved Pre-resolved dangling values.
  * @param[out] out Resolved control value.
+ * @param[in] diag Optional contention channel (nullptr = no counting).
  * @return True on success; false on X/Z values.
  */
 [[nodiscard]] inline bool resolve_control(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
-                                         const LogicValue *gate_out, const LogicValue *resolved,
-                                         LogicValue &out) noexcept {
+                                          const LogicValue *gate_out, const LogicValue *resolved,
+                                          LogicValue &out, SolveDiag *diag = nullptr) noexcept {
   const Gate &g = nl.gates[slot];
   if (input >= g.input_count) {
     out = (g.kind == GateKind::kDff && input == 4) ? LogicValue::kHigh : LogicValue::kLow;
@@ -175,7 +176,7 @@ namespace detail {
   // Shared scalar funnel (BlockInterface seam): wired/dangling/ignored
   // dispatch plus NQ polarity live in resolve_input; the EN-default arms
   // above are the only control-specific rules.
-  return resolve_input(nl, slot, input, gate_out, resolved, out);
+  return resolve_input(nl, slot, input, gate_out, resolved, out, diag);
 }
 
 /**
@@ -207,7 +208,7 @@ namespace detail {
  *         illegal S=R=1 net (state untouched).
  */
 [[nodiscard]] inline core::Status apply_level_resolve(const Netlist &nl, SeqState &st, const LogicValue *resolved,
-                                                     LogicValue *gate_out) noexcept {
+                                                      LogicValue *gate_out, SolveDiag *diag = nullptr) noexcept {
   LogicValue next_q[kMaxGates];
   for (std::size_t s = 0; s < kMaxGates; ++s) {
     next_q[s] = LogicValue::kLow;
@@ -219,10 +220,10 @@ namespace detail {
     }
     LogicValue a = LogicValue::kLow;
     LogicValue b = LogicValue::kLow;
-    if (!resolve_input(nl, s, 0, gate_out, resolved, a)) {
+    if (!resolve_input(nl, s, 0, gate_out, resolved, a, diag)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
-    if (!resolve_input(nl, s, 1, gate_out, resolved, b)) {
+    if (!resolve_input(nl, s, 1, gate_out, resolved, b, diag)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
     if ((a != LogicValue::kLow && a != LogicValue::kHigh) ||
@@ -278,13 +279,14 @@ namespace detail {
  * @param[out] block_outputs End-of-step values in interface order.
  * @param[in] members Member slots to step, or nullptr for every live flop.
  * @param[in] n_members Member count (ignored when members is nullptr).
+ * @param[in] diag Optional contention channel (nullptr = no counting).
  * @return kOk on success; kInvalidArgument on topology errors
  *         (combinational cycle under kCombOnly), size mismatches, X/Z
  *         inputs or state, or S=R=1 nets (state untouched).
  */
 [[nodiscard]] inline core::Status seq_step_filtered(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
-                                                   std::span<LogicValue> block_outputs, const std::uint16_t *members,
-                                                   std::size_t n_members) noexcept {
+                                                    std::span<LogicValue> block_outputs, const std::uint16_t *members,
+                                                    std::size_t n_members, SolveDiag *diag = nullptr) noexcept {
   init_seq_state(st, nl);
   if (!topo::validate(nl, EdgeFilter::kCombOnly).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -312,7 +314,7 @@ namespace detail {
   std::uint16_t comb_order[kMaxGates];
   std::size_t n_comb = 0;
   LogicValue gate_out[kMaxGates];
-  if (!detail::eval_comb_phase1(nl, st, resolved, gate_out, comb_order, n_comb).ok()) {
+  if (!detail::eval_comb_phase1(nl, st, resolved, gate_out, comb_order, n_comb, diag).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
 
@@ -320,7 +322,7 @@ namespace detail {
   // nets and commit before any edge snapshot, so edge flops wired from
   // latch Q see end-of-level values. Fails with state untouched on X/Z
   // (or, from US2, S=R=1). Unconditional: domain filtering is edge-only.
-  if (!detail::apply_level_resolve(nl, st, resolved, gate_out).ok()) {
+  if (!detail::apply_level_resolve(nl, st, resolved, gate_out, diag).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
 
@@ -348,10 +350,10 @@ namespace detail {
     }
     LogicValue d = LogicValue::kLow;
     LogicValue clk = LogicValue::kLow;
-    if (!resolve_input(nl, s, 0, gate_out, resolved, d)) {
+    if (!resolve_input(nl, s, 0, gate_out, resolved, d, diag)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
-    if (!resolve_input(nl, s, 1, gate_out, resolved, clk)) {
+    if (!resolve_input(nl, s, 1, gate_out, resolved, clk, diag)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
     if ((d != LogicValue::kLow && d != LogicValue::kHigh) ||
@@ -375,7 +377,7 @@ namespace detail {
       // Resolve the clock (input 2) here; per the SEQ4 rule it is
       // validated, not gating. Excitation resolves from pre-edge Q.
       LogicValue jk_clk = LogicValue::kLow;
-      if (!resolve_input(nl, s, 2, gate_out, resolved, jk_clk)) {
+      if (!resolve_input(nl, s, 2, gate_out, resolved, jk_clk, diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
       if (jk_clk != LogicValue::kLow && jk_clk != LogicValue::kHigh) {
@@ -400,9 +402,9 @@ namespace detail {
       LogicValue rst = LogicValue::kLow;
       LogicValue set = LogicValue::kLow;
       LogicValue en = LogicValue::kHigh;
-      if (!detail::resolve_control(nl, s, 2, gate_out, resolved, rst) ||
-          !detail::resolve_control(nl, s, 3, gate_out, resolved, set) ||
-          !detail::resolve_control(nl, s, 4, gate_out, resolved, en)) {
+      if (!detail::resolve_control(nl, s, 2, gate_out, resolved, rst, diag) ||
+          !detail::resolve_control(nl, s, 3, gate_out, resolved, set, diag) ||
+          !detail::resolve_control(nl, s, 4, gate_out, resolved, en, diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
       if (rst == LogicValue::kHigh) {
@@ -440,7 +442,7 @@ namespace detail {
     const std::uint16_t s = comb_order[oi];
     const Gate &g = nl.gates[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i])) {
+      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i], diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
     }
@@ -485,8 +487,9 @@ namespace detail {
  *         failure (state untouched).
  */
 [[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
-                                          std::span<LogicValue> block_outputs) noexcept {
-  return seq_step_filtered(nl, st, block_inputs, block_outputs, nullptr, 0);
+                                           std::span<LogicValue> block_outputs,
+                                           SolveDiag *diag = nullptr) noexcept {
+  return seq_step_filtered(nl, st, block_inputs, block_outputs, nullptr, 0, diag);
 }
 
 /**
@@ -509,8 +512,14 @@ namespace detail {
  *         untouched).
  */
 [[nodiscard]] inline core::Status apply_async_controls(Netlist &nl, SeqState &st,
-                                                      std::span<const LogicValue> block_inputs) noexcept {
+                                                       std::span<const LogicValue> block_inputs) noexcept {
   init_seq_state(st, nl);
+  if (!has_sequential_gates(nl)) {
+    return core::Status::success(); // (011) Vacuous settle: no flops to
+    // force, so shared-net contention (a resolution event) never refuses
+    // authoring on combinational netlists. Callers validate topology on
+    // their own path; only SeqState forcing lives here.
+  }
   if (!topo::validate(nl, EdgeFilter::kCombOnly).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
@@ -583,9 +592,12 @@ namespace detail {
  *         topology errors, size mismatches, X/Z inputs, or S=R=1 nets
  *         (state untouched).
  */
-[[nodiscard]] inline core::Status apply_level_latches(Netlist &nl, SeqState &st,
-                                                      std::span<const LogicValue> block_inputs) noexcept {
+[[nodiscard]] inline core::Status apply_level_latches(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs) noexcept {
   init_seq_state(st, nl);
+  if (!has_sequential_gates(nl)) {
+    return core::Status::success(); // (011) Vacuous settle: no latches to
+    // settle (same rationale as apply_async_controls above).
+  }
   if (!topo::validate(nl, EdgeFilter::kCombOnly).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }

@@ -364,6 +364,7 @@ if(BUILD_CLI)
         src/cli/commands/logic/tie.cpp
         src/cli/commands/logic/truth.cpp
         src/cli/commands/logic/unwire.cpp
+        src/cli/commands/logic/unshare.cpp
         src/cli/commands/logic/untie.cpp
         src/cli/commands/logic/use.cpp
         src/cli/commands/logic/wire.cpp
@@ -749,6 +750,13 @@ if(BUILD_TESTS)
     target_compile_definitions(test_logic_yaml PRIVATE
         "WENGINE_LOGIC_EXAMPLE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/examples/logic\"")
     add_test(NAME logic_yaml COMMAND test_logic_yaml)
+
+    # 011-multi-driver-nets: engine seam (mark lifecycle, span resolution,
+    # contention counting) through CLI verbs to YAML round-trip. Links
+    # wengine_cli + wengine_logic_yaml to prove the seam-to-verb chain.
+    add_executable(test_logic_shared tests/test_logic_shared.cpp)
+    target_link_libraries(test_logic_shared PRIVATE wengine_cli wengine_logic_yaml)
+    add_test(NAME logic_shared COMMAND test_logic_shared)
 
     # LOGIC-7 schematic layout: pure header-only geometry (no SDL), links
     # wengine_core alone like test_logic.

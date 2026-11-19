@@ -49,9 +49,12 @@ void interface_pins(const wengine::logic::Netlist &nl, std::vector<wengine::logi
 // Sequential session state (US1, data-model §2/§3/§5): process-wide beside
 // workspace(), cleared by `reset`. Sticky poke values keyed by tie-leader
 // flat index, per-domain cycle counters, and the clocked flop pool.
+// (011) Per-net contention counters (SolveDiag): observation-only,
+// never serialized, cleared by `reset` with the rest.
 wengine::logic::SeqState &seq_state();
 std::map<std::size_t, wengine::logic::LogicValue> &poke_map();
 std::map<std::string, std::uint64_t> &cycle_counts();
+wengine::logic::SolveDiag &solve_diag();
 void reset_seq_session_state();
 
 // Clock domains (data-model §1): the engine-owned `derive_clock_domains`
@@ -110,6 +113,12 @@ core::Status write_truth_pretty(wengine::logic::Netlist &nl, std::uint64_t rows,
 void save_yaml(std::ostream &os, const wengine::logic::Netlist &nl);
 
 [[nodiscard]] std::size_t wire_count(const wengine::logic::Netlist &nl) noexcept;
+
+// Contention readback (011): when the workspace holds any shared mark,
+// emit `contention: <NET>=<N> [...] (total <T>)` in slot order (marked
+// inputs only, zeros included so counting is visibly live); silent when
+// no input is marked (mark-free output stays byte-identical).
+void report_contention(const wengine::logic::Netlist &nl, const wengine::logic::SolveDiag &diag, std::ostream &out);
 
 // Complete a `--from` value: bare pin prefix -> pin names; exact pin (or
 // pin + bit prefix) -> valued PIN=0|1 forms.

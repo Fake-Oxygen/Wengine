@@ -134,6 +134,11 @@ struct WireRow {
   std::size_t line = 1;
 };
 
+struct SharedRow {
+  std::string net;
+  std::size_t line = 1;
+};
+
 struct TieRow {
   std::string a;
   std::string b;
@@ -385,6 +390,30 @@ struct ClockRow {
   return true;
 }
 
+// 011: one `{net: PIN}` row per marked input. The mark is the opt-in;
+// the attachment count derives from the repeated `wires:` rows.
+[[nodiscard]] bool check_shared_map(const YAML::Node &n, SharedRow &row, std::string &err) {
+  for (auto it = n.begin(); it != n.end(); ++it) {
+    const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
+    if (key != "net") {
+      err = at_line(it->first, "unknown shared key '" + key + "' (want 'net: ...')");
+      return false;
+    }
+  }
+  const YAML::Node net = n["net"];
+  if (!net || !net.IsDefined()) {
+    err = at_line(n, "shared entry needs 1 field (net)");
+    return false;
+  }
+  if (!net.IsScalar() || net.Scalar().empty()) {
+    err = at_line(n, "empty shared net");
+    return false;
+  }
+  row.net = net.Scalar();
+  row.line = line_of(n);
+  return true;
+}
+
 [[nodiscard]] bool load_impl(const std::string &text, Workspace &out, std::string &err) {
   if (text.find_first_not_of(" \t\r\n#") == std::string::npos) {
     // Cheap empty/whitespace fast path; comment-only files fall through
@@ -423,15 +452,16 @@ struct ClockRow {
   }
   for (auto it = root.begin(); it != root.end(); ++it) {
     const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
-    if (key != "version" && key != "gates" && key != "wires" && key != "ties" && key != "clocks" &&
+    if (key != "version" && key != "gates" && key != "wires" && key != "shared" && key != "ties" && key != "clocks" &&
         key != "meta") {
-      err = at_line(it->first, "unknown workspace key '" + key + "' (want version|gates|wires|ties|clocks|meta)");
+      err = at_line(it->first, "unknown workspace key '" + key + "' (want version|gates|wires|shared|ties|clocks|meta)");
       return false;
     }
   }
   const YAML::Node version = root["version"];
   const YAML::Node gates = root["gates"];
   const YAML::Node wires = root["wires"];
+  const YAML::Node shared = root["shared"];
   const YAML::Node ties = root["ties"];
   const YAML::Node clocks = root["clocks"];
   const YAML::Node meta = root["meta"];
@@ -491,6 +521,12 @@ struct ClockRow {
     err = at_line(wires, "'wires:' must read a sequence");
     return false;
   }
+  // 011: `shared:` is optional (absent = no marks, pre-011 files load
+  // byte-identically); present-but-malformed is loud, never tolerated.
+  if (shared && shared.IsDefined() && !shared.IsSequence() && !shared.IsNull()) {
+    err = at_line(shared, "'shared:' must read a sequence");
+    return false;
+  }
   if (ties && ties.IsDefined() && !ties.IsSequence() && !ties.IsNull()) {
     err = at_line(ties, "'ties:' must read a sequence");
     return false;
@@ -518,6 +554,7 @@ struct ClockRow {
 
   std::vector<GateRow> gate_rows;
   std::vector<WireRow> wire_rows;
+  std::vector<SharedRow> shared_rows;
   std::vector<TieRow> tie_rows;
   std::vector<ClockRow> clock_rows;
   if (gates.IsSequence()) {
@@ -548,6 +585,21 @@ struct ClockRow {
         return false;
       }
       wire_rows.push_back(std::move(row));
+    }
+  }
+  if (shared && shared.IsDefined() && shared.IsSequence()) {
+    shared_rows.reserve(shared.size());
+    for (std::size_t i = 0; i < shared.size(); ++i) {
+      const YAML::Node n = shared[i];
+      if (!n.IsMap()) {
+        err = at_line(n, "shared entry must read '{net: ...}'");
+        return false;
+      }
+      SharedRow row;
+      if (!check_shared_map(n, row, err)) {
+        return false;
+      }
+      shared_rows.push_back(std::move(row));
     }
   }
   if (ties && ties.IsDefined() && ties.IsSequence()) {
@@ -621,6 +673,29 @@ struct ClockRow {
   tmp.dirty = true;
   tmp.topo_size = 0;
 
+  // 011: marks land before wire replay (in slot order of first
+  // appearance — replay order stays file order per the contract, and
+  // the array state converges deterministically regardless).
+  // Mark validation mirrors the engine seam exactly: live inputs,
+  // untied destinations (ties do not exist yet at this point, so the
+  // loader's tie-time check below guards the other direction).
+  for (const SharedRow &sr : shared_rows) {
+    const std::string at = "line " + std::to_string(sr.line) + ": ";
+    const auto pin = parse_pin(tmp, sr.net);
+    if (!pin.ok() || pin.value.is_output) {
+      err = at + "bad shared net '" + sr.net + "'";
+      return false;
+    }
+    if (is_shared_input(tmp, pin.value.slot, pin.value.input)) {
+      err = at + "duplicate shared net '" + sr.net + "'";
+      return false;
+    }
+    if (!mark_shared(tmp, pin.value.slot, pin.value.input).ok()) {
+      err = at + "bad shared net '" + sr.net + "'";
+      return false;
+    }
+  }
+
   for (const WireRow &w : wire_rows) {
     const std::string at = "line " + std::to_string(w.line) + ": ";
     const auto from = parse_pin(tmp, w.from);
@@ -645,8 +720,15 @@ struct ClockRow {
       err = at + "wire needs FROM.out TO.in (got '" + w.from + "' -> '" + w.to + "')";
       return false;
     }
+    // NQ sources exist on sequential gates only (same rule as
+    // logic::wire_pins — slot-built refs stay loud, never silent).
+    if (from.value.negated && !is_sequential_kind(tmp.gates[from.value.slot].kind)) {
+      err = at + "bad wire source '" + w.from + "'";
+      return false;
+    }
     Gate &dst = tmp.gates[to.value.slot];
-    if (dst.drivers[to.value.input] != kNoDriver) {
+    const bool shared_marked = is_shared_input(tmp, to.value.slot, to.value.input);
+    if (dst.drivers[to.value.input] != kNoDriver && !shared_marked) {
       err = at + "input already wired '" + w.to + "'";
       return false;
     }
@@ -658,6 +740,26 @@ struct ClockRow {
         topo::reaches(tmp, to.value.slot, from.value.slot, EdgeFilter::kCombOnly)) {
       err = at + "wire closes a combinational cycle '" + w.from + "' -> '" + w.to + "'";
       return false;
+    }
+    if (dst.drivers[to.value.input] != kNoDriver) {
+      // 011: repeated `to:` on a marked input appends an extra — the
+      // same cap the engine enforces, loudly, never truncated.
+      const std::uint8_t extra_n = shared_extra_count(tmp, to.value.slot, to.value.input);
+      if (extra_n >= kMaxSharedExtra) {
+        err = at + "shared net full (cap 4) '" + w.to + "'";
+        return false;
+      }
+      const std::size_t flat = tie_flat(to.value.slot, to.value.input);
+      tmp.extra_drivers[flat * kMaxSharedExtra + extra_n] = from.value.slot;
+      const std::uint8_t inv = from.value.negated ? 1 : 0;
+      tmp.extra_inv[flat * kMaxSharedExtra + extra_n] = inv;
+      tmp.shared_meta[flat] = static_cast<std::uint8_t>((tmp.shared_meta[flat] & 0x01u) | ((extra_n + 1u) << 1));
+      if (inv != 0) {
+        ++tmp.gates[from.value.slot].nq_fanout;
+      } else {
+        ++tmp.gates[from.value.slot].output_fanout;
+      }
+      continue;
     }
     dst.drivers[to.value.input] = from.value.slot;
     if (from.value.negated) {
@@ -704,6 +806,13 @@ struct ClockRow {
     if (((ga.ignored_mask & static_cast<std::uint8_t>(1u << a.value.input)) != 0) ||
         ((gb.ignored_mask & static_cast<std::uint8_t>(1u << b.value.input)) != 0)) {
       err = at + "tie needs non-ignored pins (use first)";
+      return false;
+    }
+    // 011: marks and ties are disjoint per flat — a marked input is
+    // never tied (the other direction, mark-on-tied, is refused by the
+    // engine seam at authoring time).
+    if (is_shared_input(tmp, a.value.slot, a.value.input) || is_shared_input(tmp, b.value.slot, b.value.input)) {
+      err = at + "shared net cannot be tied (unshare it first)";
       return false;
     }
     if (!tie_pins(tmp, a.value, b.value).ok()) {
@@ -849,6 +958,53 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
       out += ", to: ";
       out += pin_text(nl, s, false, i);
       out += "}\n";
+      // 011: every extra attachment is a repeated `to:` row, in compact
+      // index order (legal on load iff the input is marked, which the
+      // `shared:` section below guarantees).
+      const std::size_t flat = tie_flat(s, i);
+      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
+      for (std::uint8_t j = 0; j < extra_n; ++j) {
+        const std::uint16_t edrv = nl.extra_drivers[flat * kMaxSharedExtra + j];
+        const bool eneg = nl.extra_inv[flat * kMaxSharedExtra + j] != 0;
+        out += "  - {from: ";
+        out += pin_text(nl, edrv, true, 0, eneg);
+        out += ", to: ";
+        out += pin_text(nl, s, false, i);
+        out += "}\n";
+      }
+    }
+  }
+  // 011: optional `shared:` section, emitted iff >= 1 mark exists, one
+  // `{net: PIN}` row per marked input in slot order. Absent on read
+  // means no marks (pre-011 files load byte-identically).
+  {
+    bool any_mark = false;
+    for (std::uint16_t s = 0; s < kMaxGates && !any_mark; ++s) {
+      if (!nl.gates[s].live) {
+        continue;
+      }
+      for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+        if (is_shared_flat(nl, tie_flat(s, i))) {
+          any_mark = true;
+          break;
+        }
+      }
+    }
+    if (any_mark) {
+      out += "shared:\n";
+      for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+        if (!nl.gates[s].live) {
+          continue;
+        }
+        for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+          if (!is_shared_flat(nl, tie_flat(s, i))) {
+            continue;
+          }
+          out += "  - {net: ";
+          out += pin_text(nl, s, false, i);
+          out += "}\n";
+        }
+      }
     }
   }
   out += "ties:\n";

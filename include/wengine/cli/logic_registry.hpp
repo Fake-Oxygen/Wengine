@@ -275,11 +275,15 @@ struct LogicWireSpec {
    * @brief Usage text printed by `help wire` and usage errors.
    */
   static constexpr std::string_view kUsage =
-      "wire <FROM.out> <TO.in>\n"
+      "wire <FROM.out> <TO.in> [--shared]\n"
       "  wire AND1.Y NOT1.1\n"
       "  wire DFF1.Q AND1.1\n"
       "  wire DFF1.NQ AND1.2\n"
+      "  wire AND1.Y BUS.1 --shared\n"
       "Single-driver: the destination input must be unwired; cycles are rejected.\n"
+      "--shared marks the input as a shared (multi-driver) net and lands the\n"
+      "driver (up to 4 attachments per input; extra wires past the cap, and\n"
+      "unsharing while 2+ drivers stay attached, fail loudly).\n"
       "Sequential gates use named pins (DFF1.D, DFF1.CLK, DFF1.Q, DFF1.NQ;\n"
       "DFF1.RST, DFF1.SET, DFF1.EN on --inputs 5 flops; DLATCH1.D,\n"
       "DLATCH1.EN; JK1.J, JK1.K, JK1.CLK; T1.T, T1.CLK; SRLATCH1.S,\n"
@@ -320,9 +324,12 @@ struct LogicUnwireSpec {
    * @brief Usage text printed by `help unwire` and usage errors.
    */
   static constexpr std::string_view kUsage =
-      "unwire <TO.i>\n"
+      "unwire [FROM.out] <TO.i>\n"
       "  unwire NOT1.1\n"
-      "Detaches the wire driving the destination input pin (unwired inputs fail loudly).";
+      "  unwire AND1.Y NOT1.1\n"
+      "Detaches the wire driving the destination input pin (unwired inputs fail loudly).\n"
+      "With FROM.out, releases exactly that edge (a shared extra compacts, the\n"
+      "primary promotes extra 0); without it, releases the primary driver.";
 
   /**
    * @brief Execute the `unwire` verb.
@@ -335,6 +342,44 @@ struct LogicUnwireSpec {
   static int run(ArgCursor &args, std::ostream &out);
   /**
    * @brief Tab-complete `unwire` arguments (input pin names).
+   * @param[in] prior_args Tokens after the verb, before the partial.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates (no trailing spaces).
+   */
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
+/**
+ * @brief `unshare` verb: clear the shared mark on an input pin.
+ */
+struct LogicUnshareSpec {
+  /**
+   * @brief Verb name (`unshare`), valid in-session and one-shot.
+   */
+  static constexpr std::string_view kName = "unshare";
+  /**
+   * @brief One-line description for session help listings.
+   */
+  static constexpr std::string_view kDescription = "Clear the shared (multi-driver) mark on an input pin";
+  /**
+   * @brief Usage text printed by `help unshare` and usage errors.
+   */
+  static constexpr std::string_view kUsage =
+      "unshare <TO.i>\n"
+      "  unshare BUS.1\n"
+      "Clears the shared mark on the destination input pin (fails loudly while\n"
+      "2+ drivers stay attached — unwire extras first — and on unmarked inputs).";
+
+  /**
+   * @brief Execute the `unshare` verb.
+   * @param[in] args Cursor over the argument tokens after the verb
+   *                 (`<TO.i>` positional).
+   * @param[out] out Result, usage, and error text.
+   * @return 0 (kExitOk) on success; 2 (kExitUsage) on a usage error.
+   */
+  static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Tab-complete `unshare` arguments (input pin names).
    * @param[in] prior_args Tokens after the verb, before the partial.
    * @param[in] partial Partial token under the cursor.
    * @param[out] out Candidates (no trailing spaces).
@@ -1027,7 +1072,7 @@ struct LogicPeekSpec {
  *       kept in sync when this list grows.
  */
 using LogicRegistry = Registry<LogicHelpSpec, LogicBackSpec, LogicAddSpec, LogicListSpec,
-                               LogicWireSpec, LogicUnwireSpec, LogicRemoveSpec,
+                               LogicWireSpec, LogicUnwireSpec, LogicUnshareSpec, LogicRemoveSpec,
                                LogicIgnoreSpec, LogicUseSpec, LogicTieSpec, LogicUntieSpec,
                                LogicResetSpec, LogicSolveSpec, LogicTruthSpec, LogicOptimizeSpec,
                                LogicDrawSpec, LogicSaveSpec, LogicLoadSpec,

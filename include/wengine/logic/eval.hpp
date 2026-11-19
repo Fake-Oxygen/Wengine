@@ -113,6 +113,7 @@ namespace wengine::logic {
  * @param[out] nl Netlist to solve (topology recompiled when dirty).
  * @param[in] block_inputs Input values in interface order.
  * @param[out] block_outputs Output values in interface order.
+ * @param[in] diag Optional contention channel (nullptr = no counting).
  * @return kOk on success; kInvalidArgument on topology errors
  *         (combinational cycle, dangling driver), size mismatches,
  *         X/Z inputs, or X/Z wired drivers.
@@ -120,7 +121,8 @@ namespace wengine::logic {
  *       (slot-order level order, slot-order output scan). No heap use
  *       (fixed stack arrays).
  */
-[[nodiscard]] inline core::Status solve(Netlist &nl, std::span<const LogicValue> block_inputs, std::span<LogicValue> block_outputs) noexcept {
+[[nodiscard]] inline core::Status solve(Netlist &nl, std::span<const LogicValue> block_inputs, std::span<LogicValue> block_outputs,
+                                       SolveDiag *diag = nullptr) noexcept {
   core::Status st = topo::rebuild(nl, EdgeFilter::kAll);
   if (!st.ok()) {
     return st;
@@ -142,7 +144,7 @@ namespace wengine::logic {
     const std::uint16_t s = nl.topo_order[oi];
     const Gate &g = nl.gates[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i])) {
+      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i], diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
     }
@@ -202,9 +204,14 @@ namespace wengine::logic {
  *       scalar words carry the speedup and stay portable; vectorize
  *       only on a measured hot path.
  */
-[[nodiscard]] inline core::Status eval_block_word(Netlist &nl, std::uint64_t word_index,
-                                                 std::span<std::uint64_t> gate_scratch,
-                                                 std::span<std::uint64_t> block_outputs) noexcept {
+[[nodiscard]] inline core::Status eval_block_word(Netlist &nl, std::uint64_t word_index, std::span<std::uint64_t> gate_scratch,
+                                                  std::span<std::uint64_t> block_outputs) noexcept {
+  // (011) Word-loop entry points (verbs, bench, exact) check
+  // shared_word_blocked() once before looping: the per-word path stays
+  // branch-identical to v1 (D11 fast-path claim), and a shared net with
+  // >= 2 attachments is refused loudly there, never silently folded
+  // into 1-bit lanes. Marked inputs with <= 1 attachment ride the
+  // primary word path unchanged.
   core::Status st = topo::rebuild(nl, EdgeFilter::kAll);
   if (!st.ok()) {
     return st;

@@ -256,6 +256,9 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
   }
   const std::size_t fa = tie_flat(a.slot, a.input);
   const std::size_t fb = tie_flat(b.slot, b.input);
+  if (is_shared_flat(nl, fa) || is_shared_flat(nl, fb)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // shared: never tied
+  }
   const std::size_t la = tie_leader_flat(nl, fa);
   const std::size_t lb = tie_leader_flat(nl, fb);
   if (la == lb) {

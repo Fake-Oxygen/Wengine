@@ -62,6 +62,21 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
     if (g.ignore_output) {
       out << " ignore-output";
     }
+    // Shared-net marks (011): per marked input, the pin and attachment
+    // count. Absent on unmarked netlists (output byte-identical).
+    bool first_shared = true;
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      if (!wengine::logic::is_shared_input(nl, s, i)) {
+        continue;
+      }
+      if (first_shared) {
+        out << " shared=";
+        first_shared = false;
+      } else {
+        out << ',';
+      }
+      out << support::pin_text(nl, s, false, i) << '(' << static_cast<unsigned>(wengine::logic::shared_attachment_count(nl, s, i)) << ')';
+    }
     out << '\n';
   }
   if (show_wires) {
@@ -82,6 +97,15 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
         }
         const bool neg = nl.driver_inv[static_cast<std::size_t>(s) * wengine::logic::kMaxInputs + i] != 0;
         out << "  " << support::pin_text(nl, drv, true, 0, neg) << " -> " << support::pin_text(nl, s, false, i) << '\n';
+        // Shared extras (011): every attachment is a wire row, in compact
+        // index order. No extras on unmarked netlists (loop no-op).
+        const std::size_t flat = static_cast<std::size_t>(s) * wengine::logic::kMaxInputs + i;
+        const std::uint8_t extra_n = wengine::logic::shared_extra_count(nl, s, i);
+        for (std::uint8_t j = 0; j < extra_n; ++j) {
+          const std::uint16_t edrv = nl.extra_drivers[flat * wengine::logic::kMaxSharedExtra + j];
+          const bool eneg = nl.extra_inv[flat * wengine::logic::kMaxSharedExtra + j] != 0;
+          out << "  " << support::pin_text(nl, edrv, true, 0, eneg) << " -> " << support::pin_text(nl, s, false, i) << '\n';
+        }
       }
     }
   }

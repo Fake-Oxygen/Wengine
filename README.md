@@ -158,10 +158,13 @@ REPL commands: `help [cmd]`, `exit`/`quit`, plus registered commands
 `logic` enters a module sub-shell (`[logic]> `, `back` leaves;
 `logic <verb>` also works one-shot) — the reusable session pattern
 future modules follow (see `docs/logic.md`). Verbs cover add/list/wire/
-unwire/remove/ignore/use/tie/untie/reset/solve/truth/optimize/draw/
+unwire/unshare/remove/ignore/use/tie/untie/reset/solve/truth/optimize/draw/
 save/load/export plus sequential `step`/`poke`/`peek`; `tie A.1 B.2` shorts two dangling inputs to one net
 (canonical lowest-pin rep, one block input per class) so NAND(a,a)
-inversion is first-class. Sequential blocks use readable named pins
+inversion is first-class. `wire --shared` marks an input as an allowlisted
+shared (multi-driver) net — up to 4 drivers per input, resolved through the
+shipped four-value funnel with per-net contention counted loudly in
+`solve`/`step`; `unshare` clears the mark once ≤1 driver remains. Sequential blocks use readable named pins
 (`DFF1.D`, `DFF1.CLK`, `DFF1.Q`, plus negated `DFF1.NQ` — dangling NQ
 is ignored unless wired or `use`d; numeric aliases still work).
 `add DFF --inputs 5` makes the full control set (`RST`/`SET`/`EN`)
@@ -174,7 +177,7 @@ them from DFFs. Level latches need no clock: `add DLATCH` (pins `D`/`EN`:
 `S`/`R`: set/reset/hold, `S=R=1` illegal and refused) holds async
 handshake flags. Runnable workspaces live in
 `examples/logic/` (`nand_pair`, `fanout`, `parity3`, `tieoff`,
-`tied_demorgan` — each header shows its run command). Reset + stall:
+`tied_demorgan`, `shared_bus` — each header shows its run command). Reset + stall:
 
 ```text
 > logic add DFF --inputs 5
@@ -185,6 +188,16 @@ handshake flags. Runnable workspaces live in
 > logic poke DFF1.RST=release
 > logic poke DFF1.EN=0
 > logic step 2                  # DFF1.Q: 0 (no change) — stalled
+```
+Shared (multi-driver) nets need an explicit per-input mark:
+```text
+> logic load examples/logic/shared_bus.yaml
+> logic solve --in 11110
+OR1.Y=1
+contention: OR1.1=0 (total 0)
+> logic solve --in 11000
+contention: OR1.1=1 (total 1)
+Error: solve failed
 ```
 `--help`/`-h` also print help. Return codes: `0` ok, `1`
 runtime/unknown-command error, `2` argument/usage error, `-1` internal exit
@@ -509,7 +522,7 @@ tests/  benchmarks/  examples/
 | `link` | `wengine/link/frame.hpp`, `protocol.hpp`, `socket_publisher.hpp`, `shm_publisher.hpp`, `control_server.hpp`, `uart_codec.hpp`, `uart_publisher.hpp` | Solver-agnostic `Frame` adapters (stable particle IDs) + versioned wire codec (SHM v3 72 B items, socket v3 70 B items); app-edge SHM publisher and POSIX TCP/UDP stream publishers (`wengine_link_net`), exact version/domain gates, compact UDP frames, and lag/loss accounting; domain-free TCP line server for the control plane (same package); UART serial publisher + control pump with COBS framing (same package) |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,entity_index,entity_generation,x,y,vx,vy` v3 with stable IDs, legacy 7-col still parses as unavailable, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions over a reused scratch buffer, `StrideSink` step-aligned decimation, drop counters); the snapshot reference is valid only for the call — retaining sinks copy or enqueue-owned before returning |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |
-| `logic` | `wengine/logic/netlist.hpp`, `types.hpp`, `eval.hpp`, `seq_state.hpp`, `seq_step.hpp` | Gate netlist (slots recycle, per-kind counters never reused), named seq pins + NQ second output with per-sink polarity, DFF RST/SET/EN control set (`RST > SET > EN-hold > D`, reset wins; async-apply with no clock), JK/T flop kinds (JK hold/reset/set/toggle, T hold/toggle — same stepper, sync-only), SR/D latch pair (DLATCH transparent/frozen, SRLATCH set/reset/hold with loud S=R=1 refusal — level settle with no clock, no clock domain), scalar/bit-parallel eval, four-value `resolve_net` funnel (Z transparent, X dominant/conflict), clocked `SeqState` pool + global/subset edge stepping |
+| `logic` | `wengine/logic/netlist.hpp`, `types.hpp`, `eval.hpp`, `seq_state.hpp`, `seq_step.hpp` | Gate netlist (slots recycle, per-kind counters never reused), named seq pins + NQ second output with per-sink polarity, DFF RST/SET/EN control set (`RST > SET > EN-hold > D`, reset wins; async-apply with no clock), JK/T flop kinds (JK hold/reset/set/toggle, T hold/toggle — same stepper, sync-only), SR/D latch pair (DLATCH transparent/frozen, SRLATCH set/reset/hold with loud S=R=1 refusal — level settle with no clock, no clock domain), scalar/bit-parallel eval, four-value `resolve_net` funnel (Z transparent, X dominant/conflict), allowlisted shared nets (per-input mark via `wire --shared`/`unshare`, cap 4 attachments, span resolution with polarity, per-net contention counts in session readback), clocked `SeqState` pool + global/subset edge stepping |
 | `cli` | `wengine/cli/args.hpp`, `command.hpp`, `command_registry.hpp`, `commands.hpp`, `complete.hpp`, `shell.hpp`, `line_reader.hpp` | Zero-copy parser + compile-time registry + `Shell` REPL with history and Tab completion. Two-level `ic` dispatch (`ic_dispatch.hpp` + `ic_registry.hpp`) keeps part-specific chips off the top level |
 | `tui` | `wengine/tui/exec.hpp`, `wengine/tui/async.hpp`, `wengine/tui/forms.hpp`, `wengine/tui/forms/` (shared types + one form definition per command), `wengine/tui/batches.hpp`, `wengine/tui/batches/` (shared types + one builder definition per command), `wengine/tui/choice.hpp` (shared ncurses-free enum-choice dialog model + per-field resolvers), `wengine/tui/views.hpp`, `wengine/tui/run.hpp`, `wengine/cli/cancel.hpp`, `src/tui/` | Ncurses front end (`PhysicsSimApp --tui`, `BUILD_TUI`): terminal handling only — every line runs on the async worker (`AsyncTask` + its own `Shell::execute`) with captured output, so TUI text stays byte-identical to the CLI by construction (full-registry parity matrix + completion == REPL); progress + step-boundary Ctrl-C cancel (sinks flushed/closed); guided forms compose argv strings only (F3 browser for closed-form families, with declarative required/optional argument profiles and mode/op-specific filtering in the two-pane builders; Ctrl-B then Left/Right switches panes and Space toggles viable arguments; Space on a `[choice]`-marked enum field opens the option dialog instead of typing (static options declared per field, registry vocabularies resolved centrally); F4 builders for `sim run` / `sig run` batches incl. solver/kind-aware, prerequisite-filtered arguments and `--forever`); output views render captured text only (PASS/FAIL/Error highlight, `/`+`n`/`N` scrollback search, F5 save-pane-to-file, wrapped resize reflow, visible scroll position, `TERM=dumb`/NO_COLOR fallback with loud refusal on cursor-less terminals); history is the shared REPL file; `ctest -R tui_pty_smoke` covers launch/run/complete/recall/quit + dynamic form and run-builder profiles + a choice-dialog open/cancel on a PTY |
 
@@ -721,7 +734,7 @@ parity vs headless bus, verb rejections), `test_signal_panel_lua`
 matrix),
 `test_closed_form_panels` (GUI panel models match CLI text + goldens),
 `test_viewport3d` (orbit camera projection, culling, grid, guards),
-`test_logic_seq_cli_pins` (named pins D/CLK/EN/S/R/Q + NQ polarity, fanout/interface counts, YAML round-trip), `test_logic` (flop/latch opaque barrier: O0/O1/O2 preservation incl. DCE roots, exact skip, O2 verbatim carry + NQ polarity, 10-step run parity, CLI success, report counts), `test_logic_seq_cli_step`, `test_logic_seq_cli_poke`, `test_logic_seq_cli_peek` (verb goldens: advance/selective domains, poke/release, Q+NQ readback, determinism replay, completion, T divider + JK counter + mixed-kind sessions, DLATCH level + SR set/reset/refusal sessions), `test_logic_seq_controls` (DFF RST/SET/EN: fan-in rules, named pins, priority truth table, async-apply, hold, wired reset, YAML round-trip, session scenarios, conflict matrix; JK/T/SR help + completion), `test_logic_seq_kinds` (kind vocabulary incl. JK/T/SR ordinals, names, parse, pins), `test_logic_seq_step` (edge excitation incl. JK/T tables, DLATCH transparent/frozen + SR set/reset/refusal level tables, mixed edge+level and subset stepping), `test_logic_seq_runner` (SequentialSolver + configured-run driver goldens: counter/T-dividers, selective advance/hold + member rejections, snapshot/CSV/Frame parity incl. recycle serial stability, mid-run SR abort, RST>SET/EN-hold priority), `test_frame_source` (source registry, channels, ring,
+`test_logic_seq_cli_pins` (named pins D/CLK/EN/S/R/Q + NQ polarity, fanout/interface counts, YAML round-trip), `test_logic` (flop/latch opaque barrier: O0/O1/O2 preservation incl. DCE roots, exact skip, O2 verbatim carry + NQ polarity, 10-step run parity, CLI success, report counts; shared-net span resolution incl. Q+NQ self-contention, solve end-to-end, optimizer freeze/O2-refusal), `test_logic_shared` (shared nets: authoring gate, span resolution, contention counting + determinism, YAML round-trip + schema refusals, optimizer soundness), `test_logic_seq_cli_step`, `test_logic_seq_cli_poke`, `test_logic_seq_cli_peek` (verb goldens: advance/selective domains, poke/release, Q+NQ readback, determinism replay, completion, T divider + JK counter + mixed-kind sessions, DLATCH level + SR set/reset/refusal sessions), `test_logic_seq_controls` (DFF RST/SET/EN: fan-in rules, named pins, priority truth table, async-apply, hold, wired reset, YAML round-trip, session scenarios, conflict matrix; JK/T/SR help + completion), `test_logic_seq_kinds` (kind vocabulary incl. JK/T/SR ordinals, names, parse, pins), `test_logic_seq_step` (edge excitation incl. JK/T tables, DLATCH transparent/frozen + SR set/reset/refusal level tables, mixed edge+level and subset stepping), `test_logic_seq_runner` (SequentialSolver + configured-run driver goldens: counter/T-dividers, selective advance/hold + member rejections, snapshot/CSV/Frame parity incl. recycle serial stability, mid-run SR abort, RST>SET/EN-hold priority), `test_frame_source` (source registry, channels, ring,
 particle + signal + sequential CSV-exactness, sink re-attach, plot bounds),
 `test_gui_stream_source`
 (SHM subscribe parity + lag isolation, CSV replay transport/pacing,

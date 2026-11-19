@@ -116,6 +116,14 @@ namespace wengine::logic {
  *       caller reports before/after counts.
  */
 [[nodiscard]] inline core::Result<Netlist> optimize(const Netlist &in, OptimizeOptions opts) noexcept {
+  // 011: O2 replaces the workspace wholesale via its own emitter, which
+  // has no shared-span vocabulary. Emitting O1-level output under an O2
+  // request would be a silent contract break — refuse loudly, input
+  // untouched, O0/O1 remain available. A verbatim-carry O2 emitter is
+  // the named follow-on.
+  if (opts.level == OptLevel::kO2 && any_shared_mark(in)) {
+    return core::Result<Netlist>::failure("optimize: shared nets unsupported at O2 (use O0/O1)", core::StatusCode::kInvalidArgument);
+  }
   Netlist nl = in;
   nl.dirty = true;
   nl.topo_size = 0;

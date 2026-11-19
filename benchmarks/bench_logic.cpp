@@ -120,6 +120,14 @@ int main(int argc, char **argv) {
   std::vector<std::uint64_t> out(n_out == 0 ? 1 : n_out, 0);
   std::span<std::uint64_t> out_span(out.data(), n_out);
 
+  // 011: four-value nets refuse the word path loudly, once, outside the
+  // timed region (bench nets never carry marks; the timed loop stays
+  // branch-identical to v1).
+  if (wengine::logic::shared_word_blocked(nl)) {
+    std::cout << "bench_logic: shared nets need the scalar path\n";
+    return 1;
+  }
+
   // Warmup: one slice so topology/scratch are hot before timing.
   if (!eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), scratch.size()), out_span)
            .ok()) {

@@ -31,6 +31,11 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
   Netlist &nl = workspace();
+  // (011) Four-value nets need the scalar path: refuse loudly, naming
+  // the construct and pointing at solve.
+  if (wengine::logic::shared_word_blocked(nl)) {
+    return cli::runtime_error(out, "truth: shared nets with 2+ drivers need scalar solve (word path is 1-bit per lane)");
+  }
   std::vector<PinRef> in_pins;
   std::vector<PinRef> out_pins;
   support::interface_pins(nl, in_pins, out_pins);

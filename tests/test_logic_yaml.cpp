@@ -78,6 +78,18 @@ bool netlists_equal(const logic::Netlist &a, const logic::Netlist &b) {
       }
     }
   }
+  // 011: shared marks + extras participate in test equality — a pass
+  // that dropped or duplicated an extra is a correctness bug.
+  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+    if (a.shared_meta[f] != b.shared_meta[f]) {
+      return false;
+    }
+  }
+  for (std::size_t e = 0; e < logic::kMaxGates * logic::kMaxInputs * logic::kMaxSharedExtra; ++e) {
+    if (a.extra_drivers[e] != b.extra_drivers[e] || a.extra_inv[e] != b.extra_inv[e]) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -798,6 +810,22 @@ void test_examples() {
     check_solve(nl, {kL, kL, kL}, {kL});
     check_stable(nl);
   }
+  // shared_bus.yaml: allowlisted 2-driver wired-OR bus (011). The mark
+  // and both attachments load; agreeing drivers solve to the level,
+  // disagreeing drivers fail loudly (contention is counted in the CLI
+  // session, not here).
+  {
+    logic::yaml::Workspace ws;
+    logic::Netlist &nl = ws.netlist;
+    std::string err;
+    assert(logic::yaml::load_text(load("shared_bus"), ws, err));
+    assert(nl.live_count == 4);
+    assert(logic::is_shared_input(nl, 3, 0));
+    assert(logic::shared_attachment_count(nl, 3, 0) == 2);
+    check_solve(nl, {kH, kH, kH, kH, kL}, {kH});
+    check_solve(nl, {kL, kL, kL, kL, kL}, {kL});
+    check_stable(nl);
+  }
   // tieoff.yaml: AND1.2 ignored (tied 0) plus stored delays.
   {
     logic::yaml::Workspace ws;
@@ -892,6 +920,125 @@ void test_examples() {
   }
 }
 
+// 011 US4: marks + repeated wires survive save→load→save
+// byte-identically (zero-attachment marks included); replay outputs
+// identical; unmarked duplicates keep the byte-identical refusal.
+void test_shared_round_trip() {
+  logic::Netlist nl{};
+  assert(logic::add_gate(nl, logic::GateKind::kNot, 1).ok()); // NOT1 @0
+  assert(logic::add_gate(nl, logic::GateKind::kNot, 1).ok()); // NOT2 @1
+  assert(logic::add_gate(nl, logic::GateKind::kBuf, 1).ok()); // BUF1 @2
+  assert(logic::add_gate(nl, logic::GateKind::kOr, 2).ok());  // OR1 @3
+  assert(logic::wire(nl, 0, 3, 0).ok());
+  assert(logic::mark_shared(nl, 3, 0).ok());
+  assert(logic::wire(nl, 1, 3, 0).ok());
+  assert(logic::wire(nl, 2, 3, 1).ok());
+  std::string text;
+  logic::yaml::save_text(nl, zero_inits(), text);
+  assert(contains(text, "  - {from: NOT1.Y, to: OR1.1}\n  - {from: NOT2.Y, to: OR1.1}\n"));
+  assert(contains(text, "shared:\n  - {net: OR1.1}\n"));
+  logic::yaml::Workspace ws{};
+  std::string err;
+  assert(logic::yaml::load_text(text, ws, err));
+  assert(netlists_equal(nl, ws.netlist));
+  assert(logic::is_shared_input(ws.netlist, 3, 0));
+  assert(logic::shared_attachment_count(ws.netlist, 3, 0) == 2);
+  std::string text2;
+  logic::yaml::save_text(ws.netlist, zero_inits(), text2);
+  assert(text == text2);
+  // Replay outputs identical: consensus high on NOT1.1=NOT2.1=0.
+  const logic::LogicValue in[3] = {kL, kL, kL};
+  logic::LogicValue want[1] = {kL};
+  logic::LogicValue got[1] = {kL};
+  assert(logic::solve(nl, std::span<const logic::LogicValue>(in, 3), std::span<logic::LogicValue>(want, 1)).ok());
+  assert(logic::solve(ws.netlist, std::span<const logic::LogicValue>(in, 3),
+                      std::span<logic::LogicValue>(got, 1))
+             .ok());
+  assert(want[0] == logic::LogicValue::kHigh && got[0] == want[0]);
+  // Zero-attachment mark round-trips (section carries the mark; no wire
+  // rows reference the input).
+  logic::Netlist empty{};
+  assert(logic::add_gate(empty, logic::GateKind::kAnd, 2).ok()); // AND1 @0
+  assert(logic::mark_shared(empty, 0, 0).ok());
+  std::string etext;
+  logic::yaml::save_text(empty, zero_inits(), etext);
+  assert(contains(etext, "shared:\n  - {net: AND1.1}\n"));
+  logic::yaml::Workspace ews{};
+  assert(logic::yaml::load_text(etext, ews, err));
+  assert(netlists_equal(empty, ews.netlist));
+  assert(logic::is_shared_input(ews.netlist, 0, 0));
+  assert(logic::shared_attachment_count(ews.netlist, 0, 0) == 0);
+  std::string etext2;
+  logic::yaml::save_text(ews.netlist, zero_inits(), etext2);
+  assert(etext == etext2);
+}
+
+// 011 US4: the additive schema is loud everywhere — no silent
+// reinterpretation.
+void test_shared_schema_refusals() {
+  const std::string head =
+      "version: 1\n"
+      "gates:\n"
+      "  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
+      "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+      "wires:\n";
+  const std::string mid = "ties:\nclocks:\n";
+  const std::string tail = "meta:\n  tool: wengine-logic\n";
+  // Unknown key in shared: section.
+  {
+    const std::string text = head + mid + "shared:\n  - {net: NOT1.1, bogus: 1}\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "unknown shared key"));
+  }
+  // Duplicate mark row.
+  {
+    const std::string text = head + mid + "shared:\n  - {net: NOT1.1}\n  - {net: NOT1.1}\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "duplicate shared net"));
+  }
+  // Mark on a dead pin.
+  {
+    const std::string text = head + mid + "shared:\n  - {net: NOPE.1}\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "bad shared net"));
+  }
+  // Cap overflow: 1 primary + 4 extras on one marked input.
+  {
+    const std::string text =
+        head + "  - {from: AND1.Y, to: NOT1.1}\n  - {from: AND1.Y, to: NOT1.1}\n"
+        "  - {from: AND1.Y, to: NOT1.1}\n  - {from: AND1.Y, to: NOT1.1}\n"
+        "  - {from: AND1.Y, to: NOT1.1}\n" + "shared:\n  - {net: NOT1.1}\n" + mid + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "shared net full"));
+  }
+  // Marked input also tied: loud, never silently reinterpreted.
+  {
+    const std::string tied =
+        "version: 1\n"
+        "gates:\n"
+        "  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
+        "wires:\n"
+        "ties:\n"
+        "  - {a: AND1.1, b: AND1.2}\n"
+        "clocks:\n"
+        "shared:\n"
+        "  - {net: AND1.1}\n" +
+        tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(tied, ws, err));
+    assert(contains(err, "shared net cannot be tied"));
+  }
+}
+
 } // namespace
 
 int main() {
@@ -913,6 +1060,8 @@ int main() {
   test_sr_round_trip();
   test_sequential_feedback_round_trip();
   test_malformed_line_numbers();
+  test_shared_round_trip();
+  test_shared_schema_refusals();
   test_examples();
   std::cout << "test_logic_yaml: OK\n";
   return 0;

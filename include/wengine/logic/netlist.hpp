@@ -45,16 +45,20 @@ namespace wengine::logic {
 // table Module); tie math + block-interface derivation live in
 // tie_set.hpp / block_interface.hpp. This header owns mutation.
 
+// Forward declarations: remove_gate sweeps shared attachments through the
+// named-edge removal seam defined below (promotion/compaction keep the
+// shared span dense).
+[[nodiscard]] inline core::Status unwire(Netlist &nl, std::uint16_t to_slot, std::uint8_t to_input) noexcept;
+[[nodiscard]] inline core::Status unwire_driver(Netlist &nl, std::uint16_t from_slot, std::uint16_t to_slot, std::uint8_t to_input) noexcept;
+
 /**
  * @brief Add a gate with explicit fan-in; lowest free slot wins
- *        (deterministic), per-kind counter assigns then increments,
- *        never reused.
+ *        (deterministic), per-kind counter assigns then increments, never reused.
  *
  * @param[out] nl Netlist receiving the gate.
  * @param[in] kind Gate kind to create.
  * @param[in] inputs Fan-in; must satisfy valid_fanin(kind, inputs).
- * @return kOk with the new slot on success; kInvalidArgument for bad
- *         fan-in, an unknown kind, or a full netlist ("netlist full").
+ * @return kOk with the new slot on success; kInvalidArgument for bad fan-in, an unknown kind, or a full netlist ("netlist full").
  */
 [[nodiscard]] inline core::Result<std::uint16_t> add_gate(Netlist &nl, GateKind kind, std::uint8_t inputs) noexcept {
   if (!valid_fanin(kind, inputs)) {
@@ -157,6 +161,26 @@ namespace wengine::logic {
       }
     }
     g.drivers[i] = kNoDriver;
+    // Release every extra attachment on this input (polarity-aware) and
+    // drop the mark: marks die with their gate's slot.
+    const std::size_t flat = tie_flat(slot, i);
+    const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+    for (std::uint8_t j = 0; j < extra_n; ++j) {
+      const std::size_t eii = flat * kMaxSharedExtra + j;
+      const std::uint16_t edrv = nl.extra_drivers[eii];
+      if (edrv < kMaxGates && nl.gates[edrv].live) {
+        if (nl.extra_inv[eii] != 0) {
+          if (nl.gates[edrv].nq_fanout > 0) {
+            --nl.gates[edrv].nq_fanout;
+          }
+        } else if (nl.gates[edrv].output_fanout > 0) {
+          --nl.gates[edrv].output_fanout;
+        }
+      }
+      nl.extra_drivers[eii] = 0;
+      nl.extra_inv[eii] = 0;
+    }
+    nl.shared_meta[flat] = 0;
   }
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     Gate &o = nl.gates[s];
@@ -165,8 +189,20 @@ namespace wengine::logic {
     }
     for (std::uint8_t i = 0; i < o.input_count; ++i) {
       if (o.drivers[i] == slot) {
-        o.drivers[i] = kNoDriver;
-        nl.driver_inv[tie_flat(s, i)] = 0;
+        // Primary attachment of the removed gate: unwire promotes extra
+        // 0 when the input holds more drivers (mark preserved).
+        (void)unwire(nl, s, i);
+      } else {
+        // Extra attachment of the removed gate: release exactly that
+        // edge (left-compact; remaining drivers resolve unchanged).
+        const std::size_t flat = tie_flat(s, i);
+        const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+        for (std::uint8_t j = 0; j < extra_n; ++j) {
+          if (nl.extra_drivers[flat * kMaxSharedExtra + j] == slot) {
+            (void)unwire_driver(nl, slot, s, i);
+            break; // one named edge per (from, to, input) scan position
+          }
+        }
       }
     }
   }
@@ -207,7 +243,162 @@ namespace wengine::logic {
 }
 
 /**
- * @brief Single-driver wire: exactly one wire per destination input.
+ * @brief True when the destination input is marked as a shared (multi-driver) net (011): bit0 of shared_meta[flat].
+ *
+ * Out-of-range pins read unmarked (never shared); the mark is per
+ * input, explicit, and inspectable.
+ *
+ * @param[in] nl Netlist holding the mark table.
+ * @param[in] slot Sink slot.
+ * @param[in] input 0-based sink input index.
+ * @return True when the input carries the shared mark.
+ */
+[[nodiscard]] inline bool is_shared_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+  if (slot >= kMaxGates || input >= kMaxInputs) {
+    return false;
+  }
+  return is_shared_flat(nl, tie_flat(slot, input));
+}
+
+/**
+ * @brief Extra-attachment count on a shared input, 0..kMaxSharedExtra (011): bits1..2 of shared_meta[flat].
+ *
+ * @param[in] nl Netlist holding the mark table.
+ * @param[in] slot Sink slot.
+ * @param[in] input 0-based sink input index.
+ * @return Extra count (0 when unmarked or out of range).
+ */
+[[nodiscard]] inline std::uint8_t shared_extra_count(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+  if (slot >= kMaxGates || input >= kMaxInputs) {
+    return 0;
+  }
+  return shared_extra_flat(nl, tie_flat(slot, input));
+}
+
+/**
+ * @brief Total attachments on an input (011): the primary driver (when
+ *        present) plus extras. A shared net legally holds 0..4 across
+ *        its lifetime; 0 attachments resolve kHighZ.
+ *
+ * @param[in] nl Netlist holding drivers and extras.
+ * @param[in] slot Sink slot.
+ * @param[in] input 0-based sink input index.
+ * @return Attachment count (0 when unwired/out of range).
+ */
+[[nodiscard]] inline std::uint8_t shared_attachment_count(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+  if (slot >= kMaxGates || input >= kMaxInputs || !nl.gates[slot].live) {
+    return 0;
+  }
+  const std::uint8_t primary = (input < nl.gates[slot].input_count && nl.gates[slot].drivers[input] != kNoDriver) ? 1 : 0;
+  return static_cast<std::uint8_t>(primary + shared_extra_count(nl, slot, input));
+}
+
+namespace detail {
+
+/**
+ * @brief Append one extra driver to a marked, occupied input (011).
+ *
+ * Caller-owned validation: the mark is set, the primary is occupied,
+ * and the edge passed the same live/range/untied/cycle checks as any
+ * wire. Cap overflow fails loudly, never truncates.
+ *
+ * @param[out] nl Netlist receiving the attachment.
+ * @param[in] from_slot Driver slot.
+ * @param[in] to_slot Sink slot.
+ * @param[in] to_input 0-based sink input index.
+ * @param[in] inv Per-attachment NQ polarity (1 = inverted).
+ * @return kOk on append; kInvalidArgument past the cap.
+ */
+[[nodiscard]] inline core::Status append_shared_extra(Netlist &nl, std::uint16_t from_slot,
+                                                      std::uint16_t to_slot, std::uint8_t to_input,
+                                                      std::uint8_t inv) noexcept {
+  const std::size_t flat = tie_flat(to_slot, to_input);
+  const std::uint8_t count = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+  if (count >= kMaxSharedExtra) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // cap 4: loud, never truncated
+  }
+  nl.extra_drivers[flat * kMaxSharedExtra + count] = from_slot;
+  nl.extra_inv[flat * kMaxSharedExtra + count] = inv;
+  nl.shared_meta[flat] = static_cast<std::uint8_t>((nl.shared_meta[flat] & 0x01u) | ((count + 1u) << 1));
+  Gate &from = nl.gates[from_slot];
+  if (inv != 0) {
+    ++from.nq_fanout;
+  } else {
+    ++from.output_fanout;
+  }
+  nl.dirty = true;
+  nl.topo_size = 0;
+  return core::Status::success();
+}
+
+} // namespace detail
+
+/**
+ * @brief Mark a destination input as a shared (multi-driver) net (011): the explicit per-input opt-in lifting the single-driver rule.
+ *
+ * Legal on unoccupied inputs (pre-marking) and idempotent on marked
+ * ones. Refused on tied inputs (ties never join a driver span) and on
+ * dead/out-of-range pins. Marks are persistent topology state and die
+ * with their gate's slot.
+ *
+ * @param[out] nl Netlist receiving the mark.
+ * @param[in] slot Sink slot.
+ * @param[in] input 0-based sink input index.
+ * @return kOk on mark; kInvalidArgument for dead/out-of-range pins or tied destinations.
+ */
+[[nodiscard]] inline core::Status mark_shared(Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+  if (slot >= kMaxGates || !nl.gates[slot].live) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (input >= nl.gates[slot].input_count) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (is_tied(nl, slot, input)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
+  }
+  nl.shared_meta[tie_flat(slot, input)] |= 0x01u; // idempotent
+  return core::Status::success();
+}
+
+/**
+ * @brief Clear the shared mark on an input (011).
+ *
+ * Refused loudly while the input holds more than one attachment
+ * (unwire down to at most one driver first) and on unmarked inputs.
+ * The attachment set is untouched — only the mark clears.
+ *
+ * @param[out] nl Netlist holding the mark.
+ * @param[in] slot Sink slot.
+ * @param[in] input 0-based sink input index.
+ * @return kOk on unmark; kInvalidArgument for dead/out-of-range pins,
+ *         unmarked inputs, or inputs holding >= 2 attachments.
+ */
+[[nodiscard]] inline core::Status unshare_input(Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+  if (slot >= kMaxGates || !nl.gates[slot].live) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (input >= nl.gates[slot].input_count) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  const std::size_t flat = tie_flat(slot, input);
+  if ((nl.shared_meta[flat] & 0x01u) == 0) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // not shared
+  }
+  if (((nl.shared_meta[flat] >> 1) & 0x03u) != 0) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // unwire extras first
+  }
+  nl.shared_meta[flat] = 0;
+  return core::Status::success();
+}
+
+/**
+ * @brief Single-driver wire, with the shared-net opt-in (011).
+ *
+ * Exactly one wire per destination input — unless that input is marked
+ * shared, in which case the edge appends as an extra attachment (up to
+ * kMaxSharedExtra extras; overflow is loud, never truncated). The
+ * occupied-input refusal on unmarked inputs is byte-identical to the
+ * pre-011 rule.
  *
  * An edge into a sequential-gate input can never close a combinational
  * cycle (flop Q outputs break loops), so the incremental check is
@@ -220,9 +411,9 @@ namespace wengine::logic {
  * @param[in] to_slot Sink slot.
  * @param[in] to_input 0-based sink input index.
  * @return kOk on success; kInvalidArgument for dead/out-of-range
- *         slots or inputs, occupied inputs, tied destinations (untie
- *         first), or cycle-closing wires. The netlist is untouched on
- *         failure. Fan-out is unlimited.
+ *         slots or inputs, occupied unmarked inputs, tied destinations
+ *         (untie first), shared-cap overflow, or cycle-closing wires.
+ *         The netlist is untouched on failure. Fan-out is unlimited.
  */
 [[nodiscard]] inline core::Status wire(Netlist &nl, std::uint16_t from_slot, std::uint16_t to_slot, std::uint8_t to_input) noexcept {
   if (from_slot >= kMaxGates || to_slot >= kMaxGates) {
@@ -236,7 +427,8 @@ namespace wengine::logic {
   if (to_input >= to.input_count) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (to.drivers[to_input] != kNoDriver) {
+  const bool shared_marked = is_shared_input(nl, to_slot, to_input);
+  if (to.drivers[to_input] != kNoDriver && !shared_marked) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // occupied
   }
   if (is_tied(nl, to_slot, to_input)) {
@@ -252,6 +444,11 @@ namespace wengine::logic {
   if (!is_sequential_kind(to.kind) && topo::reaches(nl, to_slot, from_slot, EdgeFilter::kCombOnly)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // cycle
   }
+  if (to.drivers[to_input] != kNoDriver) {
+    // Shared append: the mark is the prior explicit opt-in; every
+    // attachment passes the same validation above. Never truncates.
+    return detail::append_shared_extra(nl, from_slot, to_slot, to_input, 0);
+  }
   to.drivers[to_input] = from_slot;
   ++from.output_fanout;
   nl.driver_inv[tie_flat(to_slot, to_input)] = 0; // slot-wire is never inverted
@@ -261,14 +458,17 @@ namespace wengine::logic {
 }
 
 /**
- * @brief Remove the wire driving one input (polarity-aware: NQ edges
- *        decrement nq_fanout, Q edges decrement output_fanout).
+ * @brief Remove the wire driving one input (polarity-aware: NQ edges decrement nq_fanout, Q edges decrement output_fanout).
+ *
+ * On a shared input holding extras, removing the primary promotes
+ * extra 0 (slot + polarity) into drivers[]/driver_inv and left-compacts
+ * the remainder — the mark is untouched, so a marked input legally
+ * holds 0..cap attachments across its lifetime.
  *
  * @param[out] nl Netlist holding the wire.
  * @param[in] to_slot Sink slot.
  * @param[in] to_input 0-based sink input index.
- * @return kOk on success; kInvalidArgument for dead/out-of-range
- *         slots or inputs, or an already-unwired input.
+ * @return kOk on success; kInvalidArgument for dead/out-of-range slots or inputs, or an already-unwired input.
  */
 [[nodiscard]] inline core::Status unwire(Netlist &nl, std::uint16_t to_slot, std::uint8_t to_input) noexcept {
   if (to_slot >= kMaxGates) {
@@ -298,10 +498,87 @@ namespace wengine::logic {
     } else if (nl.gates[drv].output_fanout > 0) {
       --nl.gates[drv].output_fanout;
     }
+    // Promote extra 0 into the primary slot (pinned order: attachment
+    // sequences in different orders converge to identical array
+    // states). The promoted edge keeps its counted fanout — the source
+    // still drives this input.
+    const std::uint8_t count = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+    if (count > 0) {
+      to.drivers[to_input] = nl.extra_drivers[flat * kMaxSharedExtra + 0];
+      nl.driver_inv[flat] = nl.extra_inv[flat * kMaxSharedExtra + 0];
+      for (std::uint8_t j = 0; j < static_cast<std::uint8_t>(count - 1u); ++j) {
+        nl.extra_drivers[flat * kMaxSharedExtra + j] = nl.extra_drivers[flat * kMaxSharedExtra + static_cast<std::size_t>(j) + 1];
+        nl.extra_inv[flat * kMaxSharedExtra + j] = nl.extra_inv[flat * kMaxSharedExtra + static_cast<std::size_t>(j) + 1];
+      }
+      const std::size_t tail = flat * kMaxSharedExtra + (count - 1u);
+      nl.extra_drivers[tail] = 0;
+      nl.extra_inv[tail] = 0;
+      nl.shared_meta[flat] = static_cast<std::uint8_t>((nl.shared_meta[flat] & 0x01u) | ((count - 1u) << 1));
+    }
   }
   nl.dirty = true;
   nl.topo_size = 0;
   return core::Status::success();
+}
+
+/**
+ * @brief Remove one named edge onto a shared input (011): the exact
+ *        attachment from from_slot, wherever it sits.
+ *
+ * Removing the primary delegates to unwire() (promotion included);
+ * removing extra j releases its fanout polarity-aware and left-compacts
+ * (pinned order). Removing an edge that is not attached fails loudly.
+ * No dangling entries survive; remaining drivers resolve unchanged.
+ *
+ * @param[out] nl Netlist holding the wire.
+ * @param[in] from_slot Driver slot of the edge to release.
+ * @param[in] to_slot Sink slot.
+ * @param[in] to_input 0-based sink input index.
+ * @return kOk on release; kInvalidArgument for dead/out-of-range pins
+ *         or an edge that is not attached.
+ */
+[[nodiscard]] inline core::Status unwire_driver(Netlist &nl, std::uint16_t from_slot, std::uint16_t to_slot, std::uint8_t to_input) noexcept {
+  if (from_slot >= kMaxGates || to_slot >= kMaxGates) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  Gate &to = nl.gates[to_slot];
+  if (!to.live || !nl.gates[from_slot].live) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (to_input >= to.input_count) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (to.drivers[to_input] == from_slot) {
+    return unwire(nl, to_slot, to_input); // primary edge (promotion included)
+  }
+  const std::size_t flat = tie_flat(to_slot, to_input);
+  const std::uint8_t count = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+  for (std::uint8_t j = 0; j < count; ++j) {
+    const std::size_t eij = flat * kMaxSharedExtra + j;
+    if (nl.extra_drivers[eij] != from_slot) {
+      continue;
+    }
+    // Polarity-aware release of exactly this edge.
+    if (nl.extra_inv[eij] != 0) {
+      if (nl.gates[from_slot].nq_fanout > 0) {
+        --nl.gates[from_slot].nq_fanout;
+      }
+    } else if (nl.gates[from_slot].output_fanout > 0) {
+      --nl.gates[from_slot].output_fanout;
+    }
+    for (std::uint8_t k = j; k < static_cast<std::uint8_t>(count - 1u); ++k) {
+      nl.extra_drivers[flat * kMaxSharedExtra + k] = nl.extra_drivers[flat * kMaxSharedExtra + static_cast<std::size_t>(k) + 1];
+      nl.extra_inv[flat * kMaxSharedExtra + k] = nl.extra_inv[flat * kMaxSharedExtra + static_cast<std::size_t>(k) + 1];
+    }
+    const std::size_t tail = flat * kMaxSharedExtra + (count - 1u);
+    nl.extra_drivers[tail] = 0;
+    nl.extra_inv[tail] = 0;
+    nl.shared_meta[flat] = static_cast<std::uint8_t>((nl.shared_meta[flat] & 0x01u) | ((count - 1u) << 1));
+    nl.dirty = true;
+    nl.topo_size = 0;
+    return core::Status::success();
+  }
+  return core::Status::failure(core::StatusCode::kInvalidArgument); // edge not attached
 }
 
 /**
@@ -311,11 +588,9 @@ namespace wengine::logic {
  * inverted (wire() always establishes the non-inverted state).
  *
  * @param[out] nl Netlist receiving the wire.
- * @param[in] from Output pin (NQ sources exist on sequential gates
- *            only).
+ * @param[in] from Output pin (NQ sources exist on sequential gates only).
  * @param[in] to Input pin.
- * @return kOk on success; kInvalidArgument for input-as-source pins,
- *         dead slots, NQ sources on combinational gates, occupied or
+ * @return kOk on success; kInvalidArgument for input-as-source pins, dead slots, NQ sources on combinational gates, occupied or
  *         tied destinations, or cycle-closing wires.
  */
 [[nodiscard]] inline core::Status wire_pins(Netlist &nl, PinRef from, PinRef to) noexcept {
@@ -330,9 +605,25 @@ namespace wengine::logic {
   if (from.negated && !is_sequential_kind(nl.gates[from.slot].kind)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
+  // Shared append detection before the mutation: wire() lands the edge
+  // as the last extra on marked occupied inputs (Q fanout, inv 0).
+  const bool shared_append = is_shared_input(nl, to.slot, to.input) && nl.gates[to.slot].drivers[to.input] != kNoDriver;
   const core::Status st = wire(nl, from.slot, to.slot, to.input);
   if (!st.ok() || !from.negated) {
     return st;
+  }
+  if (shared_append) {
+    // Move the just-appended extra from the Q fanout to the NQ fanout
+    // and mark it inverted (wire() always establishes non-inverted).
+    Gate &src = nl.gates[from.slot];
+    if (src.output_fanout > 0) {
+      --src.output_fanout;
+    }
+    ++src.nq_fanout;
+    const std::size_t flat = tie_flat(to.slot, to.input);
+    const std::uint8_t count = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+    nl.extra_inv[flat * kMaxSharedExtra + (count - 1u)] = 1;
+    return core::Status::success();
   }
   // Move the edge from the Q fanout to the NQ fanout and mark the sink
   // inverted (wire() always establishes the non-inverted state).
@@ -448,8 +739,7 @@ namespace wengine::logic {
 }
 
 /**
- * @brief Clear the whole netlist to the fresh state: every slot dead,
- *        ties cleared, per-kind counters restarted at 1.
+ * @brief Clear the whole netlist to the fresh state: every slot dead, ties cleared, per-kind counters restarted at 1.
  *
  * @param[out] nl Netlist to reset.
  */
@@ -471,6 +761,12 @@ inline void reset_netlist(Netlist &nl) noexcept {
     }
     for (std::size_t i = 0; i < kMaxInputs; ++i) {
       nl.driver_inv[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
+      nl.shared_meta[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
+      for (std::size_t j = 0; j < kMaxSharedExtra; ++j) {
+        const std::size_t eij = (static_cast<std::size_t>(s) * kMaxInputs + i) * kMaxSharedExtra + j;
+        nl.extra_drivers[eij] = 0;
+        nl.extra_inv[eij] = 0;
+      }
     }
   }
   reset_all_ties(nl);

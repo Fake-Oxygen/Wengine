@@ -99,6 +99,13 @@ std::map<std::string, std::uint64_t> &cycles_impl() {
   return cycles;
 }
 
+// (011) Contention counters: observation-only session state beside the
+// poke map and cycle counts; never serialized, cleared by `reset`.
+wengine::logic::SolveDiag &diag_impl() {
+  static wengine::logic::SolveDiag diag{};
+  return diag;
+}
+
 } // namespace
 
 ::wengine::logic::Netlist &workspace() { return workspace_impl(); }
@@ -111,9 +118,12 @@ std::map<std::size_t, ::wengine::logic::LogicValue> &poke_map() { return poke_im
 
 std::map<std::string, std::uint64_t> &cycle_counts() { return cycles_impl(); }
 
+::wengine::logic::SolveDiag &solve_diag() { return diag_impl(); }
+
 void reset_seq_session_state() {
   poke_impl().clear();
   cycles_impl().clear();
+  diag_impl() = ::wengine::logic::SolveDiag{};
   ::wengine::logic::reset_seq_state(seq_state_impl());
 }
 

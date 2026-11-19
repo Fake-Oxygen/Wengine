@@ -157,6 +157,11 @@ inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge,
       if (feeds_seq != nullptr && feeds_seq[t]) {
         continue;
       }
+      // 011: never merge through a shared span (unreachable today — O2
+      // refuses marked netlists upfront — but the freeze is structural).
+      if (drives_shared(nl, t) || drives_shared(nl, s)) {
+        continue;
+      }
       rewire_users(nl, t, s);
       (void)remove_gate(nl, t);
       changed = true;
@@ -249,6 +254,10 @@ inline bool double_inv_universal_pass(Netlist &nl, GateKind u, const bool *feeds
     // later DCE removes it). Never cancel a gate feeding a sequential
     // gate (opaque barrier).
     if (feeds_seq != nullptr && feeds_seq[s]) {
+      continue;
+    }
+    // 011: never cancel through a shared span (see the dedup guard above).
+    if (drives_shared(nl, s)) {
       continue;
     }
     rewire_users(nl, s, e);
