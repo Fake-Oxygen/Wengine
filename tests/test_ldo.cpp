@@ -1,3 +1,5 @@
+// test_ldo: LDO regulator solver reference anchors, helper checks, typed
+// API, and CLI run/completion paths. Guards regulator golden regressions.
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/solvers/ldo.hpp"

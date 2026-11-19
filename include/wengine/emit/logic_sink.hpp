@@ -1,5 +1,14 @@
 #pragma once
 
+/**
+ * @file
+ * Machine-readable sequential-logic log: tidy CSV, one row per live flop
+ * per snapshot, co-located replay parser. Companion to SignalsCsvSink,
+ * which stays signal-shaped: sim run writes this log when the solver is
+ * logic, so each domain keeps its exact round-trip format instead of one
+ * widened schema that breaks both. Depends on core/status and emit/csv_sink.hpp
+ * (shared field parsers); never on solvers. Consumed by logic runs and replay tools.
+ */
 // Machine-readable sequential log (005-US3): tidy CSV, one row per live
 // flop per snapshot (`step,time,seq_id,value`), header written once.
 // Companion to SignalsCsvSink, which stays signal-shaped: `sim run` writes
@@ -28,8 +37,22 @@
 
 namespace wengine::emit {
 
+/**
+ * @brief Tidy flop CSV writer: one row per live flop per snapshot.
+ * @note seq_id is the stable flop serial in Snapshot slot order (serials are
+ * NOT ascending after slot recycling; uniqueness within a step is validated
+ * preserving writer order); value is Q (0/1). Doubles use max_digits10
+ * (exact round-trip, == on re-read). Best-effort observer: sticky status, never throws.
+ */
 class LogicCsvSink : public ISink {
  public:
+/**
+ * @brief Open the log file and write the header.
+ * @param[in] path destination file.
+ * @param[in] truncate true truncates; false appends (the header is then written only when
+ * starting an empty file).
+ * @note A failed open is a sticky kInternal status, never a throw.
+ */
   explicit LogicCsvSink(std::string path, bool truncate = true) : path_(std::move(path)) {
     out_.open(path_, truncate ? std::ios::trunc : std::ios::app);
     if (!out_) {
@@ -45,6 +68,10 @@ class LogicCsvSink : public ISink {
     }
   }
 
+/**
+ * @brief Append one row per live flop for the snapshot.
+ * @param[in] s emitted snapshot.
+ */
   void on_snapshot(const world::Snapshot &s) override {
     if (!status_.ok()) {
       return;
@@ -60,11 +87,19 @@ class LogicCsvSink : public ISink {
     }
   }
 
+/** @brief Sticky health flag. @return true while no I/O failure occurred (state query, not an error return). */
   [[nodiscard]] bool ok() const noexcept { return status_.ok(); }
+/** @brief Sticky status. @return kOk, or kInternal once I/O has failed. */
   [[nodiscard]] core::Status status() const noexcept { return status_; }
+/** @brief Data rows appended, ever. @return Count of written flop rows. */
   [[nodiscard]] std::size_t rows_written() const noexcept { return rows_; }
+/** @brief Destination file. @return The path passed to the constructor. */
   [[nodiscard]] const std::string &path() const noexcept { return path_; }
 
+/**
+ * @brief Push buffered rows to the file (for tailing; also happens on close).
+ * @return The sticky status (kInternal once I/O has failed).
+ */
   core::Status flush() {
     if (!status_.ok()) {
       return status_;
@@ -91,6 +126,17 @@ class LogicCsvSink : public ISink {
 // rows (exact ==), value 0/1. Violations are kInvalidArgument with a
 // line-numbered message; `out` is cleared on failure.
 [[nodiscard]] inline core::Status
+/**
+ * @brief Replay a LogicCsvSink log back into snapshots, one per step in file order.
+ * @param[in] in log stream (byte-exact "step,time,seq_id,value" header).
+ * @param[out] out parsed snapshots; cleared on failure.
+ * @param[out] error human line-numbered message on failure.
+ * @return kOk, or kInvalidArgument for a bad header, non-increasing steps, duplicate
+ * seq ids within a step, time differing within a step, or malformed rows (value must be 0/1).
+ * @note Steps strictly increase; seq ids are unique per step with file/slot order
+ * preserved (serials need not ascend after slot recycling); time is identical
+ * across a step's rows (exact ==).
+ */
 parse_logic_log(std::istream &in, std::vector<world::Snapshot> &out,
                 std::string &error) {
   out.clear();

@@ -1,3 +1,13 @@
+/**
+ * @file
+ * UART wire codec for the SIG-8 Zephyr HIL track (host side, header-only).
+ * @note Two modes share one line language (the signals-CSV row shape, so the UART stream,
+ *       the CSV log, and the Zephyr parser never drift): ascii raw lines vs COBS frames.
+ *       Pure + portable (no termios, no fd): the POSIX port TU owns the serial device, and
+ *       the Zephyr sample ships its own C99 parser cross-checked against the builder here.
+ *       Headers stay platform-free (no POSIX TU for this header).
+ *       Consumers: UartPublisher/UartControl and the Zephyr sample parser.
+ */
 #pragma once
 
 // UART wire codec for the SIG-8 Zephyr HIL track (host side, header-only).
@@ -44,18 +54,30 @@ namespace wengine::link::uart {
 
 // Default serial profile: 115200 8N1 (8 data, no parity, 1 stop — set in
 // the TU via termios; this header only names the rate).
+/** @brief Default serial profile: 115200 8N1 (8 data, no parity, 1 stop — set in the TU via termios; this header only names the rate). */
 inline constexpr unsigned kDefaultUartBaud = 115200;
 // Wire modes, selected explicitly (never silent): raw lines vs COBS frames.
+/** @brief Wire mode, selected explicitly (never silent): kAscii raw lines vs kCobs COBS frames. */
 enum class UartMode : std::uint8_t { kAscii = 0, kCobs = 1 };
 // Control marker (ascii mode) and frame type bytes (cobs mode).
+/** @brief Control marker (ascii mode): control lines are `!<line>` both ways (stream lines never start with '!', so the ascii demux is unambiguous). */
 inline constexpr char kControlPrefix = '!';
+/** @brief Cobs frame type byte: stream payload (COBS('S' + line) + 0x00). */
 inline constexpr char kFrameStream = 'S';
+/** @brief Cobs frame type byte: device-to-host command (COBS('Q' + line) + 0x00). */
 inline constexpr char kFrameCommand = 'Q';
+/** @brief Cobs frame type byte: host-to-device response (COBS('R' + line) + 0x00). */
 inline constexpr char kFrameResponse = 'R';
 // Largest COBS frame payload the host accepts (matches the control-plane
 // line cap; stream lines are far shorter).
+/** @brief Largest COBS frame payload the host accepts (matches the control-plane line cap; stream lines are far shorter). */
 inline constexpr std::size_t kMaxFrameBytes = 4096;
 
+/**
+ * @brief Parse a wire-mode name.
+ * @param[in] s mode text ("ascii" or "cobs").
+ * @return Result with the mode on success; failure (kInvalidArgument, "want ascii|cobs") otherwise.
+ */
 [[nodiscard]] inline core::Result<UartMode> parse_mode(std::string_view s) noexcept {
   if (s == "ascii") {
     return core::Result<UartMode>::success(UartMode::kAscii);
@@ -68,9 +90,15 @@ inline constexpr std::size_t kMaxFrameBytes = 4096;
 
 // Baud rates configurable via --emit-uart <device[,baud]> (termios mapping
 // lives in the TU; unknown rates are usage errors, never silent 9600).
+/** @brief Baud rates configurable via --emit-uart device[,baud] (termios mapping lives in the TU; unknown rates are usage errors, never silent 9600). */
 inline constexpr std::array<unsigned, 8> kSupportedBauds{{9600u, 19200u, 38400u, 57600u,
                                                           115200u, 230400u, 460800u, 921600u}};
 
+/**
+ * @brief Baud allowlist predicate.
+ * @param[in] baud rate in bits/s.
+ * @return True when baud is in kSupportedBauds.
+ */
 [[nodiscard]] inline bool baud_supported(unsigned baud) noexcept {
   for (unsigned b : kSupportedBauds) {
     if (b == baud) {
@@ -81,11 +109,19 @@ inline constexpr std::array<unsigned, 8> kSupportedBauds{{9600u, 19200u, 38400u,
 }
 
 // Split "device[,baud]" on the LAST comma (device paths win over the rate).
+/** @brief Split device[,baud] target: device paths win over the rate (split on the LAST comma). */
 struct UartEndpoint {
+/** @brief Serial device path (e.g. /dev/ttyUSB0, pty symlinks). */
   std::string device;
+/** @brief Explicit baud rate (default 115200). */
   unsigned baud = kDefaultUartBaud;
 };
 
+/**
+ * @brief Parse device[,baud] endpoint text.
+ * @param[in] text endpoint text.
+ * @return Result with UartEndpoint on success; failure (kInvalidArgument: "want device[,baud]" / "baud must be numeric" / "baud out of range" / "unsupported baud") otherwise.
+ */
 [[nodiscard]] inline core::Result<UartEndpoint> parse_uart_endpoint(std::string_view text) {
   if (text.empty()) {
     return core::Result<UartEndpoint>::failure("want device[,baud]");
@@ -130,6 +166,12 @@ struct UartEndpoint {
 // to a single 0x01 code byte; empty frames never decode (no silent empty
 // commands). Overhead is at most ceil(n/254)+1 bytes (<0.5% past 254 B).
 
+/**
+ * @brief Consistent Overhead Byte Stuffing encode (Stuart, 1997): appends the COBS frame WITHOUT the 0x00 delimiter (callers add exactly one).
+ * @param[in] in payload bytes (0x00-free after encoding; empty input encodes to a single 0x01 code byte).
+ * @param[out] out encoded frame appended (reserve-grown; overhead at most ceil(n/254)+1 bytes).
+ * @return kOk on success; kInvalidArgument when in exceeds kMaxFrameBytes.
+ */
 [[nodiscard]] inline core::Status cobs_encode(std::string_view in, std::string &out) {
   // Worst case: every 254 data bytes cost one code byte, plus the final.
   if (in.size() > kMaxFrameBytes) {
@@ -160,6 +202,11 @@ struct UartEndpoint {
   return core::Status::success();
 }
 
+/**
+ * @brief COBS decode of one delimiter-free frame (empty frames never decode: no silent empty commands).
+ * @param[in] frame delimiter-free COBS frame.
+ * @return Result with decoded bytes on success; failure (kInvalidArgument, "bad COBS frame") for bad code bytes, trailing span overruns, or oversized frames — malformed, loud, never half-parsed.
+ */
 [[nodiscard]] inline core::Result<std::string> cobs_decode(std::string_view frame) {
   using R = core::Result<std::string>;
   if (frame.empty() || frame.size() > kMaxFrameBytes + kMaxFrameBytes / 254 + 2) {
@@ -191,6 +238,15 @@ struct UartEndpoint {
 // Identical to one signals-CSV row (same field order, same %.17g doubles)
 // so golden corpora and parsers are shared, not duplicated.
 
+/**
+ * @brief Build one stream line (&lt;step&gt;,&lt;time&gt;,&lt;sig_id&gt;,&lt;value&gt;,&lt;quantity&gt;).
+ * @param[in] step simulation step index.
+ * @param[in] time simulation time in seconds (SI; %.17g, max_digits10 exact round-trip).
+ * @param[in] sig_id stable signal serial.
+ * @param[in] value sampled value (SI; %.17g, `==` on re-read — the same guarantee as the CSV log).
+ * @param[in] quantity stamped quantity suffix (same table as the CSV log).
+ * @return Identical-to-CSV-row line (same field order, same doubles) so golden corpora and parsers are shared, not duplicated.
+ */
 [[nodiscard]] inline std::string build_stream_line(std::uint64_t step, double time,
                                                    std::uint64_t sig_id, double value,
                                                    std::string_view quantity) {
@@ -216,16 +272,28 @@ struct UartEndpoint {
   return line;
 }
 
+/** @brief Parsed stream line (owned quantity: views would dangle past the line). */
 struct StreamSample {
+/** @brief Simulation step index. */
   std::uint64_t step = 0;
+/** @brief Simulation time in seconds (SI). */
   double time = 0.0;
+/** @brief Stable signal serial. */
   std::uint64_t sig_id = 0;
+/** @brief Sampled value (SI). */
   double value = 0.0;
+/** @brief Stamped quantity suffix (owned; "U"/"I" — same table as the CSV log). */
   std::string quantity; // "U"/"I" (owned: views would dangle past the line)
 };
 
 namespace detail {
 
+/**
+ * @brief Strict decimal u64 field parse (digits only, overflow-checked).
+ * @param[in] s field text.
+ * @param[out] v parsed value (untouched on failure).
+ * @return True on success.
+ */
 [[nodiscard]] inline bool parse_u64_field(std::string_view s, std::uint64_t &v) noexcept {
   if (s.empty()) {
     return false;
@@ -245,6 +313,12 @@ namespace detail {
   return true;
 }
 
+/**
+ * @brief Strict decimal f64 field parse (digits with one optional dot + exponent; no inf/nan, no hex, no whitespace — matches what %.17g emits; from_chars, never throws).
+ * @param[in] s field text.
+ * @param[out] v parsed value (untouched on failure).
+ * @return True on success.
+ */
 [[nodiscard]] inline bool parse_f64_field(std::string_view s, double &v) noexcept {
   if (s.empty()) {
     return false;
@@ -309,6 +383,12 @@ namespace detail {
 // Parse one stream line (no trailing newline). Failure is kInvalidArgument;
 // `out` is untouched. Quantity accepts exactly the stamped suffixes
 // ("U"/"I" — same table as the CSV log).
+/**
+ * @brief Parse one stream line (no trailing newline): exactly 5 comma fields with U/I quantity.
+ * @param[in] line stream line text.
+ * @param[out] out parsed sample (untouched on failure).
+ * @return kOk on success; kInvalidArgument otherwise.
+ */
 [[nodiscard]] inline core::Status parse_stream_line(std::string_view line, StreamSample &out) {
   std::string_view f[5];
   std::size_t n = 0;

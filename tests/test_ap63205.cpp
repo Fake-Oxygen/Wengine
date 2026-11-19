@@ -1,3 +1,6 @@
+// test_ap63205: AP63205 buck-converter IC solver goldens (inductor/Cout/UVLO/
+// delay/thermal datasheet formulas) plus the `ic ap63205` CLI glue, shell
+// run paths, and completion. Guards part-specific buck regressions.
 #include "wengine/cli/command_registry.hpp"
 #include "wengine/cli/ic/ap63205.hpp"
 #include "wengine/cli/ic_dispatch.hpp"

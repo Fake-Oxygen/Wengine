@@ -1,58 +1,75 @@
 #pragma once
 
-// Combinational optimizer (LOGIC-4): pure `optimize(netlist, opts)` sells
-// the simplification story in three explicit levels. The input is never
-// touched (const ref in, new Netlist out); overflow past kMaxGates is a
-// loud Result failure, never a silent drop.
-//
-// Levels (docs/logic.md section 6):
-//   O0: constant folding / annihilator + identity with tied inputs,
-//       double-negation + BUF bypass, dead-gate elimination + exact
-//       truth-table simplification for small blocks (n<=10,m<=16: semantic
-//       constants like x&~x==0 + dead inputs). Never grows the net
-//       (gates_after <= gates_before).
-//   O1: O0 + De Morgan bubble-push canonical form: every NOT driven by an
-//       AND/OR/NAND/NOR/XOR/XNOR is fused into the complementary kind in
-//       place (NOT(AND) -> NAND, NOT(OR) -> NOR, ...). Still mixed gates.
-//       Invariant afterwards: no live NOT is driven by a fusable kind.
-//       Output double-negations (NOT driven by NOT at a block output) are
-//       deliberately preserved: deleting the outer gate would move the
-//       output to another slot, and interface stability wins over fusion.
-//   O2: O1 + full conversion to NAND-only (--to nand) or NOR-only
-//       (--to nor). Small blocks (n<=8,m<=8) try minimized two-level
-//       resynthesis (QM + greedy, SOP/POS, shared inverters, tied inputs)
-//       and pick smaller vs structural De Morgan (which is optimal for
-//       XOR-like parity); large blocks use structural + vocabulary-preserving
-//       cleanup (dedup + double-inverter cancellation + DCE). Constants reuse
-//       a shared pool (1-2 gates, not 4+). Gate count may still grow for
-//       large nets; the caller reports before/after counts so the trade is
-//       visible. Minimized may permute inputs (tied, one per variable);
-//       structural preserves positional order (duplicating pins for inversion).
-//
-// Determinism / interface rules (all levels):
-// - Slot-order processing everywhere; new gates take the lowest free
-//   slot (O0/O1) or compact slot order (O2); per-kind counters are never
-//   reused (in-place kind changes take a fresh counter, so display names
-//   stay unique for resolve_gate).
-// - Block outputs keep their slots (O0/O1 convert in place) or their
-//   relative order (O2 emits output networks in original slot order), so
-//   truth-equivalence checks can map outputs positionally.
-// - DCE roots are the ORIGINAL sinks (live fanout-0 gates captured before
-//   any pass, ignored outputs included) plus every live sequential gate:
-//   state readback observes flops outside the block interface, so lack of
-//   fanout never makes a state element dead (opaque barrier). Optimization
-//   orphans (bypassed inners, fused-away drivers, dropped constant gates)
-//   are removed, but user logic feeding an ignored output is never deleted:
-//   ignore means "hidden", not "dead", and the optimizer must not destroy
-//   circuitry the user only hid.
-// - Ignored dangling inputs tie to kLow during eval (netlist.hpp rule).
-//   O0 reasons about them as constant-0; O2 materializes a shared
-//   target-kind constant pool for them. O2 resets propagation_delay_ps
-//   (the network is reshaped; O0/O1 preserve delays in place).
-//
-// Header-only, allocation-free, exception-free like the rest of
-// wengine/logic. No iostream (report printing belongs to the CLI verb in
-// LOGIC-8; the engine exposes before/after counts via live_count).
+/**
+ * @file
+ * Combinational optimizer (LOGIC-4): pure `optimize(netlist, opts)` —
+ * the optimize stage of the logic pipeline (netlist parse -> state ->
+ * eval -> layout/topo -> optimize). Sells the simplification story in
+ * three explicit levels; the input is never touched (const ref in, new
+ * Netlist out); overflow past kMaxGates is a loud Result failure,
+ * never a silent drop. This header only orchestrates: the individual
+ * passes live in optimize_passes.hpp (O0/O1), the sequential barrier
+ * vocabulary in optimize_barrier.hpp, exact truth-table simplification
+ * in optimize_exact.hpp, and the O2 fresh build in
+ * optimize_o2_{build,dedup,emit,min}.hpp.
+ *
+ * Levels (docs/logic.md section 6):
+ *   O0: constant folding / annihilator + identity with tied inputs,
+ *       double-negation + BUF bypass, dead-gate elimination + exact
+ *       truth-table simplification for small blocks (n<=10,m<=16:
+ *       semantic constants like x&~x==0 + dead inputs). Never grows
+ *       the net (gates_after <= gates_before).
+ *   O1: O0 + De Morgan bubble-push canonical form: every NOT driven
+ *       by an AND/OR/NAND/NOR/XOR/XNOR is fused into the complementary
+ *       kind in place (NOT(AND) -> NAND, NOT(OR) -> NOR, ...). Still
+ *       mixed gates. Invariant afterwards: no live NOT is driven by a
+ *       fusable kind. Output double-negations (NOT driven by NOT at a
+ *       block output) are deliberately preserved: deleting the outer
+ *       gate would move the output to another slot, and interface
+ *       stability wins over fusion.
+ *   O2: O1 + full conversion to NAND-only (--to nand) or NOR-only
+ *       (--to nor). Small blocks (n<=8,m<=8) try minimized two-level
+ *       resynthesis (QM + greedy, SOP/POS, shared inverters, tied
+ *       inputs) and pick smaller vs structural De Morgan (which is
+ *       optimal for XOR-like parity); large blocks use structural +
+ *       vocabulary-preserving cleanup (dedup + double-inverter
+ *       cancellation + DCE). Constants reuse a shared pool (1-2
+ *       gates, not 4+). Gate count may still grow for large nets; the
+ *       caller reports before/after counts so the trade is visible.
+ *       Minimized may permute inputs (tied, one per variable);
+ *       structural preserves positional order (duplicating pins for
+ *       inversion).
+ *
+ * Determinism / interface rules (all levels):
+ * - Slot-order processing everywhere; new gates take the lowest free
+ *   slot (O0/O1) or compact slot order (O2); per-kind counters are
+ *   never reused (in-place kind changes take a fresh counter, so
+ *   display names stay unique for resolve_gate).
+ * - Block outputs keep their slots (O0/O1 convert in place) or their
+ *   relative order (O2 emits output networks in original slot order),
+ *   so truth-equivalence checks can map outputs positionally.
+ * - DCE roots are the ORIGINAL sinks (live fanout-0 gates captured
+ *   before any pass, ignored outputs included) plus every live
+ *   sequential gate: state readback observes flops outside the block
+ *   interface, so lack of fanout never makes a state element dead
+ *   (opaque barrier). Optimization orphans (bypassed inners,
+ *   fused-away drivers, dropped constant gates) are removed, but user
+ *   logic feeding an ignored output is never deleted: ignore means
+ *   "hidden", not "dead", and the optimizer must not destroy
+ *   circuitry the user only hid.
+ * - Ignored dangling inputs tie to kLow during eval (netlist.hpp
+ *   rule). O0 reasons about them as constant-0; O2 materializes a
+ *   shared target-kind constant pool for them. O2 resets
+ *   propagation_delay_ps (the network is reshaped; O0/O1 preserve
+ *   delays in place).
+ *
+ * Dependency rules: header-only, allocation-free, exception-free like
+ * the rest of wengine/logic. No iostream (report printing belongs to
+ * the CLI verb in LOGIC-8; the engine exposes before/after counts via
+ * live_count). Logic is a standalone domain — never depends on CLI
+ * types. Consumers: the CLI `optimize` verb, SequentialSolver
+ * lowering, and the logic optimizer tests.
+ */
 
 
 #include "wengine/core/status.hpp"
@@ -76,7 +93,28 @@
 namespace wengine::logic {
 
 
-// Pure optimizer: `in` is never modified (all surgery happens on the copy).
+/**
+ * @brief Pure optimizer: const ref in, new Netlist out; the input is
+ *        never modified (all surgery happens on the copy).
+ *
+ * Runs the O0/O1 fixpoint (bypass, De Morgan fusion at O1/O2, constant
+ * folding, exact simplification, DCE) then, at O2, the fresh universal
+ * rebuild (shared constant pool, creation in original slot order,
+ * wiring from the complete driver map, vocabulary-preserving cleanup,
+ * minimized-vs-structural pick). Sequential nets ride through as opaque
+ * barriers (state elements carried verbatim, combinational glue
+ * converted around them).
+ *
+ * @param[in] in Source netlist (read-only).
+ * @param[in] opts Level (O0/O1/O2) plus the O2 target kind.
+ * @return kOk with the optimized netlist on success; kInvalidArgument
+ *         with an "optimize: ..." message on topology errors, kInternal
+ *         on gate-budget exhaustion or internal iteration bounds. Never
+ *         silently drops gates.
+ * @note Optimizing twice is idempotent. O0 never grows the net
+ *       (gates_after <= gates_before); O2 may grow large nets and the
+ *       caller reports before/after counts.
+ */
 [[nodiscard]] inline core::Result<Netlist> optimize(const Netlist &in, OptimizeOptions opts) noexcept {
   Netlist nl = in;
   nl.dirty = true;

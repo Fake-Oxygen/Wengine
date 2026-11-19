@@ -1,19 +1,29 @@
 #pragma once
 
-// Combinational topology + scalar solve + bit-parallel word eval (LOGIC-2/3).
-//
-// Topology compiles once per mutation (dirty flag): Kahn's algorithm over
-// slot order -> deterministic level order, cycle check included.
-// Steady-state `solve` never re-sorts and never allocates: two fixed
-// stack arrays (resolved dangling inputs + per-gate outputs), caller-owned
-// spans for block I/O. Bit-parallel word eval runs against the same level
-// order (see below).
-//
-// Gate semantics (v1, zero-delay):
-//   AND/OR/NAND/NOR over 2..8 inputs; NOT/BUF exactly 1; XOR is odd parity
-//   over 2..8 (XNOR = NOT(XOR), i.e. even parity). 74-series cascade
-//   equivalence holds only for 2 inputs -- the usage text must say so.
-//   Only kLow/kHigh flow; kHighZ/kUnknown inputs fail loudly (V2 slot).
+/**
+ * @file
+ * Combinational evaluation stage (LOGIC-2/LOGIC-3) of the logic
+ * pipeline: scalar solve plus bit-parallel word eval over one compiled topology. Topology
+ * compiles once per mutation (dirty flag): Kahn's algorithm over slot
+ * order yields a deterministic level order with a cycle check included;
+ * steady-state solve never re-sorts and never allocates (two fixed
+ * stack arrays: resolved dangling inputs plus per-gate outputs;
+ * caller-owned spans for block I/O). Bit-parallel word eval runs
+ * against the same level order.
+ *
+ * Gate semantics (v1, zero-delay): AND/OR/NAND/NOR over 2..8 inputs;
+ * NOT/BUF exactly 1; XOR is odd parity over 2..8 (XNOR = NOT(XOR),
+ * i.e. even parity). 74-series cascade equivalence holds only for 2
+ * inputs. Only kLow/kHigh flow; kHighZ/kUnknown inputs fail loudly
+ * (V2 tri-state slot, docs/logic.md section 12).
+ *
+ * Dependency rules (docs/logic.md sections 4, 5): header-only,
+ * allocation-free, exception-free; depends on block_interface.hpp,
+ * topo.hpp, types.hpp, and core/status for failure codes. Logic is a
+ * standalone domain: this header must never depend on CLI types.
+ * Consumers: the CLI solve/truth verbs, the optimize exact/QM passes
+ * (equivalence checks), and the test_logic* suite.
+ */
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/block_interface.hpp"
@@ -26,8 +36,17 @@
 
 namespace wengine::logic {
 
-// Pure gate function. Precondition: every input is kLow/kHigh and n
-// matches valid_fanin(kind, n) (both enforced by solve()).
+/**
+ * @brief Pure gate function over Low/High inputs.
+ *
+ * @param[in] kind Gate kind to evaluate.
+ * @param[in] inputs Per-input Low/High values (n entries).
+ * @param[in] n Input count; must match valid_fanin(kind, n).
+ * @return Gate output. Sequential kinds never reach here (the
+ *         stepper owns them); they fall to kLow.
+ * @note Precondition: every input is kLow/kHigh and n matches
+ *       valid_fanin(kind, n) (both enforced by solve()).
+ */
 [[nodiscard]] constexpr LogicValue eval_gate(GateKind kind, const LogicValue *inputs, std::uint8_t n) noexcept {
   auto is_high = [](LogicValue v) noexcept { return v == LogicValue::kHigh; };
   switch (kind) {
@@ -81,15 +100,26 @@ namespace wengine::logic {
   return LogicValue::kLow;
 }
 
-// Scalar single-assignment solve over the compiled level order.
-//
-// block_inputs order == derived interface input order (slot order, then
-// input index, one entry per tie class leader); block_outputs order ==
-// interface output order (slot order). Sizes must match exactly or the
-// call fails loudly (dangling pins minus ignored, classes collapsed).
-// Ignored dangling inputs tie to kLow. Tied members share their leader's
-// value. Any kHighZ / kUnknown block input fails loudly. Repeated calls
-// with equal inputs are bit-identical. No heap use (fixed stack arrays).
+/**
+ * @brief Scalar single-assignment solve over the compiled level order.
+ *
+ * block_inputs order == derived interface input order (slot order, then
+ * input index, one entry per tie-class leader); block_outputs order ==
+ * interface output order (slot order). Sizes must match exactly or the
+ * call fails loudly (dangling pins minus ignored, classes collapsed).
+ * Ignored dangling inputs tie to kLow. Tied members share their
+ * leader's value. Any kHighZ/kUnknown block input fails loudly.
+ *
+ * @param[out] nl Netlist to solve (topology recompiled when dirty).
+ * @param[in] block_inputs Input values in interface order.
+ * @param[out] block_outputs Output values in interface order.
+ * @return kOk on success; kInvalidArgument on topology errors
+ *         (combinational cycle, dangling driver), size mismatches,
+ *         X/Z inputs, or X/Z wired drivers.
+ * @note Determinism: repeated calls with equal inputs are bit-identical
+ *       (slot-order level order, slot-order output scan). No heap use
+ *       (fixed stack arrays).
+ */
 [[nodiscard]] inline core::Status solve(Netlist &nl, std::span<const LogicValue> block_inputs, std::span<LogicValue> block_outputs) noexcept {
   core::Status st = topo::rebuild(nl, EdgeFilter::kAll);
   if (!st.ok()) {
@@ -144,30 +174,34 @@ namespace wengine::logic {
   return core::Status::success();
 }
 
-// Bit-parallel truth eval (LOGIC-3): 64 assignments per uint64_t word.
-//
-// Row convention (shared with scalar `solve` and the future `truth`
-// verb): truth row r drives block input j with bit (r>>j)&1, where j is
-// the derived interface order (slot order, then input index). Word w
-// covers rows [w*64, w*64+63]; lane b holds row w*64+b as bit b.
-// `input_column_word` materializes one input's word procedurally, so
-// slices stay valid for any input count (bench nets exceed full-truth
-// enumeration; only slices are ever evaluated).
-//
-// `eval_block_word` evaluates one 64-row slice over the compiled level
-// order: each gate is one branchless word op (&|^|~). Ignored dangling
-// inputs tie to word 0 (same rule as scalar kLow). The last partial word
-// (rows < 64, i.e. fewer than 6 block inputs) is zero-masked on outputs
-// so don't-care lanes never leak. Steady state allocates nothing:
-// `gate_scratch` (kMaxGates words) and `block_outputs` (exactly
-// block_output_count words) are caller-owned, same pattern as
-// `fill_snapshot`. No SIMD intrinsics: scalar words carry the speedup
-// and stay portable; vectorize only on a measured hot path.
-
-// Evaluate one 64-row slice starting at row word_index*64.
-// gate_scratch must hold >= kMaxGates words; block_outputs must hold
-// exactly block_output_count(nl) words. Fails loudly on bad sizes,
-// out-of-range slices (when n_inputs < 31), or topology errors.
+/**
+ * @brief Evaluate one 64-row slice starting at row word_index*64.
+ *
+ * Bit-parallel truth eval: 64 assignments per uint64_t word over the
+ * compiled level order — each gate is one branchless word op (&|^|~).
+ * Row convention (shared with scalar solve and the `truth` verb):
+ * truth row r drives block input j with bit (r>>j)&1, where j is the
+ * derived interface order (slot order, then input index). Word w covers
+ * rows [w*64, w*64+63]; lane b holds row w*64+b as bit b.
+ * input_column_word materializes one input's word procedurally, so
+ * slices stay valid for any input count (bench nets exceed full-truth
+ * enumeration; only slices are ever evaluated). Ignored dangling inputs
+ * tie to word 0 (same rule as scalar kLow). The last partial word
+ * (rows < 64, i.e. fewer than 6 block inputs) is zero-masked on outputs
+ * so don't-care lanes never leak.
+ *
+ * @param[out] nl Netlist to evaluate (topology recompiled when dirty).
+ * @param[in] word_index 64-row slice index to evaluate.
+ * @param[out] gate_scratch Caller-owned scratch (>= kMaxGates words).
+ * @param[out] block_outputs Caller-owned outputs (exactly
+ *             block_output_count(nl) words).
+ * @return kOk on success; kInvalidArgument on bad scratch/output
+ *         sizes, out-of-range slices (when n_inputs < 31), or topology
+ *         errors.
+ * @note Steady state allocates nothing and uses no SIMD intrinsics:
+ *       scalar words carry the speedup and stay portable; vectorize
+ *       only on a measured hot path.
+ */
 [[nodiscard]] inline core::Status eval_block_word(Netlist &nl, std::uint64_t word_index,
                                                  std::span<std::uint64_t> gate_scratch,
                                                  std::span<std::uint64_t> block_outputs) noexcept {

@@ -1,5 +1,34 @@
 #pragma once
 
+/**
+ * @file
+ * O2 single-kind emitter: the conversion stage of the O2 fresh build
+ * inside the optimize stage of the logic pipeline (netlist parse ->
+ * state -> eval -> layout/topo -> optimize). Converts one reachable
+ * source gate into fresh target-kind (NAND/NOR) gates with deferred
+ * wiring: creation runs in original slot order (fresh slots follow it,
+ * so block input/output order is preserved positionally); wiring applies
+ * afterwards from the complete driver map. Dangling pins that derive
+ * from the same source tie leader are tied at wiring time (one variable
+ * per pin), so sequential O2 toggles converge instead of multiplying
+ * pins and gates.
+ *
+ * What it preserves: truth-equivalence gate by gate (structural De
+ * Morgan duals; XOR cascades; verbatim sequential carry). Cost class:
+ * linear in reachable gates times fan-in, plus the XOR cascade blocks.
+ *
+ * Opaque barrier: sequential gates travel via emit_seq_verbatim (same
+ * kind, pin count, and flags; ignored dangling pins stay ignored and
+ * dangling, never pool-routed), never through conversion.
+ *
+ * Dependency rules: header-only, allocation-free, exception-free;
+ * depends on netlist.hpp, optimize_types.hpp, optimize_barrier.hpp,
+ * optimize_exact.hpp, optimize_passes.hpp, and types.hpp. Logic is a
+ * standalone domain: this header must never depend on CLI types.
+ * Consumers: optimize_o2_build.hpp (create_networks) and the
+ * test_logic* suite.
+ */
+
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/optimize_types.hpp"
@@ -15,36 +44,67 @@ namespace wengine::logic {
 
 namespace detail {
 
-// --- O2 fresh-build conversion -------------------------------------------
-// Deferred wiring: creation runs in original slot order (fresh slots follow
-// it, so block input/output order is preserved positionally); wiring
-// applies afterwards from the complete driver map. Dangling pins that
-// derive from the same source tie leader are tied at wiring time (one
-// variable per pin), so sequential O2 toggles converge instead of
-// multiplying pins and gates.
+/**
+ * @brief Deferred-wiring conversion context: creation runs in original
+ *        slot order (fresh slots follow it); wiring applies afterwards
+ *        from the complete driver map.
+ */
+/** @brief Sentinel for "no source tie leader" (wired or pool-routed pins). */
 inline constexpr std::size_t kNoLeader = kMaxGates * kMaxInputs;
 
+/**
+ * @brief One deferred wire: a fresh sink input resolved in the wiring
+ *        pass from the complete emit map (or the shared constant pool).
+ */
 struct PendingWire {
+  /** @brief Fresh sink slot. */
   std::uint16_t fresh = kNoDriver;
+  /** @brief Original driver slot (kNoDriver means dangling). */
   std::uint16_t orig = kNoDriver; // original driver slot (kNoDriver = dangling)
+  /** @brief 0-based fresh sink input index. */
   std::uint8_t input = 0;
+  /** @brief True routes the shared C0 pool gate (ignored original input). */
   bool use_pool = false; // ignored original input: wire the shared C0 pool gate
+  /** @brief Q/NQ polarity of the original sink pin (verbatim seq carry). */
   std::uint8_t inv = 0;  // Q/NQ polarity of the original sink pin (verbatim seq carry)
+  /** @brief Source tie leader for dangling pins (kNoLeader when wired). */
   std::size_t src_leader = kNoLeader; // source tie leader for dangling pins
 };
 
+/**
+ * @brief Mutable O2 emission state: output net, target vocabulary,
+ *        orig-to-fresh driver map, pending wires, and shared pools.
+ */
 struct ConvertCtx {
+  /** @brief Fresh output netlist under construction. */
   Netlist *out = nullptr;
+  /** @brief Single-kind target (NAND or NOR). */
   OptTarget target = OptTarget::kNand;
+  /** @brief Orig slot to network-output fresh slot map. */
   std::uint16_t *emit_map = nullptr; // orig slot -> network output fresh slot
+  /** @brief Pending-wire buffer (deferred wiring pass). */
   PendingWire *pend = nullptr;
+  /** @brief Pending-wire count (in/out). */
   std::size_t *npend = nullptr;
+  /** @brief Pending-wire capacity. */
   std::size_t pend_cap = 0;
+  /** @brief Shared constant-0 pool gate (kNoDriver when unneeded). */
   std::uint16_t pool_c0 = kNoDriver;
+  /** @brief Shared constant-1 pool gate (kNoDriver when unneeded). */
   std::uint16_t pool_c1 = kNoDriver;
+  /** @brief Latched failure (budget/overflow); checked by the caller. */
   bool failed = false;
 };
 
+/**
+ * @brief Allocate one fresh gate in the output net, latching ctx.failed
+ *        on budget exhaustion.
+ *
+ * @param[out] ctx Emission state.
+ * @param[in] kind Kind to create.
+ * @param[in] n Fan-in.
+ * @return Fresh slot, or kNoDriver on failure.
+ */
 inline std::uint16_t fresh_gate(ConvertCtx &ctx, GateKind kind, std::uint8_t n) noexcept {
   if (ctx.failed) {
     return kNoDriver;
@@ -57,10 +117,21 @@ inline std::uint16_t fresh_gate(ConvertCtx &ctx, GateKind kind, std::uint8_t n) 
   return r.value;
 }
 
-// Record one network input: original input `orig_i` of `orig_s` feeding
-// `fresh` at `input_idx`. Ignored pins route to the shared C0 pool;
-// dangling block inputs pass through as dangling (mask stays clear) with
-// the source tie leader carried for wiring-time tying.
+/**
+ * @brief Record one network input: original input orig_i of orig_s
+ *        feeding fresh at input_idx.
+ *
+ * Ignored pins route to the shared C0 pool; dangling block inputs pass
+ * through as dangling (mask stays clear) with the source tie leader
+ * carried for wiring-time tying.
+ *
+ * @param[out] ctx Emission state receiving the pending wire.
+ * @param[in] src Source netlist (masks, drivers, tie leaders).
+ * @param[in] orig_s Original source slot.
+ * @param[in] orig_i Original source input index.
+ * @param[in] fresh Fresh sink slot.
+ * @param[in] input_idx Fresh sink input index.
+ */
 inline void record_input(ConvertCtx &ctx, const Netlist &src, std::uint16_t orig_s, std::uint8_t orig_i,
                          std::uint16_t fresh, std::uint8_t input_idx) noexcept {
   if (ctx.failed) {
@@ -86,15 +157,30 @@ inline void record_input(ConvertCtx &ctx, const Netlist &src, std::uint16_t orig
   ++(*ctx.npend);
 }
 
+/**
+ * @brief Universal kind for a conversion target.
+ *
+ * @param[in] t Conversion target.
+ * @return kNand for kNand targets, kNor otherwise.
+ */
 inline GateKind universal_kind(OptTarget t) noexcept {
   return (t == OptTarget::kNand) ? GateKind::kNand : GateKind::kNor;
 }
 
-// Verbatim carry of one sequential gate into the O2 fresh build (opaque
-// barrier): same kind, pin count, and flags; ignored dangling pins stay
-// ignored and dangling (never pool-routed); wired inputs resolve through
-// the emit map in the deferred wiring pass with per-pin Q/NQ polarity
-// preserved. Fresh slot/counter discipline matches add_gate.
+/**
+ * @brief Verbatim carry of one sequential gate into the O2 fresh build
+ *        (opaque barrier): same kind, pin count, and flags.
+ *
+ * Ignored dangling pins stay ignored and dangling (never pool-routed);
+ * wired inputs resolve through the emit map in the deferred wiring pass
+ * with per-pin Q/NQ polarity preserved. Fresh slot/counter discipline
+ * matches add_gate.
+ *
+ * @param[out] ctx Emission state.
+ * @param[in] src Source netlist.
+ * @param[in] s Sequential slot to carry.
+ * @return Fresh slot, or kNoDriver on budget exhaustion.
+ */
 inline std::uint16_t emit_seq_verbatim(ConvertCtx &ctx, const Netlist &src, std::uint16_t s) noexcept {
   const Gate &g = src.gates[s];
   const std::uint16_t o = fresh_gate(ctx, g.kind, g.input_count);
@@ -128,7 +214,15 @@ inline std::uint16_t emit_seq_verbatim(ConvertCtx &ctx, const Netlist &src, std:
   return o;
 }
 
-// NOT(a) in the target vocabulary: one universal gate over (a, a).
+/**
+ * @brief NOT(a) in the target vocabulary: one universal gate over (a, a).
+ *
+ * @param[out] ctx Emission state.
+ * @param[in] src Source netlist (input recording).
+ * @param[in] orig_s Original source slot.
+ * @param[in] orig_i Original source input index.
+ * @return Fresh inverter slot, or kNoDriver on budget exhaustion.
+ */
 inline std::uint16_t emit_not(ConvertCtx &ctx, const Netlist &src, std::uint16_t orig_s, std::uint8_t orig_i) noexcept {
   const GateKind u = universal_kind(ctx.target);
   const std::uint16_t t = fresh_gate(ctx, u, 2);
@@ -142,7 +236,14 @@ inline std::uint16_t emit_not(ConvertCtx &ctx, const Netlist &src, std::uint16_t
   return t;
 }
 
-// NOT over an already-emitted fresh driver (internal edge, wired at once).
+/**
+ * @brief NOT over an already-emitted fresh driver (internal edge, wired
+ *        at once).
+ *
+ * @param[out] ctx Emission state.
+ * @param[in] a Fresh driver slot to invert.
+ * @return Fresh inverter slot, or kNoDriver on budget exhaustion.
+ */
 inline std::uint16_t emit_not_fresh(ConvertCtx &ctx, std::uint16_t a) noexcept {
   const GateKind u = universal_kind(ctx.target);
   const std::uint16_t o = fresh_gate(ctx, u, 2);
@@ -154,8 +255,20 @@ inline std::uint16_t emit_not_fresh(ConvertCtx &ctx, std::uint16_t a) noexcept {
   return o;
 }
 
-// Convert one reachable source gate into fresh target-kind gates. Returns
-// the network output fresh slot (kNoDriver on budget exhaustion).
+/**
+ * @brief Convert one reachable source gate into fresh target-kind
+ *        gates: natives pass through, AND/OR duals via De Morgan with
+ *        complemented input inverters, XOR/XNOR via odd-parity 2-input
+ *        cascades (4-gate NAND blocks, 5-gate NOR blocks).
+ *
+ * Sequential kinds never convert here (opaque barrier: they travel via
+ * emit_seq_verbatim; reaching this switch is a defensive refusal).
+ *
+ * @param[out] ctx Emission state.
+ * @param[in] src Source netlist.
+ * @param[in] s Reachable source slot.
+ * @return Network output fresh slot (kNoDriver on budget exhaustion).
+ */
 inline std::uint16_t emit_gate(ConvertCtx &ctx, const Netlist &src, std::uint16_t s) noexcept {
   const Gate &g = src.gates[s];
   const GateKind u = universal_kind(ctx.target);

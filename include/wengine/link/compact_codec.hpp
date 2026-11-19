@@ -1,3 +1,13 @@
+/**
+ * @file
+ * Transport-independent compact socket codec (v2/v3 record
+ *       encode/decode over link::Frame).
+ * @note Pure header-only helper: no sockets, no SHM, no syscalls here.
+ *       Headers stay platform-free; POSIX syscalls live in the POSIX TUs
+ *       under src/link/ (wengine_link_shm) — a Windows port replaces
+ *       the TU, never this header. Consumers: TcpPublisher/UdpPublisher
+ *       (PHYSI-38 wiring) and the Python decoder.
+ */
 #pragma once
 
 // Compact socket codec (PHYSI-37): transport-independent v3 record
@@ -94,43 +104,61 @@
 namespace wengine::link::compact {
 
 // v2 record magic "WLV2" (LE bytes 'W','L','V','2').
+/** @brief Record magic "WLV2" (LE bytes 'W','L','V','2'). */
 inline constexpr std::uint32_t kMagic = 0x32564C57u;
 // v1 UDP datagram magic "WLU1", recognized for refusal only (never
 // decoded here). Must equal kUdpMagic (socket_publisher.hpp); the equality
 // is static_asserted in test_link_compact so the literals cannot drift.
 // Named (not inlined) for exactly that tie.
+/** @brief v1 UDP datagram magic "WLU1": recognized for refusal only, never decoded here. */
 inline constexpr std::uint32_t kV1UdpMagic = 0x31554C57u;
 // Socket-schema version carried in every record (NOT link::kVersion: the
 // SHM segment gate and socket readers evolve independently).
+/** @brief Socket-schema version carried in every record (v3 current; independent of link::kVersion). */
 inline constexpr std::uint32_t kSchemaVersion = 3;
 // v2 socket-schema version (61 B items, no identity), refused loudly by v3.
+/** @brief Prior socket-schema version (61 B items, no identity): refused loudly by the v3 gate. */
 inline constexpr std::uint32_t kSchemaVersionV2 = 2;
 // Record kinds. kFrame decodes via decode_record below; kSampleBlock
 // (PHYSI-44 batched signal samples) decodes via link/sample_block.hpp;
 // any other value is refused loudly until its decode entry exists.
+/**
+ * @brief Record kind tag: kFrame decodes via decode_record, kSampleBlock via sample::decode_block.
+ * @note Unknown kinds are refused loudly, never silently reinterpreted.
+ */
 enum class RecordKind : std::uint8_t { kFrame = 1, kSampleBlock = 2 };
 // Fixed frame-header size: 4+4+1+3+8+8+8+8+32+4+4.
+/** @brief Fixed frame-header size in bytes (4+4+1+3+8+8+8+8+32+4+4). */
 inline constexpr std::size_t kHeaderSize = 84;
 // Smallest v2 header across kinds: the sample-block header
 // (link/sample_block.hpp, 68 bytes) is smaller than the frame header above.
 // check_v2_schema gates on this minimum; each decoder re-checks its own
 // exact header anyway.
+/** @brief Smallest v2 header across kinds (the sample-block header); check_v2_schema gates on this minimum. */
 inline constexpr std::size_t kMinV2HeaderSize = 68;
 // Explicit item size: 7x8 + 4 + 1 + 1 + 4 + 4 (no padding, ever).
 // v2 items were 61 B (no identity tail); v3 adds has_identity + index +
 // generation.
+/** @brief Explicit v2 frame item size in bytes (7x8 + 4 + 1 + 1 + 4 + 4; no padding, ever). */
 inline constexpr std::size_t kItemSize = 70;
 // Channel name bound mirrors v1 (kChannelNameSize - 1 usable chars);
 // the u8 length prefix carries 0..31 (empty names round-trip exactly,
 // matching v1 acceptance).
+/** @brief Channel name bound in bytes (31 usable chars; empty names round-trip exactly). */
 inline constexpr std::size_t kMaxNameLen = kChannelNameSize - 1;
 // Largest encodable record: fits a maximum-size UDP payload, so one codec
 // serves datagram and stream transports alike (see header comment for the
 // maximum-shape arithmetic).
+/** @brief Largest encodable record: fits a maximum-size UDP payload, so one codec serves both transports. */
 inline constexpr std::size_t kMaxRecordBytes = 65507;
 
 namespace detail {
 
+/**
+ * @brief Store a u32 as little-endian bytes.
+ * @param[out] dst 4-byte destination buffer.
+ * @param[in] v value to store.
+ */
 inline void put_u32_le(unsigned char *dst, std::uint32_t v) noexcept {
   dst[0] = static_cast<unsigned char>(v & 0xFFu);
   dst[1] = static_cast<unsigned char>((v >> 8) & 0xFFu);
@@ -138,16 +166,31 @@ inline void put_u32_le(unsigned char *dst, std::uint32_t v) noexcept {
   dst[3] = static_cast<unsigned char>((v >> 24) & 0xFFu);
 }
 
+/**
+ * @brief Store a u64 as little-endian bytes.
+ * @param[out] dst 8-byte destination buffer.
+ * @param[in] v value to store.
+ */
 inline void put_u64_le(unsigned char *dst, std::uint64_t v) noexcept {
   for (int k = 0; k < 8; ++k) {
     dst[k] = static_cast<unsigned char>((v >> (8 * k)) & 0xFFu);
   }
 }
 
+/**
+ * @brief Store a double as exact IEEE-754 bit-pattern bytes (NaN payloads preserved, never canonicalized).
+ * @param[out] dst 8-byte destination buffer.
+ * @param[in] v value to store (SI carrier; dimensional validation lives at the engine edge, not here).
+ */
 inline void put_f64_le(unsigned char *dst, double v) noexcept {
   put_u64_le(dst, std::bit_cast<std::uint64_t>(v));
 }
 
+/**
+ * @brief Load a little-endian u32.
+ * @param[in] src 4-byte source buffer.
+ * @return The decoded u32 value.
+ */
 inline std::uint32_t get_u32_le(const unsigned char *src) noexcept {
   return static_cast<std::uint32_t>(src[0]) |
          (static_cast<std::uint32_t>(src[1]) << 8) |
@@ -155,6 +198,11 @@ inline std::uint32_t get_u32_le(const unsigned char *src) noexcept {
          (static_cast<std::uint32_t>(src[3]) << 24);
 }
 
+/**
+ * @brief Load a little-endian u64.
+ * @param[in] src 8-byte source buffer.
+ * @return The decoded u64 value.
+ */
 inline std::uint64_t get_u64_le(const unsigned char *src) noexcept {
   std::uint64_t v = 0;
   for (int k = 0; k < 8; ++k) {
@@ -163,6 +211,11 @@ inline std::uint64_t get_u64_le(const unsigned char *src) noexcept {
   return v;
 }
 
+/**
+ * @brief Load an exact IEEE-754 bit-pattern double.
+ * @param[in] src 8-byte source buffer.
+ * @return The decoded double value, bit-exact.
+ */
 inline double get_f64_le(const unsigned char *src) noexcept {
   return std::bit_cast<double>(get_u64_le(src));
 }
@@ -173,8 +226,19 @@ inline double get_f64_le(const unsigned char *src) noexcept {
 // PHYSI-38 dispatch): "WLU1" datagrams are v1, "WLV2"+schema 3 records are
 // v2, everything else (raw v1-TCP frames have no magic, hellos, garbage,
 // future schemas) is unknown — refused loudly, never guessed.
+/**
+ * @brief Socket-schema family of a byte prefix (v1/v2 refusal vocabulary for PHYSI-38 dispatch).
+ * @note kUnknown covers raw v1-TCP frames (no magic), hellos, garbage and future schemas — refused loudly, never guessed.
+ */
 enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
 
+/**
+ * @brief Classify a byte prefix into its socket-schema family.
+ * @param[in] bytes prefix to inspect (may be null).
+ * @param[in] len available bytes.
+ * @return kUnknown for null/short prefixes, kV1 for v1 datagrams, kV2 for exact magic + schema 3 records.
+ * @note Pure/noexcept: no syscalls, no allocation.
+ */
 [[nodiscard]] inline SocketSchema classify_record(const unsigned char *bytes,
                                                   std::size_t len) noexcept {
   if (bytes == nullptr || len < 4) {
@@ -195,6 +259,13 @@ enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
 // is kInvalidArgument — v1 bytes, truncated prefixes and future schemas all
 // refuse identically here; each decode_record/decode_block re-checks
 // everything anyway.
+/**
+ * @brief Cheap pre-gate for v2 dispatch: exact magic + exact schema + at least the smallest header.
+ * @param[in] bytes record prefix to gate.
+ * @param[in] len available bytes.
+ * @return kOk when the prefix is a v2 record; kInvalidArgument otherwise (v1 bytes, truncated prefixes and future schemas refuse identically).
+ * @note Each decoder re-checks everything anyway.
+ */
 [[nodiscard]] inline core::Status check_v2_schema(const unsigned char *bytes,
                                                   std::size_t len) noexcept {
   if (classify_record(bytes, len) != SocketSchema::kV2 || len < kMinV2HeaderSize) {
@@ -206,6 +277,12 @@ enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
 // Exact encoded length for a Frame, or 0 when over-bound (counts, name
 // lengths, or total > kMaxRecordBytes). Pure/noexcept: buffer sizing for
 // publishers and tests without touching output.
+/**
+ * @brief Exact encoded length for a Frame, or 0 when over-bound.
+ * @param[in] in frame to measure (item/channel counts and name lengths gated against kMaxItems/kMaxChannels/kMaxNameLen and kMaxRecordBytes).
+ * @return Encoded byte count, or 0 when over-bound.
+ * @note Pure/noexcept: buffer sizing without touching output.
+ */
 [[nodiscard]] inline std::size_t encoded_size(const Frame &in) noexcept {
   if (in.items.size() > kMaxItems || in.channels.size() > kMaxChannels) {
     return 0;
@@ -228,6 +305,18 @@ enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
 // as exact IEEE-754 bit patterns (NaN payloads preserved, never
 // canonicalized); dimensional validation lives at the engine edge, not in
 // the carrier.
+/**
+ * @brief Encode a Frame into v2 record bytes (hot publisher path).
+ * @param[in] in frame to encode (order preserved).
+ * @param[in] domain NUL-terminated solver/domain tag (non-empty, shorter than kDomainSize).
+ * @param[in] run_id publisher-run identity (opaque; generation belongs to the publisher edge).
+ * @param[in] frame_seq monotonic id per run (LagStats loss source).
+ * @param[out] out destination buffer of at least encoded_size(in) bytes.
+ * @param[in] capacity size of out in bytes.
+ * @param[out] out_len encoded byte count on success.
+ * @return kOk on success; kInvalidArgument for bad domain shape or null out; kOutOfRange when over-bound or beyond capacity (out and out_len untouched — loud, never silently truncated).
+ * @note Hot path: noexcept, allocation-free, bounded copies. Doubles cross as exact IEEE-754 bit patterns.
+ */
 [[nodiscard]] inline core::Status encode_record(const Frame &in, std::string_view domain,
                                                 std::uint64_t run_id,
                                                 std::uint64_t frame_seq,
@@ -299,6 +388,18 @@ enum class SocketSchema : std::uint8_t { kUnknown, kV1, kV2 };
 // 0 channels is valid) and non-finite doubles (bit-exact carrier).
 // v2 records (schema 2, 61 B items) are refused by the schema gate —
 // legacy identity is unavailable, never guessed.
+/**
+ * @brief Decode v3 record bytes into a Frame (cold reader side).
+ * @param[in] bytes record bytes to decode.
+ * @param[in] len available bytes.
+ * @param[in] want_domain exact-match domain gate (empty matches any domain).
+ * @param[out] out decoded frame (untouched on failure).
+ * @param[out] out_run_id publisher-run identity (for PHYSI-40 session resets).
+ * @param[out] out_seq monotonic frame id (frame_seq loss accounting).
+ * @param[out] out_kind record kind observed (non-kFrame kinds report but decode nothing here).
+ * @return kOk on success; kInvalidArgument for any validation failure (magic, schema, kind, zero reserved, domain shape, count bounds, name lengths, 0/1 flags, exact total length).
+ * @note Cold side: may allocate (vectors/strings), so NOT noexcept — never call inside the sim loop. Round-trip is exactly equal (==), including empty records and non-finite doubles.
+ */
 [[nodiscard]] inline core::Status decode_record(const unsigned char *bytes, std::size_t len,
                                                 std::string_view want_domain, Frame &out,
                                                 std::uint64_t &out_run_id,

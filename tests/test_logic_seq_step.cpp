@@ -1,3 +1,6 @@
+// test_logic_seq_step: seq_step excitation tables — 2-bit counters, shift
+// registers, DLatch/SR/JK/T tables, subset stepping, and snapshot isolation.
+// Guards edge/level stepping semantics.
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/netlist.hpp"

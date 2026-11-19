@@ -1,7 +1,15 @@
 #pragma once
 
-// Small user-preference file for the ncurses TUI. Kept separate from the
-// theme palette so persistence can be tested without starting curses.
+/**
+ * @file
+ * Small user-preference file for the ncurses TUI theme: resolves the
+ * config path, loads the saved theme name, and saves the F9 selection as
+ * the startup default. Kept separate from the theme palette
+ * (`wengine/tui/theme.hpp`) so persistence can be tested without starting
+ * curses. The file lives at `$XDG_CONFIG_HOME/wengine/tui-theme`
+ * (fallback `~/.config/wengine/tui-theme`). Consumers: the F9 apply path
+ * and startup in `src/tui/`, `tests/test_tui_views.cpp`.
+ */
 
 #include "wengine/tui/theme.hpp"
 
@@ -14,6 +22,13 @@
 
 namespace wengine::tui::themes {
 
+/**
+ * @brief Resolve the theme preference file path.
+ *
+ * @return `$XDG_CONFIG_HOME/wengine/tui-theme` when `XDG_CONFIG_HOME` is
+ *         set and non-empty, else `$HOME/.config/wengine/tui-theme`;
+ *         empty when neither variable is set (persistence disabled).
+ */
 [[nodiscard]] inline std::string preference_path() {
   const char *xdg = std::getenv("XDG_CONFIG_HOME");
   if (xdg != nullptr && *xdg != '\0') {
@@ -26,6 +41,15 @@ namespace wengine::tui::themes {
   return {};
 }
 
+/**
+ * @brief Read the saved startup theme name.
+ *
+ * @param[in] path Preference path (from `preference_path()`).
+ * @return The saved theme name when the file exists and the name is a
+ *         known theme; empty on any failure (missing/unreadable file,
+ *         unknown name) — callers treat empty as "use the terminal
+ *         theme".
+ */
 [[nodiscard]] inline std::string load_preference(const std::string &path) {
   if (path.empty()) {
     return {};
@@ -38,8 +62,19 @@ namespace wengine::tui::themes {
   return name;
 }
 
-// Write to a sibling temporary file and rename it into place so an
-// interrupted TUI cannot leave a partially written theme setting.
+/**
+ * @brief Persist the selected theme as the startup default.
+ *
+ * @param[in] path Preference path (from `preference_path()`).
+ * @param[in] name Theme key to save (must be a known theme).
+ * @param[out] error Human-readable failure reason on false.
+ * @return True when the name was saved; false with `error` set when
+ *         there is no config directory, the name is unknown, the
+ *         directory cannot be created, or the write/rename fails.
+ * @note Writes to a sibling temporary file and renames it into place so
+ *       an interrupted TUI cannot leave a partially written theme
+ *       setting.
+ */
 inline bool save_preference(const std::string &path, std::string_view name, std::string &error) {
   if (path.empty()) {
     error = "no config directory (set XDG_CONFIG_HOME or HOME)";

@@ -1,3 +1,6 @@
+// test_particle_identity: particle identity across snapshot/Frame/SHM/
+// compact-codec/CSV/checkpoint round-trips — despawn keeps survivor identity,
+// slot reuse mints fresh identity, legacy frames carry none. Guards id loss.
 #include "wengine/emit/csv_sink.hpp"
 #include "wengine/link/compact_codec.hpp"
 #include "wengine/link/frame.hpp"

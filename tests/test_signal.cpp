@@ -1,3 +1,7 @@
+// test_signal: signal solver core — eval goldens, parse/validate, noise
+// determinism, solver golden + snapshot serials, Frame adapter, CSV and
+// serialization round-trips, expression/table/custom sources, and the quantity
+// table. Guards signal-generation regressions.
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/routing.hpp"
 #include "wengine/emit/signal_sink.hpp"

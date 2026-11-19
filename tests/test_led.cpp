@@ -1,3 +1,5 @@
+// test_led: LED solver reference anchors, helper checks, typed API, and
+// CLI run/completion paths. Guards diode golden regressions.
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/solvers/led.hpp"

@@ -1,5 +1,18 @@
 #pragma once
 
+/**
+ * @file
+ * Snapshot/Frame to ROS topic mapping: the naming half of the bridge
+ * (pure, ROS-free, header-only). Owns how a stable signal serial or a
+ * particle slot becomes a topic/field name and which standard message
+ * each projection targets; the rclcpp TU performs the actual publish.
+ * Never includes ROS types, so unit tests link wengine_core alone with
+ * no ROS install. Dependency direction: ros -> link/world/emit, never
+ * the reverse (AGENTS.md section 4). Consumers: ros2/publisher.hpp
+ * (topic construction, block payload), ros2/rclcpp_transport.hpp (rmw
+ * publish), and test_ros2_mapping/test_ros2_publisher.
+ */
+
 // Snapshot/Frame -> ROS topic mapping (pure, ROS-free, header-only).
 //
 // Owns the *naming* half of the bridge: how a stable signal serial or a
@@ -48,6 +61,16 @@ namespace wengine::ros2 {
 // replaces '.' with '/' AND prefixes digit-leading segments with 's':
 // `sig.3.U` becomes `<stem>/sig/s3/U`, `p0.x` stays `<stem>/p0/x`.
 // Pure string transform, config edge only, never the sim hot path.
+/**
+ * @brief Turn one Frame channel name into a legal ROS topic suffix.
+ * @param[in] channel Frame channel name, e.g. `sig.3.U` or `p0.x`.
+ * @return Topic suffix with `.` replaced by `/` and digit-leading
+ *         segments prefixed `s` (rmw refuses digit-leading segments):
+ *         `sig.3.U` -> `sig/s3/U`, `p0.x` -> `p0/x`.
+ * @note Pure string transform at the config edge; never the sim hot
+ *       path. Message field names keep the plain `sig.<serial>.U` form -
+ *       only topic segments are sanitized.
+ */
 [[nodiscard]] inline std::string sanitize_channel(std::string_view channel) {
   std::string out;
   out.reserve(channel.size() + 4);
@@ -70,6 +93,15 @@ namespace wengine::ros2 {
 // Per-signal topic for one serial: `<stem>/sig_<serial>` (flat, valid by
 // construction — see the digit rule above). Serial-addressed, so
 // despawn/respawn never reuses a live subscription.
+/**
+ * @brief Per-signal topic name for one stable serial.
+ * @param[in] stem Config signal stem (validated by the caller).
+ * @param[in] serial Stable source serial (never reused per State).
+ * @return `<stem>/sig_<serial>` (valid by construction: the flat form
+ *         avoids digit-leading segments).
+ * @note Serial-addressed (D-ROS-2): slots recycle, serials do not, so a
+ *       despawn/respawn never reuses a live subscription.
+ */
 [[nodiscard]] inline std::string topic_for_serial(std::string_view stem, std::uint64_t serial) {
   std::string out(stem);
   out += "/sig_";
@@ -78,6 +110,12 @@ namespace wengine::ros2 {
 }
 
 // Full topic for one Frame channel under a stem.
+/**
+ * @brief Full topic for one Frame channel under a stem.
+ * @param[in] stem Config stem (namespace-relative).
+ * @param[in] channel Frame channel name (see sanitize_channel).
+ * @return `<stem>/<sanitized channel>`.
+ */
 [[nodiscard]] inline std::string topic_for_channel(std::string_view stem, std::string_view channel) {
   std::string out(stem);
   out += '/';
@@ -90,6 +128,15 @@ namespace wengine::ros2 {
 // payload with serial + quantity code arrays (see msg/SignalBlock.msg).
 // Grouped mode only — per-serial mode publishes single-entry JointStates
 // and no block.
+/**
+ * @brief Absolute topic of the exact grouped record (SignalBlock).
+ * @param[in] c Bridge config (namespace + signal stem).
+ * @return `/<ns>/<signal_topic_stem>/block`.
+ * @note Grouped mode only: the JointState on the stem stays the
+ *       RViz-friendly view; this sub-topic carries the exact record
+ *       (step + sim_time + serial/value/quantity arrays). Per-serial
+ *       mode publishes no block.
+ */
 [[nodiscard]] inline std::string signals_block_topic(const BridgeConfig &c) {
   std::string out("/");
   out += std::string(c.ns);
@@ -101,6 +148,12 @@ namespace wengine::ros2 {
 
 // Quantity suffix for display/unit metadata (from the single quantity
 // table — no ad-hoc switches here).
+/**
+ * @brief Quantity suffix (unit letter) for display metadata.
+ * @param[in] q Quantity id from the signal table.
+ * @return Suffix spelling from the single quantity table
+ *         (signal/types.hpp kQuantities - no ad-hoc switches here).
+ */
 [[nodiscard]] inline std::string_view unit_suffix(signal::QuantityId q) noexcept {
   return signal::quantity_suffix(q);
 }
@@ -109,14 +162,45 @@ namespace wengine::ros2 {
 // mirroring world::Snapshot layout. The edge TU copies this into the
 // message (Float64MultiArray or custom SignalBlock); the Snapshot ref is
 // never retained (see emit::ISink lifetime contract).
+/**
+ * @brief Grouped payload for one emitted tick (dense slot order).
+ * @note The edge TU copies this into the ROS message and never retains
+ *       the Snapshot reference (emit::ISink lifetime contract); the
+ *       publisher reuses its staging buffers across emissions.
+ */
 struct SignalBlock {
+  /**
+   * @brief Engine step index of the emitted tick.
+   */
   std::uint64_t step = 0;
+  /**
+   * @brief Engine simulation time in seconds (SI) - never wall time
+   *        (D-ROS-7).
+   */
   double sim_time = 0.0;
+  /**
+   * @brief Stable source serials, dense slot order (mirrors Snapshot).
+   */
   std::vector<std::uint64_t> serial;
+  /**
+   * @brief SI values (volts/amps/etc. per the quantity byte) in the same
+   *        order as serial.
+   */
   std::vector<double> value;
+  /**
+   * @brief Quantity codes mirroring signal::QuantityId, same order.
+   */
   std::vector<std::uint8_t> quantity;
 };
 
+/**
+ * @brief Copy the grouped signal arrays out of a snapshot.
+ * @param[in] s Snapshot taken by the Runner (dense slot order).
+ * @return Owned SignalBlock with step, sim_time (seconds), and the
+ *         serial/value/quantity arrays copied out.
+ * @note Pure copy: the caller owns the result; no Snapshot reference is
+ *       retained.
+ */
 [[nodiscard]] inline SignalBlock block_from_snapshot(const world::Snapshot &s) {
   SignalBlock b;
   b.step = s.step_index;
@@ -127,6 +211,14 @@ struct SignalBlock {
   return b;
 }
 
+/**
+ * @brief Informational block from Frame channels (grouped mode).
+ * @param[in] f Frame view-model (channels carry name + SI value).
+ * @return SignalBlock with step, sim_time (seconds), and channel values;
+ *         serial/quantity stay empty - channels here are informational.
+ * @note Grouped mode carries channels only; particle items route to the
+ *       particle topic via frame_from_snapshot.
+ */
 [[nodiscard]] inline SignalBlock block_from_frame_channels(const link::Frame &f) {
   // Grouped mode carries channels only; items (particles) route to the
   // particle topic via frame_from_snapshot. Channels here are informational.

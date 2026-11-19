@@ -1,3 +1,6 @@
+// test_world: world State — spawn/despawn, snapshot/fill/select parity,
+// signal-pool and retained-copy fill, save/load round-trip and corrupt-input
+// refusal, and determinism. Guards state-ownership regressions.
 #include "wengine/world/serialize.hpp"
 #include "wengine/world/state.hpp"
 #include "wengine/signal/types.hpp"

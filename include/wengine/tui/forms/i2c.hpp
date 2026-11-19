@@ -1,10 +1,29 @@
 #pragma once
 
+/**
+ * @file
+ * The `i2c` guided-form definition (F3 browser entry): bus pull-up/series
+ * resistor sizing over the pullup/series/full modes. The form composes one
+ * `i2c ...` argv line for the shared CLI path and never validates: empty
+ * fields are omitted and the CLI owns every error, so unit text is parsed
+ * by the same `units::` suffix tables as the REPL. Consumers: the
+ * registry in `wengine/tui/forms.hpp`, the form pane in
+ * `src/tui/panes_forms.cpp`.
+ */
+
 #include "wengine/cli/commands.hpp"
 #include "wengine/tui/forms/types.hpp"
 
 namespace wengine::tui::forms::definitions {
 
+/**
+ * @brief Build the `i2c` guided-form definition.
+ *
+ * @return The FormDef for `i2c`: the mode positional picker
+ *         (pullup/series/full, Space-opened choice dialog) plus the
+ *         VDD/Cb/speed/VOL/IOL/tr/Rp/Rs fields, with one profile per mode
+ *         and an `auto` catch-all fallback.
+ */
 [[nodiscard]] inline FormDef i2c() {
   using cli::commands::I2cSpec;
   using definition::all_arguments;

@@ -1,18 +1,27 @@
 #pragma once
 
-// TieSet seam (see GLOSSARY.md): input-input shorts as first-class nets.
-//
-// Only this header may read/write `Netlist::tie_rep` directly. Everyone
-// else (netlist mutation, optimizer passes, eval, stepper, CLI) calls the
-// functions below. Star encoding: `tie_rep[flat] == 0` means singleton
-// (untied); otherwise it holds `leader_flat + 1` where leader_flat is the
-// class canonical rep (lowest slot/input, slot-order enumeration).
-// Zero-initialization is the all-singleton state, so `Netlist{}` starts
-// untied and `reset_netlist` clears to zero.
-//
-// Header-only, allocation-free, exception-free, noexcept throughout.
-// Depends only on types.hpp + core/status (never netlist.hpp: PinRef lives
-// in types.hpp precisely to keep this include one-directional).
+/**
+ * @file
+ * TieSet seam (see GLOSSARY.md) of the logic pipeline: input-input shorts as first-class
+ * nets. Only this header may read/write Netlist::tie_rep directly;
+ * everyone else (netlist mutation, optimizer passes, eval, stepper,
+ * CLI) calls the functions below. Star encoding: tie_rep[flat] == 0
+ * means singleton (untied); otherwise it holds leader_flat + 1 where
+ * leader_flat is the class canonical rep (lowest slot/input, slot-order
+ * enumeration). Zero-initialization is the all-singleton state, so
+ * Netlist{} starts untied and reset_netlist clears to zero. One block
+ * input per class (leaders only) flows into the derived interface
+ * (block_interface.hpp); scalar and bit-parallel eval feed/share one
+ * value per class.
+ *
+ * Dependency rules (docs/logic.md section 4): header-only,
+ * allocation-free, exception-free; depends only on types.hpp plus
+ * core/status (never netlist.hpp: PinRef lives in types.hpp precisely
+ * to keep this include one-directional). Logic is a standalone domain:
+ * this header must never depend on CLI types. Consumers: netlist.hpp
+ * mutation, the O0/O1/O2 optimizer passes, eval.hpp, seq_step.hpp, the
+ * CLI tie/untie verbs, and the test_logic* suite.
+ */
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/types.hpp"
@@ -23,16 +32,36 @@
 
 namespace wengine::logic {
 
-// Whole-table transaction support: tie_pins can merge two classes, so a
-// pin-level untie cannot revert a merge — callers snapshot and restore
-// wholesale (tie.cpp refusal path).
+/**
+ * @brief Whole-table tie snapshot: tie_pins can merge two classes, so
+ *        a pin-level untie cannot revert a merge — callers snapshot and
+ *        restore wholesale instead.
+ */
 using TieSnapshot = std::array<std::uint16_t, kMaxGates * kMaxInputs>;
 
+/**
+ * @brief Copy the whole tie table for a later wholesale restore.
+ *
+ * @param[in] nl Netlist to snapshot.
+ * @return Copy of nl.tie_rep.
+ */
 [[nodiscard]] inline TieSnapshot snapshot_ties(const Netlist &nl) noexcept { return nl.tie_rep; }
 
+/**
+ * @brief Restore a whole-table snapshot taken by snapshot_ties.
+ *
+ * @param[out] nl Netlist receiving the snapshot.
+ * @param[in] snap Snapshot to install.
+ */
 inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie_rep = snap; }
 
-// Structural equality for save/load round-trip tests.
+/**
+ * @brief Structural equality of two tie tables (save/load round-trip).
+ *
+ * @param[in] a First netlist.
+ * @param[in] b Second netlist.
+ * @return True when every tie_rep entry agrees.
+ */
 [[nodiscard]] inline bool ties_equal(const Netlist &a, const Netlist &b) noexcept {
   for (std::size_t f = 0; f < kMaxGates * kMaxInputs; ++f) {
     if (a.tie_rep[f] != b.tie_rep[f]) {
@@ -42,10 +71,25 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie
   return true;
 }
 
+/**
+ * @brief Flat tie-table index for (slot, input): slot * kMaxInputs + input.
+ *
+ * @param[in] slot Gate slot.
+ * @param[in] input 0-based input index.
+ * @return Flat index into Netlist::tie_rep.
+ */
 [[nodiscard]] constexpr std::size_t tie_flat(std::uint16_t slot, std::uint8_t input) noexcept {
   return static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input);
 }
 
+/**
+ * @brief Canonical leader flat of the class holding flat (flat itself
+ *        for singletons).
+ *
+ * @param[in] nl Netlist holding the tie table.
+ * @param[in] flat Flat pin index from tie_flat.
+ * @return Leader flat of flat's class.
+ */
 [[nodiscard]] inline std::size_t tie_leader_flat(const Netlist &nl, std::size_t flat) noexcept {
   const std::uint16_t rep = nl.tie_rep[flat];
   if (rep == 0) {
@@ -54,6 +98,14 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie
   return static_cast<std::size_t>(rep - 1u);
 }
 
+/**
+ * @brief True when (slot, input) belongs to a tie class (non-singleton).
+ *
+ * @param[in] nl Netlist holding the tie table.
+ * @param[in] slot Gate slot.
+ * @param[in] input 0-based input index.
+ * @return True when tied; false for singletons and out-of-range pins.
+ */
 [[nodiscard]] inline bool is_tied(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
   if (slot >= kMaxGates || input >= kMaxInputs) {
     return false;
@@ -61,14 +113,29 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie
   return nl.tie_rep[tie_flat(slot, input)] != 0;
 }
 
+/**
+ * @brief True when (slot, input) is its class canonical leader.
+ *
+ * @param[in] nl Netlist holding the tie table.
+ * @param[in] slot Gate slot.
+ * @param[in] input 0-based input index.
+ * @return True when the pin leaders itself (singletons included).
+ */
 [[nodiscard]] inline bool is_tie_leader(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
   const std::size_t flat = tie_flat(slot, input);
   return tie_leader_flat(nl, flat) == flat;
 }
 
-// Slot-order member enumeration for one class leader. Fills `out` (cap)
-// with member flats; returns the total member count (may exceed cap, in
-// which case only the first cap entries are stored). Pure readout.
+/**
+ * @brief Slot-order member enumeration for one class leader.
+ *
+ * @param[in] nl Netlist holding the tie table.
+ * @param[in] leader Class leader flat to enumerate.
+ * @param[out] out Caller buffer receiving member flats.
+ * @param[in] cap Capacity of out.
+ * @return Total member count (may exceed cap; only the first cap
+ *         entries are stored). Pure readout.
+ */
 [[nodiscard]] inline std::size_t tie_class_members(const Netlist &nl, std::size_t leader, std::size_t *out, std::size_t cap) noexcept {
   std::size_t n = 0;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
@@ -97,8 +164,14 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie
 }
 
 namespace detail {
-// Re-star one survivor set around its minimum; a lone survivor dissolves
-// back to singleton. Shared by untie/detach/remove paths.
+/**
+ * @brief Re-star one survivor set around its minimum; a lone survivor
+ *        dissolves back to singleton. Shared by untie/detach paths.
+ *
+ * @param[out] nl Netlist receiving the rebuilt star.
+ * @param[in] survivors Survivor flats to re-star.
+ * @param[in] n_surv Number of survivors.
+ */
 inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n_surv) noexcept {
   if (n_surv > 1) {
     std::size_t leader = survivors[0];
@@ -116,7 +189,15 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
 }
 } // namespace detail
 
-// Number of tied peers in the class (1 == singleton-or-leader-alone).
+/**
+ * @brief Number of tied peers in the class (1 for a singleton or a
+ *        leader alone).
+ *
+ * @param[in] nl Netlist holding the tie table.
+ * @param[in] slot Gate slot.
+ * @param[in] input 0-based input index.
+ * @return Member count of the pin's class.
+ */
 [[nodiscard]] inline std::size_t tie_group_size(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
   const std::size_t flat = tie_flat(slot, input);
   const std::size_t leader = tie_leader_flat(nl, flat);
@@ -135,10 +216,20 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
   return n;
 }
 
-// Tie two dangling input pins to the same net. Both pins must be live
-// inputs, unwired, non-ignored; outputs are rejected. Tying is idempotent
-// within a class; merging two classes elects the lowest (slot, input) as
-// canonical leader and re-stars every member. Same-pin ties fail loudly.
+/**
+ * @brief Tie two dangling input pins to the same net.
+ *
+ * Merging two classes elects the lowest (slot, input) as canonical
+ * leader and re-stars every member. Tying is idempotent within a
+ * class.
+ *
+ * @param[out] nl Netlist receiving the tie.
+ * @param[in] a First input pin (must dangle, live, non-ignored).
+ * @param[in] b Second input pin (must dangle, live, non-ignored).
+ * @return kOk on success (including idempotent re-tie);
+ *         kInvalidArgument for output pins, dead/out-of-range pins,
+ *         wired or ignored pins, or tying a pin to itself.
+ */
 [[nodiscard]] inline core::Status tie_pins(Netlist &nl, PinRef a, PinRef b) noexcept {
   if (a.is_output || b.is_output) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -188,10 +279,19 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
   return core::Status::success();
 }
 
-// Untie one input pin from its class. Singleton (untied), wired, ignored,
-// output, or dead pins fail loudly. Removing the leader re-elects the
-// lowest surviving member; removing a non-leader leaves the class otherwise
-// intact. A two-member class dissolves back to two singletons.
+/**
+ * @brief Untie one input pin from its class.
+ *
+ * Removing the leader re-elects the lowest surviving member; removing
+ * a non-leader leaves the class otherwise intact. A two-member class
+ * dissolves back to two singletons.
+ *
+ * @param[out] nl Netlist receiving the untie.
+ * @param[in] pin Input pin to remove from its class.
+ * @return kOk on success; kInvalidArgument for output pins,
+ *         dead/out-of-range pins, wired or ignored pins, or pins that
+ *         are not tied.
+ */
 [[nodiscard]] inline core::Status untie_pin(Netlist &nl, PinRef pin) noexcept {
   if (pin.is_output) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -236,9 +336,14 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
   return core::Status::success();
 }
 
-// Detach every tied pin of slot `s` from its class (used when a gate is
-// collapsed to a constant or removed: the varying tied pins disappear,
-// outside survivors re-elect). Leaves slot `s` with no tie entries.
+/**
+ * @brief Detach every tied pin of slot s from its class (used when a
+ *        gate is removed or collapsed to a constant): outside survivors
+ *        re-elect, and slot s keeps no tie entries.
+ *
+ * @param[out] nl Netlist receiving the detach.
+ * @param[in] s Slot to detach.
+ */
 inline void detach_slot_ties(Netlist &nl, std::uint16_t s) noexcept {
   if (s >= kMaxGates || !nl.gates[s].live) {
     return;
@@ -302,12 +407,22 @@ inline void detach_slot_ties(Netlist &nl, std::uint16_t s) noexcept {
   }
 }
 
-// Rebuild tie classes after an input-drop compaction on slot `s`: kept pins
-// shifted to indices 0..n-1, each carrying its original class leader in
-// `orig_leader[k]` (`orig_tied[k]` says whether it was tied). Each original
-// class re-stars around its new minimum (kept new flats + outside survivors
-// still pointing at the old leader); singletons stay singleton. Called with
-// the gate's new input_count already in place.
+/**
+ * @brief Rebuild tie classes after an input-drop compaction on slot s.
+ *
+ * Kept pins shift to indices 0..n-1, each carrying its original class
+ * leader in orig_leader[k] (orig_tied[k] says whether it was tied).
+ * Each original class re-stars around its new minimum (kept new flats
+ * plus outside survivors still pointing at the old leader); singletons
+ * stay singleton. Call with the gate's new input_count already in
+ * place.
+ *
+ * @param[out] nl Netlist receiving the rebuilt classes.
+ * @param[in] s Compacted slot.
+ * @param[in] orig_leader Original leader flat per kept pin.
+ * @param[in] orig_tied Whether each kept pin was tied.
+ * @param[in] n Kept pin count (the new input_count).
+ */
 inline void reindex_kept_ties(Netlist &nl, std::uint16_t s, const std::size_t *orig_leader, const bool *orig_tied, std::uint8_t n) noexcept {
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     nl.tie_rep[tie_flat(s, static_cast<std::uint8_t>(i))] = 0;
@@ -354,10 +469,17 @@ inline void reindex_kept_ties(Netlist &nl, std::uint16_t s, const std::size_t *o
   }
 }
 
-// Dissolve one tie class into ignored pins: every member unties and marks
-// ignored (ties off to kLow at eval). Used by exact dead-input elimination,
-// where dead inputs never affect any output so the function is preserved.
-// No-op when `leader` is not a live class leader.
+/**
+ * @brief Dissolve one tie class into ignored pins: every member unties
+ *        and marks ignored (ties off to kLow at eval).
+ *
+ * Used by exact dead-input elimination, where dead inputs never affect
+ * any output so the function is preserved. No-op when leader is not a
+ * live class leader.
+ *
+ * @param[out] nl Netlist receiving the dissolve.
+ * @param[in] leader Class leader flat to dissolve.
+ */
 inline void ignore_tie_class(Netlist &nl, std::size_t leader) noexcept {
   std::size_t members[kMaxGates * kMaxInputs];
   const std::size_t n = tie_class_members(nl, leader, members, kMaxGates * kMaxInputs);
@@ -373,24 +495,42 @@ inline void ignore_tie_class(Netlist &nl, std::size_t leader) noexcept {
   }
 }
 
-// Checkpoint serialization privilege (world/serialize format v6): the
-// format stores raw tie_rep entries, so the serializer needs byte-level
-// read/write plus load-time validation. The star encoding stays owned here;
-// serialize.hpp calls these three and nothing else.
+/**
+ * @brief Byte-level read of one raw tie_rep entry for checkpoint
+ *        serialization (world format v6).
+ *
+ * @param[in] nl Netlist holding the tie table.
+ * @param[in] flat Flat pin index from tie_flat.
+ * @return tie_rep[flat], or 0 when flat is out of range.
+ */
 [[nodiscard]] inline std::uint16_t tie_rep_entry(const Netlist &nl, std::size_t flat) noexcept {
   return (flat < kMaxGates * kMaxInputs) ? nl.tie_rep[flat] : 0;
 }
 
+/**
+ * @brief Byte-level write of one raw tie_rep entry for the checkpoint
+ *        loader.
+ *
+ * @param[out] nl Netlist receiving the entry.
+ * @param[in] flat Flat pin index from tie_flat.
+ * @param[in] rep Raw star value to store.
+ */
 inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, std::uint16_t rep) noexcept {
   if (flat < kMaxGates * kMaxInputs) {
     nl.tie_rep[flat] = rep;
   }
 }
 
-// Star-consistency validation for a loaded netlist: tied pins must be
-// live, unwired, non-ignored; every rep must name an in-range leader that
-// agrees (tie_rep[leader] == rep) and is itself a live dangling
-// non-ignored pin. Pure readout, used by the checkpoint loader.
+/**
+ * @brief Star-consistency validation for a loaded netlist: tied pins
+ *        must be live, unwired, non-ignored; every rep must name an
+ *        in-range leader that agrees (tie_rep[leader] == rep) and is
+ *        itself a live dangling non-ignored pin. Pure readout, used by
+ *        the checkpoint loader.
+ *
+ * @param[in] nl Netlist to validate.
+ * @return True when every tie entry is consistent.
+ */
 [[nodiscard]] inline bool validate_ties(const Netlist &nl) noexcept {
   for (std::uint16_t slot = 0; slot < kMaxGates; ++slot) {
     const Gate &g = nl.gates[slot];
@@ -422,7 +562,12 @@ inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, std::uint16_t rep) 
   return true;
 }
 
-// Count of tie groups with >= 2 members.
+/**
+ * @brief Count of tie groups with at least 2 members.
+ *
+ * @param[in] nl Netlist holding the tie table.
+ * @return Number of live classes with 2 or more members.
+ */
 [[nodiscard]] inline std::size_t tie_group_count(const Netlist &nl) noexcept {
   std::size_t n = 0;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
@@ -450,16 +595,26 @@ inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, std::uint16_t rep) 
   return n;
 }
 
-// Construction helpers: the only direct writers beside the paths above.
-// `reset_all_ties` clears the whole pool (reset_netlist / fresh Netlist
-// invariant); per-slot entries are otherwise owned by tie/untie/detach.
+/**
+ * @brief Clear the whole tie pool (reset_netlist / fresh Netlist
+ *        invariant). Construction helper: the only direct writer beside
+ *        the tie/untie/detach paths above.
+ *
+ * @param[out] nl Netlist whose ties are cleared.
+ */
 inline void reset_all_ties(Netlist &nl) noexcept {
   for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
     nl.tie_rep[i] = 0;
   }
 }
 
-// Total tied pairs for canonical YAML (one entry per non-leader member).
+/**
+ * @brief Total tied pairs for canonical YAML: one entry per non-leader
+ *        tied member.
+ *
+ * @param[in] nl Netlist holding the tie table.
+ * @return Number of tied non-leader dangling pins.
+ */
 [[nodiscard]] inline std::size_t tie_pair_count(const Netlist &nl) noexcept {
   std::size_t n = 0;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {

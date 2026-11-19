@@ -1,5 +1,22 @@
 #pragma once
 
+/**
+ * @file
+ * Top-level command spec declarations (one CommandSpec per command:
+ * kName, kDescription, kUsage, run, optional complete). Implementations
+ * live in src/cli/commands/; this header is the shared vocabulary Shell,
+ * completion, and tests program against. Every command parses named
+ * `--key value` / `--key=value` arguments via ArgCursor, refuses stray
+ * positionals loudly (never silently ignored), and returns the process
+ * exit code: 0 success, 1 runtime/check failure, 2 usage error (-1 is the
+ * Shell exit signal, never a command result). One command per solver
+ * domain: `sim run` takes no solver options beyond the grandfathered
+ * `--gravity`, signal vocabulary lives in `sig`, IC vocabulary in `ic`,
+ * logic workspace verbs in `logic`. Consumers: command_registry.hpp (the
+ * production list), Shell, and the completion engine. Dependency
+ * direction: cli to solvers and core, never the reverse.
+ */
+
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/command.hpp"
 
@@ -11,9 +28,21 @@
 
 namespace wengine::cli::commands {
 
+/**
+ * @brief Resistor solver command (Ohm's law, closed form).
+ */
 struct OhmSpec {
+  /**
+   * @brief Command name token (`ohm`).
+   */
   static constexpr std::string_view kName = "ohm";
+  /**
+   * @brief One-line summary for help listings.
+   */
   static constexpr std::string_view kDescription = "Solve resistor (Ohm's law)";
+  /**
+   * @brief Full usage text (printed with usage errors and `--help`).
+   */
   static constexpr std::string_view kUsage =
       "ohm [U] [I]\n"
       "  ohm 12.4V 0.54A\n"
@@ -22,14 +51,39 @@ struct OhmSpec {
       "  ohm --i 2A --r 5Ohm       (solve from I+R)\n"
       "  ohm --help";
 
+  /**
+   * @brief Solve the resistor from any two of U/I/R.
+   * @param[in,out] args Named (`--u`/`--i`/`--r`) or positional tokens.
+   * @param[out] out Stream receiving the solved row or the error text.
+   * @return 0 with the solution printed; 2 on bad arguments or stray
+   *         positionals; 1 on a check failure.
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete option names for the ohm command.
+   * @param[in] prior_args Tokens after `ohm` before the partial token.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
                        std::vector<std::string> &out);
 };
 
+/**
+ * @brief S0 meter pulse command (convert/rate/power/energy/pulses/full).
+ */
 struct S0Spec {
+  /**
+   * @brief Command name token (`s0`).
+   */
   static constexpr std::string_view kName = "s0";
+  /**
+   * @brief One-line summary for help listings.
+   */
   static constexpr std::string_view kDescription = "S0 pulse output (energy meter imp/kWh)";
+  /**
+   * @brief Full usage text (printed with usage errors and `--help`).
+   */
   static constexpr std::string_view kUsage =
       "s0 <mode> [options]   (C = meter constant in imp/kWh)\n"
       "  s0 convert --const 1000imp/kWh\n"
@@ -43,14 +97,39 @@ struct S0Spec {
       "Units: W/kW, J/Ws/kJ/Wh/kWh, Hz/kHz, s/ms/min/h,\n"
       "  imp/kWh (also imp/Wh, imp/J == imp/Ws), pulses as bare/imp.";
 
+  /**
+   * @brief Convert between S0 meter quantities (rate/power/energy/pulses).
+   * @param[in,out] args Mode plus named options (`--const` is required).
+   * @param[out] out Stream receiving the converted row or the error text.
+   * @return 0 with the result printed; 2 on a bad mode, bad arguments, or
+   *         stray positionals; 1 on a check failure.
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete s0 modes and option names.
+   * @param[in] prior_args Tokens after `s0` before the partial token.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
                        std::vector<std::string> &out);
 };
 
+/**
+ * @brief I2C bus resistor command (pull-up, series, full; NXP UM10204).
+ */
 struct I2cSpec {
+  /**
+   * @brief Command name token (`i2c`).
+   */
   static constexpr std::string_view kName = "i2c";
+  /**
+   * @brief One-line summary for help listings.
+   */
   static constexpr std::string_view kDescription = "I2C bus resistors (pull-up Rp + series Rs)";
+  /**
+   * @brief Full usage text (printed with usage errors and `--help`).
+   */
   static constexpr std::string_view kUsage =
       "i2c <mode> --vdd <V> --cb <F> [options]   (NXP UM10204 section 7.1)\n"
       "  i2c pullup --vdd 3.3V --cb 200pF [--speed fast] [--rp 1.5kOhm]\n"
@@ -61,14 +140,39 @@ struct I2cSpec {
       "(UM10204 section 5 uses current-source pull-ups, not resistors).\n"
       "Units: V, F/pF/nF/uF, s/ns/us, A/mA, Ohm/kOhm.";
 
+  /**
+   * @brief Size I2C resistors (pull-up Rp, series Rs, or the full bus).
+   * @param[in,out] args Mode plus named options (`--vdd`/`--cb` required).
+   * @param[out] out Stream receiving the sized row or the error text.
+   * @return 0 with the result printed; 2 on a bad mode, bad arguments, or
+   *         stray positionals; 1 on a check failure.
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete i2c modes and option names.
+   * @param[in] prior_args Tokens after `i2c` before the partial token.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
                        std::vector<std::string> &out);
 };
 
+/**
+ * @brief Stepped-simulation command (any registered solver, edge sinks).
+ */
 struct SimSpec {
+  /**
+   * @brief Command name token (`sim`).
+   */
   static constexpr std::string_view kName = "sim";
+  /**
+   * @brief One-line summary for help listings.
+   */
   static constexpr std::string_view kDescription = "Run stepped simulation (engine vertical slice)";
+  /**
+   * @brief Full usage text (printed with usage errors and `--help`).
+   */
   static constexpr std::string_view kUsage =
       "sim run [--solver <name>] [--steps N] [--dt <s>] [--gravity <m/s^2>]\n"
       "        [--particles N] [--x0 X] [--y0 Y] [--vx0 VX] [--vy0 VY]\n"
@@ -166,15 +270,45 @@ struct SimSpec {
       "Defaults: steps=100, dt=0.01s, gravity=9.81, particles=1,\n"
       "  x0=y0=0, vx0=vy0=10, emit-every=1. Time unit: s/ms/us/ns.";
 
+  /**
+   * @brief Run a stepped simulation with edge-owned sinks.
+   * @param[in,out] args `run` verb plus named options (any registered
+   *            solver with defaults; `--gravity` is projectile-only).
+   * @param[out] out Stream receiving progress, summaries, and errors.
+   * @return 0 when the run completes; 2 on bad flags, orphan
+   *         stride/select options, or over-capacity outputs; 1 on a
+   *         runtime/check failure (sinks are best-effort and loud).
+   * @note Solvers mutate world::State in place; snapshots are independent
+   *       copies handed to sinks. Sinks attach at the app edge, never in
+   *       RunConfig.
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete sim verbs, solver names, and option names.
+   * @param[in] prior_args Tokens after `sim` before the partial token.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
                        std::vector<std::string> &out);
 };
 
+/**
+ * @brief Signal generation command (batch runs plus live control verbs).
+ */
 struct SigSpec {
+  /**
+   * @brief Command name token (`sig`).
+   */
   static constexpr std::string_view kName = "sig";
+  /**
+   * @brief One-line summary for help listings.
+   */
   static constexpr std::string_view kDescription =
       "Generate signals (sine/square/triangle/saw/dc/pulse/noise/sum/expression/table/lua)";
+  /**
+   * @brief Full usage text (printed with usage errors and `--help`).
+   */
   static constexpr std::string_view kUsage =
       "sig run [--sig-kind <kind>] [--sig-freq <Hz>] [--sig-amp <V|A>]\n"
       "        [--sig-offset <V|A>] [--sig-phase <rad>] [--sig-duty 0..1]\n"
@@ -328,13 +462,44 @@ struct SigSpec {
       "  seed=1, quantity=U, count=1, steps=100, dt=0.01s, emit-every=1;\n"
       "  --forever runs continuously until Ctrl-C.";
 
+  /**
+   * @brief Generate signals: batch runs plus the live control plane.
+   * @param[in,out] args `run`/`list`/`add`/`set`/`start`/`stop`/`drop`
+   *            verbs plus per-source, emit, control, pacing, and plot
+   *            options (see kUsage).
+   * @param[out] out Stream receiving the log line, verdicts, and errors.
+   * @return 0 when the run (or control verb) completes; 2 on bad flags or
+   *         orphan stride/select options; 1 on a runtime/check failure,
+   *         a refused connection, or a loud publish failure.
+   * @note Snapshots stamp end-of-step values; evaluation order is slot
+   *       order in two passes (generators, then sums). Batch runs reject
+   *       per-source constructs (`sum` needs live operands via `sig add`).
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete sig verbs, kinds, and option names.
+   * @param[in] prior_args Tokens after `sig` before the partial token.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
+/**
+ * @brief LDO regulator operating-point command.
+ */
 struct LdoSpec {
+  /**
+   * @brief Command name token (`ldo`).
+   */
   static constexpr std::string_view kName = "ldo";
+  /**
+   * @brief One-line summary for help listings.
+   */
   static constexpr std::string_view kDescription = "LDO linear regulator operating point";
+  /**
+   * @brief Full usage text (printed with usage errors and `--help`).
+   */
   static constexpr std::string_view kUsage =
       "ldo --vin <V> --vout <V> --iout <A> [options]   (generic linear regulator)\n"
       "  ldo --vin 5V --vout 3.3V --iout 500mA\n"
@@ -351,13 +516,38 @@ struct LdoSpec {
       "  Ppass = (VIN - VOUT) * IOUT, Pq = VIN * Iq, Ptot = Ppass + Pq,\n"
       "  eff = VOUT*IOUT / (VIN*IIN), TJ = TA + Ptot * RthJA.";
 
+  /**
+   * @brief Evaluate an LDO operating point (headroom, loss, thermals).
+   * @param[in,out] args Named options (`--vin`/`--vout`/`--iout` required).
+   * @param[out] out Stream receiving the operating-point row or errors.
+   * @return 0 with the result printed (PASS/FAIL included for thermal and
+   *         dropout checks); 2 on bad arguments or stray positionals.
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete ldo option names.
+   * @param[in] prior_args Tokens after `ldo` before the partial token.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
+/**
+ * @brief LED series-resistor command.
+ */
 struct LedSpec {
+  /**
+   * @brief Command name token (`led`).
+   */
   static constexpr std::string_view kName = "led";
+  /**
+   * @brief One-line summary for help listings.
+   */
   static constexpr std::string_view kDescription = "LED series resistor (supply Vf/If)";
+  /**
+   * @brief Full usage text (printed with usage errors and `--help`).
+   */
   static constexpr std::string_view kUsage =
       "led --vs <V> --vf <V> --if <A> [options]   (generic LED resistor)\n"
       "  led --vs 5V --vf 2V --if 20mA\n"
@@ -370,13 +560,39 @@ struct LedSpec {
       "  Rs = headroom / IF, IF' = headroom / Rs_used,\n"
       "  Pres = headroom * IF', Pled = VF * IF', eff = VF / VS.";
 
+  /**
+   * @brief Size an LED series resistor (or evaluate one at hand).
+   * @param[in,out] args Named options (`--vs`/`--vf`/`--if` required).
+   * @return 0 with the result printed (nearest E12 pick unless `--rs`
+   *         overrides; PASS/FAIL when `--prating` is given); 2 on bad
+   *         arguments or stray positionals.
+   * @param[out] out Stream receiving the result row or the error text.
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete led option names.
+   * @param[in] prior_args Tokens after `led` before the partial token.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
+/**
+ * @brief IC calculator dispatcher (one command for all parts).
+ */
 struct IcSpec {
+  /**
+   * @brief Command name token (`ic`).
+   */
   static constexpr std::string_view kName = "ic";
+  /**
+   * @brief One-line summary for help listings.
+   */
   static constexpr std::string_view kDescription = "IC-specific calculators (datasheet formulas)";
+  /**
+   * @brief Full usage text (printed with usage errors and `--help`).
+   */
   static constexpr std::string_view kUsage =
       "ic <chip> <op> [options]   (one command for all parts — chips never\n"
       "        become top-level commands; see `ic --help` for the list)\n"
@@ -385,13 +601,40 @@ struct IcSpec {
       "Solvers live in solvers/ic/ (one part per header, formulas quoted\n"
       "  from the datasheet); each chip dispatches its own subcommands.";
 
+  /**
+   * @brief Dispatch `ic` to one chip spec (`ic` never gains per-chip flags).
+   * @param[in,out] args Chip token plus the chip subcommand line.
+   * @param[out] out Stream receiving chip output, the chip list, or errors.
+   * @return The chip run() result; 0 with the chip list on `--help`; 2 on
+   *         a missing/unknown chip or stray positionals.
+   * @note One command per chip family, never per-chip top-level commands
+   *       (see ic_dispatch.hpp and ic_registry.hpp).
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete chip names, then delegate to the chip completer.
+   * @param[in] prior_args Tokens after `ic` before the partial token.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
+/**
+ * @brief Logic workspace command (session entry plus one-shot verbs).
+ */
 struct LogicSpec {
+  /**
+   * @brief Command name token (`logic`).
+   */
   static constexpr std::string_view kName = "logic";
+  /**
+   * @brief One-line summary for help listings.
+   */
   static constexpr std::string_view kDescription = "Logic-gate workspace (sub-shell session)";
+  /**
+   * @brief Full usage text (printed with usage errors and `--help`).
+   */
   static constexpr std::string_view kUsage =
       "logic                 (enter the logic session: prompt becomes [logic]> )\n"
       "logic <verb> [args]  (one-shot, no session entered)\n"
@@ -400,7 +643,22 @@ struct LogicSpec {
       "  help back add list wire unwire remove ignore use reset solve truth\n"
       "  optimize draw save load export   (exit/quit also leave the session)";
 
+  /**
+   * @brief Enter the logic session, or run one verb headless.
+   * @param[in,out] args Empty enters the session; otherwise one verb line.
+   * @param[out] out Stream receiving verb output or the error text.
+   * @return The verb result one-shot; kEnterSubShell (100) from the REPL
+   *         on empty args (Shell pushes the session); 2 on bad verbs.
+   * @note Session and one-shot verbs share one process-wide Netlist
+   *       workspace (see logic_registry.hpp).
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete logic verbs, then delegate to the verb completer.
+   * @param[in] prior_args Tokens after `logic` before the partial token.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 

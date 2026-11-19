@@ -1,5 +1,16 @@
 #pragma once
 
+/**
+ * @file
+ * Signal-source stepped solver: evaluates every live slot of the
+ * world::State signal pool in slot order, stamping SI values for the
+ * configured quantity. Owns the two-pass per-step evaluation only —
+ * depends on core/world/signal (units downstream), never CLI types.
+ * Registered in solver_registry.hpp; consumed by `sim run --solver
+ * signal`, the `sig run` driver, the GUI signal controller, and
+ * tests/test_signal.cpp.
+ */
+
 // Signal-source stepped solver: evaluates every live `Signals` pool slot
 // in slot order (SIG-2 engine core, see docs/signals.md).
 //
@@ -33,19 +44,59 @@
 
 namespace wengine::solvers {
 
+/**
+ * @brief Stepped solver for stamped signal sources (SIG-2 engine core).
+ *
+ * Mutates the world::State signal pool in place per the solver contract:
+ * validate dt, skip detached and stopped slots, then evaluate live
+ * sources in slot order over two passes (generators, then kSum
+ * combinators).
+ *
+ * @note Determinism: snapshots stamped at time T carry value(T)
+ *       (end-of-step evaluation, T = sim_time + dt). Noise slots
+ *       advance their seeded splitmix64 state once per step before
+ *       sampling, so sequences are a pure function of (seed, step
+ *       count) — independent of dt. Pass 2 sums always read fresh
+ *       pass-1 operand values regardless of slot order; operands are
+ *       guaranteed non-sum at configure time, and a later-despawned
+ *       (dangling) operand fails the step loudly — never a stale read.
+ *       Lua sources are NOT evaluated here: the caller-owned Lua extra
+ *       solver steps them before this solver (extras step first), so
+ *       this header stays Lua-free.
+ */
 class SignalSolver : public core::ISolver {
 public:
+  /** @brief Registry key: the solver named by `sim run --solver signal`. */
   static constexpr std::string_view kName = "signal";
+  /** @brief One-line listing text shown by the CLI and GUI. */
   static constexpr std::string_view kDescription =
       "Signal sources: sine/square/triangle/saw/dc/pulse/noise/sum/expression/table/lua "
       "(stamped U/I)";
 
+  /** @brief Registry factory. @return A default-configured instance. */
   static std::unique_ptr<core::ISolver> create() {
     return std::make_unique<SignalSolver>();
   }
 
+  /** @brief Registry identity. @return kName. */
   [[nodiscard]] std::string_view name() const noexcept override { return kName; }
 
+  /**
+   * @brief Evaluate every live signal slot for the step about to stamp T.
+   *
+   * @param[in,out] s world state; live generator slots receive value(T),
+   *                  sum slots accumulate fresh operand values, and
+   *                  noise RNGs advance one step. Stopped slots keep a
+   *                  frozen sample and frozen RNG; detached slots are
+   *                  skipped.
+   * @param[in] dt fixed timestep, in seconds (must be > 0 and finite).
+   * @return kOk on success; kInvalidArgument when dt is non-positive or
+   *         non-finite, when an expression or table source fails to
+   *         evaluate (out of domain, corrupt table range — loud, never
+   *         a NaN sample), or when a sum's operand serial has gone
+   *         dangling. The failed step advances neither time nor index
+   *         (Runner contract) and emits nothing.
+   */
   core::Status step(world::State &s, double dt) noexcept override {
     if (!(dt > 0.0) || !std::isfinite(dt)) {
       return {core::StatusCode::kInvalidArgument};
@@ -124,6 +175,12 @@ public:
   }
 
 private:
+  /**
+   * @brief Copy slot i's effective parameters from the pool.
+   * @param[in] s world state (read-only view of the signal pool).
+   * @param[in] i pool slot index to read.
+   * @return The slot's SignalParams, expression program included.
+   */
   static signal::SignalParams params_at(const world::State &s, std::uint32_t i) noexcept {
     signal::SignalParams p;
     p.kind = static_cast<signal::SignalKind>(s.signals.kind[i]);

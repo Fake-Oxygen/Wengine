@@ -146,8 +146,9 @@ projection choice (sec. 5), never the block layout.
 ## 5. Checkpoints, views, transports
 
 - **Checkpoints preserve authoritative restart state.** Versioned binary
-  `save_state`/`load_state` with fallback loaders (v5 current: serials,
-  operands, expression/table/Lua columns and stores). Dead slots retain
+  `save_state`/`load_state` with fallback loaders (v6 current: sequential
+  pool, serials, operands, expression/table/Lua columns and stores; v5
+  and earlier load with an empty sequential pool). Dead slots retain
   columns; load re-checks sizes/ranges and live-source invariants (sums
   resolve to live non-sums of matching quantity, table ranges hold finite
   strictly-increasing points, Lua ranges land in the blob). CSV is output

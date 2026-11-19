@@ -1,3 +1,7 @@
+// test_cli_args: CLI front door — tokenizer, scalar/unit parsing, ArgCursor
+// options/positionals, registry compile-time pins, ohm/sig/shell/history/
+// completion/logic-session verbs through `Shell::execute`. Guards arg-parsing
+// and surface-parity regressions.
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/command_registry.hpp"
 #include "wengine/cli/complete.hpp"

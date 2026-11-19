@@ -4,6 +4,7 @@ build-dev
 build-test-opt
 build-bench
 examples/__pycache__
+docs/__pycache__
 bin/
 obj/
 out/

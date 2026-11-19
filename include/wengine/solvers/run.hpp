@@ -1,6 +1,16 @@
 #pragma once
 
-// Headless batch driver: the engine side of the core::RunConfig seam.
+/**
+ * @file
+ * Headless batch driver: the engine side of the core::RunConfig seam.
+ * Owns the one-shot build-then-step flow over ConfiguredRun — it builds
+ * the shared validation/population, attaches caller-owned sinks, advances
+ * exactly cfg.steps fixed steps, and copies the final state out. Never
+ * opens files or touches frontend I/O, and depends on engine types only
+ * (never CLI types). Consumed by the `sim run` / `sig run` CLI commands
+ * and tests.
+ */
+
 // Thin one-shot wrapper over solvers::ConfiguredRun (see configured_run.hpp):
 // builds the shared validation/population (solver resolution,
 // projectile-scoped gravity, particle + signal spawns with deterministic
@@ -27,6 +37,32 @@
 
 namespace wengine::solvers {
 
+/**
+ * @brief Build a run from cfg, attach sinks, advance cfg.steps, and copy
+ *        the final state out.
+ *
+ * @param[in] cfg parsed run configuration (loop, solver selection,
+ *            particle/signal/sequential sections).
+ * @param[in] sinks caller-owned, non-null sink observers attached for the
+ *            whole run (CLI file sinks, GUI views); the driver never
+ *            owns or opens them.
+ * @param[out] out_state receives a copy of the final world state; written
+ *            only on success.
+ * @param[in] extra caller-owned extra solvers stepped BEFORE the primary
+ *            solver, in span order (the custom-source evaluation
+ *            contract; empty by default). Callers keep them alive for the
+ *            whole call.
+ * @param[in] stop_requested optional poll (checked between step chunks);
+ *            null runs all steps uninterrupted.
+ * @return kOk on success; kInvalidArgument on config problems (unknown
+ *         solver, bad dt/steps, misplaced per-solver sections, missing
+ *         Lua runtime); the solver/runner Status unchanged when a step
+ *         fails. An interrupted run (stop requested) still succeeds with
+ *         the partial prefix in out_state.
+ * @note Determinism: identical cfg plus identical sinks reproduce the
+ *       run exactly — validation, spawn order, seeds, and step sequencing
+ *       all live in the shared ConfiguredRun builder.
+ */
 [[nodiscard]] inline core::Status run_headless(const core::RunConfig &cfg,
                                                std::span<emit::ISink *> sinks,
                                                world::State &out_state,

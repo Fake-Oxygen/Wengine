@@ -1,3 +1,11 @@
+/**
+ * @file
+ * Bounded owning SPSC output queue: fixed-capacity reusable storage for owned SampleBlocks.
+ * @note Ownership bridge between the sim producer (copies sealed blocks in) and one async
+ *       consumer (reads queue-owned views, returns slots by popping). Pure header, no syscalls,
+ *       no threads, no I/O; headers stay platform-free (no POSIX TU for this header).
+ *       Consumers: TcpBlockWorker (ordered/latest modes) and future async endpoints.
+ */
 #pragma once
 
 // Bounded owning SPSC output queue (PHYSI-45): fixed-capacity reusable
@@ -57,52 +65,94 @@ namespace wengine::link::sample {
 
 // Default slot count mirrors the SHM ring depth: bounded jitter cover, not
 // a completeness promise (see docs/delivery.md classes A/B).
+/** @brief Default slot count (mirrors the SHM ring depth: bounded jitter cover, not a completeness promise). */
 inline constexpr std::size_t kOutputQueueDefaultSlots = 8;
 // Default byte budget holds one maximum-size block per default slot.
+/** @brief Default byte budget (holds one maximum-size block per default slot). */
 inline constexpr std::size_t kOutputQueueDefaultBytes =
     kBlockMaxBytes * kOutputQueueDefaultSlots;
 
+/** @brief Queue capacity configuration (slots AND bytes; overflow is loud, never silent). */
 struct OutputQueueConfig {
+/** @brief Slot capacity (0 sanitizes to the default). */
   std::size_t max_slots = kOutputQueueDefaultSlots;
+/** @brief Byte budget across queued blocks (0 sanitizes to the default). */
   std::size_t max_bytes = kOutputQueueDefaultBytes;
 };
 
+/**
+ * @brief Admission verdict: kOk owns the copy from here; kFull (slots exhausted or byte budget exceeded, counted) and kClosed (post-shutdown, counted separately) leave the queue untouched.
+ */
 enum class PushResult : std::uint8_t { kOk, kFull, kClosed };
 
 // Plain snapshot of monotonic queue counters (see OutputQueue::stats()).
+/** @brief Plain snapshot of monotonic queue counters (exact at rest; see OutputQueue::stats). */
 struct OutputQueueStats {
+/** @brief Blocks admitted (kOk pushes). */
   std::uint64_t pushed_blocks = 0;
+/** @brief Samples admitted. */
   std::uint64_t pushed_samples = 0;
+/** @brief Blocks released by the consumer. */
   std::uint64_t popped_blocks = 0;
+/** @brief Samples released by the consumer. */
   std::uint64_t popped_samples = 0;
+/** @brief kFull refusals in blocks (slot or byte budget). */
   std::uint64_t dropped_blocks = 0;  // kFull refusals (slot or byte budget)
+/** @brief kFull refusals in samples. */
   std::uint64_t dropped_samples = 0;
+/** @brief kClosed refusals in blocks (post-shutdown admission stops). */
   std::uint64_t closed_blocks = 0;  // kClosed refusals (post-shutdown)
+/** @brief kClosed refusals in samples. */
   std::uint64_t closed_samples = 0;
+/** @brief Max ready slots observed. */
   std::uint64_t high_water_slots = 0;  // max ready slots observed
+/** @brief Max queued bytes observed. */
   std::uint64_t high_water_bytes = 0;  // max queued bytes observed
 
+/** @brief Exact field-wise equality. @return True when every counter compares equal. */
   bool operator==(const OutputQueueStats &) const noexcept = default;
 };
 
+/**
+ * @brief Bounded owning single-producer/single-consumer queue for SampleBlocks.
+ * @note Exactly one producer thread (try_push) and one consumer thread (front/pop/try_pop);
+ *       anything else needs external sync. No syscalls, no I/O. The consumer path is
+ *       non-allocating and noexcept; try_push allocates only while slot capacities warm up.
+ */
 class OutputQueue {
  public:
+/**
+ * @brief Construct with sanitized capacities (zero fields fall back to defaults).
+ * @param[in] cfg slot and byte budgets.
+ */
   explicit OutputQueue(OutputQueueConfig cfg = {})
       : cfg_(sanitize(cfg)), slots_(cfg_.max_slots), slot_bytes_(cfg_.max_slots, 0) {}
 
+/** @brief Non-copyable (holds heap buffers). */
   OutputQueue(const OutputQueue &) = delete;
+/** @brief Non-copyable (holds heap buffers). */
   OutputQueue &operator=(const OutputQueue &) = delete;
+/** @brief Non-movable. */
   OutputQueue(OutputQueue &&) = delete;
+/** @brief Non-movable. */
   OutputQueue &operator=(OutputQueue &&) = delete;
 
+/** @brief Effective configuration. @return Sanitized config. */
   [[nodiscard]] const OutputQueueConfig &config() const noexcept { return cfg_; }
+/** @brief Slot capacity. @return Max slots. */
   [[nodiscard]] std::size_t capacity() const noexcept { return cfg_.max_slots; }
+/** @brief Byte budget. @return Max queued bytes. */
   [[nodiscard]] std::size_t byte_capacity() const noexcept { return cfg_.max_bytes; }
 
   // Producer: copy one owned block into the next free slot. kOk owns the
   // copy from here; kFull (slots exhausted or byte budget exceeded) and
   // kClosed (post-shutdown) leave the queue untouched and count the
   // rejected block + its samples. Never blocks, never overwrites.
+/**
+ * @brief Producer: copy one owned block into the next free slot.
+ * @param[in] in block to copy (caller keeps it and may mutate/reuse immediately — queued data is immutable).
+ * @return kOk (copy owned from here), kFull (slots exhausted or byte budget exceeded — counted, maps to PublisherStats::dropped_queue_full), or kClosed (post-shutdown — counted separately). Never blocks, never overwrites.
+ */
   PushResult try_push(const SampleBlock &in) {
     if (closed_.load(std::memory_order_acquire)) {
       closed_blocks_.fetch_add(1, std::memory_order_relaxed);
@@ -138,6 +188,11 @@ class OutputQueue {
   // Producer: hand a block over by move. Same bounds and counting as the
   // copy form; steady same-shape traffic stays allocation-free either way
   // (capacities swap rather than grow).
+/**
+ * @brief Producer: hand a block over by move (same bounds and counting as the copy form).
+ * @param[in] in block to move from.
+ * @return kOk, kFull, or kClosed as above. Steady same-shape traffic stays allocation-free (capacities swap rather than grow).
+ */
   PushResult try_push(SampleBlock &&in) {
     if (closed_.load(std::memory_order_acquire)) {
       closed_blocks_.fetch_add(1, std::memory_order_relaxed);
@@ -172,6 +227,10 @@ class OutputQueue {
 
   // Consumer: oldest ready block, or nullptr when empty. The view is valid
   // until the matching pop()/try_pop() and must not be retained past it.
+/**
+ * @brief Consumer: oldest ready block, or nullptr when empty.
+ * @return Queue-owned const view, valid until the matching pop()/try_pop(); must not be retained past it — a retaining consumer copies out (try_pop) before returning.
+ */
   [[nodiscard]] const SampleBlock *front() const noexcept {
     const std::size_t tail = tail_.load(std::memory_order_relaxed);
     // Acquire pairs with the producer's head_ release: a visible slot is a
@@ -185,6 +244,7 @@ class OutputQueue {
 
   // Consumer: release the front slot for producer reuse. No-op on empty
   // (never UB); the normal contract is front() != nullptr.
+/** @brief Consumer: release the front slot for producer reuse. No-op on empty (never UB); the normal contract is front() != nullptr. */
   void pop() noexcept {
     const std::size_t tail = tail_.load(std::memory_order_relaxed);
     const std::size_t head = head_.load(std::memory_order_acquire);
@@ -203,6 +263,11 @@ class OutputQueue {
 
   // Consumer: copy the front block into caller-owned storage (reusing its
   // capacity) and release the slot. False when empty with `out` untouched.
+/**
+ * @brief Consumer: copy the front block into caller-owned storage (reusing its capacity) and release the slot.
+ * @param[out] out caller-owned destination (untouched when empty).
+ * @return True when a block was copied; false when empty.
+ */
   bool try_pop(SampleBlock &out) {
     const SampleBlock *head_block = front();
     if (head_block == nullptr) {
@@ -215,27 +280,33 @@ class OutputQueue {
 
   // Admission stop: later try_push reports kClosed. Queued blocks stay
   // readable and drainable; idempotent.
+/** @brief Admission stop: later try_push reports kClosed. Queued blocks stay readable and drainable; idempotent. */
   void shutdown() noexcept { closed_.store(true, std::memory_order_release); }
 
+/** @brief Admission-stop flag. @return True after shutdown(). */
   [[nodiscard]] bool closed() const noexcept {
     return closed_.load(std::memory_order_acquire);
   }
 
   // Ready-block count. Exact at rest; may shift under live traffic.
+/** @brief Ready-block count (exact at rest; may shift under live traffic). @return Ready blocks. */
   [[nodiscard]] std::size_t size() const noexcept {
     const std::size_t head = head_.load(std::memory_order_acquire);
     const std::size_t tail = tail_.load(std::memory_order_acquire);
     return head - tail;
   }
 
+/** @brief Empty predicate. @return True when no ready block. */
   [[nodiscard]] bool empty() const noexcept { return size() == 0; }
 
+/** @brief Queued-byte footprint. @return Queued bytes. */
   [[nodiscard]] std::size_t bytes_queued() const noexcept {
     return bytes_.load(std::memory_order_acquire);
   }
 
   // Monotonic counters. Exact at rest (no push/pop in flight); a snapshot
   // taken during traffic may mix epochs.
+/** @brief Monotonic counters (exact at rest; a snapshot during traffic may mix epochs). @return Counter snapshot. */
   [[nodiscard]] OutputQueueStats stats() const noexcept {
     OutputQueueStats s;
     s.pushed_blocks = pushed_blocks_.load(std::memory_order_relaxed);
@@ -252,6 +323,7 @@ class OutputQueue {
   }
 
   // Closed and drained: the worker shutdown quiescence point.
+/** @brief Worker shutdown quiescence point: closed and drained. @return True when closed() and empty(). */
   [[nodiscard]] bool done() const noexcept { return closed() && empty(); }
 
  private:

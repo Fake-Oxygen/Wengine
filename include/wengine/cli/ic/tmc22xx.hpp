@@ -1,5 +1,17 @@
 #pragma once
 
+/**
+ * @file
+ * TMC22xx CLI glue: the chip CommandSpec declaration for the `ic`
+ * command (kName `tmc22xx` covers the TMC2202/2208/2224 family). The pure
+ * solver lives in solvers/ic/tmc22xx.hpp (datasheet Rev. 1.14 formulas
+ * only, no CLI types); the implementation lives in
+ * src/cli/commands/ic/tmc22xx.cpp; registration lives in
+ * wengine/cli/ic_registry.hpp. Consumers: ic::dispatch (two-level
+ * routing) and the `ic` completion entry. Dependency direction: cli to
+ * solvers, never the reverse.
+ */
+
 // TMC2202/TMC2208/TMC2224 CLI glue (spec declaration). Implementation:
 // `src/cli/commands/ic/tmc22xx.cpp`. Registered in `ic_registry.hpp`.
 
@@ -13,9 +25,21 @@
 
 namespace wengine::cli::ic {
 
+/**
+ * @brief TMC2202/2208/2224 stepper-driver chip spec (family-shared ops).
+ */
 struct Tmc22xxSpec {
+  /**
+   * @brief Chip name token (`tmc22xx`, the family-shared command name).
+   */
   static constexpr std::string_view kName = "tmc22xx";
+  /**
+   * @brief One-line summary for the `ic` chip list.
+   */
   static constexpr std::string_view kDescription = "TMC2202/2208/2224 stepper driver (current, chopper, StealthChop, standby)";
+  /**
+   * @brief Full usage text (printed with usage errors and chip `--help`).
+   */
   static constexpr std::string_view kUsage =
       "ic tmc22xx <op> [options]   (datasheet Rev. 1.14; fCLK default 12MHz)\n"
       "  ic tmc22xx current --rsense 220mOhm [--irun 31] [--ihold 16]\n"
@@ -42,7 +66,21 @@ struct Tmc22xxSpec {
       "  ic tmc22xx spec\n"
       "Currents are RMS per coil; ratings: 1.2A cont, 1.4A duty-limited, 2A peak.";
 
+  /**
+   * @brief Run one TMC22xx subcommand (current/chop/hyst/pwm/velocity).
+   * @param[in,out] args Subcommand plus named options (tokens after `ic`
+   *            and the chip name; the chip token is already consumed).
+   * @param[out] out Stream receiving the result row or the error text.
+   * @return 0 with the result printed; 2 on a bad subcommand, bad
+   *         arguments, or stray positionals; 1 on a check failure.
+   */
   static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Complete TMC22xx subcommands and option names.
+   * @param[in] prior_args Tokens after the chip name before the partial.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates appended without trailing space.
+   */
   static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 

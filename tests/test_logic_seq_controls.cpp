@@ -1,3 +1,6 @@
+// test_logic_seq_controls: sequential control pins — fanin/parse, async
+// apply, hold, RST-beats-SET, wired RST, preset/stall/subset-enable CLI
+// flows, YAML round-trip, and determinism replay. Guards control-pinning.
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"

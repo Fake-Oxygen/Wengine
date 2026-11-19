@@ -1,5 +1,12 @@
 #pragma once
 
+/**
+ * @file
+ * Machine-readable particle snapshot log: tidy CSV, header written once,
+ * co-located replay parser. Depends on core/status and emit/sink only;
+ * never on solvers. Consumed by sim run for the particle domain and by
+ * the link bridge replaying logs onto the bus.
+ */
 // Machine-readable snapshot log: tidy CSV, one row per particle per
 // snapshot (`step,time,slot,entity_index,entity_generation,x,y,vx,vy`),
 // header written once on open. v3 identity columns (PHYSI particle
@@ -36,12 +43,31 @@
 
 namespace wengine::emit {
 
+/**
+ * @brief Tidy particle CSV writer: one row per particle per snapshot.
+ * @note Best-effort observer: I/O errors are sticky (status flips to
+ * kInternal, further snapshots are skipped, nothing throws). The log
+ * round-trips exactly (max_digits10) and doubles as the deterministic
+ * replay format, but it is output replay, never a restart checkpoint
+ * (checkpoints are the versioned binary save_state/load_state).
+ */
 class CsvSink : public ISink {
 public:
   // Sentinel for unavailable particle identity in the CSV columns.
   // Matches world::Entity::kInvalidIndex: never a live slot.
+/**
+ * @brief Sentinel for unavailable particle identity in the CSV columns.
+ * @note Matches world::Entity::kInvalidIndex: never a live slot; parses back to unavailable identity.
+ */
   static constexpr std::uint32_t kMissingIdentity = 0xFFFFFFFFu;
 
+/**
+ * @brief Open the log file and write the header.
+ * @param[in] path destination file.
+ * @param[in] truncate true truncates; false appends (the header is then written only when
+ * starting an empty file).
+ * @note A failed open is a sticky kInternal status, never a throw.
+ */
   explicit CsvSink(std::string path, bool truncate = true) : path_(std::move(path)) {
     out_.open(path_, truncate ? std::ios::trunc : std::ios::app);
     if (!out_) {
@@ -57,6 +83,11 @@ public:
     }
   }
 
+/**
+ * @brief Append one row per particle for the snapshot.
+ * @param[in] s emitted snapshot.
+ * @note Snapshots without identity write kMissingIdentity for both columns.
+ */
   void on_snapshot(const world::Snapshot &s) override {
     if (!status_.ok()) {
       return;
@@ -75,13 +106,21 @@ public:
     }
   }
 
+/** @brief Sticky health flag. @return true while no I/O failure occurred (state query, not an error return). */
   [[nodiscard]] bool ok() const noexcept { return status_.ok(); }
+/** @brief Sticky status. @return kOk, or kInternal once I/O has failed. */
   [[nodiscard]] core::Status status() const noexcept { return status_; }
+/** @brief Data rows appended, ever. @return Count of written particle rows. */
   [[nodiscard]] std::size_t rows_written() const noexcept { return rows_; }
+/** @brief Destination file. @return The path passed to the constructor. */
   [[nodiscard]] const std::string &path() const noexcept { return path_; }
 
   // Push buffered rows to the file (for tailing; also happens on close).
   // Returns the sticky status (kInternal once I/O has failed).
+/**
+ * @brief Push buffered rows to the file (for tailing; also happens on close).
+ * @return The sticky status (kInternal once I/O has failed).
+ */
   core::Status flush() {
     if (!status_.ok()) {
       return status_;
@@ -120,6 +159,12 @@ namespace csv_detail {
 
 // Strict unsigned: digits only (strtoull alone would accept '-' wrap and
 // '+' prefixes, which this log format never emits).
+/**
+ * @brief Strict unsigned field parse: digits only (strtoull alone would accept '-' wrap and '+' prefixes).
+ * @param[in] text field text.
+ * @param[out] v parsed value on true.
+ * @return true on success, false otherwise.
+ */
 [[nodiscard]] inline bool parse_u64_field(const std::string &text,
                                           std::uint64_t &v) noexcept {
   if (text.empty() || text.front() < '0' || text.front() > '9') {
@@ -135,6 +180,12 @@ namespace csv_detail {
   return true;
 }
 
+/**
+ * @brief Strict double field parse via full-consumption strtod.
+ * @param[in] text field text.
+ * @param[out] v parsed value on true.
+ * @return true on success, false otherwise.
+ */
 [[nodiscard]] inline bool parse_f64_field(const std::string &text,
                                           double &v) noexcept {
   if (text.empty()) {
@@ -152,6 +203,12 @@ namespace csv_detail {
 
 // Split a row into fields; returns field count (7 legacy or 9 v3) or 0 on
 // any other shape (views share no tolerance here: loud beats lossy).
+/**
+ * @brief Split a CSV row into fields (7 legacy or 9 v3); any other shape is loud, not tolerated.
+ * @param[in] line raw row text.
+ * @param[out] fields parsed fields.
+ * @return Field count (7 or 9), or 0 on any other shape.
+ */
 [[nodiscard]] inline std::size_t split_row(const std::string &line, std::string fields[9]) {
   std::size_t begin = 0;
   std::size_t n = 0;
@@ -175,6 +232,18 @@ namespace csv_detail {
 
 } // namespace csv_detail
 
+/**
+ * @brief Replay a CsvSink log back into snapshots, one per step in file order.
+ * @param[in] in log stream (v3 identity header or legacy 7-column header).
+ * @param[out] out parsed snapshots; cleared on failure.
+ * @param[out] error human line-numbered message on failure (edge code may allocate; the sim hot path never calls this).
+ * @return kOk, or kInvalidArgument for a bad header, non-increasing steps, non-dense slots,
+ * time differing within a step, or malformed rows.
+ * @note Steps strictly increase; slots are dense 0..n-1 in row order per step; time is
+ * identical across a step's rows (exact ==: same text parses to the same double).
+ * Empty snapshots have no rows and do not survive a CSV round trip (documented limitation).
+ * Doubles use max_digits10 full consumption, so logs round-trip exactly (bitwise, not approximate).
+ */
 [[nodiscard]] inline core::Status parse_csv_log(std::istream &in, std::vector<world::Snapshot> &out, std::string &error) {
   out.clear();
   error.clear();

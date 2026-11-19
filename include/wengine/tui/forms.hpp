@@ -1,7 +1,14 @@
 #pragma once
 
-// F3 command-form registry. Form data is defined one command per file under
-// forms/; register a new form here and keep the registry order stable.
+/**
+ * @file
+ * F3 command-form registry. Form data is defined one command per file
+ * under `forms/`; register a new form here and keep the registry order
+ * stable. The TUI is a front end: forms compose one argv line each for
+ * the shared CLI path, never parsing or validating anything themselves.
+ * Consumers: the F3 form browser in `src/tui/panes_forms.cpp`,
+ * `tests/test_tui_forms.cpp`.
+ */
 
 #include "wengine/tui/forms/types.hpp"
 
@@ -17,9 +24,17 @@
 
 namespace wengine::tui::forms {
 
+/**
+ * @brief Factory building one guided-form definition.
+ *
+ * @return The form definition for one closed-form command family.
+ */
 using FormFactory = FormDef (*)();
 
-// Single registration point, in the stable order shown by the F3 browser.
+/**
+ * @brief Single registration point, in the stable order shown by the F3
+ *        browser.
+ */
 inline constexpr std::array<FormFactory, kFormCount> kFormRegistry{{
     &definitions::ohm,
     &definitions::s0,
@@ -29,6 +44,11 @@ inline constexpr std::array<FormFactory, kFormCount> kFormRegistry{{
     &definitions::ic,
 }};
 
+/**
+ * @brief Instantiate every registered guided form.
+ *
+ * @return One FormDef per registry entry, in F3 browser order.
+ */
 [[nodiscard]] inline std::vector<FormDef> form_defs() {
   std::vector<FormDef> defs;
   defs.reserve(kFormRegistry.size());

@@ -1,16 +1,30 @@
 #pragma once
 
-// Logic netlist mutation + pins + derived block interface (LOGIC-2).
-//
-// Header-only, allocation-free, exception-free. Fallible ops use
-// core::Status/Result (literals only, no heap). Determinism: free-slot
-// search and interface derivation both scan in slot order; display ids
-// are per-kind monotonic counters never reused (slots recycle).
-//
-// Ignored-pin rule (v1): `ignore` excludes a dangling pin from the
-// derived block interface. Ignored dangling *inputs* tie off to kLow
-// during eval (documented); wired inputs ignore the mark (the wire
-// wins). `use` clears the mark. Both are idempotent.
+/**
+ * @file
+ * Netlist mutation stage (LOGIC-2) of the logic pipeline: pins plus the derived
+ * block interface. Header-only, allocation-free, exception-free;
+ * fallible ops use core::Status/Result (literals only, no heap).
+ * Determinism: free-slot search and interface derivation both scan in
+ * slot order; display ids are per-kind monotonic counters never reused
+ * (slots recycle). Pin vocabulary lives in types.hpp (so tie_set.hpp
+ * can take pins without a netlist.hpp include cycle); pin/kind parsing
+ * lives in pins.hpp (the table module); tie math plus block-interface
+ * derivation live in tie_set.hpp / block_interface.hpp. This header owns
+ * mutation.
+ *
+ * Ignored-pin rule (v1): `ignore` excludes a dangling pin from the
+ * derived block interface. Ignored dangling *inputs* tie off to kLow
+ * during eval; wired inputs ignore the mark (the wire wins). `use`
+ * clears the mark. Both are idempotent.
+ *
+ * Dependency rules (docs/logic.md section 4): depends on
+ * block_interface.hpp, pins.hpp, tie_set.hpp, topo.hpp, types.hpp, and
+ * core/status. Logic is a standalone domain: this header must never
+ * depend on CLI types. Consumers: the CLI add/remove/wire/ignore verbs,
+ * eval.hpp, seq_step.hpp, yaml_store.hpp, the optimize pipeline, and
+ * the test_logic* suite.
+ */
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/block_interface.hpp"
@@ -31,8 +45,17 @@ namespace wengine::logic {
 // table Module); tie math + block-interface derivation live in
 // tie_set.hpp / block_interface.hpp. This header owns mutation.
 
-// Add a gate with explicit fan-in. Lowest free slot wins (deterministic);
-// per-kind counter assigns then increments, never reused.
+/**
+ * @brief Add a gate with explicit fan-in; lowest free slot wins
+ *        (deterministic), per-kind counter assigns then increments,
+ *        never reused.
+ *
+ * @param[out] nl Netlist receiving the gate.
+ * @param[in] kind Gate kind to create.
+ * @param[in] inputs Fan-in; must satisfy valid_fanin(kind, inputs).
+ * @return kOk with the new slot on success; kInvalidArgument for bad
+ *         fan-in, an unknown kind, or a full netlist ("netlist full").
+ */
 [[nodiscard]] inline core::Result<std::uint16_t> add_gate(Netlist &nl, GateKind kind, std::uint8_t inputs) noexcept {
   if (!valid_fanin(kind, inputs)) {
     return core::Result<std::uint16_t>::failure("bad fan-in for kind");
@@ -84,14 +107,31 @@ namespace wengine::logic {
   return core::Result<std::uint16_t>::success(slot);
 }
 
+/**
+ * @brief Add a gate with the kind's default fan-in.
+ *
+ * @param[out] nl Netlist receiving the gate.
+ * @param[in] kind Gate kind to create.
+ * @return kOk with the new slot on success; kInvalidArgument for a full
+ *         netlist ("netlist full").
+ */
 [[nodiscard]] inline core::Result<std::uint16_t> add_gate(Netlist &nl, GateKind kind) noexcept {
   return add_gate(nl, kind, default_fanin(kind));
 }
 
-// Remove a gate: detaches its inputs (releasing driver fanout) and clears
-// every input it drives elsewhere. Counters never reused; slot recycles.
-// Tied pins of the removed gate leave their classes (remaining members
-// re-elect the lowest surviving pin as leader).
+/**
+ * @brief Remove a gate: detaches its inputs (releasing driver fanout)
+ *        and clears every input it drives elsewhere.
+ *
+ * Counters never reused; slot recycles. Tied pins of the removed gate
+ * leave their classes (remaining members re-elect the lowest surviving
+ * pin as leader).
+ *
+ * @param[out] nl Netlist holding the gate.
+ * @param[in] slot Slot to remove.
+ * @return kOk on success; kInvalidArgument for out-of-range or dead
+ *         slots.
+ */
 [[nodiscard]] inline core::Status remove_gate(Netlist &nl, std::uint16_t slot) noexcept {
   if (slot >= kMaxGates) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -150,6 +190,14 @@ namespace wengine::logic {
   return core::Status::success();
 }
 
+/**
+ * @brief Remove a gate by display name (e.g. "AND1").
+ *
+ * @param[out] nl Netlist holding the gate.
+ * @param[in] name Display name resolved via resolve_gate.
+ * @return kOk on success; kInvalidArgument when the name does not
+ *         resolve to a live gate.
+ */
 [[nodiscard]] inline core::Status remove_gate_by_name(Netlist &nl, std::string_view name) noexcept {
   auto gate = resolve_gate(nl, name);
   if (!gate.ok()) {
@@ -158,9 +206,24 @@ namespace wengine::logic {
   return remove_gate(nl, gate.value);
 }
 
-// Single-driver wire: exactly one wire per destination input. Occupied
-// inputs, tied destinations (untie first), and cycle-closing wires are
-// loud errors; the netlist is untouched on failure. Fan-out is unlimited.
+/**
+ * @brief Single-driver wire: exactly one wire per destination input.
+ *
+ * An edge into a sequential-gate input can never close a combinational
+ * cycle (flop Q outputs break loops), so the incremental check is
+ * vacuous there and acceptance never depends on wiring order. The
+ * whole-graph validator stays authoritative for combinational
+ * destinations (a live-but-uninvolved flop shields nothing).
+ *
+ * @param[out] nl Netlist receiving the wire.
+ * @param[in] from_slot Driver slot.
+ * @param[in] to_slot Sink slot.
+ * @param[in] to_input 0-based sink input index.
+ * @return kOk on success; kInvalidArgument for dead/out-of-range
+ *         slots or inputs, occupied inputs, tied destinations (untie
+ *         first), or cycle-closing wires. The netlist is untouched on
+ *         failure. Fan-out is unlimited.
+ */
 [[nodiscard]] inline core::Status wire(Netlist &nl, std::uint16_t from_slot, std::uint16_t to_slot, std::uint8_t to_input) noexcept {
   if (from_slot >= kMaxGates || to_slot >= kMaxGates) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -197,6 +260,16 @@ namespace wengine::logic {
   return core::Status::success();
 }
 
+/**
+ * @brief Remove the wire driving one input (polarity-aware: NQ edges
+ *        decrement nq_fanout, Q edges decrement output_fanout).
+ *
+ * @param[out] nl Netlist holding the wire.
+ * @param[in] to_slot Sink slot.
+ * @param[in] to_input 0-based sink input index.
+ * @return kOk on success; kInvalidArgument for dead/out-of-range
+ *         slots or inputs, or an already-unwired input.
+ */
 [[nodiscard]] inline core::Status unwire(Netlist &nl, std::uint16_t to_slot, std::uint8_t to_input) noexcept {
   if (to_slot >= kMaxGates) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -231,6 +304,20 @@ namespace wengine::logic {
   return core::Status::success();
 }
 
+/**
+ * @brief Wire output pin from to input pin to, with NQ polarity.
+ *
+ * Moves the edge from the Q fanout to the NQ fanout and marks the sink
+ * inverted (wire() always establishes the non-inverted state).
+ *
+ * @param[out] nl Netlist receiving the wire.
+ * @param[in] from Output pin (NQ sources exist on sequential gates
+ *            only).
+ * @param[in] to Input pin.
+ * @return kOk on success; kInvalidArgument for input-as-source pins,
+ *         dead slots, NQ sources on combinational gates, occupied or
+ *         tied destinations, or cycle-closing wires.
+ */
 [[nodiscard]] inline core::Status wire_pins(Netlist &nl, PinRef from, PinRef to) noexcept {
   if (!from.is_output || to.is_output) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -258,6 +345,14 @@ namespace wengine::logic {
   return core::Status::success();
 }
 
+/**
+ * @brief Remove the wire driving one input pin.
+ *
+ * @param[out] nl Netlist holding the wire.
+ * @param[in] pin Input pin to unwire.
+ * @return kOk on success; kInvalidArgument for output pins or an
+ *         already-unwired input.
+ */
 [[nodiscard]] inline core::Status unwire_pin(Netlist &nl, PinRef pin) noexcept {
   if (pin.is_output) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -265,6 +360,15 @@ namespace wengine::logic {
   return unwire(nl, pin.slot, pin.input);
 }
 
+/**
+ * @brief Parse two pin spellings and wire output to input.
+ *
+ * @param[out] nl Netlist receiving the wire.
+ * @param[in] from_text Output pin spelling (e.g. "AND2.Y").
+ * @param[in] to_text Input pin spelling (e.g. "NOR1.1").
+ * @return kOk on success; kInvalidArgument for unparsable pins or any
+ *         wire_pins refusal.
+ */
 [[nodiscard]] inline core::Status wire_text(Netlist &nl, std::string_view from_text, std::string_view to_text) noexcept {
   auto from = parse_pin(nl, from_text);
   if (!from.ok()) {
@@ -277,9 +381,19 @@ namespace wengine::logic {
   return wire_pins(nl, from.value, to.value);
 }
 
-// ignore/use are idempotent: marking twice (or clearing an unmarked pin)
-// still succeeds. Ignoring a tied input fails loudly (untie first);
-// tied pins are never ignored by construction.
+/**
+ * @brief Ignore a pin: exclude it from the derived block interface.
+ *
+ * Idempotent: marking twice still succeeds. Ignoring a tied input
+ * fails loudly (untie first); tied pins are never ignored by
+ * construction.
+ *
+ * @param[out] nl Netlist holding the pin.
+ * @param[in] pin Pin to ignore (inputs mark the ignored bit, outputs
+ *            mark ignore_output / ignore_nq_output).
+ * @return kOk on success; kInvalidArgument for dead/out-of-range pins
+ *         or tied inputs.
+ */
 [[nodiscard]] inline core::Status ignore_pin(Netlist &nl, PinRef pin) noexcept {
   if (pin.slot >= kMaxGates || !nl.gates[pin.slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -303,6 +417,15 @@ namespace wengine::logic {
   return core::Status::success();
 }
 
+/**
+ * @brief Re-expose an ignored pin to the derived block interface.
+ *
+ * Idempotent: clearing an unmarked pin still succeeds.
+ *
+ * @param[out] nl Netlist holding the pin.
+ * @param[in] pin Pin to re-expose.
+ * @return kOk on success; kInvalidArgument for dead/out-of-range pins.
+ */
 [[nodiscard]] inline core::Status use_pin(Netlist &nl, PinRef pin) noexcept {
   if (pin.slot >= kMaxGates || !nl.gates[pin.slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -324,6 +447,12 @@ namespace wengine::logic {
   return core::Status::success();
 }
 
+/**
+ * @brief Clear the whole netlist to the fresh state: every slot dead,
+ *        ties cleared, per-kind counters restarted at 1.
+ *
+ * @param[out] nl Netlist to reset.
+ */
 inline void reset_netlist(Netlist &nl) noexcept {
   for (std::size_t s = 0; s < kMaxGates; ++s) {
     Gate &g = nl.gates[s];
@@ -353,7 +482,16 @@ inline void reset_netlist(Netlist &nl) noexcept {
   nl.topo_size = 0;
 }
 
-// Text adapters over the TieSet seam: parse pins, then delegate.
+/**
+ * @brief Parse two input-pin spellings and tie them (text adapter over
+ *        the TieSet seam).
+ *
+ * @param[out] nl Netlist receiving the tie.
+ * @param[in] a_text First pin spelling.
+ * @param[in] b_text Second pin spelling.
+ * @return kOk on success; kInvalidArgument for unparsable pins or any
+ *         tie_pins refusal.
+ */
 [[nodiscard]] inline core::Status tie_text(Netlist &nl, std::string_view a_text, std::string_view b_text) noexcept {
   auto a = parse_pin(nl, a_text);
   if (!a.ok()) {
@@ -366,6 +504,14 @@ inline void reset_netlist(Netlist &nl) noexcept {
   return tie_pins(nl, a.value, b.value);
 }
 
+/**
+ * @brief Parse one input-pin spelling and untie it.
+ *
+ * @param[out] nl Netlist receiving the untie.
+ * @param[in] text Pin spelling.
+ * @return kOk on success; kInvalidArgument for unparsable pins or any
+ *         untie_pin refusal.
+ */
 [[nodiscard]] inline core::Status untie_text(Netlist &nl, std::string_view text) noexcept {
   auto p = parse_pin(nl, text);
   if (!p.ok()) {

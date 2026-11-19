@@ -1,5 +1,39 @@
 #pragma once
 
+/**
+ * @file
+ * O2 post-cleanup passes that preserve the single-kind vocabulary
+ * (LOGIC-4): the dedup stage of the O2 fresh build inside the optimize
+ * stage of the logic pipeline (netlist parse -> state -> eval ->
+ * layout/topo -> optimize). After the O2 emitter (optimize_o2_emit.hpp)
+ * rebuilds the net in NAND-only/NOR-only form, these passes shrink the
+ * result without leaving the target vocabulary: identical universal
+ * gates merge (non-sinks only) and internal double inverters
+ * U(U(E,E),U(E,E)) cancel back to E.
+ *
+ * What each pass preserves: the truth table exactly, the target
+ * vocabulary (every gate stays the universal kind U), and the block
+ * output count (sinks are never merged, so outputs stay positional).
+ * Cost class: quadratic pairwise compare over live universal gates
+ * per call, bounded by kMaxGates with fixed stack arrays — no
+ * allocation, deterministic slot order throughout.
+ *
+ * Merge contract (optimize_barrier.hpp DedupKey/MergeTied): dangling
+ * inputs never merge under kStrict (two [NoDriver,NoDriver] gates may
+ * be distinct variables); under kMergeTied, tied dangling pins merge
+ * by tie leader (sound because the O2 structural build ties
+ * same-source duplicates at creation; sequential nets only, so
+ * pure-combinational output stays bit-identical). Gates feeding a
+ * sequential gate are never merged or cancelled (opaque barrier:
+ * feeds_seq guards every removal).
+ *
+ * Dependency rules: header-only, allocation-free, exception-free,
+ * noexcept throughout. Lives in the wengine::logic::detail seam —
+ * internal to the optimizer family. Never depends on CLI types.
+ * Consumers: optimize_o2_build.hpp post_cleanup and the logic
+ * optimizer tests.
+ */
+
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/optimize_types.hpp"
@@ -26,6 +60,23 @@ namespace detail {
 // merge by tie leader (sound because the O2 structural build ties
 // same-source duplicates at creation; sequential nets only, so
 // pure-combinational output stays bit-identical).
+/**
+ * @brief One O2 dedup sweep: merge identical non-sink universal gates.
+ *
+ * Sorted-key multiset compare makes the match order-insensitive
+ * (commutative kinds); merge direction is always higher slot into
+ * lower slot. Sinks are never merged (output slots and count stay
+ * stable for positional truth-equivalence checks); gates feeding a
+ * sequential gate are never merged (opaque barrier).
+ *
+ * @param[in,out] nl Netlist being cleaned; mutated only on merges.
+ * @param[in] u Universal target kind (kNand or kNor).
+ * @param[in] merge kStrict keeps dangling pins distinct; kMergeTied
+ *                  merges same-tie-class dangling pins.
+ * @param[in] feeds_seq Precomputed feeds-sequential bits (nullptr when
+ *                     the net has no sequential gates).
+ * @return True when any merge happened (caller re-runs to fixpoint).
+ */
 inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge,
                                       const bool *feeds_seq) noexcept {
   recount_fanout(nl);
@@ -119,22 +170,58 @@ inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge,
   return changed;
 }
 
-// Named dedup entry points replacing the old bool flag: strict keeps
-// pure-combinational output bit-identical (dangling pins never merge);
-// tied merges same-source tied dangling pins (sequential nets only, where
-// the structural build ties duplicates at creation so toggles converge).
+/**
+ * @brief Strict dedup entry point (dangling pins never merge).
+ *
+ * Named dedup entry points replacing the old bool flag: strict keeps
+ * pure-combinational output bit-identical (dangling pins never merge);
+ * tied merges same-source tied dangling pins (sequential nets only,
+ * where the structural build ties duplicates at creation so toggles
+ * converge).
+ *
+ * @param[in,out] nl Netlist being cleaned; mutated only on merges.
+ * @param[in] u Universal target kind (kNand or kNor).
+ * @param[in] feeds_seq Precomputed feeds-sequential bits (nullptr when
+ *                     the net has no sequential gates).
+ * @return True when any merge happened (caller re-runs to fixpoint).
+ */
 inline bool dedup_universal_pass(Netlist &nl, GateKind u, const bool *feeds_seq = nullptr) noexcept {
   return dedup_universal_pass_impl(nl, u, MergeTied::kStrict, feeds_seq);
 }
 
+/**
+ * @brief Tied-dangling dedup entry point (same-tie-class pins merge).
+ *
+ * Merges same-source tied dangling pins by tie leader — used on
+ * sequential nets, where the O2 structural build tied duplicated pins
+ * at creation, so repeated NAND/NOR toggles converge instead of
+ * multiplying gates.
+ *
+ * @param[in,out] nl Netlist being cleaned; mutated only on merges.
+ * @param[in] u Universal target kind (kNand or kNor).
+ * @param[in] feeds_seq Precomputed feeds-sequential bits (nullptr when
+ *                     the net has no sequential gates).
+ * @return True when any merge happened (caller re-runs to fixpoint).
+ */
 inline bool dedup_universal_tied_pass(Netlist &nl, GateKind u, const bool *feeds_seq = nullptr) noexcept {
   return dedup_universal_pass_impl(nl, u, MergeTied::kMergeTied, feeds_seq);
 }
 
-// Cancel internal double inverters: G=U(D,D), D=U(E,E) with D,E wired live
-// gates => G==E. Only non-sinks (preserves output slots/count); dangling
-// bases (E==NoDriver) are skipped to avoid interface churn.
-// feeds_seq is the precomputed barrier bit (nullptr == no sequential gates).
+/**
+ * @brief Cancel internal double inverters: G=U(D,D), D=U(E,E)
+ *        implies G==E, so rewire G's users to E and drop G.
+ *
+ * Only non-sinks fire (preserves output slots/count); dangling bases
+ * (E==NoDriver) are skipped to avoid interface churn. Gates feeding a
+ * sequential gate are never cancelled (opaque barrier).
+ *
+ * @param[in,out] nl Netlist being cleaned; mutated only on cancels.
+ * @param[in] u Universal target kind (kNand or kNor).
+ * @param[in] feeds_seq Precomputed feeds-sequential bits (nullptr when
+ *                     the net has no sequential gates).
+ * @return True when any cancellation happened (caller re-runs to
+ *         fixpoint; the orphaned D vanishes via DCE).
+ */
 inline bool double_inv_universal_pass(Netlist &nl, GateKind u, const bool *feeds_seq = nullptr) noexcept {
   recount_fanout(nl);
   bool changed = false;

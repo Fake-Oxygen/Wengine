@@ -1,0 +1,61 @@
+# Doxygen configuration for the WEngine documentation suite.
+#
+# Purpose: extract the public engine API (include/wengine/**) as XML so
+# Breathe can render it inside the Sphinx site (docs/conf.py,
+# breathe_projects["wengine"]). Undocumented-entity warnings are the
+# SC-003 coverage audit input: the delivery target is zero.
+#
+# Run via docs/build.sh from the repository root (BC2); paths below are
+# relative to that root.
+
+PROJECT_NAME           = "WEngine"
+PROJECT_BRIEF          = "High-performance C++20 physics simulation engine"
+
+# --- Extraction scope: the public API only (research R4) ----------------
+# apps/, src/, tests/, benchmarks/, examples/ follow the same comment
+# *convention* (DC1/DC2/DC5) but are not rendered as API pages; their
+# story is the dev guide + catalogs.
+INPUT                  = include/wengine
+FILE_PATTERNS          = *.hpp *.h
+RECURSIVE              = YES
+INPUT_ENCODING         = UTF-8
+
+# --- Output: XML only, strictly out-of-tree (BC3) ------------------------
+# XML lands directly in build/docs/doxygen-xml/ (index.xml + one .xml per
+# file), which is the path Breathe points at. HTML/LaTeX are off: the
+# Sphinx site is the single rendered surface.
+OUTPUT_DIRECTORY       = build/docs/doxygen-xml
+XML_OUTPUT             = .
+GENERATE_XML           = YES
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+
+# --- Comment grammar enforcement (contracts/doxygen-comment-conventions.md)
+# EXTRACT_ALL=YES renders undocumented entities too, so gaps stay visible
+# in the site instead of silently disappearing; the same run's warnings
+# list every miss (the coverage audit).
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+JAVADOC_AUTOBRIEF      = NO
+MARKDOWN_SUPPORT       = YES
+
+# --- Coverage audit switches (SC-003) ------------------------------------
+# NOTE: Doxygen auto-disables WARN_IF_UNDOCUMENTED while EXTRACT_ALL=YES,
+# so undocumented entities never warn in the rendering pass — they stay
+# visible in the output instead. The audit is `docs/check_api_coverage.py`
+# (run from docs/build.sh), which parses the deliverable XML and requires
+# a brief on every public entity, docs on every parameter, and a role
+# paragraph on every file. WARN_NO_PARAMDOC still catches missing
+# parameter docs where it can; the XML audit is authoritative.
+WARN_IF_UNDOCUMENTED   = YES
+WARN_NO_PARAMDOC       = YES
+WARN_AS_ERROR          = NO
+WARN_FORMAT            = "$file:$line: $text"
+
+# XML extraction only: no call/collaboration graphs, no plantuml — keeps
+# the build fast and free of optional host tools.
+HAVE_DOT               = NO
+
+# --- Deterministic, reviewable output ------------------------------------
+SORT_GROUP_NAMES       = YES
+SORT_MEMBER_DOCS       = YES

@@ -1,5 +1,17 @@
 #pragma once
 
+/**
+ * @file
+ * The versioned binary checkpoint format for world::State: save_state
+ * writes and load_state restores a complete, restartable simulation
+ * state (little-endian, deterministic, no external dependencies).
+ * Consumers are the CLI save/load commands and the GUI restore path.
+ * This file is the ONLY restart mechanism — snapshot CSV is output
+ * replay, never a restart checkpoint (see docs/delivery.md) — and it
+ * must never grow I/O policy beyond stream reads/writes: all validation
+ * happens in load_state with Status codes, never exceptions.
+ */
+
 // Versioned binary persistence for world::State (deterministic, no deps).
 //
 // Format v6, all integers little-endian, doubles as IEEE-754 bits:
@@ -61,21 +73,48 @@
 
 namespace wengine::world {
 
+/**
+ * @brief Current binary format version (6). Writers always emit this
+ *        version; readers accept 1..kStateFormatVersion with per-version
+ *        fallback loaders (kind bytes stay append-only across
+ *        versions).
+ */
 inline constexpr std::uint32_t kStateFormatVersion = 6;
-// Sanity cap per count field: rejects corrupt files before huge allocs.
+/**
+ * @brief Sanity cap per count field: rejects corrupt files before huge
+ *        allocations (any stored count above this fails loading).
+ */
 inline constexpr std::uint32_t kMaxStateEntries = 1u << 24;
 
 namespace detail {
 
+/**
+ * @brief Write one byte (serialization detail).
+ *
+ * @param[in] out target stream.
+ * @param[in] v byte to write.
+ */
 inline void put_u8(std::ostream &out, std::uint8_t v) {
   out.put(static_cast<char>(v));
 }
 
+/**
+ * @brief Write a 16-bit value little-endian (serialization detail).
+ *
+ * @param[in] out target stream.
+ * @param[in] v value to write, low byte first.
+ */
 inline void put_u16_le(std::ostream &out, std::uint16_t v) {
   out.put(static_cast<char>(v & 0xFFu));
   out.put(static_cast<char>((v >> 8) & 0xFFu));
 }
 
+/**
+ * @brief Write a 32-bit value little-endian (serialization detail).
+ *
+ * @param[in] out target stream.
+ * @param[in] v value to write, low byte first.
+ */
 inline void put_u32_le(std::ostream &out, std::uint32_t v) {
   for (int k = 0; k < 4; ++k) {
     out.put(static_cast<char>(v & 0xFFu));
@@ -83,6 +122,12 @@ inline void put_u32_le(std::ostream &out, std::uint32_t v) {
   }
 }
 
+/**
+ * @brief Write a 64-bit value little-endian (serialization detail).
+ *
+ * @param[in] out target stream.
+ * @param[in] v value to write, low byte first.
+ */
 inline void put_u64_le(std::ostream &out, std::uint64_t v) {
   for (int k = 0; k < 8; ++k) {
     out.put(static_cast<char>(v & 0xFFu));
@@ -90,10 +135,25 @@ inline void put_u64_le(std::ostream &out, std::uint64_t v) {
   }
 }
 
+/**
+ * @brief Write a double as its IEEE-754 bit pattern, little-endian
+ *        (serialization detail).
+ *
+ * @param[in] out target stream.
+ * @param[in] v value to write; round-trips exactly (max_digits10 is a
+ *            CSV concern, binary stores the exact bits).
+ */
 inline void put_f64_le(std::ostream &out, double v) {
   put_u64_le(out, std::bit_cast<std::uint64_t>(v));
 }
 
+/**
+ * @brief Read one byte (serialization detail).
+ *
+ * @param[in] in source stream.
+ * @param[out] v receives the byte read.
+ * @return true on success; false at EOF/truncation.
+ */
 inline bool get_u8(std::istream &in, std::uint8_t &v) {
   const int c = in.get();
   if (c == std::char_traits<char>::eof()) {
@@ -103,6 +163,13 @@ inline bool get_u8(std::istream &in, std::uint8_t &v) {
   return true;
 }
 
+/**
+ * @brief Read a 16-bit value little-endian (serialization detail).
+ *
+ * @param[in] in source stream.
+ * @param[out] v receives the value read.
+ * @return true on success; false at EOF/truncation.
+ */
 inline bool get_u16_le(std::istream &in, std::uint16_t &v) {
   std::uint8_t lo = 0;
   std::uint8_t hi = 0;
@@ -113,6 +180,13 @@ inline bool get_u16_le(std::istream &in, std::uint16_t &v) {
   return true;
 }
 
+/**
+ * @brief Read a 32-bit value little-endian (serialization detail).
+ *
+ * @param[in] in source stream.
+ * @param[out] v receives the value read.
+ * @return true on success; false at EOF/truncation.
+ */
 inline bool get_u32_le(std::istream &in, std::uint32_t &v) {
   v = 0;
   for (int k = 0; k < 4; ++k) {
@@ -125,6 +199,13 @@ inline bool get_u32_le(std::istream &in, std::uint32_t &v) {
   return true;
 }
 
+/**
+ * @brief Read a 64-bit value little-endian (serialization detail).
+ *
+ * @param[in] in source stream.
+ * @param[out] v receives the value read.
+ * @return true on success; false at EOF/truncation.
+ */
 inline bool get_u64_le(std::istream &in, std::uint64_t &v) {
   v = 0;
   for (int k = 0; k < 8; ++k) {
@@ -137,6 +218,14 @@ inline bool get_u64_le(std::istream &in, std::uint64_t &v) {
   return true;
 }
 
+/**
+ * @brief Read a double from its IEEE-754 bit pattern, little-endian
+ *        (serialization detail).
+ *
+ * @param[in] in source stream.
+ * @param[out] v receives the value read.
+ * @return true on success; false at EOF/truncation.
+ */
 inline bool get_f64_le(std::istream &in, double &v) {
   std::uint64_t bits = 0;
   if (!get_u64_le(in, bits)) {
@@ -148,6 +237,23 @@ inline bool get_f64_le(std::istream &in, double &v) {
 
 } // namespace detail
 
+/**
+ * @brief Serialize a complete world::State to the versioned binary
+ *        checkpoint format (v6, little-endian).
+ *
+ * @param[in] s state to write; read-only, never mutated.
+ * @param[in] out target binary stream (the full checkpoint is written
+ *            as one contiguous block).
+ * @return kOk on success; kInternal when the stream rejects writes
+ *         (the output may be partial — the caller owns the stream's
+ *         fate).
+ * @note Deterministic: identical states serialize to identical bytes.
+ *       Freelist order is stored, so a round-trip preserves exact
+ *       spawn-reuse behavior. Dead signal slots keep their last live
+ *       columns verbatim (detach clears presence only), and derived
+ *       data (fanouts, topo order/levels, dirty flags) is recomputed
+ *       on load, never stored.
+ */
 [[nodiscard]] inline core::Status save_state(const State &s, std::ostream &out) {
   out.put('W');
   out.put('E');
@@ -275,6 +381,32 @@ inline bool get_f64_le(std::istream &in, double &v) {
   return core::Status::success();
 }
 
+/**
+ * @brief Restore a world::State from a versioned binary checkpoint,
+ *        replacing the target.
+ *
+ * @param[out] s target state; cleared on entry and left cleared when
+ *               the input is corrupt (a failed load never leaves a
+ *               half-built state).
+ * @param[in] in source binary stream positioned at the magic.
+ * @return kOk on success; kInvalidArgument on any corruption — bad
+ *         magic, version outside 1..kStateFormatVersion, truncation,
+ *         counts above kMaxStateEntries, out-of-range indices, or a
+ *         violated invariant (duplicate freelist slots, dead-serial
+ *         exhaustion, invalid kinds/quantities/programs, sum operand
+ *         rules, netlist topology, sequential member rules, stimulus
+ *         and output lengths).
+ * @note Fallback loaders: v5/v4/v3/v2/v1 files still load — the
+ *       sequential pool comes back empty (v5 and older); v4 zeroes
+ *       the Lua ranges and leaves the script store empty; v3 zeroes
+ *       the expression/table columns and both stores; v2 synthesizes
+ *       serials as slot indices and loads empty operand lists; v1
+ *       loads with no signal section at all. Kind and quantity bytes
+ *       are append-only across versions. Live sum invariants are
+ *       re-checked here so a hand-edited checkpoint cannot bypass the
+ *       configure-time rules; dead slots keep their stale columns
+ *       (no live-source invariant applies to them).
+ */
 [[nodiscard]] inline core::Status load_state(State &s, std::istream &in) {
   s.clear();
   auto invalid = [] {

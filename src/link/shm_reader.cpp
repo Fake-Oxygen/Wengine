@@ -66,9 +66,11 @@ ShmReader::ShmReader(std::string_view name) {
   }
   base_ = base;
   header_ = static_cast<const SegmentHeader *>(base_);
-  slots_ = reinterpret_cast<const Slot *>(static_cast<const char *>(base_) +
-                                          sizeof(SegmentHeader));
+  slots_ = reinterpret_cast<const Slot *>(static_cast<const char *>(base_) + sizeof(SegmentHeader));
   // Commit word unset: publisher mapped but not yet initialized header.
+  // Version 0 is the reserved mid-construction marker (never assigned on
+  // the wire), so seeing it means "publisher still initializing", not
+  // "incompatible peer" — attach must fail cleanly and let the caller retry.
   if (header_->version.load(std::memory_order_acquire) == 0) {
     status_ = {core::StatusCode::kInvalidArgument};
     cleanup();

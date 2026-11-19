@@ -1,3 +1,13 @@
+/**
+ * @file
+ * Streaming batch decoder for length-prefixed v2 record streams (PHYSI-46).
+ * @note Splits a TCP worker byte stream and decodes every complete record with kind
+ *       dispatch (kFrame visualization records + kSampleBlock sample batches). Cold reader
+ *       side only: may allocate, NOT noexcept, never on the sim thread. No sockets, no
+ *       threads. Headers stay platform-free; POSIX syscalls live in the POSIX TUs under src/link/ under
+ *       wengine_link_shm — a Windows port replaces the TU, never this header.
+ *       Consumers: TCP worker readers and offline stream tools.
+ */
 #pragma once
 
 // Streaming batch decoder for length-prefixed v2 record streams (PHYSI-46).
@@ -28,11 +38,20 @@ namespace wengine::link {
 // kind: kFrame fills frame, kSampleBlock fills block. seq is the
 // per-kind monotonic id (frame_seq / block_seq); run_id is the
 // publisher-run identity for session resets (PHYSI-40).
+/**
+ * @brief One decoded stream record: exactly one payload valid, selected by kind (kFrame fills frame, kSampleBlock fills block).
+ * @note seq is the per-kind monotonic id (frame_seq / block_seq); run_id is the publisher-run identity for session resets (PHYSI-40).
+ */
 struct StreamRecord {
+/** @brief Which payload is valid (kFrame or kSampleBlock). */
   compact::RecordKind kind = compact::RecordKind::kFrame;
+/** @brief Visualization payload (valid when kind is kFrame). */
   Frame frame;
+/** @brief Sample-batch payload (valid when kind is kSampleBlock). */
   sample::SampleBlock block;
+/** @brief Publisher-run identity (opaque; resets the receiver cursor on change). */
   std::uint64_t run_id = 0;
+/** @brief Per-kind monotonic id (frame_seq / block_seq; LagStats loss source). */
   std::uint64_t seq = 0;
 };
 
@@ -40,9 +59,16 @@ struct StreamRecord {
 // bytes, in wire order. A trailing incomplete length prefix or record is
 // normal TCP behavior, not an error: it sets has_partial and stops the
 // walk so the caller can prepend the remainder to the next read.
+/**
+ * @brief Decoded prefix of a byte stream: every complete record up to consumed bytes, in wire order.
+ * @note A trailing incomplete length prefix or record is normal TCP behavior, not an error: it sets has_partial and stops the walk so the caller prepends the remainder to the next read.
+ */
 struct StreamDecode {
+/** @brief Complete records decoded so far, in wire order. */
   std::vector<StreamRecord> records;
+/** @brief Bytes consumed (stop point: malformed record or trailing partial). */
   std::size_t consumed = 0;
+/** @brief True when the stream ends in a trailing partial prefix/record (success: wait for more bytes). */
   bool has_partial = false;
 };
 
@@ -53,6 +79,15 @@ struct StreamDecode {
 // records decoded before the bad one and `consumed` stopping at it; the
 // caller reports the byte offset, never guesses past it. A trailing
 // partial prefix/record is success with has_partial set.
+/**
+ * @brief Split + decode a length-prefixed stream with kind dispatch.
+ * @param[in] bytes stream bytes to decode (may be null only when len is 0).
+ * @param[in] len available bytes.
+ * @param[in] want_domain exact-match domain gate for every record (empty matches any domain, like the per-record decoders).
+ * @param[out] out decoded prefix (holds exactly the records decoded before a bad one; consumed stops at it).
+ * @return kOk on success (including trailing-partial success); kInvalidArgument for malformed input (absurd prefix length, failed schema/kind gate, undecodable record) — the caller reports the byte offset, never guesses past it.
+ * @note Cold side: may allocate, NOT noexcept — never call inside the sim loop.
+ */
 [[nodiscard]] inline core::Status decode_stream(const unsigned char *bytes, std::size_t len,
                                                std::string_view want_domain,
                                                StreamDecode &out) {

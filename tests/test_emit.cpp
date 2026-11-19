@@ -1,3 +1,5 @@
+// test_emit: console/CSV sink formatting, empty-input and failure paths,
+// plus end-to-end emission through `Runner`. Guards sink-output regressions.
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/console_sink.hpp"
 #include "wengine/emit/csv_sink.hpp"

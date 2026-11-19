@@ -1,3 +1,6 @@
+// test_link_protocol: link wire protocol — header init/compat matrix,
+// encode/decode round-trips, particle adapter, over-bound refusal, seqlock
+// states, and ring/lag accounting including concurrent attach.
 #include "wengine/link/protocol.hpp"
 
 #include <array>

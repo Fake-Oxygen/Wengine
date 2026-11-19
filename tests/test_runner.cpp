@@ -1,3 +1,6 @@
+// test_runner: core Runner contract — exact stepping, determinism, emit
+// decimation, failure latch, non-finite dt/clock/budget rejection, stop
+// callback, and accumulator behavior. Guards engine-loop regressions.
 #include "wengine/core/runner.hpp"
 #include "wengine/signal/types.hpp"
 #include "wengine/solvers/signal.hpp"

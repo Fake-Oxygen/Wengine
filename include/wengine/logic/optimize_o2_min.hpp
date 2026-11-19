@@ -1,4 +1,61 @@
+/**
+ * @file
+ * Minimized two-level resynthesis for O2 (n<=8, m<=8): the exact-
+ * minimization stage of the O2 fresh build inside the optimize stage of
+ * the logic pipeline (netlist parse -> state -> eval -> layout/topo ->
+ * optimize). Truth-table driven NAND-NAND (SOP) / NOR-NOR (POS)
+ * synthesis with shared input inverters and globally tied dangling pins
+ * (one block input per variable, so the interface stays stable instead
+ * of duplicating pins for inversion). Used as an alternative to the
+ * structural De Morgan translation; the caller picks the smaller
+ * (gates, then inputs).
+ *
+ * What it preserves: the truth table exactly (verified under pin
+ * replication/permutation before acceptance). Cost class: QM prime
+ * search plus greedy cover — bounded to n<=8, m<=8 with fixed arrays;
+ * returns false on any limit/budget/equivalence failure and the caller
+ * falls back to structural (which is optimal for XOR-like parity).
+ *
+ * Dependency rules: header-only, allocation-free, exception-free;
+ * deterministic (slot order, j-ascending lits, greedy cover order).
+ * Depends on eval.hpp, netlist.hpp, optimize_types.hpp,
+ * optimize_barrier.hpp, optimize_exact.hpp, the O2 dedup/emit headers,
+ * optimize_passes.hpp, and types.hpp. Logic is a standalone domain:
+ * this header must never depend on CLI types. Consumers:
+ * optimize_o2_build.hpp finish_o2 and the test_logic* suite.
+ */
+
 #pragma once
+
+/**
+ * @file
+ * Minimized two-level resynthesis for O2 (the "min" stage of the O2
+ * fresh build inside the optimize stage of the logic pipeline: netlist
+ * parse -> state -> eval -> layout/topo -> optimize). For small blocks
+ * (n<=8, m<=8, no hidden outputs, no sequential gates) it rebuilds the
+ * net from the truth table — SOP NAND-NAND for kNand, POS NOR-NOR for
+ * kNor — with shared input inverters and globally tied dangling pins
+ * (one block input per variable, so the interface stays stable instead
+ * of duplicating pins for inversion). optimize_o2_build.hpp's
+ * finish_o2 then picks the smaller of minimized vs structural (gates,
+ * then inputs), so repeated nand/nor toggles converge instead of
+ * growing 4x per toggle.
+ *
+ * What it preserves: the truth table exactly, verified by explicit
+ * re-solve under pin permutation (tied inputs share one column);
+ * output count (constant sinks get dedicated gates). Cost class:
+ * truth-table enumeration (256 rows max) plus Quine-McCluskey primes
+ * and greedy cover per output — bounded by the n/m caps, with loud
+ * false-return fallback to the structural De Morgan translation
+ * (which is optimal for XOR-like parity).
+ *
+ * Dependency rules: header-only, allocation-free, exception-free,
+ * noexcept throughout; deterministic (slot order, j-ascending
+ * literals, greedy cover order). Lives in the
+ * wengine::logic::detail seam — internal to the optimizer family.
+ * Never depends on CLI types. Consumers: optimize_o2_build.hpp
+ * (finish_o2 picking) and the logic optimizer tests.
+ */
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/eval.hpp"
@@ -19,21 +76,30 @@ namespace wengine::logic {
 
 namespace detail {
 
-// --- Minimized two-level resynthesis for O2 (n<=8, m<=8) ---------------
-// Truth-table driven NAND-NAND (SOP) / NOR-NOR (POS) synthesis with shared
-// input inverters and globally tied dangling pins (one block input per
-// variable, so the interface stays stable instead of duplicating pins for
-// inversion). Used as an alternative to the structural De Morgan translation;
-// the caller picks the smaller (gates, then inputs). Deterministic (slot
-// order, j-ascending lits, greedy cover order), allocation-free (fixed
-// arrays), noexcept. Returns false on any limit/budget failure (caller falls
-// back to structural, which is optimal for XOR-like parity).
+/**
+ * @brief One dangling pin of the minimized build awaiting global tying
+ *        (one block input per original variable).
+ */
 struct MiniDang {
+  /** @brief Fresh gate slot holding the dangling pin. */
   std::uint16_t fresh = kNoDriver;
+  /** @brief 0-based input index on the fresh gate. */
   std::uint8_t input = 0;
+  /** @brief Original variable index (block-input ordinal in src). */
   std::uint8_t orig_j = 0;
 };
 
+/**
+ * @brief Append one dangling pin to the global-tying list.
+ *
+ * @param[out] list Dangling-pin buffer.
+ * @param[out] n Pin count (in/out).
+ * @param[in] cap Buffer capacity.
+ * @param[in] fresh Fresh gate slot.
+ * @param[in] input 0-based input index.
+ * @param[in] orig_j Original variable index.
+ * @return True on success; false when the buffer is full.
+ */
 inline bool mini_add_dang(MiniDang *list, std::size_t *n, std::size_t cap,
                           std::uint16_t fresh, std::uint8_t input, std::uint8_t orig_j) noexcept {
   if (*n >= cap) {
@@ -46,12 +112,29 @@ inline bool mini_add_dang(MiniDang *list, std::size_t *n, std::size_t cap,
   return true;
 }
 
-// Minimized two-level build from QM covers (one cover per output, greedy
-// order). SOP for NAND (lit = x_j if bits=1 else ~x_j), POS for NOR (lit =
-// x_j if bits=0 else ~x_j): the two forms are duals, so a single builder
-// parameterized by target serves both — only the lit-polarity reading
-// differs. Shared input inverters, globally tied dangling pins (one block
-// input per variable). Returns false on budget/tie failure.
+/**
+ * @brief Minimized two-level build from QM covers (one cover per
+ *        output, greedy order).
+ *
+ * SOP for NAND (lit = x_j if bits=1 else ~x_j), POS for NOR (lit = x_j
+ * if bits=0 else ~x_j): the two forms are duals, so a single builder
+ * parameterized by target serves both — only the lit-polarity reading
+ * differs. Shared input inverters, globally tied dangling pins (one
+ * block input per variable).
+ *
+ * @param[out] out Fresh minimized netlist under construction.
+ * @param[in] n Block-input count (<= 8).
+ * @param[in] m Block-output count (<= 8).
+ * @param[in] covers Per-output QM cover cubes (m rows of 8).
+ * @param[in] ncover Per-output cover sizes.
+ * @param[in] is_const Per-output constant flags.
+ * @param[in] const_val Per-output constant values (meaningful for consts).
+ * @param[in] target Conversion target (polarity reading).
+ * @param[out] dangs Dangling-pin buffer for global tying.
+ * @param[out] ndangs Dangling-pin count (in/out).
+ * @param[in] dang_cap Dangling-pin capacity.
+ * @return True on success; false on budget/tie failure.
+ */
 inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
                             const QmCube *covers, const std::size_t *ncover,
                             const bool *is_const, const std::uint8_t *const_val,
@@ -307,13 +390,24 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
   return true;
 }
 
-// Attempt truth-table resynthesis for O2 (n<=8, m<=8, no hidden outputs).
-// Builds a minimized two-level network (SOP for NAND, POS for NOR) with
-// shared inverters and globally tied inputs, verifies equivalence under pin
-// replication/permutation, and leaves the result in `out_min`. Returns false
-// on any limit/budget/equivalence failure (caller falls back to structural,
-// which is optimal for XOR-like parity). Deterministic, allocation-free,
-// noexcept.
+/**
+ * @brief Attempt truth-table resynthesis for O2 (n<=8, m<=8, no hidden
+ *        outputs).
+ *
+ * Builds a minimized two-level network (SOP for NAND, POS for NOR) with
+ * shared inverters and globally tied inputs, verifies equivalence under
+ * pin replication/permutation, and leaves the result in out_min.
+ *
+ * @param[out] src Source netlist (recompiled for enumeration).
+ * @param[in] target Conversion target.
+ * @param[out] out_min Minimized netlist on success.
+ * @return True with out_min on success; false on any limit/budget/
+ *         equivalence failure (caller falls back to structural, which is
+ *         optimal for XOR-like parity). Deterministic,
+ *         allocation-free, noexcept.
+ * @note Opaque barrier: sequential nets and hidden outputs refuse loudly
+ *       to the structural path.
+ */
 inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) noexcept {
   const std::size_t n = block_input_count(src);
   const std::size_t m = block_output_count(src);

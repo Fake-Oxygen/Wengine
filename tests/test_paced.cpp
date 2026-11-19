@@ -1,3 +1,6 @@
+// test_paced: paced_run wall-clock pacing — validation, paced-matches-unpaced
+// parity, absolute deadlines without drift, late-counted-never-skipped, stop
+// responsiveness, and the CLI path. Guards pacing regressions.
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/solvers/configured_run.hpp"

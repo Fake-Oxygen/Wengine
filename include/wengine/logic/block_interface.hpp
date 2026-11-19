@@ -1,16 +1,22 @@
 #pragma once
 
-// BlockInterface seam (see GLOSSARY.md): derived block boundary, never
-// stored. One block input per tie class (canonical leader in slot order)
-// plus dangling outputs in slot order, minus ignored pins.
-//
-// Only this header (beside tie_set.hpp for raw tie_rep) derives interface
-// order. Scalar `solve`, bit-parallel `eval_block_word`, the sequential
-// stepper, and the CLI poke composer are adapters: they enumerate via
-// `block_input_pin`/`input_index` and resolve via `fill_resolved`.
-//
-// Header-only, allocation-free, exception-free. Caller-owned buffers
-// throughout (same contract as `block_interface`).
+/**
+ * @file
+ * BlockInterface seam (see GLOSSARY.md) of the logic pipeline: the derived block boundary,
+ * never stored. One block input per tie class (canonical leader in slot
+ * order) plus dangling outputs in slot order, minus ignored pins. Only
+ * this header (beside tie_set.hpp for raw tie_rep) derives interface
+ * order. Scalar solve, bit-parallel eval_block_word, the sequential
+ * stepper, and the CLI poke composer are adapters: they enumerate via
+ * block_input_pin / input_index and resolve via fill_resolved.
+ *
+ * Dependency rules (docs/logic.md sections 4, 8): header-only,
+ * allocation-free, exception-free; caller-owned buffers throughout
+ * (same contract as block_interface). Depends only on tie_set.hpp,
+ * types.hpp, and core/status. Logic is a standalone domain: this header
+ * must never depend on CLI types. Consumers: eval.hpp, seq_step.hpp,
+ * the CLI solve/truth/poke verbs, and the test_logic* suite.
+ */
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/tie_set.hpp"
@@ -23,9 +29,15 @@
 namespace wengine::logic {
 
 namespace detail {
-// Shared enumeration filters: one dangling pin (live gate, unwired,
-// non-ignored input), and one block input (dangling pin that leads its
-// tie class). The single filter behind every interface enumeration below.
+/**
+ * @brief Shared dangling-input predicate: live gate, unwired,
+ *        non-ignored input.
+ *
+ * @param[in] nl Netlist holding the gate.
+ * @param[in] slot Gate slot.
+ * @param[in] input 0-based input index.
+ * @return True when the pin is dangling (unwired and non-ignored).
+ */
 [[nodiscard]] inline bool is_dangling_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
   if (slot >= kMaxGates || input >= kMaxInputs) {
     return false;
@@ -35,6 +47,15 @@ namespace detail {
          (g.ignored_mask & static_cast<std::uint8_t>(1u << input)) == 0;
 }
 
+/**
+ * @brief Shared block-input predicate: dangling pin that leads its tie
+ *        class. The single filter behind every interface enumeration.
+ *
+ * @param[in] nl Netlist holding the gate and tie table.
+ * @param[in] slot Gate slot.
+ * @param[in] input 0-based input index.
+ * @return True when the pin is a block input (dangling leader).
+ */
 [[nodiscard]] inline bool is_block_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
   if (!is_dangling_input(nl, slot, input)) {
     return false;
@@ -44,11 +65,18 @@ namespace detail {
 }
 } // namespace detail
 
-// Batch form of input_index: one scan fills the full (slot,input)->ordinal
-// map (kNoDriver for wired/ignored/dead pins; tied members share their
-// leader's column). Lets word-eval build its column map in two O(G)
-// passes instead of one O(G) query per pin; the map is bit-identical to
-// per-pin input_index calls.
+/**
+ * @brief Batch form of input_index: one scan fills the full
+ *        (slot,input)->ordinal map.
+ *
+ * kNoDriver marks wired/ignored/dead pins; tied members share their
+ * leader's column. Lets word-eval build its column map in two O(G)
+ * passes instead of one O(G) query per pin; the map is bit-identical
+ * to per-pin input_index calls.
+ *
+ * @param[in] nl Netlist to scan (slot order, leaders first).
+ * @param[out] in_pos Caller buffer of kMaxGates*kMaxInputs ordinals.
+ */
 inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noexcept {
   for (std::size_t f = 0; f < kMaxGates * kMaxInputs; ++f) {
     in_pos[f] = kNoDriver;
@@ -87,9 +115,13 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
   }
 }
 
-// Derived block interface (never stored): one input per tie class
-// (canonical leader in slot order) plus dangling outputs in slot order.
-// Fixed caller buffers, loud kOutOfRange when too small.
+/**
+ * @brief Derived block input count: one per tie class (canonical leader
+ *        in slot order), minus ignored pins.
+ *
+ * @param[in] nl Netlist to scan.
+ * @return Number of block inputs.
+ */
 [[nodiscard]] inline std::size_t block_input_count(const Netlist &nl) noexcept {
   std::size_t n = 0;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
@@ -107,6 +139,14 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
   return n;
 }
 
+/**
+ * @brief Derived block output count: dangling outputs in slot order,
+ *        minus ignored pins (Q plus the NQ second output on sequential
+ *        gates whose NQ is exposed).
+ *
+ * @param[in] nl Netlist to scan.
+ * @return Number of block outputs.
+ */
 [[nodiscard]] inline std::size_t block_output_count(const Netlist &nl) noexcept {
   std::size_t n = 0;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
@@ -124,6 +164,22 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
   return n;
 }
 
+/**
+ * @brief Derived block interface (never stored): fill caller buffers
+ *        with block inputs (one per tie-class leader, slot order) and
+ *        block outputs (dangling outputs, slot order).
+ *
+ * @param[in] nl Netlist to scan.
+ * @param[out] in_buf Caller buffer for input pins (may be nullptr to
+ *             query counts only).
+ * @param[in] in_cap Capacity of in_buf.
+ * @param[out] in_n Needed input count (always written, may be nullptr).
+ * @param[out] out_buf Caller buffer for output pins (may be nullptr).
+ * @param[in] out_cap Capacity of out_buf.
+ * @param[out] out_n Needed output count (always written, may be nullptr).
+ * @return kOk when both buffers fit; kOutOfRange when either buffer is
+ *         too small (counts are still reported).
+ */
 [[nodiscard]] inline core::Status block_interface(const Netlist &nl, PinRef *in_buf, std::size_t in_cap,
                                                   std::size_t *in_n, PinRef *out_buf,
                                                   std::size_t out_cap, std::size_t *out_n) noexcept {
@@ -174,8 +230,16 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
   return core::Status::success();
 }
 
-// Leader pin for one block-input ordinal (slot order, leaders only).
-// Returns false for out-of-range ordinals.
+/**
+ * @brief Leader pin for one block-input ordinal (slot order, leaders
+ *        only).
+ *
+ * @param[in] nl Netlist to scan.
+ * @param[in] ordinal Block-input ordinal to look up.
+ * @param[out] slot_out Slot of the leader pin.
+ * @param[out] input_out 0-based input of the leader pin.
+ * @return True on success; false for out-of-range ordinals.
+ */
 [[nodiscard]] inline bool block_input_pin(const Netlist &nl, std::size_t ordinal, std::uint16_t &slot_out,
                                           std::uint8_t &input_out) noexcept {
   std::size_t cur = 0;
@@ -199,9 +263,18 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
   return false;
 }
 
-// Block-input ordinal for one pin's tie class leader; kNoDriver when the
-// pin is wired, ignored, dead, or otherwise not a block input. Lets
-// word-eval build its column map without touching tie_rep.
+/**
+ * @brief Block-input ordinal for one pin's tie class leader.
+ *
+ * kNoDriver marks wired, ignored, dead, or otherwise non-block-input
+ * pins. Lets word-eval build its column map without touching tie_rep.
+ *
+ * @param[in] nl Netlist holding the gate and tie table.
+ * @param[in] slot Gate slot.
+ * @param[in] input 0-based input index.
+ * @return Leader ordinal in slot order, or kNoDriver when the pin is
+ *         not a block input.
+ */
 [[nodiscard]] inline std::uint16_t input_index(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
   if (!detail::is_block_input(nl, slot, input)) {
     return kNoDriver;
@@ -227,11 +300,23 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
   return kNoDriver;
 }
 
-// Single shared dangling-input resolution prelude (was duplicated in
-// eval::solve, seq_step::compose_resolved, and the CLI composer):
-// leaders consume block_inputs in slot order, X/Z rejected; ignored pins
-// tie to kLow; tied members fan out from their leader. Callee zeroes the
-// full resolved[] first. Sizes must match block_input_count exactly.
+/**
+ * @brief Single shared dangling-input resolution prelude (was
+ *        duplicated in eval::solve, seq_step composition, and the CLI
+ *        composer).
+ *
+ * Leaders consume block_inputs in slot order, X/Z rejected; ignored
+ * pins tie to kLow; tied members fan out from their leader. The caller
+ * zeroes the full resolved[] first. Sizes must match
+ * block_input_count exactly.
+ *
+ * @param[in] nl Netlist to resolve against.
+ * @param[in] block_inputs Block input values in derived interface order.
+ * @param[out] resolved Per-(slot,input) values (leaders filled, tied
+ *             members fanned out, ignored tied to kLow).
+ * @return kOk on success; kInvalidArgument on X/Z inputs or a size
+ *         mismatch.
+ */
 [[nodiscard]] inline core::Status fill_resolved(const Netlist &nl, std::span<const LogicValue> block_inputs, LogicValue *resolved) noexcept {
   for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
     resolved[i] = LogicValue::kLow;
@@ -285,13 +370,24 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
   return core::Status::success();
 }
 
-// Single-input resolution (scalar): wired inputs read gate_out (old-Q
-// phase, new-Q phase, or combinational settle); dangling inputs read the
-// pre-resolved block vector (leaders only — caller fans ties out first);
-// ignored dangling pins tie to kLow (netlist rule). Returns false on X/Z
-// or on a resolve_net refusal (wired X/Z driver) — loud, never silent.
-// The one funnel every scalar evaluator (solve, stepper phases, async and
-// level apply) resolves through.
+/**
+ * @brief Single-input scalar resolution: wired inputs read gate_out
+ *        (old-Q phase, new-Q phase, or combinational settle); dangling
+ *        inputs read the pre-resolved block vector (leaders only —
+ *        caller fans ties out first); ignored dangling pins tie to kLow.
+ *
+ * The one funnel every scalar evaluator (solve, stepper phases, async
+ * and level apply) resolves through.
+ *
+ * @param[in] nl Netlist holding drivers and ignore marks.
+ * @param[in] slot Gate slot of the sink.
+ * @param[in] input 0-based sink input index.
+ * @param[in] gate_out Per-slot settled gate outputs.
+ * @param[in] resolved Pre-resolved dangling values from fill_resolved.
+ * @param[out] out Resolved input value.
+ * @return True on success; false on X/Z values or on a resolve_net
+ *         refusal (wired X/Z driver) — loud, never silent.
+ */
 [[nodiscard]] inline bool resolve_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
                                         const LogicValue *gate_out, const LogicValue *resolved,
                                         LogicValue &out) noexcept {
@@ -326,12 +422,19 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
 // and the `truth` verb): truth row r drives block input j with bit
 // (r>>j)&1, where j is the derived interface order. Word w covers rows
 // [w*64, w*64+63]; lane b holds row w*64+b as bit b.
+/** @brief Bit-parallel word size: one word covers 64 truth rows. */
 inline constexpr std::size_t kBitWordSize = 64;
+/** @brief Caller-owned word-eval scratch size: one word per gate slot. */
 inline constexpr std::size_t kBitScratchWords = kMaxGates;
 
-// Full-truth word count for n block inputs: ceil(2^n / 64). Returns 0
-// when n >= 31 (2^n rows exceed sane streaming; slice eval stays valid,
-// full enumeration is the caller's refusal, like `truth --limit`).
+/**
+ * @brief Full-truth word count for n block inputs: ceil(2^n / 64).
+ *
+ * @param[in] n_inputs Block input count.
+ * @return Word count; 0 when n_inputs >= 31 (2^n rows exceed sane
+ *         streaming: slice eval stays valid, full enumeration is the
+ *         caller's refusal, like `truth --limit`).
+ */
 [[nodiscard]] constexpr std::size_t bit_words_for_inputs(std::size_t n_inputs) noexcept {
   if (n_inputs >= 31) {
     return 0;
@@ -340,10 +443,22 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
   return (rows + (kBitWordSize - 1)) / kBitWordSize;
 }
 
-// Procedural input column for block input `input_pos` over word
-// `word_index`. For positions < 6 the 64-row tile is word-independent
-// (base w*64 is a multiple of 2^(pos+1)); for positions >= 6 the whole
-// word is constant (2^pos rows per bit value covers the tile).
+/**
+ * @brief Procedural input column for block input input_pos over word
+ *        word_index.
+ *
+ * Row convention (shared with scalar solve and the `truth` verb):
+ * truth row r drives block input j with bit (r>>j)&1, where j is the
+ * derived interface order. Word w covers rows [w*64, w*64+63]; lane b
+ * holds row w*64+b as bit b. For positions < 6 the 64-row tile is
+ * word-independent (base w*64 is a multiple of 2^(pos+1)); for
+ * positions >= 6 the whole word is constant (2^pos rows per bit value
+ * covers the tile).
+ *
+ * @param[in] input_pos Block-input ordinal.
+ * @param[in] word_index 64-row slice index.
+ * @return 64-bit column word for this input over the slice.
+ */
 [[nodiscard]] constexpr std::uint64_t input_column_word(std::size_t input_pos, std::uint64_t word_index) noexcept {
   if (input_pos == 0) {
     return 0xAAAAAAAAAAAAAAAAULL;
@@ -368,12 +483,24 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
   return (bit != 0ULL) ? ~static_cast<std::uint64_t>(0ULL) : static_cast<std::uint64_t>(0ULL);
 }
 
-// Bit-parallel twin of resolve_input: wired inputs read the source word
-// (with NQ polarity, T005); ignored dangling pins read word 0 (same rule
-// as scalar kLow); dangling block inputs read their procedural interface
-// column. `in_pos` maps (slot, input) to the block-input ordinal
-// (kNoDriver for wired/ignored pins — never read on those paths; tied
-// members carry their leader's ordinal).
+/**
+ * @brief Bit-parallel twin of resolve_input: wired inputs read the
+ *        source word (with NQ polarity); ignored dangling pins read
+ *        word 0 (same rule as scalar kLow); dangling block inputs read
+ *        their procedural interface column.
+ *
+ * in_pos maps (slot, input) to the block-input ordinal (kNoDriver for
+ * wired/ignored pins — never read on those paths; tied members carry
+ * their leader's ordinal).
+ *
+ * @param[in] nl Netlist holding drivers, ignore marks, and NQ polarity.
+ * @param[in] slot Gate slot of the sink.
+ * @param[in] input 0-based sink input index.
+ * @param[in] gate_scratch Per-slot words from the compiled level order.
+ * @param[in] in_pos (slot,input)->ordinal map from build_input_positions.
+ * @param[in] word_index 64-row slice index.
+ * @return 64-bit resolved word for this input over the slice.
+ */
 [[nodiscard]] inline std::uint64_t resolve_word(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
                                                 const std::uint64_t *gate_scratch,
                                                 const std::uint16_t *in_pos,

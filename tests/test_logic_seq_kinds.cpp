@@ -1,3 +1,6 @@
+// test_logic_seq_kinds: sequential GateKind vocabulary — append-only ordinal
+// values, names, parsing, fanin, and creation including JK/T/SR pins.
+// Guards accidental renumbering or kind-table drift.
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/types.hpp"
 

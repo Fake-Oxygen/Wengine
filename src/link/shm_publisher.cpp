@@ -138,8 +138,15 @@ void ShmPublisher::on_snapshot(const world::Snapshot &snapshot) {
     status_ = {core::StatusCode::kOutOfRange}; // loud (S7), frame skipped
     return;
   }
-  Slot &slot = slots_[static_cast<std::size_t>(
-      ring_slot(stats_.published, static_cast<std::uint64_t>(kSlotCount)))];
+  // Publish path contract: adapt, encode, seqlock copy, bump counters —
+  // no syscalls, no I/O, no allocation from here on. That is deliberate:
+  // a sink hanging off the sim loop must never add unbounded latency
+  // (delivery policy: latest-state class, writer drops instead of
+  // blocking). Single-writer by construction: this publisher is the only
+  // writer of its slot ring, so the seqlock needs no CAS retry loop —
+  // begin marks the slot odd (in-progress, readers retry), end's release
+  // store publishes the relaxed payload stores sequenced before it.
+  Slot &slot = slots_[static_cast<std::size_t>(ring_slot(stats_.published, static_cast<std::uint64_t>(kSlotCount)))];
   slot_begin_write(slot);
   slot_store_frame(slot, staging_);
   slot_end_write(slot);

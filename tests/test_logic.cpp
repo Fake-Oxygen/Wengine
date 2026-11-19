@@ -1,3 +1,6 @@
+// test_logic: combinational logic core — kinds/counters/slots, pins, wire
+// rules, cycle rejection, eval/solve goldens, bit-columns, and optimize
+// passes. Links wengine_core alone to prove the engine-header seam.
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/netlist.hpp"

@@ -187,7 +187,11 @@ class SimController {
   // RunnerConfig::max_substeps, so stalls cannot spiral. While playing, the
   // frame is additionally clamped to the remaining step budget, so play
   // parks exactly at `steps` and Reset + Play reproduces a headless batch
-  // bit-for-bit regardless of frame rate. Reaching the budget auto-pauses.
+  // bit-for-bit regardless of frame rate. The clamp is against the integer
+  // step budget, never against accumulated frame_dt: float accumulation
+  // across frames is FP-fragile at the cap edge (a hair short parks early,
+  // a hair past overshoots), so exact step counts come from integer
+  // arithmetic only. Reaching the budget auto-pauses.
   // A solver failure also auto-pauses with the same partial-step error as
   // run_exact (the Runner latches; reset() rebuilds).
   // Verbs drain once per call (frame boundaries, not substep boundaries:

@@ -1,3 +1,6 @@
+// test_run_config: RunConfig CLI/GUI seam — headless golden, gravity and
+// emit_every flow-through, bad-config rejection, chunked-matches-one-shot,
+// and the lua-extra rejection. Guards frontend/driver contract drift.
 #include "wengine/core/run_config.hpp"
 #include "wengine/solvers/configured_run.hpp"
 #include "wengine/solvers/run.hpp"

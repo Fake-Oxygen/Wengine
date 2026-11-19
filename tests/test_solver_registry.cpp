@@ -1,3 +1,5 @@
+// test_solver_registry: stepped-solver registry — compile-time find pins
+// plus factory-create and Runner integration. Guards registration omissions.
 #include "wengine/core/runner.hpp"
 #include "wengine/solvers/solver_registry.hpp"
 

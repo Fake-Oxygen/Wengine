@@ -1,3 +1,6 @@
+// test_ina219: INA219 current-sense IC solver goldens (calibration,
+// shunt/bus, readout, ADC config) plus the `ic ina219` CLI glue, shell run
+// paths, and completion. Guards part-specific regressions.
 #include "wengine/cli/command_registry.hpp"
 #include "wengine/cli/ic/ina219.hpp"
 #include "wengine/cli/ic_dispatch.hpp"

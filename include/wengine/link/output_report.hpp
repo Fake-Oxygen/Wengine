@@ -1,3 +1,11 @@
+/**
+ * @file
+ * Shared edge-side live-output health report: one formatting/accounting vocabulary for every live output.
+ * @note Pure + allocation-tolerant (cold edge path only, never the hot on_snapshot path).
+ *       Per-cause vocabulary per docs/delivery.md section 5; publisher counts are LOCAL
+ *       acceptance (bus/kernel) — remote receipt is unknown unless a receiver reports
+ *       its own LagStats. Consumers: CLI finite/--forever summaries, benchmarks, future GUI panels.
+ */
 #pragma once
 
 // Shared edge-side live-output health report (PHYSI-39).
@@ -37,9 +45,20 @@ namespace wengine::link {
 
 // Appended to every publisher summary so local acceptance is never read
 // as remote receipt (PHYSI-39 labeling rule).
+/**
+ * @brief Labeling rule appended to every publisher summary: local acceptance is never remote receipt.
+ * @note Remote receipt is unknown without receiver LagStats.
+ */
 inline constexpr const char *kLocalOnlyNote =
     "local acceptance only; remote receipt unknown without receiver LagStats";
 
+/**
+ * @brief Conservation check over one PublisherStats snapshot (PHYSI-39 vocabulary).
+ * @param[in] s publisher counters to close.
+ * @param[in] pending_frames 0/1 TCP tail frames still held (edge state, reported at finish/close).
+ * @return True when attempted == published + over_bound + backpressure + pending_blocked + queue_full + disabled (+ 1 while a TCP frame is pending).
+ * @note Intentional stride/subset skips live in the routing wrappers, never here.
+ */
 [[nodiscard]] inline bool output_accounting_ok(const PublisherStats &s,
                                               std::uint64_t pending_frames) noexcept {
   return s.attempted == s.published + s.dropped_over_bound + s.dropped_send +
@@ -47,6 +66,11 @@ inline constexpr const char *kLocalOnlyNote =
                             s.disabled_after_error + pending_frames;
 }
 
+/**
+ * @brief Stable short name for a StatusCode (renders the sticky status in health lines).
+ * @param[in] code status code to name.
+ * @return "ok", "kInvalidArgument", "kOutOfRange", "kNotImplemented", "kInternal", or "?" for unknown values.
+ */
 [[nodiscard]] inline const char *status_name(core::StatusCode code) noexcept {
   switch (code) {
     case core::StatusCode::kOk:
@@ -66,6 +90,16 @@ inline constexpr const char *kLocalOnlyNote =
 // Single-line publisher health: everyognised cause named exactly once.
 // `pending_frames` is 0/1 (TCP tail present), `abandoned_frames` is the
 // edge-observed tail at finish/close (normally == pending_frames then).
+/**
+ * @brief Single-line publisher health: everyognised cause named exactly once (cold edge path; may allocate).
+ * @param[in] s publisher counters (local acceptance only).
+ * @param[in] status sticky publisher status.
+ * @param[in] last_errno errno captured at the failing syscall (0 when ok).
+ * @param[in] pending_frames 0/1 TCP tail state (current edge state).
+ * @param[in] pending_bytes unsent bytes of the TCP tail (0 when idle clean).
+ * @param[in] abandoned_frames tail still held at finish/close time (normally == pending_frames then).
+ * @return Summary line; appends ACCOUNTING_MISMATCH when output_accounting_ok fails, plus the local-only note.
+ */
 [[nodiscard]] inline std::string format_publisher_health(
     const PublisherStats &s, core::Status status, int last_errno,
     std::uint64_t pending_frames, std::uint64_t pending_bytes,

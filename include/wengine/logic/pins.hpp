@@ -1,23 +1,23 @@
 #pragma once
 
-// Pin + kind vocabulary Module (C2 deepening): one table per gate kind.
-//
-// Each row owns everything parsing needs for its kind — display name,
-// default fan-in, exact allowed fan-in set (bitmask, so DFF's {2,5} stays
-// exact instead of degrading to a range), and the named input pins with
-// their per-pin minimum fan-in (DFF RST/SET/EN exist only on wider flops).
-// `valid_fanin`, `default_fanin`, `parse_gate_kind`, `resolve_gate`, and
-// `parse_pin` are all views over this table: adding a kind is one row, not
-// five edits across three functions.
-//
-// Split (deliberate): `types.hpp::gate_kind_name` stays the display-only
-// name (types.hpp is dependency-free; parse returns Result and cannot live
-// there), and `kind_ordinal` stays beside the table for the counter slots.
-// Keep the three name spellings in sync when adding a kind.
-//
-// Header-only, allocation-free, exception-free, noexcept throughout.
-// Depends only on types.hpp + core/status, so netlist/yaml/CLI can all
-// include it with no cycle.
+/**
+ * @file
+ * Pin + kind vocabulary module (C2 deepening) of the logic pipeline: the one table per
+ * gate kind that everything parses against. Each row owns the display
+ * name, default fan-in, exact allowed fan-in set, and named input pins
+ * with per-pin minimum fan-in, so adding a kind is one row, not edits
+ * across functions. This header is the parse/authoring stage of the
+ * pipeline (netlist parse -> state -> eval -> layout/topo -> optimize):
+ * it turns gate/pin text into slots and PinRefs that netlist.hpp
+ * mutates, topo.hpp orders, eval.hpp solves, and layout.hpp draws.
+ *
+ * Dependency rules (docs/logic.md section 4): header-only,
+ * allocation-free, exception-free; depends only on types.hpp plus
+ * core/status (parsing returns core::Result, never throws). Logic is a
+ * standalone domain: this header must never depend on CLI types.
+ * Consumers: netlist.hpp, yaml_store.hpp, the CLI `logic` verbs, and
+ * the test_logic* suite.
+ */
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/types.hpp"
@@ -28,11 +28,24 @@
 
 namespace wengine::logic {
 
+/**
+ * @brief Ordinal of a gate kind: its byte value (0..7 combinational,
+ *        16..20 sequential), used to index Netlist::next_counter.
+ *
+ * @param[in] k Kind to convert.
+ * @return Underlying byte value of k.
+ */
 [[nodiscard]] constexpr std::uint8_t kind_ordinal(GateKind k) noexcept {
   return static_cast<std::uint8_t>(k);
 }
 
 namespace detail {
+/**
+ * @brief Uppercase one ASCII letter; other characters pass through.
+ *
+ * @param[in] c Character to convert.
+ * @return Uppercase form of c for 'a'..'z', else c unchanged.
+ */
 [[nodiscard]] constexpr char to_upper(char c) noexcept {
   if (c >= 'a' && c <= 'z') {
     return static_cast<char>(c - ('a' - 'A'));
@@ -40,6 +53,13 @@ namespace detail {
   return c;
 }
 
+/**
+ * @brief Case-insensitive prefix test over uppercase ASCII.
+ *
+ * @param[in] text Text to test.
+ * @param[in] prefix Uppercase prefix to look for.
+ * @return True when text starts with prefix ignoring case.
+ */
 [[nodiscard]] constexpr bool starts_with_ci(std::string_view text, std::string_view prefix) noexcept {
   if (text.size() < prefix.size()) {
     return false;
@@ -52,8 +72,15 @@ namespace detail {
   return true;
 }
 
-// Strict unsigned decimal, no signs/spaces. Returns false on empty,
-// non-digits, or overflow past limit.
+/**
+ * @brief Strict unsigned decimal parse: no signs, no spaces.
+ *
+ * @param[in] text Digits to parse; must be non-empty.
+ * @param[in] limit Upper bound; values that would exceed it fail.
+ * @param[out] out Parsed value on success.
+ * @return True on success; false on empty text, non-digits, or
+ *         overflow past limit.
+ */
 [[nodiscard]] constexpr bool parse_decimal(std::string_view text, std::uint32_t limit, std::uint32_t &out) noexcept {
   if (text.empty()) {
     return false;
@@ -74,9 +101,15 @@ namespace detail {
 }
 } // namespace detail
 
-// Exact case-insensitive pin-name match ("clk" == "CLK", "q" == "Q").
-// Empty name never matches; longer/shorter suffixes fall through to the
-// numeric parser so `DFF1.1` keeps working alongside `DFF1.D`.
+/**
+ * @brief Exact case-insensitive pin-name match ("clk" == "CLK").
+ *
+ * @param[in] suffix Pin suffix text after the dot.
+ * @param[in] name Uppercase table spelling to compare against.
+ * @return True on exact length + case-insensitive match; empty names
+ *         never match. Non-matching (longer/shorter) suffixes fall
+ *         through to the numeric parser at the call site.
+ */
 [[nodiscard]] constexpr bool match_pin_name(std::string_view suffix, std::string_view name) noexcept {
   if (name.empty() || suffix.size() != name.size()) {
     return false;
@@ -89,39 +122,66 @@ namespace detail {
   return true;
 }
 
-// One named input pin: `name` resolves to 0-based `input` iff the gate was
-// created with at least `min_inputs` inputs (DFF RST/SET/EN exist only on
-// wider flops; bare 2-input flops reject them like out-of-range numerics).
-// `anchor_row` is the schematic role row (1..5 of 6ths, contract C2;
-// -1 for combinational kinds without role anchors). `is_clock` marks the
-// edge-flop wedge pin (row 2), `is_notch` the DLATCH enable notch (row 2).
+/**
+ * @brief One named input pin of a sequential kind: 0-based input plus
+ *        the minimum fan-in that exposes it, the schematic anchor row,
+ *        and the clock-wedge / latch-notch marks.
+ *
+ * DFF RST/SET/EN exist only on wider flops (bare 2-input flops reject
+ * them like out-of-range numerics). anchor_row is the role row
+ * (1..5 of 6ths; -1 for combinational kinds without role anchors);
+ * is_clock marks the edge-flop wedge pin (row 2), is_notch the
+ * DLATCH enable notch (row 2).
+ */
 struct KindPin {
+  /** @brief Uppercase pin spelling (e.g. "CLK", "RST"). */
   std::string_view name;
+  /** @brief 0-based input index this name resolves to. */
   std::uint8_t input = 0;
+  /** @brief Minimum gate fan-in exposing this pin. */
   std::uint8_t min_inputs = 0;
+  /** @brief Schematic role row (1..5 of 6ths); -1 when the kind has none. */
   std::int8_t anchor_row = -1;
+  /** @brief True for the edge-flop clock-wedge pin. */
   bool is_clock = false;
+  /** @brief True for the level-latch enable-notch pin. */
   bool is_notch = false;
 };
 
-// One gate kind: parse name, default fan-in, exact allowed fan-in set
-// (bit (n-1) set iff fan-in n valid, n = 1..8), named input pins, and the
-// schematic face letters for sequential kinds (empty for combinational).
+/**
+ * @brief One gate kind: parse name, default fan-in, exact allowed
+ *        fan-in set, named input pins, and sequential face letters.
+ *
+ * allowed_mask holds bit (n-1) iff fan-in n (1..8) is valid; pins are
+ * the named sequential inputs (empty for combinational kinds); face
+ * holds the schematic face letters for sequential kinds (empty for
+ * combinational).
+ */
 struct KindInfo {
+  /** @brief Gate kind this row describes. */
   GateKind kind;
+  /** @brief Uppercase parse/display spelling (e.g. "DFF"). */
   std::string_view name;
+  /** @brief Fan-in used when creation omits the count. */
   std::uint8_t default_inputs = 2;
+  /** @brief Bit (n-1) set iff fan-in n (1..8) is valid. */
   std::uint16_t allowed_mask = 0;
+  /** @brief Number of valid entries in pins. */
   std::uint8_t pin_count = 0;
+  /** @brief Named sequential input pins. */
   KindPin pins[5]{};
+  /** @brief Schematic face letters; empty for combinational kinds. */
   std::string_view face{};
 };
 
-// Append-only: keep every known kind here (same order as the historical
-// kKinds/kAllKinds) so the persisted byte values (DFF=16, DLATCH=17,
-// JK=18, T=19, SR=20) never shift. Fan-in masks: combinational 2..8 =
-// 0xFE; NOT/BUF exactly 1 = 0x01; DFF {2,5} = 0x12; DLATCH/T/SR exactly
-// 2 = 0x02; JK exactly 3 = 0x04.
+/**
+ * @brief The kind table: every known kind in one append-only place.
+ *
+ * @note Append-only: persisted byte values (DFF=16, DLATCH=17, JK=18,
+ *       T=19, SRLATCH=20) must never shift. Fan-in masks: combinational
+ *       2..8 = 0xFE; NOT/BUF exactly 1 = 0x01; DFF {2,5} = 0x12;
+ *       DLATCH/T/SRLATCH exactly 2 = 0x02; JK exactly 3 = 0x04.
+ */
 inline constexpr KindInfo kKinds[] = {
     {GateKind::kAnd, "AND", 2, 0xFEu, 0, {}},
     {GateKind::kOr, "OR", 2, 0xFEu, 0, {}},
@@ -139,6 +199,12 @@ inline constexpr KindInfo kKinds[] = {
     {GateKind::kSrlatch, "SRLATCH", 2, 0x02u, 2, {{"S", 0, 2, 1}, {"R", 1, 2, 4}}, "SR"},
 };
 
+/**
+ * @brief Compile-time table self-check: names, masks, defaults, pin
+ *        rows, anchors, and clock/notch/face marks all agree.
+ *
+ * @return True when the table is internally consistent.
+ */
 [[nodiscard]] constexpr bool kind_table_valid() noexcept {
   std::size_t n = 0;
   for (const KindInfo &e : kKinds) {
@@ -213,6 +279,13 @@ inline constexpr KindInfo kKinds[] = {
 
 static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows inconsistent");
 
+/**
+ * @brief True iff fan-in n is allowed for kind k (table mask lookup).
+ *
+ * @param[in] k Gate kind to check.
+ * @param[in] n Fan-in to check (0 or above kMaxInputs is always false).
+ * @return True when the kind row allows n.
+ */
 [[nodiscard]] constexpr bool valid_fanin(GateKind k, std::uint8_t n) noexcept {
   if (n == 0 || n > kMaxInputs) {
     return false;
@@ -225,6 +298,12 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
   return false;
 }
 
+/**
+ * @brief Default fan-in for kind k (table lookup; 2 for unknown kinds).
+ *
+ * @param[in] k Gate kind to look up.
+ * @return Default input count for k.
+ */
 [[nodiscard]] constexpr std::uint8_t default_fanin(GateKind k) noexcept {
   for (const KindInfo &e : kKinds) {
     if (e.kind == k) {
@@ -234,10 +313,17 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
   return 2;
 }
 
-// Case-insensitive ("and", "AND", "And" all match). Exact full match.
-// Sequential kinds (DFF/DLATCH/JK/T/SRLATCH) parse here; creation validates
-// fan-in via valid_fanin and state attaches via init_seq_state. Keep the
-// want-list in sync with kKinds above.
+/**
+ * @brief Parse a gate kind name, case-insensitively, exact full match.
+ *
+ * Sequential kinds (DFF/DLATCH/JK/T/SRLATCH) parse here; creation
+ * validates fan-in via valid_fanin and state attaches via
+ * init_seq_state.
+ *
+ * @param[in] text Kind spelling (e.g. "and", "DFF").
+ * @return kOk with the kind on success; kInvalidArgument for empty
+ *         text or an unknown kind spelling.
+ */
 [[nodiscard]] inline core::Result<GateKind> parse_gate_kind(std::string_view text) noexcept {
   if (text.empty()) {
     return core::Result<GateKind>::failure("bad gate kind: empty");
@@ -260,10 +346,19 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
   return core::Result<GateKind>::failure("bad gate kind: want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T|SRLATCH");
 }
 
-// Find a live gate by display name (e.g. "AND1", "DFF1", case-insensitive
-// kind). Linear slot-order scan: deterministic, first (only) match wins.
-// Covers all sequential kinds (DFF/DLATCH/JK/T/SRLATCH); no Netlist shape change
-// (ordinals compare by value).
+/**
+ * @brief Find a live gate by display name (e.g. "AND1", "DFF1").
+ *
+ * Linear slot-order scan: deterministic, first (only) match wins;
+ * covers all sequential kinds (ordinals compare by value, so no
+ * Netlist shape change was needed).
+ *
+ * @param[in] nl Netlist to search.
+ * @param[in] name Case-insensitive kind prefix plus 1-based counter.
+ * @return kOk with the slot on success; kInvalidArgument for empty
+ *         text, a bad kind prefix/number ("bad gate name"), or a
+ *         well-formed but absent gate ("unknown gate").
+ */
 [[nodiscard]] inline core::Result<std::uint16_t> resolve_gate(const Netlist &nl, std::string_view name) noexcept {
   if (name.empty()) {
     return core::Result<std::uint16_t>::failure("bad gate name: empty");
@@ -290,15 +385,25 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
   return core::Result<std::uint16_t>::failure("bad gate name");
 }
 
-// Parse `<NAME>.Y` (output) or `<NAME>.<1..k>` (input, 1-based in text).
-// Sequential gates additionally accept named pins (FR-010/FR-011,
-// case-insensitive) from the kind table (DFF `D`/`CLK` plus `RST`/`SET`/`EN`
-// on full-control flops only; DLATCH `D`/`EN`; JK `J`/`K`/`CLK`; T `T`/
-// `CLK`; SRLATCH `S`/`R`; every flop also `Q`/`NQ`). Numeric aliases
-// keep working for all kinds; names on combinational gates are rejected;
-// kind-foreign names (e.g. `D` on a JK flop, `J` on a DFF) fall through
-// to the numeric parser and fail there.
-// Input range validates against the gate's configured fan-in.
+/**
+ * @brief Parse `<NAME>.Y` (output) or `<NAME>.<1..k>` (1-based input).
+ *
+ * Sequential gates additionally accept named pins (case-insensitive)
+ * from the kind table (DFF `D`/`CLK` plus `RST`/`SET`/`EN` on
+ * full-control flops only; DLATCH `D`/`EN`; JK `J`/`K`/`CLK`;
+ * T `T`/`CLK`; SRLATCH `S`/`R`; every flop also `Q`/`NQ`). Numeric
+ * aliases keep working for all kinds; names on combinational gates are
+ * rejected; kind-foreign names (e.g. `D` on a JK flop) fall through to
+ * the numeric parser and fail there. Input range validates against the
+ * gate's configured fan-in.
+ *
+ * @param[in] nl Netlist holding the named gate.
+ * @param[in] text Pin spelling to parse.
+ * @return kOk with the PinRef on success; kInvalidArgument for a
+ *         malformed pin ("bad pin: ..."), an absent gate
+ *         ("unknown gate"), or an out-of-range input index
+ *         ("input index out of range").
+ */
 [[nodiscard]] inline core::Result<PinRef> parse_pin(const Netlist &nl, std::string_view text) noexcept {
   std::size_t dot = text.find('.');
   if (dot == std::string_view::npos) {

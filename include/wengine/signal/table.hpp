@@ -1,5 +1,13 @@
 #pragma once
 
+/**
+ * @file
+ * Table/CSV replay source (SIG-4a): sampled-waveform replay with linear
+ * interpolation over source time. Owns the byte-stable CSV format, strict
+ * parsing, and the clamp/exact-hit evaluation policy. Depends only on
+ * core/status; never on world, emit, or the CLI. Consumed by the signal
+ * solver for kTable sources and batch drivers.
+ */
 // Table/CSV replay source (SIG-4a): replays a sampled waveform with linear
 // interpolation over source time.
 //
@@ -40,17 +48,34 @@
 
 namespace wengine::signal {
 
+/**
+ * @brief One CSV row: source time and SI value (volts/amps per the stamped quantity).
+ * @note No unit suffixes in tables; quantity-suffixed text lives at CLI/GUI edges only.
+ */
 struct TablePoint {
+/** @brief Source time in SI seconds; strictly increasing across the table. */
   double t = 0.0;
+/** @brief Sample value in SI (V or A per the source quantity). */
   double v = 0.0;
 
+/**
+ * @brief Field-wise equality.
+ * @return true when time and value compare equal.
+ */
   bool operator==(const TablePoint &) const noexcept = default;
 };
 
+/** @brief Maximum CSV rows per table (bounds memory; overlong files fail loudly). */
 inline constexpr std::size_t kMaxTablePoints = 65536;
 
 namespace table_detail {
 
+/**
+ * @brief Strict finite-double field parse via full-consumption from_chars.
+ * @param[in] s text field to parse.
+ * @param[out] out parsed value on true.
+ * @return true on success, false for empty, malformed, or non-finite text.
+ */
 [[nodiscard]] inline bool parse_double_field(std::string_view s, double &out) noexcept {
   if (s.empty()) {
     return false;
@@ -74,6 +99,11 @@ namespace table_detail {
 // Structural validation for point spans (configure edge, batch driver,
 // loaded blobs): non-empty, bounded, finite, strictly increasing times.
 [[nodiscard]] inline core::Status
+/**
+ * @brief Structural validation for point spans (configure edge, batch driver, loaded blobs).
+ * @param[in] pts points to gate: non-empty, bounded, finite, strictly increasing times.
+ * @return kOk, or kInvalidArgument on any violation.
+ */
 validate_table_points(std::span<const TablePoint> pts) noexcept {
   if (pts.empty() || pts.size() > kMaxTablePoints) {
     return {core::StatusCode::kInvalidArgument};
@@ -91,6 +121,14 @@ validate_table_points(std::span<const TablePoint> pts) noexcept {
 
 // Parse a table CSV (see header doc) into `out`. Clears `out` on failure;
 // `error` carries a line-numbered reason (config-edge allocation only).
+/**
+ * @brief Parse a table CSV (exact "time,value" header, one "t,v" row per line).
+ * @param[in] in text stream to read (a single trailing carriage return per line is tolerated for CRLF files).
+ * @param[out] out parsed points; cleared on failure.
+ * @param[out] error line-numbered reason on failure (config-edge allocation only).
+ * @return kOk, or kInvalidArgument with the reason in error.
+ * @note Write doubles with max_digits10 for bit-exact replay.
+ */
 [[nodiscard]] inline core::Status parse_table_csv(std::istream &in,
                                                  std::vector<TablePoint> &out,
                                                  std::string &error) {
@@ -153,6 +191,15 @@ validate_table_points(std::span<const TablePoint> pts) noexcept {
 // Interpolate `t` over parallel time/value arrays (n >= 1, times strictly
 // increasing — the configure-time invariant). Infallible by contract:
 // clamps outside the span, exact stored value on exact hits.
+/**
+ * @brief Interpolate t over parallel time/value arrays.
+ * @param[in] times strictly increasing sample times (the configure-time invariant).
+ * @param[in] values sample values parallel to times.
+ * @param[in] t source time to evaluate.
+ * @return Exact stored value on exact time hits (bit-identical replay at logged sample times);
+ * otherwise linear interpolation in fixed order; clamps (holds first/last) outside the span.
+ * @note Binary search over unique brackets: the result is independent of the search method.
+ */
 [[nodiscard]] inline double eval_table(std::span<const double> times,
                                       std::span<const double> values, double t) noexcept {
   const std::size_t n = times.size();

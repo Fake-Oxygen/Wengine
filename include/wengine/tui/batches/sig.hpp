@@ -1,10 +1,32 @@
 #pragma once
 
+/**
+ * @file
+ * The `sig run` run-builder definition (F4 browser entry). Field indices
+ * match the `fields` order below (bit N == field N). The builder composes
+ * one `sig run ...` argv line for the shared CLI path and never
+ * validates: empty fields are omitted, bare flags emit only when enabled,
+ * and the CLI owns every error. Signal kinds resolve from
+ * `kKindNames` (plus `U|I` quantities and `ascii|cobs` UART modes), so
+ * new kinds appear with no builder-side change. `--forever` lines route
+ * to the async worker (see `wants_async`, TUI-5). Consumers: the registry
+ * in `wengine/tui/batches.hpp`, the batch pane in
+ * `src/tui/panes_batches.cpp`.
+ */
+
 #include "wengine/cli/commands.hpp"
 #include "wengine/tui/batches/types.hpp"
 
 namespace wengine::tui::batches::definitions {
 
+/**
+ * @brief Build the `sig run` builder definition.
+ *
+ * @return The BatchDef for `sig run`: one profile per signal kind over
+ *         runtime fields (steps/dt/emit/control/pacing, shared by every
+ *         kind) plus per-kind signal fields (freq/amp/.../lua). Runtime
+ *         fields are shared by every kind; signal fields vary per kind.
+ */
 [[nodiscard]] inline BatchDef sig() {
   using cli::commands::SigSpec;
 

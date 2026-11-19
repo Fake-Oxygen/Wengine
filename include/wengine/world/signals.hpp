@@ -1,5 +1,20 @@
 #pragma once
 
+/**
+ * @file
+ * The second per-domain SoA component pool: stamped signal sources
+ * (same parallel-vectors + occupancy shape as Particles), plus the
+ * configure-time attach APIs that validate and mint sources with
+ * stable serials. Owned by world::State, which detaches the pool on
+ * despawn; snapshots carry live values in dense slot order and the
+ * publish path adapts them into Frame channels. Serial identity, the
+ * end-of-step timing convention, sum flattening, and the append-only
+ * table/script stores are this file's contracts — see the block comments
+ * below. This header must stay free of solver I/O and of any unit-text
+ * knowledge: quantity parsing goes through cli::parse_quantity_value
+ * against signal/types.hpp's kQuantities table.
+ */
+
 // Second per-domain SoA component pool: signal sources (same shape as
 // Particles — parallel vectors + occupancy, indexed by entity slot).
 // Owned by world::State, which keeps registry and pools consistent on
@@ -56,42 +71,175 @@
 
 namespace wengine::world {
 
+/**
+ * @brief SoA pool of signal sources: per-slot generator columns plus
+ *        the shared append-only table and script stores.
+ *
+ * @note Slots recycle, serials never do: `next_serial` is monotonic
+ *       per pool and every live source owns a serial from it, so
+ *       subscriptions, CSV sig_ids, Frame channels, and the control
+ *       plane address sources unambiguously across despawn/respawn.
+ *       The hot path stays SI double + quantity tag (zero-cost);
+ *       dimensional safety lives at configure/parse edges.
+ */
 struct Signals {
+  /**
+   * @brief Stable source identity per slot (u64, monotonic per pool,
+   *        never reused — even across despawn/respawn).
+   */
   std::vector<std::uint64_t> serial; // stable source id, never reused
+  /**
+   * @brief Generator kind per slot, a signal::SignalKind value as u8.
+   */
   std::vector<std::uint8_t> kind; // signal::SignalKind
+  /**
+   * @brief Quantity tag per slot, a signal::QuantityId value as u8;
+   *        fixes the dimension of amp/offset/value.
+   */
   std::vector<std::uint8_t> quantity; // signal::QuantityId
+  /**
+   * @brief Frequency per slot in hertz (SI base 1/s).
+   */
   std::vector<double> freq;
+  /**
+   * @brief Amplitude per slot, in the SI base unit of the slot's
+   *        quantity.
+   */
   std::vector<double> amp;
+  /**
+   * @brief DC offset per slot, in the SI base unit of the slot's
+   *        quantity.
+   */
   std::vector<double> offset;
+  /**
+   * @brief Phase per slot in radians.
+   */
   std::vector<double> phase;
+  /**
+   * @brief Duty cycle per slot as a fraction in [0, 1] (square/pulse).
+   */
   std::vector<double> duty;
+  /**
+   * @brief Spawn seed per slot (raw u64 bits; kept for replay clarity).
+   */
   std::vector<std::uint64_t> seed; // spawn seed (replay clarity)
+  /**
+   * @brief Live noise RNG state per slot; advances once per step per
+   *        live slot (never at configure time).
+   */
   std::vector<std::uint64_t> rng; // live noise state
+  /**
+   * @brief Source time base per slot in seconds (_s): spawn time,
+   *        rebased on start; the solver evaluates
+   *        value(t_end - t0).
+   */
   std::vector<double> t0;
+  /**
+   * @brief Current output per slot, in the SI base unit of the slot's
+   *        quantity; frozen (not zeroed) while running == 0.
+   */
   std::vector<double> value; // current output, SI base
+  /**
+   * @brief Stepping flag per slot: 1 = stepping, 0 = frozen (value
+   *        keeps its last sample, noise RNG does not advance).
+   */
   std::vector<std::uint8_t> running; // 1 = stepping, 0 = frozen
+  /**
+   * @brief Sum operand serials, kMaxOps per slot (flattened rows;
+   *        slot i owns [i*kMaxOps, (i+1)*kMaxOps)).
+   */
   std::vector<std::uint64_t> ops; // sum operand serials, kMaxOps per slot
+  /**
+   * @brief Number of live operands for kSum slots; 0 for every other
+   *        kind.
+   */
   std::vector<std::uint8_t> op_count;
+  /**
+   * @brief Expression RPN opcodes, kMaxExprNodes per slot.
+   */
   std::vector<std::uint8_t> expr_op; // expression RPN opcodes, kMaxExprNodes/slot
+  /**
+   * @brief Expression kConst payloads, kMaxExprNodes per slot.
+   */
   std::vector<double> expr_arg; // expression kConst payloads, kMaxExprNodes/slot
+  /**
+   * @brief Expression program length per slot (0 for non-expression
+   *        slots).
+   */
   std::vector<std::uint8_t> expr_len; // expression program length per slot
+  /**
+   * @brief Table range start per slot into table_times/table_values.
+   */
   std::vector<std::uint64_t> table_off; // table range start in the store
+  /**
+   * @brief Table range length per slot (0 for non-table slots).
+   */
   std::vector<std::uint64_t> table_len; // table range length per slot
+  /**
+   * @brief Append-only global table store: time points in seconds
+   *        (_s), strictly increasing within each range.
+   */
   std::vector<double> table_times; // append-only global table store (times)
+  /**
+   * @brief Append-only global table store: values in the SI base unit
+   *        of the referencing slot's quantity.
+   */
   std::vector<double> table_values; // append-only global table store (values)
+  /**
+   * @brief Script range start per slot into lua_text.
+   */
   std::vector<std::uint64_t> lua_off; // script range start in lua_text
+  /**
+   * @brief Script byte length per slot (0 for non-Lua slots).
+   */
   std::vector<std::uint64_t> lua_len; // script byte length per slot
+  /**
+   * @brief Append-only global script store (SIG-4b): opaque bytes to
+   *        the engine, compiled only where Lua exists.
+   */
   std::string lua_text; // append-only global script store (SIG-4b)
+  /**
+   * @brief Occupancy column: 1 = live source in the slot.
+   */
   std::vector<std::uint8_t> present; // 1 = live source in slot
+  /**
+   * @brief Number of present slots (exact, maintained by
+   *        attach()/detach()).
+   */
   std::size_t live_count{0};
+  /**
+   * @brief Next serial to hand out; monotonic, never decremented, never
+   *        reused (including across clear()).
+   */
   std::uint64_t next_serial{0};
 
+  /**
+   * @brief Number of allocated slots (present.size()).
+   *
+   * @return slots addressable by ensure()/attach() today.
+   */
   [[nodiscard]] std::size_t capacity() const noexcept { return present.size(); }
 
+  /**
+   * @brief Occupancy predicate.
+   *
+   * @param[in] index slot to test.
+   * @return true when the index is in range and the slot is present.
+   */
   [[nodiscard]] bool has(std::uint32_t index) const noexcept {
     return index < present.size() && present[index] != 0;
   }
 
+  /**
+   * @brief Grow arrays so `index` is addressable. New slots are absent
+   *        and zeroed (including the per-slot operand and expression
+   *        rows).
+   *
+   * @param[in] index slot that must become addressable.
+   * @note Setup-path allocation (not the hot step); every SoA column
+   *       and both per-slot row groups (ops, expr) resize together so
+   *       flat indexing stays aligned.
+   */
   // Grow arrays so `index` is addressable. New slots are absent and zeroed.
   void ensure(std::uint32_t index) {
     const std::size_t need = static_cast<std::size_t>(index) + 1;
@@ -126,6 +274,15 @@ struct Signals {
     present.resize(need, 0);
   }
 
+  /**
+   * @brief Attach a live source to `index` (idempotent; keeps existing
+   *        columns).
+   *
+   * @param[in] index slot to mark present.
+   * @note The caller (configure_source / attach_table_source /
+   *       attach_lua_source) assigns the serial and columns after
+   *       attach; attach only flips presence and maintains live_count.
+   */
   // Attach a live source to `index` (idempotent; keeps existing data).
   void attach(std::uint32_t index) {
     ensure(index);
@@ -135,6 +292,15 @@ struct Signals {
     }
   }
 
+  /**
+   * @brief Detach (idempotent no-op when absent). Capacity is retained.
+   *
+   * @param[in] index slot to clear.
+   * @note Clears presence only: all other columns retain their last
+   *       live values verbatim (serialization stores them; every
+   *       configure path overwrites them on reuse), and the serial is
+   *       never reused — next_serial does not rewind.
+   */
   // Detach (idempotent no-op when absent). Capacity is retained.
   void detach(std::uint32_t index) noexcept {
     if (index < present.size() && present[index] != 0) {
@@ -143,6 +309,11 @@ struct Signals {
     }
   }
 
+  /**
+   * @brief Reset the pool completely: all columns, both shared stores,
+   *        live count, and next_serial (serials restart from 0 in a
+   *        fresh pool — clear means a new identity space).
+   */
   void clear() noexcept {
     serial.clear();
     kind.clear();
@@ -174,9 +345,26 @@ struct Signals {
     next_serial = 0;
   }
 
+  /**
+   * @brief Whole-pool equality against another pool: every column,
+   *        both stores, and the counters.
+   *
+   * @return true when all columns match (used by round-trip tests).
+   */
   bool operator==(const Signals &) const noexcept = default;
 };
 
+/**
+ * @brief Resolve a source serial to its live slot.
+ *
+ * @param[in] pool pool to scan.
+ * @param[in] serial stable identity to look up.
+ * @return the slot index holding the live source with this serial;
+ *         nullopt when the serial is unknown or despawned —
+ *         subscribers treat that as "source gone", never as slot 0.
+ * @note Linear scan over the pool (signal counts are small); pass order
+ *       is slot order, so resolution is deterministic.
+ */
 // Resolve a source serial to its live slot. Absent (unknown or despawned)
 // yields nullopt — subscribers treat that as "source gone", never as slot 0.
 [[nodiscard]] inline std::optional<std::uint32_t> find_serial(const Signals &pool,
@@ -189,6 +377,36 @@ struct Signals {
   return std::nullopt;
 }
 
+/**
+ * @brief Configure entity `e` as a signal source (attach + params +
+ *        time base).
+ *
+ * @param[in] e entity whose .index addresses the pool slot; the pool
+ *            is slot-indexed and State keeps registry and pools
+ *            consistent.
+ * @param[in, out] pool pool to configure into; columns of slot e.index
+ *                    are (over)written and a fresh serial is consumed.
+ * @param[in] p validated shape: kind, quantity tag, freq in hertz
+ *            (freq_hz), amplitude/offset in the quantity's SI base
+ *            unit, phase in radians, duty in [0,1], seed bits, and for
+ *            kSum the flattened operand serials (op_count entries of
+ *            p.ops) with the sum's own quantity.
+ * @param[in] t_now current simulation time in seconds (_s); becomes
+ *            the slot's time base t0 (evaluations use t_end - t0).
+ * @return kOk on attach; kInvalidArgument when the params fail
+ *         validate_params, when the kind is kTable or kLua (rejected
+ *         here by design — use configure_table_source or
+ *         lua::configure_lua_source), when a kSum operand serial is
+ *         unknown/despawned, resolves to another kSum (sums stay
+ *         flattened), carries a quantity different from the sum's
+ *         own, or when a kExpression program already fails at t = 0.
+ * @note On failure nothing is attached and no serial is consumed —
+ *       the pool is untouched. Initial sample is eval(0): periodic
+ *       kinds start at phase, noise starts at the seed peek (the RNG
+ *       advances on the first step, never here), sums start at the
+ *       operands' current sum, expressions evaluate at t = 0 — so
+ *       spawn is a pure function of (params, pool, t_now).
+ */
 // Configure entity `e` as a signal source (attach + params + time base).
 // Validates shape (validate_params) and, for sums, operand serials against
 // the live pool; on failure nothing is attached and the pool is untouched.
@@ -285,6 +503,22 @@ struct Signals {
   return core::Status::success();
 }
 
+/**
+ * @brief Append validated table points to the pool's shared store (no
+ *        attach). Shared by single-source configure and batch spawns
+ *        so N identical sources reference one range instead of N
+ *        duplicate copies.
+ *
+ * @param[in, out] pool pool whose table_times/table_values grow.
+ * @param[in] pts points to append: times in seconds (_s), finite and
+ *            strictly increasing; values in the quantity's SI base
+ *            unit.
+ * @param[out] off receives the range start of the appended points.
+ * @return kOk after appending; kInvalidArgument when the points fail
+ *         validate_table_points (nothing appended, off untouched).
+ * @note The store is append-only: ranges never move, so references stay
+ *       valid across despawn/respawn, and detach never reclaims rows.
+ */
 // Append validated table points to the pool store (no attach). Shared by
 // single-source configure and batch spawns so N identical sources reference
 // one range instead of N duplicate copies. `off` receives the range start.
@@ -302,6 +536,25 @@ struct Signals {
   return core::Status::success();
 }
 
+/**
+ * @brief Attach entity `e` as a table source over the already-stored
+ *        range [off, off + len) (from append_table_points).
+ *
+ * @param[in] e entity whose .index addresses the pool slot.
+ * @param[in, out] pool pool to attach into; consumes a fresh serial and
+ *                    writes the slot's columns.
+ * @param[in] off range start in table_times/table_values.
+ * @param[in] len range length (1..kMaxTablePoints).
+ * @param[in] quantity QuantityId fixing the dimension of the stored
+ *            values and the slot's output.
+ * @param[in] t_now current simulation time in seconds (_s); becomes
+ *            the slot's time base t0.
+ * @return kOk on attach; kInvalidArgument when the range is empty or
+ *         oversized, lies outside the store, or the quantity is not a
+ *         valid QuantityId (nothing attached).
+ * @note The initial sample is the table value at t = 0 (clamped when
+ *       the table starts later).
+ */
 // Attach entity `e` as a table source over the already-stored range
 // [off, off + len) (from append_table_points). Initial sample is the
 // table value at t = 0 (clamped when the table starts later).
@@ -348,6 +601,24 @@ struct Signals {
   return core::Status::success();
 }
 
+/**
+ * @brief Configure entity `e` as a table-replay source: validates
+ *        points, appends them once to the shared store, and attaches
+ *        over the new range.
+ *
+ * @param[in] e entity whose .index addresses the pool slot.
+ * @param[in, out] pool pool that grows by the appended range and gains
+ *                    the live source.
+ * @param[in] pts points to append (times in seconds (_s), finite,
+ *            strictly increasing; values in the quantity's SI base
+ *            unit).
+ * @param[in] quantity QuantityId fixing the source's dimension.
+ * @param[in] t_now current simulation time in seconds (_s).
+ * @return kOk when points validated and the source attached;
+ *         kInvalidArgument on invalid points or range (nothing
+ *         attached; appended points from a failed attach remain in the
+ *         store — ranges are inert until referenced).
+ */
 // Configure entity `e` as a table-replay source: validates points,
 // appends them once, and attaches over the new range.
 [[nodiscard]] inline core::Status
@@ -361,6 +632,21 @@ configure_table_source(Entity e, Signals &pool, std::span<const signal::TablePoi
                              quantity, t_now);
 }
 
+/**
+ * @brief Append a validated Lua script to the pool's shared store (no
+ *        attach).
+ *
+ * @param[in, out] pool pool whose lua_text grows by the script bytes.
+ * @param[in] script opaque script bytes; the engine never compiles
+ *            them here (compile-checked where Lua exists:
+ *            lua::configure_lua_source, the CLI) — only the size is
+ *            bounded so pools, batch sections, and blobs stay finite.
+ * @param[out] off receives the range start of the appended script.
+ * @return kOk after appending; kInvalidArgument when the script is
+ *         empty or exceeds kMaxLuaScriptBytes (nothing appended).
+ * @note The store is append-only; ranges never move, and detach never
+ *       reclaims bytes.
+ */
 // Append a validated Lua script to the pool store (no attach). Script text
 // is opaque bytes to the engine (compile-checked where Lua exists:
 // lua::configure_lua_source, the CLI); the engine only bounds the size so
@@ -376,6 +662,29 @@ configure_table_source(Entity e, Signals &pool, std::span<const signal::TablePoi
   return core::Status::success();
 }
 
+/**
+ * @brief Attach entity `e` as a Lua source over the already-stored
+ *        range [off, off + len) (from append_lua_script).
+ *
+ * @param[in] e entity whose .index addresses the pool slot.
+ * @param[in, out] pool pool to attach into; consumes a fresh serial and
+ *                    writes the slot's columns.
+ * @param[in] off range start in lua_text.
+ * @param[in] len script byte length (1..kMaxLuaScriptBytes).
+ * @param[in] quantity QuantityId fixing the source's dimension.
+ * @param[in] t_now current simulation time in seconds (_s); becomes
+ *            the slot's time base t0.
+ * @return kOk on attach; kInvalidArgument when the range is empty or
+ *         oversized, lies outside the store, or the quantity is not a
+ *         valid QuantityId (nothing attached).
+ * @note The initial sample is 0: Lua sources sample on their first
+ *       stepped evaluation (the Lua solver runs before SignalSolver,
+ *       so sums over Lua operands still read fresh values within the
+ *       step). Batch spawns and direct configures agree on this —
+ *       run_headless always steps at least once, so the 0 is never
+ *       observed there; direct API users read it only before the
+ *       first step.
+ */
 // Attach entity `e` as a Lua source over the already-stored range
 // [off, off + len) (from append_lua_script). The initial sample is 0: Lua
 // sources sample on their first stepped evaluation (the Lua solver runs

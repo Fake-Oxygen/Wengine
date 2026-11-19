@@ -1,5 +1,14 @@
 #pragma once
 
+/**
+ * @file
+ * Machine-readable signal log: tidy CSV, one row per live source per
+ * snapshot, co-located replay parser. Companion to CsvSink, which stays
+ * particle-shaped: sim run writes this log when the solver is signal, so
+ * each domain keeps its exact round-trip format instead of one widened
+ * schema that breaks both. Depends on core/status, emit/sink, and signal
+ * leaf types; never on the solver. Consumed by signal runs and replay tools.
+ */
 // Machine-readable signal log (D2b-A): tidy CSV, one row per live source
 // per snapshot (`step,time,sig_id,value,quantity`), header written once.
 // Companion to CsvSink, which stays particle-shaped: `sim run` writes this
@@ -29,8 +38,22 @@
 
 namespace wengine::emit {
 
+/**
+ * @brief Tidy signal CSV writer: one row per live source per snapshot.
+ * @note Doubles use max_digits10 (exact round-trip, == on re-read); sig_id
+ * is the stable source serial in Snapshot slot order (serials are NOT
+ * ascending after slot recycling; uniqueness within a step is validated
+ * preserving writer order). Best-effort observer: sticky status, never throws.
+ */
 class SignalsCsvSink : public ISink {
 public:
+/**
+ * @brief Open the log file and write the header.
+ * @param[in] path destination file.
+ * @param[in] truncate true truncates; false appends (the header is then written only when
+ * starting an empty file).
+ * @note A failed open is a sticky kInternal status, never a throw.
+ */
   explicit SignalsCsvSink(std::string path, bool truncate = true) : path_(std::move(path)) {
     out_.open(path_, truncate ? std::ios::trunc : std::ios::app);
     if (!out_) {
@@ -46,6 +69,10 @@ public:
     }
   }
 
+/**
+ * @brief Append one row per live source for the snapshot.
+ * @param[in] s emitted snapshot (quantities render via quantity_suffix from the kQuantities table).
+ */
   void on_snapshot(const world::Snapshot &s) override {
     if (!status_.ok()) {
       return;
@@ -62,11 +89,19 @@ public:
     }
   }
 
+/** @brief Sticky health flag. @return true while no I/O failure occurred (state query, not an error return). */
   [[nodiscard]] bool ok() const noexcept { return status_.ok(); }
+/** @brief Sticky status. @return kOk, or kInternal once I/O has failed. */
   [[nodiscard]] core::Status status() const noexcept { return status_; }
+/** @brief Data rows appended, ever. @return Count of written signal rows. */
   [[nodiscard]] std::size_t rows_written() const noexcept { return rows_; }
+/** @brief Destination file. @return The path passed to the constructor. */
   [[nodiscard]] const std::string &path() const noexcept { return path_; }
 
+/**
+ * @brief Push buffered rows to the file (for tailing; also happens on close).
+ * @return The sticky status (kInternal once I/O has failed).
+ */
   core::Status flush() {
     if (!status_.ok()) {
       return status_;
@@ -93,6 +128,17 @@ private:
 // rows (exact ==). Violations are kInvalidArgument with a line-numbered
 // message; `out` is cleared on failure.
 [[nodiscard]] inline core::Status
+/**
+ * @brief Replay a SignalsCsvSink log back into snapshots, one per step in file order.
+ * @param[in] in log stream (byte-exact "step,time,sig_id,value,quantity" header).
+ * @param[out] out parsed snapshots; cleared on failure.
+ * @param[out] error human line-numbered message on failure.
+ * @return kOk, or kInvalidArgument for a bad header, non-increasing steps, duplicate
+ * sig ids within a step, time differing within a step, or malformed rows (unknown quantity included).
+ * @note Steps strictly increase; sig ids are unique per step with file/slot order
+ * preserved (serials need not ascend after slot recycling); time is identical
+ * across a step's rows (exact ==).
+ */
 parse_signals_log(std::istream &in, std::vector<world::Snapshot> &out,
                   std::string &error) {
   out.clear();

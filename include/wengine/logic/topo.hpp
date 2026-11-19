@@ -1,32 +1,29 @@
 #pragma once
 
-// Canonical topology Module for the logic netlist (C1 deepening).
-//
-// One Kahn core (`detail::kahn_pure`), three direct entries — no
-// cross-header forwarders:
-//   rebuild()            mutating compile into nl.topo_order/level/size/dirty.
-//   validate()           pure verdict over the same core, no mutation.
-//   compile_comb_order() pure combinational order for the stepper.
-// reaches() is the pure reachability query (unchanged).
-//
-// EdgeFilter rule:
-//   kAll      — every driver edge counts (combinational cycle check).
-//   kCombOnly — edges INTO sequential-gate inputs are excluded (flop Q
-//               outputs break loops, so feedback through flops validates
-//               while pure combinational cycles still fail loudly).
-// Sequential-driven edges cost 0 under kCombOnly (flop Q is always ready;
-// the old validate_sequential counted them at 1 with the same verdict but
-// a different schedule — 0-cost is canonical since the stepper and the
-// optimizer already used it).
-//
-// Failure contracts (preserved):
-//   rebuild/kAll:   zeroes topo_size, keeps dirty, fails loudly.
-//   rebuild/kCombOnly: leaves dirty/size untouched on failure.
-//   validate/compile: pure, never touch the netlist.
-//
-// Depends only on types.hpp + core/status (Netlist lives in types.hpp, so
-// netlist/eval/seq_step/cli can all include this with no cycle).
-// Header-only, allocation-free, exception-free, noexcept throughout.
+/**
+ * @file
+ * Canonical topology module (C1 deepening) of the logic pipeline: the one Kahn core
+ * every compile/validation path runs. Compiled once per mutation
+ * (dirty flag): Kahn's algorithm over slot order yields a deterministic
+ * level order with a cycle check included; steady-state solve never
+ * re-sorts. Three direct entries, no cross-header forwarders:
+ * rebuild (mutating compile), validate (pure verdict), and
+ * compile_comb_order (pure combinational order for the stepper);
+ * reaches is the pure reachability query.
+ *
+ * Edge-filter rule: kAll counts every driver edge (combinational cycle
+ * check); kCombOnly excludes edges into sequential-gate inputs (flop Q
+ * outputs break loops, so feedback through flops validates while pure
+ * combinational cycles still fail loudly).
+ *
+ * Dependency rules (docs/logic.md section 4): header-only,
+ * allocation-free, exception-free; depends only on types.hpp plus
+ * core/status (Netlist lives in types.hpp, so netlist/eval/seq_step/cli
+ * can all include this with no cycle). Logic is a standalone domain:
+ * this header must never depend on CLI types. Consumers: eval.hpp,
+ * netlist.hpp mutation, seq_step.hpp, the optimize pipeline, layout.hpp,
+ * the CLI wire/truth verbs, and the test_logic* suite.
+ */
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/types.hpp"
@@ -36,8 +33,13 @@
 
 namespace wengine::logic {
 
+/**
+ * @brief Which driver edges the Kahn core counts.
+ */
 enum class EdgeFilter : std::uint8_t {
+  /** @brief Every driver edge counts (combinational cycle check). */
   kAll = 0,
+  /** @brief Edges into sequential-gate inputs excluded (flop Q outputs break loops). */
   kCombOnly = 1,
 };
 
@@ -45,9 +47,16 @@ namespace topo {
 
 namespace detail {
 
-// Combinational indegree over comb-only edges (flop outputs read as
-// always-ready sources, so seq-driven edges cost 0). Shared by every
-// kCombOnly entry below.
+/**
+ * @brief Combinational indegree over comb-only edges: flop outputs read
+ *        as always-ready sources, so sequential-driven edges cost 0.
+ *
+ * Shared by every kCombOnly entry below.
+ *
+ * @param[in] nl Netlist to scan.
+ * @param[out] indeg Per-slot combinational indegree (sequential slots read 0).
+ * @param[out] n_comb Number of live combinational gates.
+ */
 inline void count_comb_indeg(const Netlist &nl, std::uint8_t *indeg, std::size_t &n_comb) noexcept {
   n_comb = 0;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
@@ -77,18 +86,35 @@ inline void count_comb_indeg(const Netlist &nl, std::uint8_t *indeg, std::size_t
   }
 }
 
-// How sequential gates appear in the output order.
+/**
+ * @brief How sequential gates appear in the Kahn output order.
+ */
 enum class SeqOut : std::uint8_t {
+  /** @brief kAll path: no special-casing, every gate is emitted. */
   kNone = 0,       // kAll path: no special-casing, every gate is emitted.
+  /** @brief rebuild/kCombOnly: sequential gates emitted first as roots. */
   kPrependSeq = 1, // rebuild/kCombOnly: seq gates emitted first as roots.
+  /** @brief Stepper order: sequential gates seed readiness but are skipped. */
   kSkipSeq = 2,    // stepper order: seq gates seed readiness but are skipped.
 };
 
-// The one Kahn skeleton. Pure: reads nl, writes caller buffers, never
-// mutates. Slot-order seeds and successors (FIFO) everywhere, so every
-// entry point shares one determinism story. Levels: 0 for sources (and
-// seq roots under kCombOnly), else 1 + max(driver levels).
-// Returns false on any defect (dangling driver, combinational cycle).
+/**
+ * @brief The one Kahn skeleton: pure slot-order topological compile.
+ *
+ * Reads nl, writes caller buffers, never mutates. Slot-order seeds and
+ * successors (FIFO) everywhere, so every entry point shares one
+ * determinism story. Levels: 0 for sources (and sequential roots under
+ * kCombOnly), else 1 + max(driver levels).
+ *
+ * @param[in] nl Netlist to compile.
+ * @param[in] filter Edge set to count (kAll vs kCombOnly).
+ * @param[out] order_out Emission-order slots.
+ * @param[out] level_out Per-slot levels (may be nullptr to skip).
+ * @param[out] n_out Number of emitted slots.
+ * @param[in] seq_out How sequential gates appear in the output.
+ * @return True when every gate emitted; false on any defect (dangling
+ *         driver, combinational cycle).
+ */
 inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order_out,
                       std::uint16_t *level_out, std::size_t &n_out, SeqOut seq_out) noexcept {
   if (filter == EdgeFilter::kAll) {
@@ -243,14 +269,21 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
 
 } // namespace detail
 
-// Compile (or reuse) the deterministic level order: zero-indegree seeds
-// scan in slot order; successors of each popped gate scan in slot order;
-// FIFO queue.
-// kAll: Kahn over all edges (early-out included).
-// kCombOnly: sequential gates emit first as slot-order roots (level 0),
-// then Kahn over comb-only edges.
-// Returns failure on any defect (dangling driver, combinational cycle);
-// keeps dirty on failure for the kAll path.
+/**
+ * @brief Compile (or reuse) the deterministic level order.
+ *
+ * Zero-indegree seeds scan in slot order; successors of each popped gate
+ * scan in slot order; FIFO queue. kAll: Kahn over all edges (early-out
+ * included). kCombOnly: sequential gates emit first as slot-order roots
+ * (level 0), then Kahn over comb-only edges.
+ *
+ * @param[out] nl Netlist receiving topo_order/level/size/dirty.
+ * @param[in] filter Edge set to count.
+ * @return kOk on success; kInvalidArgument on any defect (dangling
+ *         driver, combinational cycle). The kAll path zeroes topo_size
+ *         and keeps dirty on failure; kCombOnly leaves dirty/size
+ *         untouched on failure.
+ */
 [[nodiscard]] inline core::Status rebuild(Netlist &nl, EdgeFilter filter) noexcept {
   if (filter == EdgeFilter::kAll) {
     if (!nl.dirty && nl.topo_size == nl.live_count) {
@@ -296,10 +329,19 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
   return core::Status::success();
 }
 
-// Pure verdict over the same core: no mutation, fixed stack arrays,
-// noexcept. kAll sees every edge (combinational cycle check);
-// kCombOnly excludes flop-breaking edges (feedback through flops
-// validates, pure combinational cycles still fail loudly).
+/**
+ * @brief Pure verdict over the same Kahn core: no mutation, fixed stack
+ *        arrays.
+ *
+ * kAll sees every edge (combinational cycle check); kCombOnly excludes
+ * flop-breaking edges (feedback through flops validates, pure
+ * combinational cycles still fail loudly).
+ *
+ * @param[in] nl Netlist to check.
+ * @param[in] filter Edge set to count.
+ * @return kOk when the netlist compiles; kInvalidArgument on any defect
+ *         (dangling driver, combinational cycle).
+ */
 [[nodiscard]] inline core::Status validate(const Netlist &nl, EdgeFilter filter) noexcept {
   std::uint16_t order[kMaxGates];
   std::uint16_t levels[kMaxGates] = {};
@@ -312,10 +354,19 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
   return core::Status::success();
 }
 
-// Reachability over the driver graph: can `from` reach `to` following
-// output->input edges? Iterative DFS on a fixed stack (no alloc).
-// kCombOnly excludes edges into sequential-gate inputs from the edge set
-// (flop Q outputs break loops); kAll counts every edge.
+/**
+ * @brief Reachability over the driver graph: iterative DFS on a fixed
+ *        stack (no allocation).
+ *
+ * kCombOnly excludes edges into sequential-gate inputs from the edge
+ * set (flop Q outputs break loops); kAll counts every edge.
+ *
+ * @param[in] nl Netlist holding the driver graph.
+ * @param[in] from Source slot.
+ * @param[in] to Destination slot.
+ * @param[in] filter Edge set to follow.
+ * @return True when from can reach to (including from == to).
+ */
 [[nodiscard]] inline bool reaches(const Netlist &nl, std::uint16_t from, std::uint16_t to,
                                   EdgeFilter filter) noexcept {
   if (from == to) {
@@ -357,11 +408,21 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
   return false;
 }
 
-// Combinational-only level order for the stepper: Kahn over combinational
-// edges only, same determinism as rebuild (slot-order seeds and
-// successors). Sequential gates act as roots (their Q is the source value)
-// and never appear in the output. Returns false on any combinational cycle
-// or dangling-driver defect so stepping never evaluates a partial order.
+/**
+ * @brief Combinational-only level order for the stepper: Kahn over
+ *        combinational edges only, same slot-order determinism as
+ *        rebuild.
+ *
+ * Sequential gates act as roots (their Q is the source value) and never
+ * appear in the output.
+ *
+ * @param[in] nl Netlist to compile.
+ * @param[out] order_out Emission-order combinational slots.
+ * @param[out] n_out Number of emitted slots.
+ * @return True on success; false on any combinational cycle or
+ *         dangling-driver defect, so stepping never evaluates a partial
+ *         order.
+ */
 [[nodiscard]] inline bool compile_comb_order(const Netlist &nl, std::uint16_t *order_out,
                                              std::size_t &n_out) noexcept {
   return detail::kahn_pure(nl, EdgeFilter::kCombOnly, order_out, nullptr, n_out,

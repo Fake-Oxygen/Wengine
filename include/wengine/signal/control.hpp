@@ -1,5 +1,14 @@
 #pragma once
 
+/**
+ * @file
+ * SIG-10 generic control plane: text-line protocol vocabulary (engine leaf).
+ * Owns wire-facing verb/param enums, strict line parsing, and response-line
+ * builders; never touches simulation state and performs no I/O. Depends only
+ * on core/status and signal leaf types. Consumed by transport owners (TCP
+ * server, UART framer, CLI, GUI) and the step-boundary apply half in
+ * solvers/signal_control.hpp.
+ */
 // SIG-10 generic control plane: text-line protocol vocabulary (engine leaf).
 //
 // This header owns the wire-facing half of the control plane and nothing
@@ -72,34 +81,68 @@ namespace wengine::signal::control {
 
 // Wire protocol version. Exact-match at HELLO: any other version is
 // rejected loudly (never a silent downgrade), like the socket hello gates.
+/** @brief Wire protocol version; HELLO exact-matches, any other version is rejected loudly. */
 inline constexpr std::uint32_t kProtoVersion = 1;
 // Longest accepted command line in bytes (transports refuse longer lines
 // with ERR before the engine ever sees them; the engine re-checks).
+/** @brief Longest accepted command line in bytes; overlong lines fail with kInvalidArgument. */
 inline constexpr std::size_t kMaxLineBytes = 4096;
 
+/**
+ * @brief Control-plane verbs: one uppercase word per command line.
+ * @note Parsing is strict and total: any shape violation fails with
+ * kInvalidArgument and a literal message, never a throw, never partial state.
+ */
 enum class Verb : std::uint8_t {
+/** @brief Version handshake + run provenance (HELLO). */
   kHello,
+/** @brief Liveness probe (PING). */
   kPing,
+/** @brief Read-only source census in slot order (LIST). */
   kList,
+/** @brief Spawn a source; the serial returns in the response (ADD). */
   kAdd,
+/** @brief Retune one parameter mid-run (SET). */
   kSet,
+/** @brief Resume a source, phase-exact; idempotent (START). */
   kStart,
+/** @brief Freeze a source; idempotent (STOP). */
   kStop,
+/** @brief Detach a source; the serial is never reused (DROP). */
   kDrop,
+/** @brief Mux input select; reserved, rejected until the mux combinator exists (SELECT). */
   kSelect,
 };
 
+/**
+ * @brief Tunable source parameters addressable by SET and ADD keys.
+ * @note Transports carry SI doubles; unit suffixes are a frontend concern
+ * parsed with cli::parse_quantity_value before enqueue.
+ */
 enum class Param : std::uint8_t {
+/** @brief FREQ: frequency in hertz (SI). */
   kFreq,
+/** @brief AMP: amplitude in SI (V or A per quantity). */
   kAmp,
+/** @brief OFFSET: offset in SI base units. */
   kOffset,
+/** @brief PHASE: phase in radians. */
   kPhase,
+/** @brief DUTY: high fraction in [0,1]. */
   kDuty,
+/** @brief SEED: noise seed (u64). */
   kSeed,
+/** @brief QUANTITY: stamped quantity tag. */
   kQuantity,
+/** @brief Sentinel for unrecognized parameter text. */
   kUnknown,
 };
 
+/**
+ * @brief Render a Param as its wire word.
+ * @param[in] p parameter to name.
+ * @return Uppercase word ("FREQ", ...), or "?" for kUnknown.
+ */
 [[nodiscard]] inline constexpr std::string_view param_name(Param p) noexcept {
   switch (p) {
   case Param::kFreq:
@@ -122,6 +165,11 @@ enum class Param : std::uint8_t {
   return "?";
 }
 
+/**
+ * @brief Parse a parameter word.
+ * @param[in] s uppercase word to resolve.
+ * @return The Param, or kUnknown for unrecognized text.
+ */
 [[nodiscard]] inline constexpr Param parse_param(std::string_view s) noexcept {
   if (s == "FREQ") {
     return Param::kFreq;
@@ -147,6 +195,11 @@ enum class Param : std::uint8_t {
   return Param::kUnknown;
 }
 
+/**
+ * @brief Render a StatusCode as its wire code.
+ * @param[in] c status code to name.
+ * @return Wire word ("ok", "invalid_argument", "out_of_range", "not_implemented", "internal").
+ */
 [[nodiscard]] inline constexpr std::string_view status_name(core::StatusCode c) noexcept {
   switch (c) {
   case core::StatusCode::kOk:
@@ -166,6 +219,12 @@ enum class Param : std::uint8_t {
 namespace detail {
 
 // %.17g round-trips IEEE doubles exactly (same guarantee as the CSV log).
+/**
+ * @brief Format a double for the wire with %.17g exactness.
+ * @param[in] v value in SI to render.
+ * @return Shortest exact round-trip text; "0" when snprintf fails.
+ * @note Same exactness guarantee as the CSV log.
+ */
 [[nodiscard]] inline std::string fmt_f64(double v) {
   char buf[32];
   const int n = std::snprintf(buf, sizeof(buf), "%.17g", v);
@@ -181,6 +240,21 @@ namespace detail {
 // census caches (single formatter, never two — a byte-equality test locks
 // this): "SRC <serial> <kind> <qty> <freq> <amp> <offset> <phase> <duty>
 // <seed> <running>" with exact doubles.
+/**
+ * @brief Format one LIST census row shared by the apply path and edge caches.
+ * @param[in] serial stable source serial (never reused).
+ * @param[in] kind_name canonical kind word from kKindNames.
+ * @param[in] qty_suffix quantity suffix from quantity_suffix.
+ * @param[in] freq frequency in hertz (SI).
+ * @param[in] amp amplitude in SI.
+ * @param[in] offset offset in SI.
+ * @param[in] phase phase in radians.
+ * @param[in] duty duty fraction.
+ * @param[in] seed noise seed.
+ * @param[in] running true when the source is live.
+ * @return "SRC <serial> <kind> <qty> <freq> <amp> <offset> <phase> <duty> <seed> <running>".
+ * @note A byte-equality test locks this single formatter; never duplicate it.
+ */
 [[nodiscard]] inline std::string format_src_row(std::uint64_t serial, std::string_view kind_name,
                                                std::string_view qty_suffix, double freq, double amp,
                                                double offset, double phase, double duty,
@@ -195,26 +269,47 @@ namespace detail {
 // Parsed command. Views (`client`, `expr`) borrow the queued line: the
 // caller keeps the line alive until the command is applied (the bus drains
 // from its own stored strings, so this always holds there).
+/**
+ * @brief Parsed control command; applying it mutates nothing.
+ * @note Views (client, expr) borrow the queued line: the caller keeps the
+ * line alive until the command is applied.
+ */
 struct Command {
+/** @brief Dispatched verb. */
   Verb verb = Verb::kPing;
+/** @brief Target source serial for SET/START/STOP/DROP/SELECT. */
   std::uint64_t serial = 0; // SET/START/STOP/DROP/SELECT target
   // HELLO:
+/** @brief Offered protocol version (HELLO). */
   std::uint32_t hello_version = 0;
+/** @brief Client name borrowing the HELLO line. */
   std::string_view client;
   // ADD:
+/** @brief Requested kind (ADD). */
   SignalKind kind = SignalKind::kSine;
+/** @brief Requested quantity (ADD). */
   QuantityId quantity = QuantityId::kVoltage;
+/** @brief Parametric keys over SignalParams defaults (ADD). */
   SignalParams params; // parametric keys over SignalParams defaults
+/** @brief Operand serials for kind=sum (ADD OPS). */
   std::array<std::uint64_t, SignalParams::kMaxOps> ops{};
+/** @brief Number of live serials in ops. */
   std::uint8_t op_count = 0;
+/** @brief Rest-of-line program text for kind=expression (ADD EXPR). */
   std::string_view expr; // rest-of-line program text (kind=expression)
+/** @brief True when EXPR program text was supplied. */
   bool has_expr = false;
   // SET:
+/** @brief Target parameter (SET). */
   Param param = Param::kUnknown;
+/** @brief Value for FREQ/AMP/OFFSET/PHASE/DUTY (SET, SI, finite). */
   double number = 0.0; // FREQ/AMP/OFFSET/PHASE/DUTY value (SI, finite)
+/** @brief Value for SEED (SET). */
   std::uint64_t seed = 0; // SEED value
+/** @brief Value for QUANTITY (SET). */
   QuantityId set_quantity = QuantityId::kVoltage; // QUANTITY value
   // SELECT:
+/** @brief Mux input index (SELECT, reserved). */
   std::uint64_t select_index = 0;
 };
 
@@ -222,6 +317,11 @@ namespace detail {
 
 // Strict u64: full-string from_chars, no signs, no whitespace, no empty.
 [[nodiscard]] inline core::Result<std::uint64_t>
+/**
+ * @brief Strict u64 field parse: full-string from_chars, no signs or whitespace.
+ * @param[in] s text field to parse.
+ * @return Success with the value, or kInvalidArgument ("expected integer"/"invalid integer").
+ */
 parse_u64(std::string_view s) noexcept {
   if (s.empty()) {
     return core::Result<std::uint64_t>::failure("expected integer");
@@ -238,6 +338,11 @@ parse_u64(std::string_view s) noexcept {
 
 // Strict f64: full-string from_chars. from_chars accepts no inf/nan
 // spellings, so success implies a finite value; overflow fails loudly.
+/**
+ * @brief Strict f64 field parse; from_chars accepts no inf/nan spellings.
+ * @param[in] s text field to parse.
+ * @return Success with the finite value, or kInvalidArgument; overflow fails loudly.
+ */
 [[nodiscard]] inline core::Result<double> parse_f64(std::string_view s) noexcept {
   if (s.empty()) {
     return core::Result<double>::failure("expected number");
@@ -255,6 +360,11 @@ parse_u64(std::string_view s) noexcept {
 // Next space-separated token; `rest` advances past it. Quoting is
 // deliberately unsupported: values are numbers, names, or the rest-of-line
 // EXPR program — spaces only split before EXPR.
+/**
+ * @brief Split the next space-separated token; quoting is unsupported by design.
+ * @param[in,out] rest remaining line; advances past the token and following spaces.
+ * @return The next token (empty when none remains).
+ */
 [[nodiscard]] inline std::string_view next_word(std::string_view &rest) noexcept {
   while (!rest.empty() && rest.front() == ' ') {
     rest.remove_prefix(1);
@@ -271,6 +381,11 @@ parse_u64(std::string_view s) noexcept {
   return tok;
 }
 
+/**
+ * @brief Strip spaces, tabs, and carriage returns from both ends.
+ * @param[in] s text to trim (a trailing carriage return is stripped so telnet-style clients work).
+ * @return The trimmed view.
+ */
 [[nodiscard]] inline std::string_view trim(std::string_view s) noexcept {
   while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r')) {
     s.remove_prefix(1);
@@ -286,6 +401,13 @@ parse_u64(std::string_view s) noexcept {
 // Parse one control line. Views in the result borrow `line` (see Command);
 // the bus drains from stored strings so they stay alive through apply.
 // Failure is kInvalidArgument with a literal diagnostic; no partial state.
+/**
+ * @brief Parse one control line into a Command without mutating anything.
+ * @param[in] line borrowed command line (views in the result borrow it; keep it alive until apply).
+ * @return Success with the parsed Command, or kInvalidArgument with a literal diagnostic; no partial state.
+ * @note ADD rejects kTable/kTable-like bulk kinds (table/lua) as parsed-but-not_implemented at apply:
+ * bulk payloads ride batch runs, never a text line.
+ */
 [[nodiscard]] inline core::Result<Command> parse_line(std::string_view line) {
   using R = core::Result<Command>;
   if (line.size() > kMaxLineBytes) {
@@ -513,38 +635,84 @@ parse_u64(std::string_view s) noexcept {
 
 // --- Response builders (append one line, no trailing newline) ---
 
+/**
+ * @brief Append an "OK hello 1 run=<run_id>" line.
+ * @param[in] run_id provenance id echoed to the client.
+ * @param[in,out] responses caller-owned sink for the appended line (no trailing newline).
+ */
 inline void ok_hello(std::uint64_t run_id, std::vector<std::string> &responses) {
   responses.push_back("OK hello 1 run=" + std::to_string(run_id));
 }
 
+/**
+ * @brief Append an "OK pong" line.
+ * @param[in,out] responses caller-owned sink for the appended line (no trailing newline).
+ */
 inline void ok_pong(std::vector<std::string> &responses) {
   responses.emplace_back("OK pong");
 }
 
+/**
+ * @brief Append an "OK list <n>" header for exactly n following SRC rows.
+ * @param[in] n census row count.
+ * @param[in,out] responses caller-owned sink for the appended line (no trailing newline).
+ */
 inline void ok_list_begin(std::size_t n, std::vector<std::string> &responses) {
   responses.push_back("OK list " + std::to_string(n));
 }
 
+/**
+ * @brief Append an "OK added <serial>" line.
+ * @param[in] serial stable serial of the spawned source.
+ * @param[in,out] responses caller-owned sink for the appended line (no trailing newline).
+ */
 inline void ok_added(std::uint64_t serial, std::vector<std::string> &responses) {
   responses.push_back("OK added " + std::to_string(serial));
 }
 
+/**
+ * @brief Append an "OK set <serial> <PARAM>" line.
+ * @param[in] serial target source serial.
+ * @param[in] p parameter that was retuned.
+ * @param[in,out] responses caller-owned sink for the appended line (no trailing newline).
+ */
 inline void ok_set(std::uint64_t serial, Param p, std::vector<std::string> &responses) {
   responses.push_back("OK set " + std::to_string(serial) + " " + std::string(param_name(p)));
 }
 
+/**
+ * @brief Append an "OK started <serial>" line.
+ * @param[in] serial resumed source serial.
+ * @param[in,out] responses caller-owned sink for the appended line (no trailing newline).
+ */
 inline void ok_started(std::uint64_t serial, std::vector<std::string> &responses) {
   responses.push_back("OK started " + std::to_string(serial));
 }
 
+/**
+ * @brief Append an "OK stopped <serial>" line.
+ * @param[in] serial frozen source serial.
+ * @param[in,out] responses caller-owned sink for the appended line (no trailing newline).
+ */
 inline void ok_stopped(std::uint64_t serial, std::vector<std::string> &responses) {
   responses.push_back("OK stopped " + std::to_string(serial));
 }
 
+/**
+ * @brief Append an "OK dropped <serial>" line.
+ * @param[in] serial detached source serial (never reused).
+ * @param[in,out] responses caller-owned sink for the appended line (no trailing newline).
+ */
 inline void ok_dropped(std::uint64_t serial, std::vector<std::string> &responses) {
   responses.push_back("OK dropped " + std::to_string(serial));
 }
 
+/**
+ * @brief Append an "ERR <code> <message>" line mirroring core::Status.
+ * @param[in] st engine status whose code selects the wire code.
+ * @param[in] what human-readable reason.
+ * @param[in,out] responses caller-owned sink for the appended line (no trailing newline).
+ */
 inline void err_status(core::Status st, std::string_view what,
                        std::vector<std::string> &responses) {
   responses.push_back("ERR " + std::string(status_name(st.code)) + " " + std::string(what));

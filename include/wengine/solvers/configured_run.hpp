@@ -1,5 +1,16 @@
 #pragma once
 
+/**
+ * @file
+ * Shared configured-run builder: the single validation and
+ * initialization path behind solvers::run_headless() (headless/CLI) and
+ * gui::SimController (GUI) — both frontends step the same population in
+ * the same order. Owns the primary solver lifetime and the initialized
+ * Runner state; engine-only (no frontend I/O, no Lua headers, no
+ * ImGui/SDL/Vulkan, never CLI types). Consumed by run.hpp, the `sim
+ * run`/`sig run` commands, and the GUI sim controller.
+ */
+
 // Shared configured-run builder: the single validation + initialization
 // implementation behind solvers::run_headless() (headless/CLI) and
 // gui::SimController (GUI). Owns the primary solver lifetime and the
@@ -48,10 +59,20 @@ namespace wengine::solvers {
 
 // Literal for the scripting runtime solver name (see header comment: kept
 // as a literal so this header never includes signal/lua.hpp).
+/** @brief Scripting-runtime solver name ("lua"), mirroring lua::LuaSignalSolver::kName. */
 inline constexpr std::string_view kLuaSolverName = "lua";
 
 // True when `extra` holds a live solver claiming the Lua runtime name.
 // Null entries never satisfy it (they are rejected separately).
+/**
+ * @brief Check whether the extras span contains the Lua runtime solver.
+ *
+ * @param[in] extra caller-owned extra solvers (may contain nulls).
+ * @return true when some non-null extra reports the kLuaSolverName
+ *         identity; null entries never satisfy it.
+ * @note Ownership: extras are borrowed — the caller keeps them alive for
+ *       the whole run and steps them before the primary solver.
+ */
 [[nodiscard]] inline bool contains_lua_solver(std::span<core::ISolver *> extra) noexcept {
   for (core::ISolver *e : extra) {
     if (e != nullptr && e->name() == kLuaSolverName) {
@@ -61,12 +82,25 @@ inline constexpr std::string_view kLuaSolverName = "lua";
   return false;
 }
 
+/**
+ * @brief Move-only run handle: primary solver + initialized Runner.
+ *
+ * Built via build(); keeps its state and owned solvers across chunked
+ * run(N) calls so callers can pace or batch driving (GUI frames,
+ * wall-clock batching) without rebuilding per chunk. Sinks stay
+ * caller-owned and are (re)attached by the caller after every rebuild.
+ */
 class ConfiguredRun {
  public:
+  /** @brief Default constructor: an empty handle (no solver, no steps). */
   ConfiguredRun() = default;
+  /** @brief Non-copyable (owns the solver and runner). */
   ConfiguredRun(const ConfiguredRun &) = delete;
+  /** @brief Non-copyable (owns the solver and runner). */
   ConfiguredRun &operator=(const ConfiguredRun &) = delete;
+  /** @brief Move constructor (defaulted): transfers the owned solver and runner; source left in a valid empty state. */
   ConfiguredRun(ConfiguredRun &&) noexcept = default;
+  /** @brief Move assignment (defaulted): transfers ownership, frees the old run; source left in a valid empty state. @return *this */
   ConfiguredRun &operator=(ConfiguredRun &&) noexcept = default;
 
   // Build + validate + populate a run from `cfg`. Extras are borrowed
@@ -77,6 +111,33 @@ class ConfiguredRun {
   // scripting runtime (the CLI passes contains_lua_solver(extra), the GUI
   // passes false). On failure returns kInvalidArgument (or the spawn
   // Status) and, when `error` is non-null, explains why.
+  /**
+   * @brief Build, validate, and populate a run from cfg.
+   *
+   * Validates the loop (finite dt > 0, steps >= 1), resolves the solver
+   * by name, scopes per-solver sections (gravity to projectile, signal
+   * params to signal, sequential section to logic — misplaced sections
+   * are rejected, never ignored), rejects batch kSum and Lua sources
+   * without their explicit runtime, then spawns the population with
+   * deterministic seeds (noise seed + index) and populates the
+   * singleton sequential pool.
+   *
+   * @param[in] cfg parsed run configuration (loop, solver, sections).
+   * @param[in] extra borrowed extra solvers, non-null, stepped before
+   *            the primary in span order; the caller keeps them alive.
+   * @param[in] has_lua_runtime true only when the caller provides a live
+   *            Lua scripting runtime (CLI: contains_lua_solver(extra);
+   *            GUI: false — wengine_core ships no scripting runtime).
+   * @param[out] out receives the built run (unchanged on failure —
+   *             rejections leave the live run untouched).
+   * @param[out] error optional human-readable explanation for GUI
+   *             display; pass nullptr for Status-only handling.
+   * @return kOk on success; kInvalidArgument for every config problem
+   *         above; a spawn Status unchanged when pool population fails
+   *         (table/Lua payload append, source configure).
+   * @note No sinks are attached and no steps are taken here — callers
+   *       attach sinks, then drive run(N) chunks.
+   */
   static core::Status build(const core::RunConfig &cfg, std::span<core::ISolver *> extra,
                             bool has_lua_runtime, ConfiguredRun &out,
                             std::string *error = nullptr) {
@@ -311,16 +372,38 @@ class ConfiguredRun {
 
   // Chunked driving over the same state and owned solvers (multiple
   // run(N) calls accumulate; interruption stops at step boundaries).
+  /**
+   * @brief Advance the run by a chunk of fixed steps.
+   *
+   * @param[in] steps number of fixed-dt steps for this chunk (multiple
+   *            calls accumulate over the same state and solvers).
+   * @param[in] stop_requested optional poll checked between chunks;
+   *            null drives all steps uninterrupted. A stop ends the
+   *            chunked drive with kOk (partial prefix, like
+   *            Runner::run_until).
+   * @return kOk on success or interruption; the solver/runner Status
+   *         unchanged when a step fails (loud, deterministic).
+   */
   core::Status run(std::uint64_t steps,
                    bool (*stop_requested)() noexcept = nullptr) {
     return runner_.run_until(steps, stop_requested);
   }
 
+  /**
+   * @brief Attach one non-owning sink observer for future steps.
+   * @param[in] sink observer the caller keeps alive for the run; the
+   *            runner never owns sinks and re-attach is the caller's
+   *            job after any rebuild.
+   */
   void add_sink(emit::ISink &sink) { runner_.add_sink(sink); }
 
+  /** @brief Mutable access to the owned runner (rebuilds/config edges). @return Reference to the runner. */
   [[nodiscard]] core::Runner &runner() noexcept { return runner_; }
+  /** @brief Read-only access to the owned runner. @return Const reference to the runner. */
   [[nodiscard]] const core::Runner &runner() const noexcept { return runner_; }
+  /** @brief Mutable access to the live world state (spawn/attach edges). @return Reference to the state. */
   [[nodiscard]] world::State &state() noexcept { return runner_.state(); }
+  /** @brief Read-only access to the live world state. @return Const reference to the state. */
   [[nodiscard]] const world::State &state() const noexcept { return runner_.state(); }
 
  private:

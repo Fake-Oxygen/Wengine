@@ -1,3 +1,12 @@
+/**
+ * @file
+ * Receiver-side sequence accounting (PHYSI-40): reorder-tolerant loss tracking with explicit session and attach semantics.
+ * @note Pure helpers over frame_seq/run_id integers: no transport, no syscalls. Hot path is
+ *       noexcept/allocation-free. SHM latest-only readers keep using LagStats/reader_missed for
+ *       monotonic jumps (or observe_latest here to separate intentional skips); UDP/sample
+ *       receivers use observe() per datagram. Counter vocabulary matches docs/delivery.md
+ *       section 5 (LagStats received/missed/max_gap; local acceptance is never remote receipt).
+ */
 #pragma once
 
 // Receiver-side sequence accounting (PHYSI-40): reorder-tolerant loss
@@ -40,9 +49,15 @@ namespace wengine::link {
 // are remembered exactly (one bit each). Arrivals older than this are
 // stale: already confirmed lost if they never arrived, counted but unable
 // to fill the gap.
+/** @brief Bounded reorder window: how many sequences behind the highest seen seq are remembered exactly (one bit each). Arrivals older than this are stale (counted, unable to fill the gap). */
 inline constexpr std::size_t kReceiveWindow = 64;
 
 // Per-datagram verdict for SequenceTracker::observe (UDP path).
+/**
+ * @brief Per-datagram verdict for SequenceTracker::observe (UDP path).
+ * @note kInOrder advances, kAdvancedWithGap leaves gaps pending, kReorderedFill fills a pending gap,
+ *       kDuplicate re-observes inside the window, kStale is too old to fill, kIgnored skips seq 0 (never a real frame_seq) with no state change.
+ */
 enum class SeqOutcome : std::uint8_t {
   kInOrder, // seq == highest + 1 (or first attach): new unique frame
   kAdvancedWithGap, // seq > highest + 1: new unique, gap stays pending
@@ -55,25 +70,50 @@ enum class SeqOutcome : std::uint8_t {
 // Single-session reorder tracker. Counters are monotonic within the
 // session and reset only by an explicit session change (SessionReceiver)
 // or reset().
+/**
+ * @brief Single-session reorder tracker: bounded 64-seq window (one u64 bitmask, no allocation).
+ * @note Counters are monotonic within the session and reset only by an explicit session change (SessionReceiver) or reset(). Gaps stay pending until they fill (reordered) or age out (confirmed loss).
+ */
 struct SequenceTracker {
+/** @brief True once any seq observed in this session. */
   bool attached = false; // any seq observed yet in this session
+/** @brief Max seq seen (0 = none yet). */
   std::uint64_t highest = 0; // max seq seen (0 = none yet)
+/** @brief Bit d = (highest - d) seen, d in 0..63. */
   std::uint64_t seen_mask = 0; // bit d = (highest - d) seen, d in 0..63
+/** @brief Distinct frames accepted (incl. reordered fills). */
   std::uint64_t unique = 0; // distinct frames accepted (incl. reordered fills)
+/** @brief Re-observations inside the window. */
   std::uint64_t duplicates = 0; // re-observations inside the window
+/** @brief Late arrivals that filled a pending gap. */
   std::uint64_t reordered = 0; // late arrivals that filled a pending gap
+/** @brief Arrivals older than the window. */
   std::uint64_t stale = 0; // arrivals older than the window
+/** @brief Seqs before the first observation (history, never loss). */
   std::uint64_t pre_attach = 0; // seqs before the first observation (history)
+/** @brief Intentional latest-only jumps (observe_latest). */
   std::uint64_t skipped = 0; // intentional latest-only jumps (observe_latest)
+/** @brief Pending gaps aged out of the window (loss). */
   std::uint64_t confirmed = 0; // pending gaps aged out of the window (loss)
+/** @brief Gaps still inside the window (unknown yet). */
   std::uint64_t pending = 0; // gaps still inside the window (unknown yet)
+/** @brief Largest single advance gap. */
   std::uint64_t max_gap = 0; // largest single advance gap (observe/observe_latest)
 };
 
+/**
+ * @brief Reset a tracker to its fresh state.
+ * @param[in,out] t tracker to reset.
+ */
 inline void receiver_reset(SequenceTracker &t) noexcept {
   t = SequenceTracker{};
 }
 
+/**
+ * @brief Gaps still inside the window (unknown yet).
+ * @param[in] t tracker to query.
+ * @return Pending gap count.
+ */
 [[nodiscard]] inline std::uint64_t receiver_pending(const SequenceTracker &t) noexcept {
   return t.pending;
 }
@@ -81,6 +121,12 @@ inline void receiver_reset(SequenceTracker &t) noexcept {
 // UDP reorder-tolerant path: record one datagram seq. Returns the verdict;
 // counters update as documented on SequenceTracker. seq == 0 is ignored
 // (0 means "no frame yet", never a real frame_seq).
+/**
+ * @brief UDP reorder-tolerant path: record one datagram seq.
+ * @param[in,out] t session tracker to advance.
+ * @param[in] seq datagram frame_seq (0 is ignored: 0 means "no frame yet", never a real frame_seq).
+ * @return Per-datagram verdict; counters update as documented on SequenceTracker.
+ */
 [[nodiscard]] inline SeqOutcome receiver_observe(SequenceTracker &t,
                                                  std::uint64_t seq) noexcept {
   if (seq == 0) {
@@ -164,6 +210,12 @@ inline void receiver_reset(SequenceTracker &t) noexcept {
 // span (plus any previously pending gaps) as intentional skips, never as
 // confirmed loss. seq == 0 is ignored. seq <= highest counts as duplicate
 // (poll_newer guarantees strictly newer; anything else is a re-read).
+/**
+ * @brief SHM/latest-only path: jump to the newest seq, counting the whole skipped span (plus any previously pending gaps) as intentional skips, never as confirmed loss.
+ * @param[in,out] t session tracker to advance.
+ * @param[in] seq newest frame_seq (0 ignored; <= highest counts as duplicate — poll_newer guarantees strictly newer, anything else is a re-read).
+ * @return Skipped span (seq - highest - 1), or 0 when ignored/duplicate/first attach.
+ */
 [[nodiscard]] inline std::uint64_t receiver_observe_latest(SequenceTracker &t,
                                                            std::uint64_t seq) noexcept {
   if (seq == 0) {
@@ -196,12 +248,25 @@ inline void receiver_reset(SequenceTracker &t) noexcept {
 // Trailing-loss report: frames after highest that never arrived. Only
 // meaningful with an authoritative expected final sequence (e.g. a run
 // header/footer or a closed TCP stream length); otherwise unknown.
+/**
+ * @brief Trailing-loss report: frames after highest that never arrived (meaningful ONLY with an authoritative expected final sequence).
+ * @note Without an authoritative expectation, trailing loss is unknown, never inferred.
+ */
 struct TrailingReport {
+/** @brief False: no authoritative expectation, do not infer. */
   bool known = false; // false: no authoritative expectation, do not infer
+/** @brief expected - highest when expected > highest. */
   std::uint64_t missing = 0; // expected - highest when expected > highest
 };
 
 [[nodiscard]] inline TrailingReport
+/**
+ * @brief Trailing-loss verdict against an authoritative expected final sequence (e.g. a run header/footer or a closed TCP stream length).
+ * @param[in] t tracker to query.
+ * @param[in] expected_final_seq authoritative final seq (0 or absent expectation means unknown).
+ * @param[in] has_expected true when the caller holds an authoritative expectation.
+ * @return Report with known=false unless the expectation is authoritative, attached, and non-zero.
+ */
 receiver_trailing(const SequenceTracker &t, std::uint64_t expected_final_seq,
                   bool has_expected) noexcept {
   TrailingReport r;
@@ -218,25 +283,48 @@ receiver_trailing(const SequenceTracker &t, std::uint64_t expected_final_seq,
 // first seq counts its own pre-attach history, never the old run's loss.
 // One SessionReceiver per (sender, stream): unrelated UDP senders must use
 // separate instances (e.g. keyed by source address at the call site).
+/**
+ * @brief Session wrapper: one tracker plus the run_id cursor (a run_id change resets the tracker so the new run's first seq counts its own pre-attach history, never the old run's loss).
+ * @note One SessionReceiver per (sender, stream): unrelated UDP senders must use separate instances (e.g. keyed by source address at the call site).
+ */
 struct SessionReceiver {
+/** @brief True once any run_id observed. */
   bool has_run = false;
+/** @brief Current run cursor (opaque publisher-run identity). */
   std::uint64_t run_id = 0;
+/** @brief Distinct run_ids observed. */
   std::uint64_t sessions = 0; // distinct run_ids observed
+/** @brief Per-session reorder tracker. */
   SequenceTracker track{};
 };
 
+/**
+ * @brief Reset a session receiver to its fresh state.
+ * @param[in,out] s receiver to reset.
+ */
 inline void session_reset(SessionReceiver &s) noexcept {
   s = SessionReceiver{};
 }
 
+/** @brief UDP-with-session verdict: whether the run changed plus the per-datagram outcome. */
 struct SessionOutcome {
+/** @brief True when run_id changed (cursor reset). */
   bool session_reset = false; // true when run_id changed (cursor reset)
+/** @brief Per-datagram sequence verdict. */
   SeqOutcome seq_outcome = SeqOutcome::kIgnored;
 };
 
 // UDP path with session handling. latest_only selects the SHM-style jump
 // accounting for the new seq (TCP-ordered callers keep their own strict
 // verdict instead and should not set it).
+/**
+ * @brief UDP path with session handling (latest_only selects the SHM-style jump accounting for the new seq; TCP-ordered callers keep their own strict verdict and must not set it).
+ * @param[in,out] s session receiver to advance.
+ * @param[in] run_id datagram run identity (change resets the cursor).
+ * @param[in] seq datagram frame_seq (0 ignored with no state change).
+ * @param[in] latest_only false for UDP reorder accounting, true for latest-only jump accounting.
+ * @return Session + sequence verdict.
+ */
 [[nodiscard]] inline SessionOutcome session_observe(SessionReceiver &s,
                                                     std::uint64_t run_id,
                                                     std::uint64_t seq,

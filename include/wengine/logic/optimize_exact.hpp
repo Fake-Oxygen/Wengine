@@ -1,3 +1,36 @@
+/**
+ * @file
+ * Exact truth-table simplification plus Quine-McCluskey minimization:
+ * the semantic-reasoning stage of the optimize pipeline (barrier/exact
+ * vs O2 passes: build/emit/dedup/min). exact_simplify_pass detects what
+ * structural folding misses — semantic constants (contradictions like
+ * x&~x==0) and dead inputs (inputs that never affect any output) — for
+ * small blocks (n<=10, m<=16, no hidden outputs); it collapses constants
+ * to canonical form and ties dead inputs off to 0. The QM helpers
+ * (qm_primes, qm_greedy_cover) power the O2 minimized two-level
+ * resynthesis (SOP for NAND, POS for NOR) used as an alternative to
+ * structural De Morgan translation.
+ *
+ * What each pass preserves: function (truth table) exactly; the net
+ * never grows (exact_simplify_pass), or the caller picks the smaller of
+ * minimized vs structural (O2). Cost class: enumerative truth tables
+ * and prime-implicant search — bounded to small blocks by explicit
+ * caps, with loud fallback to structural De Morgan above them.
+ *
+ * Opaque barrier: the exact pass skips sequential nets entirely (block
+ * tables are history-dependent; solve() reads flop outputs as kLow);
+ * structural passes still simplify the combinational glue around the
+ * barriers.
+ *
+ * Dependency rules: header-only, allocation-free, exception-free;
+ * fixed stack arrays, deterministic slot order everywhere. Depends on
+ * eval.hpp, netlist.hpp, optimize_types.hpp, optimize_barrier.hpp, and
+ * types.hpp. Logic is a standalone domain: this header must never
+ * depend on CLI types. Consumers: optimize.hpp (exact_simplify_pass in
+ * the O0/O1 fixpoint), optimize_o2_min.hpp (QM cover), and the
+ * test_logic* suite.
+ */
+
 #pragma once
 
 #include "wengine/core/status.hpp"
@@ -15,9 +48,19 @@ namespace wengine::logic {
 namespace detail {
 
 
+/**
+ * @brief Constant-ness label for one gate output: constant 0, constant
+ *        1, or varying with block inputs. Ignored dangling inputs read
+ *        as C0 (they tie low in eval); wired inputs inherit the
+ *        driver's label; dangling block inputs are V. Sequential outputs
+ *        always classify as V (opaque barrier).
+ */
 enum class Constness : std::uint8_t {
+  /** @brief Output is constant 0. */
   kC0 = 0,
+  /** @brief Output is constant 1. */
   kC1 = 1,
+  /** @brief Output varies with block inputs. */
   kV = 2, // varies with block inputs
 };
 
@@ -26,15 +69,26 @@ enum class Constness : std::uint8_t {
 inline void recount_fanout(Netlist &nl) noexcept;
 inline void retag(Netlist &nl, std::uint16_t slot, GateKind kind) noexcept;
 
-// Exact truth-table simplification (semantic, not just structural):
-// for small blocks (n<=10, m<=16, no hidden outputs) detect constant
-// outputs (contradictions like x & ~x == 0 that structural folding
-// misses) and dead inputs (inputs that never affect any output), then
-// collapse constants to canonical form and tie dead inputs off to 0
-// (preserving function, since dead). Runs at all levels (O0/O1/O2
-// pre-pass); never grows the net. Returns true when changed.
-// Deterministic (slot order everywhere), allocation-free (fixed stack
-// arrays), noexcept.
+/**
+ * @brief Exact truth-table simplification (semantic, not just
+ *        structural).
+ *
+ * For small blocks (n<=10, m<=16, no hidden outputs) detects constant
+ * outputs (contradictions like x&~x==0 that structural folding misses)
+ * and dead inputs (inputs that never affect any output), then collapses
+ * constants to canonical form and ties dead inputs off to 0 (preserving
+ * function, since dead). Runs at all levels (O0/O1/O2 pre-pass); never
+ * grows the net. Returns true when changed. Deterministic (slot order
+ * everywhere), allocation-free (fixed stack arrays), noexcept.
+ *
+ * @param[out] nl Netlist to simplify.
+ * @return True when the net changed; false when limits, hidden
+ *         outputs, or sequential gates skip the pass, or nothing was
+ *         constant/dead.
+ * @note Opaque barrier: sequential nets are skipped entirely (block
+ *       truth tables are history-dependent). Hidden outputs skip the
+ *       pass (conservative: dead-for-visible may be live-for-hidden).
+ */
 inline bool exact_simplify_pass(Netlist &nl) noexcept {
   const std::size_t n = block_input_count(nl);
   const std::size_t m = block_output_count(nl);
@@ -230,11 +284,23 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
 // loudly (returns false) when the cover would need splitting (>8 products
 // or >8 sums) or exceed fixed caps — the caller then falls back to the
 // structural De Morgan translation (which is optimal for XOR-like parity).
+/**
+ * @brief Quine-McCluskey cube: mask marks don't-care variables, bits
+ *        holds values for cared bits (don't-care bits cleared).
+ */
 struct QmCube {
+  /** @brief Don't-care mask: bit set means the variable is uncovered. */
   std::uint16_t mask = 0; // 1 = don't care
+  /** @brief Cube values for cared bits (don't-care bits cleared). */
   std::uint16_t bits = 0; // values for cared bits (don't-care bits cleared)
 };
 
+/**
+ * @brief Population count of a 16-bit word.
+ *
+ * @param[in] x Word to count.
+ * @return Number of set bits.
+ */
 inline std::uint8_t qm_popcount(std::uint16_t x) noexcept {
   std::uint8_t c = 0;
   while (x != 0) {
@@ -244,13 +310,29 @@ inline std::uint8_t qm_popcount(std::uint16_t x) noexcept {
   return c;
 }
 
+/**
+ * @brief True when x is a power of two (exactly one bit set).
+ *
+ * @param[in] x Word to test.
+ * @return True for non-zero single-bit words.
+ */
 inline bool qm_is_pow2(std::uint16_t x) noexcept {
   return x != 0 && ((x & static_cast<std::uint16_t>(x - 1u)) == 0u);
 }
 
-// Collect prime implicants for `minterms[0..nm)` (sorted ascending, distinct)
-// over `n` vars (n<=8). Primes in deterministic creation order. Returns false
-// when fixed caps would overflow (caller falls back to structural).
+/**
+ * @brief Collect prime implicants for sorted ascending distinct
+ *        minterms over n vars (n<=8). Primes in deterministic creation
+ *        order.
+ *
+ * @param[in] minterms Sorted ascending distinct minterms.
+ * @param[in] nm Minterm count (0 < nm <= 1024).
+ * @param[in] n Variable count (1..8).
+ * @param[out] primes Collected prime implicants.
+ * @param[out] nprimes Prime count.
+ * @return True with primes on success; false when fixed caps would
+ *         overflow (caller falls back to structural).
+ */
 inline bool qm_primes(const std::uint16_t *minterms, std::size_t nm, std::uint8_t n,
                       QmCube *primes, std::size_t *nprimes) noexcept {
   if (nm == 0 || n == 0 || n > 8) {
@@ -338,10 +420,21 @@ inline bool qm_primes(const std::uint16_t *minterms, std::size_t nm, std::uint8_
   return np > 0;
 }
 
-// Greedy set cover of `minterms` by `primes` (both deterministic order).
-// Picks the prime covering the most still-uncovered minterms (first-max
-// tie-break). Returns false when uncovered remains (shouldn't happen) or
-// cover would exceed 8 products (needs splitting; caller falls back).
+/**
+ * @brief Greedy set cover of minterms by primes (both deterministic
+ *        order): picks the prime covering the most still-uncovered
+ *        minterms (first-max tie-break).
+ *
+ * @param[in] minterms Minterms to cover (nm <= 256).
+ * @param[in] nm Minterm count.
+ * @param[in] primes Prime implicants to choose from.
+ * @param[in] np Prime count.
+ * @param[out] cover Chosen cover cubes.
+ * @param[out] ncover Cover size.
+ * @return True with the cover on success; false when uncovered remains
+ *         or the cover would exceed 8 products (needs splitting; caller
+ *         falls back to structural).
+ */
 inline bool qm_greedy_cover(const std::uint16_t *minterms, std::size_t nm,
                            const QmCube *primes, std::size_t np,
                            QmCube *cover, std::size_t *ncover) noexcept {

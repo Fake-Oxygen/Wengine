@@ -1,3 +1,5 @@
+// test_i2c: I2C pullup/series solver reference anchors, helper checks, typed
+// API, and CLI run paths. Guards bus-resistance golden regressions.
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/solvers/i2c.hpp"

@@ -1,10 +1,28 @@
 #pragma once
 
+/**
+ * @file
+ * The `ldo` guided-form definition (F3 browser entry): LDO
+ * dropout/thermal sizing from VIN/VOUT/IOUT plus optional Iq, dropout,
+ * ambient, thermal-resistance, and Tj-limit fields. The form composes one
+ * `ldo ...` argv line for the shared CLI path and never validates: empty
+ * fields are omitted and the CLI owns every error, so unit text is parsed
+ * by the same `units::` suffix tables as the REPL. Consumers: the
+ * registry in `wengine/tui/forms.hpp`, the form pane in
+ * `src/tui/panes_forms.cpp`.
+ */
+
 #include "wengine/cli/commands.hpp"
 #include "wengine/tui/forms/types.hpp"
 
 namespace wengine::tui::forms::definitions {
 
+/**
+ * @brief Build the `ldo` guided-form definition.
+ *
+ * @return The FormDef for `ldo`: a single profile requiring
+ *         VIN/VOUT/IOUT with the remaining fields optional.
+ */
 [[nodiscard]] inline FormDef ldo() {
   using cli::commands::LdoSpec;
   using definition::argument;

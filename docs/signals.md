@@ -125,8 +125,10 @@ The GUI batch model rejects tables (no CSV picker in the batch form —
 SIG-9 panel follow-up); the per-source family (SIG-6) configures them
 directly.
 
-Serialization is v4 (expr columns + table ranges per slot, store tail;
-v3 loads with zeroed custom columns, v2/v1 as before). Cross-kind
+Serialization is v6 (sequential pool + expr/table/Lua columns and
+stores; v5–v1 load with an empty sequential pool, v4 loads with empty
+script ranges, v3 with zeroed custom columns, v2 with synthesized
+serials, v1 with empty signals). Cross-kind
 leftovers (expression program with a sine kind, table points with a
 non-table kind) are rejected at every edge (CLI usage error, driver/
 controller `kInvalidArgument`), never silently ignored.

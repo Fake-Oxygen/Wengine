@@ -1,5 +1,13 @@
 #pragma once
 
+/**
+ * @file
+ * Closed deterministic expression source (SIG-4a): a small fixed math
+ * language for custom waveforms without a scripting dependency. Owns the
+ * RPN opcode vocabulary, the config-edge parser, and pure fallible
+ * evaluation. Depends only on core/status; never on world, emit, or Lua.
+ * Consumed by the signal solver for kExpression sources.
+ */
 // Closed deterministic expression source (SIG-4a): a small fixed math
 // language for custom waveforms without a scripting dependency.
 //
@@ -40,54 +48,113 @@ namespace wengine::signal {
 
 // RPN opcodes. APPEND-ONLY for the same reason as SignalKind: programs
 // persist in the pool and the v4 state blob, so code bytes stay stable.
+/**
+ * @brief RPN opcodes for closed expression programs.
+ * @note APPEND-ONLY like SignalKind: programs persist in the pool and the
+ * v4 state blob, so code bytes stay stable; kCount is a sentinel, never emitted.
+ */
 enum class ExprOp : std::uint8_t {
+/** @brief Push node.value. */
   kConst = 0, // push node.value
+/** @brief Push source time t. */
   kT = 1, // push t
+/** @brief Pop b,a; push a + b. */
   kAdd = 2,
+/** @brief Pop b,a; push a - b. */
   kSub = 3,
+/** @brief Pop b,a; push a * b. */
   kMul = 4,
+/** @brief Pop b,a; push a / b (exactly-zero denominator fails loudly). */
   kDiv = 5,
+/** @brief Pop b,a; push pow(a, b) (right-associative in the grammar). */
   kPow = 6,
+/** @brief Negate the top of stack. */
   kNeg = 7,
+/** @brief Push sin(x). */
   kSin = 8,
+/** @brief Push cos(x). */
   kCos = 9,
+/** @brief Push exp(x). */
   kExp = 10,
+/** @brief Push log(x); x <= 0 fails loudly. */
   kLog = 11,
+/** @brief Push sqrt(x); x < 0 fails loudly. */
   kSqrt = 12,
+/** @brief Push fabs(x). */
   kAbs = 13,
+/** @brief Pop b,a; push min(a, b). */
   kMin = 14,
+/** @brief Pop b,a; push max(a, b). */
   kMax = 15,
+/** @brief Sentinel: valid codes are < kCount, never emitted. */
   kCount = 16, // sentinel: valid codes are < kCount, never emitted
 };
 
+/** @brief Maximum RPN nodes per expression program (fixed, no allocation). */
 inline constexpr std::size_t kMaxExprNodes = 64;
+/** @brief Maximum parenthesis/function nesting depth while parsing. */
 inline constexpr std::size_t kMaxExprDepth = 32;
 
+/**
+ * @brief One RPN instruction: an opcode plus the kConst payload.
+ * @note Fixed size, so per-step program copies stay memcpy.
+ */
 struct ExprNode {
+/** @brief Opcode. */
   ExprOp op = ExprOp::kConst;
+/** @brief Literal payload for kConst only. */
   double value = 0.0; // kConst payload only
 
+/**
+ * @brief Field-wise equality.
+ * @return true when opcode and payload compare equal.
+ */
   bool operator==(const ExprNode &) const noexcept = default;
 };
 
+/**
+ * @brief Compiled expression: fixed RPN nodes evaluated in program order.
+ * @note Identical text always compiles to the identical program, so results
+ * are exactly reproducible for fixed inputs.
+ */
 struct ExprProgram {
+/** @brief RPN nodes in evaluation order. */
   std::array<ExprNode, kMaxExprNodes> nodes{};
+/** @brief Number of live nodes in nodes. */
   std::uint8_t size = 0;
 
+/**
+ * @brief Field-wise equality.
+ * @return true when every live node compares equal.
+ */
   bool operator==(const ExprProgram &) const noexcept = default;
 };
 
 namespace expr_detail {
 
+/** @brief pi literal for the expression language. */
 inline constexpr double kPi = 3.141592653589793;
+/** @brief e literal for the expression language. */
 inline constexpr double kE = 2.718281828459045;
 
+/**
+ * @brief Recursive-descent parser with precedence climbing; emits RPN directly.
+ * @note Config edge only: the hot path never parses (see parse_expression).
+ */
 struct Parser {
+/** @brief Borrowed expression text being parsed. */
   std::string_view in;
+/** @brief Current scan position in in. */
   std::size_t pos = 0;
+/** @brief Program under construction. */
   ExprProgram prog;
+/** @brief Current nesting depth (bounded by kMaxExprDepth). */
   std::size_t depth = 0;
 
+/**
+ * @brief Advance pos past ASCII whitespace.
+ * @note Whitespace is ignored everywhere in the language.
+ */
   void skip_ws() noexcept {
     while (pos < in.size() &&
            (in[pos] == ' ' || in[pos] == '\t' || in[pos] == '\n' || in[pos] == '\r')) {
@@ -95,6 +162,12 @@ struct Parser {
     }
   }
 
+/**
+ * @brief Append one node to prog.
+ * @param[in] op opcode to emit.
+ * @param[in] value literal payload for kConst.
+ * @return true on success, false when the program would exceed kMaxExprNodes.
+ */
   [[nodiscard]] bool emit(ExprOp op, double value = 0.0) noexcept {
     if (prog.size >= kMaxExprNodes) {
       return false;
@@ -106,6 +179,10 @@ struct Parser {
 
   // Recursive descent with precedence climbing; emits RPN directly.
   // expr := term (('+'|'-') term)*
+/**
+ * @brief Parse expr := term (('+'|'-') term)*.
+ * @return nullptr on success, or a literal diagnostic on failure.
+ */
   [[nodiscard]] const char *parse_expr() {
     if (const char *e = parse_term()) {
       return e;
@@ -127,6 +204,10 @@ struct Parser {
   }
 
   // term := unary (('*'|'/') unary)*
+/**
+ * @brief Parse term := unary (('*'|'/') unary)*.
+ * @return nullptr on success, or a literal diagnostic on failure.
+ */
   [[nodiscard]] const char *parse_term() {
     if (const char *e = parse_unary()) {
       return e;
@@ -148,6 +229,10 @@ struct Parser {
   }
 
   // unary := '-' unary | power   (unary plus rejected: write the literal)
+/**
+ * @brief Parse unary := '-' unary | power (unary plus is rejected: write the literal).
+ * @return nullptr on success, or a literal diagnostic on failure.
+ */
   [[nodiscard]] const char *parse_unary() {
     skip_ws();
     if (pos < in.size() && in[pos] == '-') {
@@ -164,6 +249,10 @@ struct Parser {
   }
 
   // power := primary ('^' unary)?   (right-associative, exponent binds unary)
+/**
+ * @brief Parse power := primary ('^' unary)? (right-associative, exponent binds unary).
+ * @return nullptr on success, or a literal diagnostic on failure.
+ */
   [[nodiscard]] const char *parse_power() {
     if (const char *e = parse_primary()) {
       return e;
@@ -181,6 +270,10 @@ struct Parser {
     return nullptr;
   }
 
+/**
+ * @brief Parse a parenthesized group, number, or name.
+ * @return nullptr on success, or a literal diagnostic on failure.
+ */
   [[nodiscard]] const char *parse_primary() {
     skip_ws();
     if (depth >= kMaxExprDepth) {
@@ -213,6 +306,10 @@ struct Parser {
     return "unexpected character in expression";
   }
 
+/**
+ * @brief Parse a decimal/scientific literal via from_chars (no hex, no suffixes, no implicit multiplication).
+ * @return nullptr on success, or a literal diagnostic on failure.
+ */
   [[nodiscard]] const char *parse_number() {
     const char *beg = in.data() + pos;
     const char *end = in.data() + in.size();
@@ -236,6 +333,10 @@ struct Parser {
     return nullptr;
   }
 
+/**
+ * @brief Parse t, pi, e, or a function call (1-arg math, 2-arg min/max).
+ * @return nullptr on success, or a literal diagnostic on failure.
+ */
   [[nodiscard]] const char *parse_named() {
     std::size_t beg = pos;
     while (pos < in.size() && in[pos] >= 'a' && in[pos] <= 'z') {
@@ -324,6 +425,12 @@ struct Parser {
 // Compile expression text to an RPN program (config edge only; hot path
 // never parses). Empty/whitespace-only text is an error.
 [[nodiscard]] inline core::Result<ExprProgram>
+/**
+ * @brief Compile expression text to a fixed RPN program (config edge only).
+ * @param[in] text expression source; empty/whitespace-only text is an error.
+ * @return Success with the compiled program, or kInvalidArgument with a literal reason.
+ * @note Identical text always yields the identical program.
+ */
 parse_expression(std::string_view text) noexcept {
   expr_detail::Parser p;
   p.in = text;
@@ -346,6 +453,12 @@ parse_expression(std::string_view text) noexcept {
 
 // Structural validation for stored programs (pool contents, loaded blobs):
 // codes in range, stack balanced, exactly one value left. Pure, noexcept.
+/**
+ * @brief Structural validation for stored programs (pool contents, loaded blobs).
+ * @param[in] prog program to gate (codes in range, stack balanced, exactly one value left).
+ * @return true when the program is structurally sound.
+ * @note Pure and noexcept; evaluation still fails loudly on domain errors.
+ */
 [[nodiscard]] inline bool validate_program(const ExprProgram &prog) noexcept {
   if (prog.size == 0 || prog.size > kMaxExprNodes) {
     return false;
@@ -400,6 +513,15 @@ parse_expression(std::string_view text) noexcept {
 // Evaluate a validated program at source time `t`. Failure (division by
 // exactly-zero denominator, log(x <= 0), sqrt(x < 0), any non-finite
 // intermediate) is a loud error — never a NaN/inf sample.
+/**
+ * @brief Evaluate a validated program at source time t.
+ * @param[in] prog structurally valid program (see validate_program).
+ * @param[in] t source seconds since start.
+ * @return Success with the value, or kInvalidArgument for an exactly-zero divisor,
+ * log(x <= 0), sqrt(x < 0), any non-finite intermediate, or a malformed program;
+ * never a NaN/inf sample.
+ * @note Failure maps to a failed step (time/index frozen, nothing emitted), like a dangling sum operand.
+ */
 [[nodiscard]] inline core::Result<double> eval_expression(const ExprProgram &prog,
                                                          double t) noexcept {
   double stack[kMaxExprNodes];

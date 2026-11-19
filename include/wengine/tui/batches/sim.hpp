@@ -1,10 +1,32 @@
 #pragma once
 
+/**
+ * @file
+ * The `sim run` run-builder definition (F4 browser entry). Field indices
+ * match the `fields` order below (bit N == field N); `--solver`
+ * (field 0) is the profile selector. The builder composes one
+ * `sim run ...` argv line for the shared CLI path and never validates:
+ * empty fields are omitted, bare flags emit only when enabled, and the
+ * CLI owns every error. Solver names resolve from `SolverRegistry`, so new
+ * solvers appear with no builder-side change. Consumers: the registry in
+ * `wengine/tui/batches.hpp`, the batch pane in
+ * `src/tui/panes_batches.cpp`.
+ */
+
 #include "wengine/cli/commands.hpp"
 #include "wengine/tui/batches/types.hpp"
 
 namespace wengine::tui::batches::definitions {
 
+/**
+ * @brief Build the `sim run` builder definition.
+ *
+ * @return The BatchDef for `sim run`: projectile/signal profiles over
+ *         steps, gravity, particle initials, emit sinks, pacing, and ROS
+ *         topics. `--gravity` is projectile-only; UART plus all
+ *         `-select` options are signal-only; nothing is strictly required
+ *         (every option has a CLI default).
+ */
 [[nodiscard]] inline BatchDef sim() {
   using cli::commands::SimSpec;
 

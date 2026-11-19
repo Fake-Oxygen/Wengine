@@ -1,15 +1,39 @@
-#pragma once
+/**
+ * @file
+ * O2 fresh-build phases (C2 deepening): the six stages of the NAND/NOR universal build
+ * as small testable modules, with optimize() left as the orchestrator.
+ * Move-only split: no policy, gate-count, or interface change —
+ * structural De Morgan emission, pool sharing, wiring-time tying,
+ * vocabulary-preserving cleanup, and minimized-vs-structural picking
+ * all behave as before. Phases in order: size_pool_needs, emit_pool,
+ * create_networks, wire_pending, restore_masks, post_cleanup,
+ * finish_o2.
+ *
+ * What the build preserves: truth-equivalence with the O0/O1-fixed-point
+ * net (structural duals plus the minimized alternative); output networks
+ * follow original slot order so truth checks map positionally. Cost
+ * class: linear creation and wiring plus the fixpoint post-cleanup
+ * (bounded iterations) and the optional QM resynthesis for small
+ * blocks.
+ *
+ * Opaque barrier: sequential gates ride through every phase verbatim
+ * (same kind, pin count, flags, Q/NQ polarity); only the combinational
+ * glue converts. Same-source dangling pins duplicated per use are
+ * re-tied (one variable per pin) and tied duplicates merge in cleanup,
+ * so repeated NAND/NOR toggles converge instead of multiplying gates
+ * and pins.
+ *
+ * Dependency rules: header-only, allocation-free, exception-free
+ * (finish_o2 returns Result only for the budget/topology failures the
+ * caller already reports loudly). Depends on netlist.hpp,
+ * optimize_barrier.hpp, optimize_exact.hpp, the O2
+ * dedup/emit/min headers, optimize_passes.hpp, optimize_types.hpp,
+ * seq_state.hpp, topo.hpp, and types.hpp. Logic is a standalone domain:
+ * this header must never depend on CLI types. Consumers: optimize.hpp
+ * (the O2 path) and the test_logic* suite.
+ */
 
-// O2 fresh-build phases (C2 deepening): the six stages of the NAND/NOR
-// universal build live here as small testable Modules, with optimize()
-// left as a ~40-line orchestrator. Move-only split: no policy, gate-count,
-// or interface change — structural De Morgan emission, pool sharing,
-// wiring-time tying, vocabulary-preserving cleanup, and minimized-vs-
-// structural picking all behave exactly as before.
-//
-// Header-only, allocation-free, exception-free, noexcept throughout
-// (finish_o2 returns Result only for the budget/topology failures the
-// caller already reported loudly).
+#pragma once
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
@@ -31,25 +55,45 @@ namespace wengine::logic {
 
 namespace detail {
 
-// Failure modes of the fresh build (mapped to loud messages once, in
-// optimize(), so every phase stays a plain bool/Result-free predicate).
+/**
+ * @brief Failure modes of the fresh build (mapped to loud messages
+ *        once, in optimize(), so every phase stays a plain predicate).
+ */
 enum class BuildError : std::uint8_t {
+  /** @brief No failure. */
   kNone = 0,
+  /** @brief Gate budget exceeded (kMaxGates). */
   kBudget = 1, // gate budget exceeded (kMaxGates)
+  /** @brief Internal wiring error (emit-map gap, bad indices). */
   kWiring = 2, // internal wiring error (emit-map gap, bad indices)
+  /** @brief Topology error inside post-cleanup. */
   kTopo = 3,   // topology error inside post-cleanup
+  /** @brief Internal iteration bound. */
   kIter = 4,   // internal iteration bound
 };
 
+/**
+ * @brief Which shared constant-pool gates the fresh build needs.
+ */
 struct PoolNeeds {
+  /** @brief True when the shared constant-1 pool gate is needed. */
   bool c1 = false;
+  /** @brief True when the shared constant-0 pool gate is needed. */
   bool c0 = false;
 };
 
-// Constant-aware shared-pool sizing: structural constant labels (ignored
-// pins tie to 0) decide whether the fresh build needs the shared C1 pool
-// (U(0,0) = 1) and the shared C0 pool (U(C1,C1) = 0). Internal constants
-// share the pool; constant sinks get dedicated output gates.
+/**
+ * @brief Constant-aware shared-pool sizing: structural constant labels
+ *        (ignored pins tie to 0) decide whether the fresh build needs
+ *        the shared C1 pool (U(0,0) = 1) and the shared C0 pool
+ *        (U(C1,C1) = 0). Internal constants share the pool; constant
+ *        sinks get dedicated output gates.
+ *
+ * @param[in] nl Source netlist with structural labels.
+ * @param[in] reach Reachable slots (barrier roots cone).
+ * @param[in] clabel Per-slot Constness labels.
+ * @return Pool gates the fresh build must materialize.
+ */
 [[nodiscard]] inline PoolNeeds size_pool_needs(const Netlist &nl, const bool *reach,
                                                const Constness *clabel) noexcept {
   PoolNeeds needs{};
@@ -83,8 +127,17 @@ struct PoolNeeds {
   return needs;
 }
 
-// Materialize the shared pool into the fresh build. U(0,0)=1 and
-// U(C1,C1)=0 hold in both vocabularies, so the pool is target-neutral.
+/**
+ * @brief Materialize the shared pool into the fresh build. U(0,0)=1 and
+ *        U(C1,C1)=0 hold in both vocabularies, so the pool is
+ *        target-neutral.
+ *
+ * @param[out] out Fresh netlist receiving the pool gates.
+ * @param[out] ctx Emission state (pool slots recorded).
+ * @param[in] target Conversion target (pool is target-neutral).
+ * @param[in] needs Pool gates to materialize.
+ * @return kNone on success; kBudget on gate-budget exhaustion.
+ */
 [[nodiscard]] inline BuildError emit_pool(Netlist &out, ConvertCtx &ctx, OptTarget target,
                                           PoolNeeds needs) noexcept {
   if (!needs.c1) {
@@ -110,10 +163,21 @@ struct PoolNeeds {
   return BuildError::kNone;
 }
 
-// Creation pass in original slot order (fresh slots follow it).
-// Constant gates reuse the pool (internal share, sinks get dedicated
-// outputs); sequential gates carry verbatim (opaque barrier); all other
-// gates emit via De Morgan as before.
+/**
+ * @brief Creation pass in original slot order (fresh slots follow it).
+ *
+ * Constant gates reuse the pool (internal share, sinks get dedicated
+ * outputs); sequential gates carry verbatim (opaque barrier); all other
+ * gates emit via De Morgan as before.
+ *
+ * @param[in] nl Source netlist.
+ * @param[in] reach Reachable slots to convert.
+ * @param[in] clabel Per-slot Constness labels.
+ * @param[out] ctx Emission state (fresh net + emit map).
+ * @param[out] emit_map Orig slot to network-output fresh slot map.
+ * @param[in] target Conversion target.
+ * @return kNone on success; kBudget/kWiring on exhaustion or gaps.
+ */
 [[nodiscard]] inline BuildError create_networks(const Netlist &nl, const bool *reach,
                                                 const Constness *clabel, ConvertCtx &ctx,
                                                 std::uint16_t *emit_map,
@@ -184,11 +248,23 @@ struct PoolNeeds {
   return BuildError::kNone;
 }
 
-// Wiring pass from the complete map, with wiring-time tying for
-// sequential nets only: dangling pins derived from the same source tie
-// leader share one tie class, so one variable stays one variable and
-// sequential nand<->nor toggles converge instead of multiplying pins
-// and gates. Pure-combinational output stays bit-identical (no tying).
+/**
+ * @brief Wiring pass from the complete map, with wiring-time tying for
+ *        sequential nets only: dangling pins derived from the same
+ *        source tie leader share one tie class, so one variable stays
+ *        one variable and sequential NAND/NOR toggles converge instead
+ *        of multiplying pins and gates. Pure-combinational output stays
+ *        bit-identical (no tying).
+ *
+ * @param[out] out Fresh netlist receiving wires and ties.
+ * @param[out] ctx Emission state.
+ * @param[in] pend Deferred wires from the creation pass.
+ * @param[in] npend Pending-wire count.
+ * @param[in] emit_map Complete orig-to-fresh driver map.
+ * @param[in] structural_tie_duplicates True ties same-source dangling
+ *            duplicates (sequential nets only).
+ * @return kNone on success; kWiring on emit-map gaps or bad indices.
+ */
 [[nodiscard]] inline BuildError wire_pending(Netlist &out, ConvertCtx &ctx, const PendingWire *pend,
                                              std::size_t npend, const std::uint16_t *emit_map,
                                              bool structural_tie_duplicates) noexcept {
@@ -235,9 +311,21 @@ struct PoolNeeds {
   return BuildError::kNone;
 }
 
-// Restore ignored marks on fresh dangling pins that mirror ignored
-// original pins (they stay excluded from the block interface), plus
-// ignored-output flags on the fresh output gates.
+/**
+ * @brief Restore ignored marks on fresh dangling pins that mirror
+ *        ignored original pins (they stay excluded from the block
+ *        interface), plus ignored-output flags on the fresh output
+ *        gates.
+ *
+ * Only single-gate networks mirror pin positions 1:1; multi-gate
+ * networks route ignored originals through the pool (wired, no mark).
+ *
+ * @param[in] nl Source netlist (masks to mirror).
+ * @param[out] out Fresh netlist receiving the marks.
+ * @param[in] reach Reachable slots.
+ * @param[in] emit_map Orig-to-fresh map.
+ * @param[in] target Conversion target (single-gate mirror rule).
+ */
 inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach,
                           const std::uint16_t *emit_map, OptTarget target) noexcept {
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
@@ -264,13 +352,23 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach,
   }
 }
 
-// Vocabulary-preserving post-cleanup: share identical wired gates and
-// cancel internal double inverters (both keep all-NAND/all-NOR and never
-// merge sinks, so output count is stable). Runs to fixpoint with DCE for
-// orphans (roots = original fresh outputs, hidden included, plus every
-// verbatim-carried sequential gate — the same opaque-barrier rule as the
-// O0/O1 fixpoint roots — so orphans that become sinks are removed, not
-// kept as extra outputs).
+/**
+ * @brief Vocabulary-preserving post-cleanup: share identical wired gates
+ *        and cancel internal double inverters (both keep all-NAND/
+ *        all-NOR and never merge sinks, so output count is stable).
+ *
+ * Runs to fixpoint with DCE for orphans (roots are original fresh
+ * outputs, hidden included, plus every verbatim-carried sequential
+ * gate — the same opaque-barrier rule as the O0/O1 fixpoint roots — so
+ * orphans that become sinks are removed, not kept as extra outputs).
+ *
+ * @param[out] out Fresh netlist to clean.
+ * @param[in] nl Source netlist (root mapping).
+ * @param[in] reach Reachable slots.
+ * @param[in] emit_map Orig-to-fresh map (root translation).
+ * @param[in] target Conversion target (universal kind).
+ * @return kNone on success; kTopo/kIter on topology or bound failures.
+ */
 [[nodiscard]] inline BuildError post_cleanup(Netlist &out, const Netlist &nl, const bool *reach,
                                              const std::uint16_t *emit_map,
                                              OptTarget target) noexcept {
@@ -329,12 +427,21 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach,
   return BuildError::kNone;
 }
 
-// Truth-table resynthesis pick + final recompile: try the minimized
-// two-level network, keep the smaller (gates, then inputs), then recount
-// and recompile. Small blocks only (Karnaugh-style exact minimization
-// fixes repeated O2 toggles staying near-optimal); falls back to
-// structural for XOR-like parity (where two-level is larger) and large
-// blocks (n>8 or m>8).
+/**
+ * @brief Truth-table resynthesis pick plus final recompile: try the
+ *        minimized two-level network, keep the smaller (gates, then
+ *        inputs), then recount and recompile.
+ *
+ * Small blocks only (exact minimization fixes repeated O2 toggles
+ * staying near-optimal); falls back to structural for XOR-like parity
+ * (where two-level is larger) and large blocks (n>8 or m>8).
+ *
+ * @param[out] out Structural fresh netlist (returned when it wins).
+ * @param[out] src_nl Source netlist (recompiled on the structural path).
+ * @param[in] target Conversion target.
+ * @return kOk with the winning netlist; kInternal with an "optimize:
+ *         ..." message on topology errors.
+ */
 [[nodiscard]] inline core::Result<Netlist> finish_o2(Netlist &out, Netlist &src_nl,
                                                      OptTarget target) noexcept {
   {
@@ -359,6 +466,13 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach,
   return core::Result<Netlist>::success(out);
 }
 
+/**
+ * @brief Loud message for a fresh-build failure mode (reported once by
+ *        optimize()).
+ *
+ * @param[in] e Build error to name.
+ * @return String-literal message (zero-copy, no allocation).
+ */
 [[nodiscard]] inline const char *build_error_message(BuildError e) noexcept {
   switch (e) {
   case BuildError::kNone:

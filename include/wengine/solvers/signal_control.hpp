@@ -1,5 +1,17 @@
 #pragma once
 
+/**
+ * @file
+ * SIG-10 generic control plane, driver half: ControlBus queues raw
+ * command lines per channel, drains them in fixed registration order at
+ * deterministic step boundaries, answers through per-channel outboxes,
+ * and logs every applied mutating verb for replay. Owns the
+ * state-mutating half only — transports (TCP, UART, CLI) move lines and
+ * live outside; this header depends on core/signal/world, never CLI
+ * types. Consumed by the CLI/REPL control commands, the paced-run
+ * before-chunk drain, and tests/test_signal_control.cpp.
+ */
+
 // SIG-10 generic control plane: state-mutating half (driver side).
 //
 // ControlBus owns per-channel command queues drained at deterministic step
@@ -56,22 +68,36 @@ namespace wengine::solvers {
 
 // One applied mutating command, in drain order (replay: re-enqueue each
 // line into the same channel before the recorded step, then step once).
+/**
+ * @brief One applied mutating command, in drain order.
+ */
 struct AppliedCommand {
-  std::uint64_t step = 0; // state.step_index at drain (the step about to run)
+  std::uint64_t step = 0; /**< @brief state.step_index at drain (the step about to run). */
+  /** @brief Channel the line arrived on (registration index). */
   std::uint32_t channel = 0;
+  /** @brief The raw verb line as received (replay re-enqueues it verbatim). */
   std::string line;
 };
 
+/** @brief Per-drain verdict counts (mutating vs read-only vs rejected). */
 struct DrainStats {
-  std::uint64_t applied = 0; // mutating verbs, logged for replay
-  std::uint64_t readonly = 0; // HELLO/PING/LIST successes (answered, unlogged)
-  std::uint64_t rejected = 0; // malformed or refused lines (ERR, unlogged)
+  std::uint64_t applied = 0; /**< @brief Mutating verbs, logged for replay. */
+  std::uint64_t readonly = 0; /**< @brief HELLO/PING/LIST successes (answered, unlogged). */
+  std::uint64_t rejected = 0; /**< @brief Malformed or refused lines (ERR, unlogged). */
 };
 
 namespace control_detail {
 
 // Pool slot -> params copy for SET validation (mirrors the solver's view;
 // sums carry their op_count so validate_params sees the live shape).
+/**
+ * @brief Copy a pool slot's effective parameters for SET validation.
+ *
+ * @param[in] pool live signal pool (read-only view).
+ * @param[in] slot pool slot index to read.
+ * @return The slot's SignalParams, including expression program and sum
+ *         op_count, so validate_params sees the live shape.
+ */
 [[nodiscard]] inline signal::SignalParams params_of(const world::Signals &pool,
                                                     std::uint32_t slot) noexcept {
   signal::SignalParams p;
@@ -102,6 +128,31 @@ namespace control_detail {
 // mutating commands append to `log`. `step` is the about-to-run step index
 // (for the log), `t_now` the current sim_time (STOP/START time base).
 // Never throws; pool is untouched on any refusal.
+/**
+ * @brief Apply one parsed command to the world state.
+ *
+ * Responses append to `outbox`; applied mutating commands append to
+ * `log`. Never throws; the pool is untouched on any refusal.
+ *
+ * @param[in,out] s world state; the signal pool is mutated only after
+ *                  full validation.
+ * @param[in] cmd the parsed verb (ADD/SET/START/STOP/DROP/HELLO/PING/
+ *            LIST/SELECT).
+ * @param[in] line the raw verb line, logged verbatim on mutating success.
+ * @param[in] step the about-to-run step index (replay log stamp).
+ * @param[in] channel registration index the line arrived on.
+ * @param[in] run_id run identifier echoed by HELLO.
+ * @param[in] t_now current simulation time, in seconds (STOP/START
+ *            time-base math: t0 -= t_now freezes, t0 += t_now resumes).
+ * @param[out] log replay log; one AppliedCommand per applied mutating verb.
+ * @param[out] outbox response lines (OK/ERR verdicts, LIST rows).
+ * @note Failures answer ERR lines (kInvalidArgument / kNotImplemented /
+ *       kInternal in the verdict) rather than returning Status — the
+ *       pool is untouched on any refusal, and rejected lines are
+ *       counted, never logged. ADD table/lua and SELECT are refused as
+ *       kNotImplemented (bulk payloads ride batch paths; mux needs its
+ *       combinator) — loud, never silent.
+ */
 inline void apply_command(world::State &s, const signal::control::Command &cmd,
                           const std::string &line, std::uint64_t step, std::uint32_t channel,
                           std::uint64_t run_id, double t_now,
@@ -368,25 +419,60 @@ inline void apply_command(world::State &s, const signal::control::Command &cmd,
 
 // Step-boundary command bus: fixed-order channels, response outboxes, and
 // the replay log. Single driver thread only (poll + drain + step).
+/**
+ * @brief Step-boundary command bus: fixed-order channels, response
+ *        outboxes, and the replay log.
+ *
+ * Single driver thread only (poll + drain + step): channels drain in
+ * fixed registration order, each FIFO; conflicting verbs resolve by
+ * channel order, never by arrival timing. Replaying the log against a
+ * fresh run (same channel order, same steps) reproduces the session
+ * exactly.
+ *
+ * @note Ownership/lifetime: raw lines are moved in by transports; the
+ *       outboxes are taken (moved out) by their transports; the log is
+ *       exposed by const reference and lives as long as the bus.
+ */
 class ControlBus {
 public:
+  /**
+   * @brief Construct a bus bound to one run.
+   * @param[in] run_id run identifier echoed by HELLO (channel identity).
+   */
   explicit ControlBus(std::uint64_t run_id) : run_id_(run_id) {}
 
   // Register a channel; ids are dense in registration order and that order
   // IS the drain order (documented at attach: default local CLI, then TCP
   // slots, then UART slots — SIG-8 owns its slots, same rule).
+  /**
+   * @brief Register a channel and return its id.
+   *
+   * @return Dense channel id; registration order IS the drain order
+   *         (documented at attach: default local CLI, then TCP slots,
+   *         then UART slots).
+   */
   std::uint32_t add_channel() {
     channels_.emplace_back();
     return static_cast<std::uint32_t>(channels_.size() - 1);
   }
 
+  /** @brief Number of registered channels. @return The dense channel count. */
   [[nodiscard]] std::uint32_t channel_count() const noexcept {
     return static_cast<std::uint32_t>(channels_.size());
   }
 
+  /** @brief Run identifier bound at construction. @return The run id. */
   [[nodiscard]] std::uint64_t run_id() const noexcept { return run_id_; }
 
   // Enqueue a raw command line (false = unknown channel, line dropped).
+  /**
+   * @brief Enqueue one raw command line for the next drain.
+   *
+   * @param[in] channel destination channel id (from add_channel()).
+   * @param[in] line raw verb line; moved into the channel queue.
+   * @return true when enqueued; false for an unknown channel (line
+   *         dropped — callers surface that loudly).
+   */
   bool enqueue(std::uint32_t channel, std::string line) {
     if (channel >= channels_.size()) {
       return false;
@@ -400,6 +486,18 @@ public:
   // ERR and count as rejected; successes answer OK. Mutating successes are
   // logged for replay; read-only successes are only counted. Returns all
   // three counts.
+  /**
+   * @brief Drain every channel in registration order, each FIFO.
+   *
+   * Applies lines to `s` at (step, s.sim_time): malformed and refused
+   * lines answer ERR and count as rejected; successes answer OK;
+   * mutating successes are logged for replay; read-only successes are
+   * only counted.
+   *
+   * @param[in,out] s world state mutated by applied verbs.
+   * @param[in] step the about-to-run step index (log stamp).
+   * @return applied / readonly / rejected counts for this drain.
+   */
   DrainStats drain(world::State &s, std::uint64_t step) {
     DrainStats stats;
     for (std::uint32_t c = 0; c < channels_.size(); ++c) {
@@ -437,6 +535,14 @@ public:
   }
 
   // Collect and clear a channel's pending response lines.
+  /**
+   * @brief Collect and clear a channel's pending response lines.
+   *
+   * @param[in] channel id whose outbox to take.
+   * @return All pending response lines (OK/ERR verdicts, LIST rows),
+   *         moved out; the outbox is left empty. Unknown channel id
+   *         yields an empty vector.
+   */
   [[nodiscard]] std::vector<std::string> take_responses(std::uint32_t channel) {
     std::vector<std::string> out;
     if (channel < channels_.size()) {
@@ -446,9 +552,13 @@ public:
     return out;
   }
 
+  /** @brief Replay log of applied mutating commands, in drain order. @return Const reference to the log. */
   [[nodiscard]] const std::vector<AppliedCommand> &log() const noexcept { return log_; }
+  /** @brief Total applied (mutating, logged) verbs, lifetime of the bus. @return The counter. */
   [[nodiscard]] std::uint64_t applied() const noexcept { return applied_; }
+  /** @brief Total read-only successes (answered, unlogged), lifetime of the bus. @return The counter. */
   [[nodiscard]] std::uint64_t readonly() const noexcept { return readonly_; }
+  /** @brief Total rejected lines (malformed or refused), lifetime of the bus. @return The counter. */
   [[nodiscard]] std::uint64_t rejected() const noexcept { return rejected_; }
 
 private:

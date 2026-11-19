@@ -1,5 +1,21 @@
 #pragma once
 
+/**
+ * @file
+ * INA219 zero-drift bidirectional current/power monitor design solver:
+ * calibration-word sizing (Current_LSB, Cal), shunt/PGA/bus-range
+ * selection, register-code conversions, and the register-word readout
+ * math. Owns the pure datasheet math only — depends on nothing but
+ * plain constexpr arithmetic, never CLI types; register codes are plain
+ * ints, never physical quantities; input validation (ranges, > 0, ...)
+ * is the CLI layer's job per the solver error convention. Reference:
+ * Texas Instruments INA219 datasheet SBOS448G (August 2008, revised
+ * December 2015), sections 8.5/8.6 plus the 9.2.2 worked example —
+ * equations and worked goldens preserved in the banner below. Consumed
+ * by the `ic ina219` CLI glue (src/cli/commands/ic/ina219.cpp) and
+ * tests/test_ina219.cpp.
+ */
+
 // INA219 zero-drift bidirectional current/power monitor design solver.
 //
 // Reference: Texas Instruments INA219 datasheet SBOS448G (August 2008,
@@ -40,62 +56,117 @@
 
 namespace wengine::solvers::ic {
 
+/** @brief Calibration-word design result (Eq.1-Eq.3 plus range verdicts). */
 struct Ina219Calibration {
+  /** @brief Eq.2 minimum Current_LSB MaxExpected/2^15, in amperes. */
   double lsb_min_a{0.0};
+  /** @brief Current_LSB actually used (the request, or the Eq.2 minimum), in amperes. */
   double lsb_used_a{0.0};
+  /** @brief Eq.1 programmed calibration word (even value: FS0 is void). */
   unsigned cal{0};
+  /** @brief Eq.3 Power_LSB = 20 * Current_LSB, in watts. */
   double power_lsb_w{0.0};
+  /** @brief Full-scale current 32767 * Current_LSB, in amperes. */
   double max_current_a{0.0};
+  /** @brief Full-scale power 65535 * Power_LSB, in watts. */
   double max_power_w{0.0};
-  int pga_idx{0}; // 0..3 -> /1, /2, /4, /8 (Table 4); -1 = over range
-  int brng{0};    // 0 = 16V, 1 = 32V; -1 = over range
+  int pga_idx{0}; /**< @brief 0..3 -> /1, /2, /4, /8 (Table 4); -1 = over range. */
+  int brng{0};    /**< @brief 0 = 16V, 1 = 32V; -1 = over range. */
+  /** @brief Full-scale shunt voltage IMAX * RSHUNT, in volts. */
   double vshunt_fs_v{0.0};
+  /** @brief Some PGA range covers the shunt swing. */
   bool shunt_ok{false};
+  /** @brief Bus range fits (and stays under the 26 V absolute maximum). */
   bool bus_ok{false};
+  /** @brief Cal word is in range (nonzero, <= 0xFFFE). */
   bool cal_ok{false};
+  /** @brief shunt_ok && bus_ok && cal_ok (design verdict). */
   bool ok{false};
 };
 
+/** @brief One register-level readout (voltages/current/power plus codes). */
 struct Ina219Readout {
+  /** @brief Shunt voltage from the shunt register, in volts. */
   double vshunt_v{0.0};
+  /** @brief Bus voltage from the (shifted) bus register, in volts. */
   double vbus_v{0.0};
+  /** @brief Eq.4 scaled current, in amperes. */
   double current_a{0.0};
+  /** @brief Eq.5 scaled power, in watts. */
   double power_w{0.0};
+  /** @brief Current register code (Eq.4). */
   int current_reg{0};
+  /** @brief Power register code (Eq.5). */
   int power_reg{0};
 };
 
+/**
+ * @brief INA219 calibration/readout solver (static-only utility).
+ *
+ * @note Pure, header-only, constexpr + noexcept: every conversion is
+ *       one datasheet equation (numbered per the banner above), exactly
+ *       reproducible with no accumulation error. Register codes are
+ *       plain ints; -1/0 sentinels mark out-of-range selections and are
+ *       domain values — callers validate at the CLI layer. Eq.1/Eq.6
+ *       truncation carries a 1e-9 relative guard so decimal-exact
+ *       quotients (e.g. the 20480 golden) survive binary FP dust while
+ *       genuine fractions still truncate per the datasheet.
+ */
 class Ina219Solver {
 public:
+  /** @brief Deleted constructor: every solver here is a static function. */
   Ina219Solver() = delete;
 
   // Fixed part parameters (electrical tables + register maps).
+  /** @brief Shunt-voltage LSB (fixed for all PGA settings), in volts. */
   static constexpr double kShuntLsbV = 10e-6;
+  /** @brief Bus-voltage LSB, in volts. */
   static constexpr double kBusLsbV = 4e-3;
+  /** @brief Eq.1 calibration scale constant (0.04096). */
   static constexpr double kCalScale = 0.04096;
+  /** @brief Eq.3 power ratio: Power_LSB = 20 * Current_LSB (dimensionless). */
   static constexpr double kPowerRatio = 20.0;
+  /** @brief Eq.4 current divisor (fixed). */
   static constexpr double kCurDiv = 4096.0;
+  /** @brief Eq.5 power divisor (fixed). */
   static constexpr double kPowDiv = 5000.0;
-  static constexpr double kCodeFull = 32768.0; // 2^15 (Eq.2 divisor)
-  static constexpr double kVbusAbsMaxV = 26.0; // Sec. 7.1 absolute maximum
+  static constexpr double kCodeFull = 32768.0; /**< @brief 2^15 (Eq.2 divisor). */
+  static constexpr double kVbusAbsMaxV = 26.0; /**< @brief Sec. 7.1 absolute bus maximum, in volts. */
+  /** @brief Supply minimum VS, in volts. */
   static constexpr double kVsMinV = 3.0;
+  /** @brief Supply maximum VS, in volts. */
   static constexpr double kVsMaxV = 5.5;
+  /** @brief Power-on reset configuration word (BRNG=32V, PGA /8, 12-bit, continuous). */
   static constexpr unsigned kConfigReset = 0x399Fu;
-  static constexpr unsigned kCalMax = 0xFFFEu; // FS0 is void, always 0
+  static constexpr unsigned kCalMax = 0xFFFEu; /**< @brief Largest programmable Cal (FS0 is void, always 0). */
 
   // Table 4 full-scale shunt ranges for PGA /1, /2, /4, /8.
+  /** @brief Table 4 full-scale shunt ranges for PGA /1, /2, /4, /8, in volts (by index). */
   static constexpr double kPgaRangesV[4] = {40e-3, 80e-3, 160e-3, 320e-3};
 
   // Table 5 conversion times [us]: 9/10/11/12-bit, then 1/2/4/.../128 avg.
+  /** @brief Table 5 conversion times in microseconds: 9/10/11/12-bit rows, then 1..128-sample averaging rows. */
   static constexpr double kAdcTimeUs[12] = {84.0,   148.0,  276.0,  532.0,  532.0,  1060.0,
                                             2130.0, 4260.0, 8510.0, 17020.0, 34050.0, 68100.0};
 
   // ------------------------------------------------------------ Eq.2/Eq.1
+  /**
+   * @brief Minimum Current_LSB for a maximum expected current (Eq.2).
+   * @param[in] imax_a maximum expected current, in amperes.
+   * @return IMAX / 2^15, in amperes.
+   */
   [[nodiscard]] static constexpr double min_lsb_a(double imax_a) noexcept {
     return imax_a / kCodeFull;
   }
 
   // Datasheet trunc() with a 1e-9 relative guard against binary FP dust.
+  /**
+   * @brief Datasheet trunc() with a 1e-9 relative guard.
+   *
+   * @param[in] x the exact quotient to truncate (must be positive).
+   * @return floor(x) after absorbing binary FP dust: decimal-exact
+   *         quotients survive; genuine fractions still truncate.
+   */
   [[nodiscard]] static constexpr unsigned trunc_cal(double x) noexcept {
     if (!(x > 0.0)) {
       return 0;
@@ -103,6 +174,13 @@ public:
     return static_cast<unsigned>(x + x * 1e-9);
   }
 
+  /**
+   * @brief Raw Eq.1 calibration word (before the FS0 fixup).
+   * @param[in] lsb_a chosen Current_LSB, in amperes.
+   * @param[in] rshunt_ohm shunt resistance, in ohms.
+   * @return trunc(0.04096 / (Current_LSB * RSHUNT)); 0 when either
+   *         input is non-positive.
+   */
   [[nodiscard]] static constexpr unsigned cal_raw(double lsb_a, double rshunt_ohm) noexcept {
     if (!(lsb_a > 0.0) || !(rshunt_ohm > 0.0)) {
       return 0;
@@ -111,33 +189,72 @@ public:
   }
 
   // FS0 is void (always 0): the programmed value is even.
+  /**
+   * @brief Eq.1 calibration word as programmed (FS0 forced to 0).
+   * @param[in] lsb_a chosen Current_LSB, in amperes.
+   * @param[in] rshunt_ohm shunt resistance, in ohms.
+   * @return cal_raw with bit 0 cleared (the programmed value is even).
+   */
   [[nodiscard]] static constexpr unsigned cal(double lsb_a, double rshunt_ohm) noexcept {
     return static_cast<unsigned>(cal_raw(lsb_a, rshunt_ohm) & ~1u);
   }
 
   // ----------------------------------------------------------------- Eq.3
+  /**
+   * @brief Power_LSB from Current_LSB (Eq.3).
+   * @param[in] lsb_a chosen Current_LSB, in amperes.
+   * @return 20 * Current_LSB, in watts.
+   */
   [[nodiscard]] static constexpr double power_lsb_w(double lsb_a) noexcept {
     return kPowerRatio * lsb_a;
   }
 
   // ---------------------------------------------------------- shunt/bus
+  /**
+   * @brief Shunt voltage drop at a current (Ohm's law on the shunt).
+   * @param[in] current_a current, in amperes.
+   * @param[in] rshunt_ohm shunt resistance, in ohms.
+   * @return I * RSHUNT, in volts.
+   */
   [[nodiscard]] static constexpr double shunt_v(double current_a, double rshunt_ohm) noexcept {
     return current_a * rshunt_ohm;
   }
 
+  /**
+   * @brief Round half away from zero (constexpr, libm-free).
+   * @param[in] x value to round.
+   * @return The nearest integer, ties away from zero.
+   */
   [[nodiscard]] static constexpr long long llround_half_away(double x) noexcept {
     return x >= 0.0 ? static_cast<long long>(x + 0.5) : static_cast<long long>(x - 0.5);
   }
 
+  /**
+   * @brief Encode a shunt voltage into the shunt register.
+   * @param[in] vshunt_v shunt voltage, in volts.
+   * @return round(vshunt / 10uV) as the shunt register code
+   *         (quantization choice, not a datasheet equation).
+   */
   [[nodiscard]] static constexpr int shunt_reg(double vshunt_v) noexcept {
     return static_cast<int>(llround_half_away(vshunt_v / kShuntLsbV));
   }
 
+  /**
+   * @brief Decode a shunt register code back to volts.
+   * @param[in] reg shunt register code.
+   * @return reg * 10uV, in volts.
+   */
   [[nodiscard]] static constexpr double shunt_v_from_reg(int reg) noexcept {
     return static_cast<double>(reg) * kShuntLsbV;
   }
 
   // Smallest PGA index whose range covers |VSHUNT|; -1 above 320 mV.
+  /**
+   * @brief Smallest PGA index whose range covers the shunt swing.
+   * @param[in] vshunt_abs_v absolute shunt voltage, in volts.
+   * @return PGA index 0..3 (/1../8 by Table 4); -1 when above 320 mV
+   *         or for negative input.
+   */
   [[nodiscard]] static constexpr int pga_for_shunt(double vshunt_abs_v) noexcept {
     if (!(vshunt_abs_v >= 0.0)) {
       return -1;
@@ -150,11 +267,22 @@ public:
     return -1;
   }
 
+  /**
+   * @brief Full-scale shunt range of one PGA setting.
+   * @param[in] idx PGA index 0..3 (/1../8).
+   * @return The Table 4 range in volts; 0.0 for an invalid index.
+   */
   [[nodiscard]] static constexpr double pga_range_v(int idx) noexcept {
     return (idx >= 0 && idx < 4) ? kPgaRangesV[idx] : 0.0;
   }
 
   // 0 = 16V range, 1 = 32V range, -1 above the 32V ADC range.
+  /**
+   * @brief Bus voltage-range bit for a bus voltage.
+   * @param[in] vbus_v bus voltage, in volts.
+   * @return BRNG code: 0 for the 16 V range, 1 for the 32 V range;
+   *         -1 above 32 V or for negative input.
+   */
   [[nodiscard]] static constexpr int brng_for_bus(double vbus_v) noexcept {
     if (!(vbus_v >= 0.0)) {
       return -1;
@@ -168,53 +296,117 @@ public:
     return -1;
   }
 
+  /**
+   * @brief Encode a bus voltage into the shifted bus register.
+   * @param[in] vbus_v bus voltage, in volts.
+   * @return round(vbus / 4mV) as the shifted code (bits D2:D0 are
+   *         CNVR/OVF, so the raw register is this value << 3).
+   */
   [[nodiscard]] static constexpr int bus_shifted(double vbus_v) noexcept {
     return static_cast<int>(llround_half_away(vbus_v / kBusLsbV));
   }
 
+  /**
+   * @brief Decode a shifted bus code back to volts.
+   * @param[in] shifted shifted bus register code.
+   * @return shifted * 4mV, in volts.
+   */
   [[nodiscard]] static constexpr double bus_v_from_shifted(int shifted) noexcept {
     return static_cast<double>(shifted) * kBusLsbV;
   }
 
+  /**
+   * @brief Compose the raw bus register from the shifted code.
+   * @param[in] shifted shifted bus register code.
+   * @return shifted << 3 (bits D2:D0 carry CNVR/OVF, not voltage).
+   */
   [[nodiscard]] static constexpr int bus_raw_from_shifted(int shifted) noexcept {
     return shifted << 3;
   }
 
+  /**
+   * @brief Extract the shifted bus code from a raw register word.
+   * @param[in] raw raw bus register read.
+   * @return (raw >> 3) masked to 13 bits, the voltage-carrying code.
+   */
   [[nodiscard]] static constexpr int bus_shifted_from_raw(int raw) noexcept {
     return (raw >> 3) & 0x1FFF;
   }
 
   // ----------------------------------------------------------------- Eq.4
+  /**
+   * @brief Current register code (Eq.4).
+   * @param[in] shunt_reg_value shunt register code.
+   * @param[in] cal_value programmed calibration word.
+   * @return ShuntReg * Cal / 4096 as the current register code.
+   */
   [[nodiscard]] static constexpr int current_reg(int shunt_reg_value, unsigned cal_value) noexcept {
     return static_cast<int>(static_cast<long long>(shunt_reg_value) *
                             static_cast<long long>(cal_value) /
                             static_cast<long long>(kCurDiv));
   }
 
+  /**
+   * @brief Scaled current from the current register (Eq.4).
+   * @param[in] current_reg_value current register code.
+   * @param[in] lsb_a Current_LSB, in amperes.
+   * @return CurrentReg * Current_LSB, in amperes.
+   */
   [[nodiscard]] static constexpr double current_a(int current_reg_value, double lsb_a) noexcept {
     return static_cast<double>(current_reg_value) * lsb_a;
   }
 
   // ----------------------------------------------------------------- Eq.5
+  /**
+   * @brief Power register code (Eq.5).
+   * @param[in] current_reg_value current register code.
+   * @param[in] bus_shifted_value shifted bus register code.
+   * @return CurrentReg * BusShifted / 5000 as the power register code.
+   */
   [[nodiscard]] static constexpr int power_reg(int current_reg_value, int bus_shifted_value) noexcept {
     return static_cast<int>(static_cast<long long>(current_reg_value) *
                             static_cast<long long>(bus_shifted_value) /
                             static_cast<long long>(kPowDiv));
   }
 
+  /**
+   * @brief Scaled power from the power register (Eq.5).
+   * @param[in] power_reg_value power register code.
+   * @param[in] power_lsb Power_LSB, in watts.
+   * @return PowerReg * Power_LSB, in watts.
+   */
   [[nodiscard]] static constexpr double power_w(int power_reg_value, double power_lsb) noexcept {
     return static_cast<double>(power_reg_value) * power_lsb;
   }
 
+  /**
+   * @brief Full-scale current for a Current_LSB.
+   * @param[in] lsb_a Current_LSB, in amperes.
+   * @return 32767 * Current_LSB, in amperes.
+   */
   [[nodiscard]] static constexpr double max_current_a(double lsb_a) noexcept {
     return 32767.0 * lsb_a;
   }
 
+  /**
+   * @brief Full-scale power for a Power_LSB.
+   * @param[in] power_lsb Power_LSB, in watts.
+   * @return 65535 * Power_LSB, in watts.
+   */
   [[nodiscard]] static constexpr double max_power_w(double power_lsb) noexcept {
     return 65535.0 * power_lsb;
   }
 
   // ----------------------------------------------------------------- Eq.6
+  /**
+   * @brief System-trim corrected calibration word (Eq.6).
+   * @param[in] cal_value currently programmed calibration word.
+   * @param[in] i_meas_a externally measured true current, in amperes.
+   * @param[in] i_ina_a the INA219's reported current for the same
+   *            point, in amperes.
+   * @return trunc(Cal * I_meas / I_ina) with FS0 forced to 0 (even
+   *         value); 0 when either current is non-positive.
+   */
   [[nodiscard]] static constexpr unsigned correct_cal(unsigned cal_value, double i_meas_a,
                                                       double i_ina_a) noexcept {
     if (!(i_ina_a > 0.0) || !(i_meas_a > 0.0)) {
@@ -225,6 +417,12 @@ public:
   }
 
   // ------------------------------------------------------------ Table 5
+  /**
+   * @brief Single-shot conversion time by ADC resolution (Table 5).
+   * @param[in] bits resolution 9..12.
+   * @return Conversion time, in microseconds; -1.0 for any other
+   *         resolution.
+   */
   [[nodiscard]] static constexpr double adc_time_us_bits(int bits) noexcept {
     if (bits == 9) {
       return kAdcTimeUs[0];
@@ -241,6 +439,12 @@ public:
     return -1.0;
   }
 
+  /**
+   * @brief Conversion time by sample-averaging setting (Table 5).
+   * @param[in] avg averaging count (1, 2, 4, ..., 128).
+   * @return Conversion time, in microseconds; -1.0 for any other
+   *         count.
+   */
   [[nodiscard]] static constexpr double adc_time_us_avg(int avg) noexcept {
     if (avg == 1) {
       return kAdcTimeUs[4];
@@ -271,6 +475,17 @@ public:
 
   // ------------------------------------------------------- config word
   // brng: 0/1, pga: 0..3, badc/sadc: 4-bit Table 5 codes, mode: 0..7.
+  /**
+   * @brief Compose the 16-bit configuration register word.
+   *
+   * @param[in] brng bus range bit: 0 = 16 V, 1 = 32 V.
+   * @param[in] pga_idx PGA setting 0..3 (/1../8).
+   * @param[in] badc_code 4-bit bus-ADC Table 5 code.
+   * @param[in] sadc_code 4-bit shunt-ADC Table 5 code.
+   * @param[in] mode operating mode 0..7.
+   * @return The composed configuration word (BRNG<<13 | PGA<<11 |
+   *         BADC<<7 | SADC<<3 | mode).
+   */
   [[nodiscard]] static constexpr unsigned config_word(int brng, int pga_idx, int badc_code,
                                                       int sadc_code, int mode) noexcept {
     return static_cast<unsigned>(((brng & 1) << 13) | ((pga_idx & 3) << 11) |
@@ -279,6 +494,18 @@ public:
 
   // ------------------------------------------------------------- design
   // lsb_req_a <= 0 selects the Eq.2 minimum (highest resolution).
+  /**
+   * @brief Size the full calibration for a measurement design.
+   *
+   * @param[in] imax_a maximum expected current, in amperes.
+   * @param[in] rshunt_ohm shunt resistance, in ohms.
+   * @param[in] vbus_max_v maximum bus voltage, in volts.
+   * @param[in] lsb_req_a requested Current_LSB, in amperes; <= 0
+   *            selects the Eq.2 minimum (highest resolution).
+   * @return LSBs, Cal word, full scales, and the shunt/bus/cal
+   *         verdicts (all-zero struct when imax/rshunt are invalid —
+   *         callers surface that at the CLI layer).
+   */
   [[nodiscard]] static constexpr Ina219Calibration solve_calibration(double imax_a, double rshunt_ohm,
                                                                     double vbus_max_v,
                                                                     double lsb_req_a) noexcept {
@@ -303,6 +530,16 @@ public:
     return r;
   }
 
+  /**
+   * @brief Decode one register-level readout (Eq.4/Eq.5 in SI units).
+   *
+   * @param[in] shunt_reg_value shunt register code.
+   * @param[in] bus_raw raw bus register read (D2:D0 are CNVR/OVF).
+   * @param[in] cal_value programmed calibration word.
+   * @param[in] lsb_a Current_LSB, in amperes.
+   * @return Shunt and bus voltages in volts, current in amperes,
+   *         power in watts, plus the current/power register codes.
+   */
   [[nodiscard]] static constexpr Ina219Readout solve_readout(int shunt_reg_value, int bus_raw,
                                                              unsigned cal_value,
                                                              double lsb_a) noexcept {

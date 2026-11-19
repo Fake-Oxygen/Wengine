@@ -1,18 +1,28 @@
 #pragma once
 
-// Engine-owned clock-domain derivation (006-versioned-workspace-v1).
-//
-// Live edge-triggered flops (DFF/JK/T) grouped by clock-driver net, named
-// by the source pin (e.g. "BUF1.Y", "DFF2.NQ" keeping the NQ spelling);
-// flops with dangling clock pins form the implicit "clk" domain.
-// First-seen (slot) order; members in slot order. Level-sensitive latches
-// (DLATCH/SRLATCH) belong to no domain.
-//
-// Single implementation shared by the session `step` verb, `sim run`
-// `--seq-clocks` lowering, completion, and the workspace loader's
-// `clocks:` validation — the file pins what stepping uses, so derivation
-// must exist exactly once. Header-only, session/file-path code (uses
-// std::string/std::vector like yaml_store.hpp); never on hot paths.
+/**
+ * @file
+ * Engine-owned clock-domain derivation: the grouping stage that turns
+ * one netlist into named stepping subsets. Live edge-triggered flops
+ * (DFF/JK/T) are grouped by clock-driver net, named by the source pin
+ * (e.g. "BUF1.Y", "DFF2.NQ" keeping the NQ spelling); flops with
+ * dangling clock pins form the implicit "clk" domain. First-seen (slot)
+ * order; members in slot order. Level-sensitive latches (DLATCH/SRLATCH)
+ * belong to no domain.
+ *
+ * Single implementation shared by the session `step` verb, `sim run`
+ * `--seq-clocks` lowering, completion, and the workspace loader's
+ * `clocks:` validation — the file pins what stepping uses, so
+ * derivation must exist exactly once. Header-only; session/file-path
+ * code (uses string and vector like yaml_store.hpp); never on hot
+ * paths.
+ *
+ * Dependency rules (docs/logic.md section 4): depends only on
+ * netlist.hpp. Logic is a standalone domain: this header must never
+ * depend on CLI types. Consumers: the CLI step verb, sim run
+ * --seq-clocks lowering, completion, the yaml_store loader's clocks
+ * validation, and the test_logic* suite.
+ */
 
 #include "wengine/logic/netlist.hpp"
 
@@ -22,14 +32,28 @@
 
 namespace wengine::logic {
 
+/**
+ * @brief One clock domain: live edge flops sharing a clock-driver net.
+ */
 struct ClockDomain {
+  /** @brief Domain name: source-pin spelling, or bare "clk" for dangling clocks. */
   std::string name;
+  /** @brief Member flop slots, in slot order. */
   std::vector<std::uint16_t> members;
 };
 
-// Derive clock domains from a netlist. CLK is input 1 (the same rule the
-// session stepper and the engine member filter assume); a live driver
-// names the domain by its source pin, dangling clock pins join "clk".
+/**
+ * @brief Derive clock domains from a netlist: group live edge flops
+ *        (DFF/JK/T) by clock-driver net.
+ *
+ * CLK is input 1 (the same rule the session stepper and the engine
+ * member filter assume); a live driver names the domain by its source
+ * pin, dangling clock pins join "clk".
+ *
+ * @param[in] nl Netlist to group (read-only).
+ * @return Domains in first-seen slot order, members in slot order.
+ *         Level latches belong to no domain.
+ */
 [[nodiscard]] inline std::vector<ClockDomain> derive_clock_domains(const Netlist &nl) {
   std::vector<ClockDomain> domains;
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {

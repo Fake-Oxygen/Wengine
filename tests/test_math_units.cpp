@@ -1,3 +1,6 @@
+// test_math_units: units single source of truth — Value comparisons and
+// printing plus the scales suffix table behind the CLI parsers. Guards
+// unit-table drift.
 #include "wengine/cli/args.hpp"
 #include "wengine/units/scales.hpp"
 #include "wengine/units/units.hpp"

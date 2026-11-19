@@ -1,3 +1,6 @@
+// test_routing: signal edge routing — serial stability across despawn/
+// respawn, subset/stride routing with loud drops, sum goldens and rejections,
+// sink-failure isolation, and v3/v2 serialization. Guards routing regressions.
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/routing.hpp"
 #include "wengine/emit/signal_sink.hpp"

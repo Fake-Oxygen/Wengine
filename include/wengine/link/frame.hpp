@@ -1,3 +1,12 @@
+/**
+ * @file
+ * Shared simulation view-model: link::Frame, the single source of truth for points-plus-scalars displays.
+ * @note link::Frame is consumed directly by BOTH the wire encoder (link/protocol.hpp)
+ *       AND the GUI view layer (views/panels/history take `const link::Frame &`, never
+ *       Snapshot internals and never wire structs). New solvers add one adapter function
+ *       here plus one frame-source registry entry; views stay untouched. Engine Snapshot
+ *       must NOT grow for GUI/link needs. Pure header; consumers: publishers, readers, GUI.
+ */
 #pragma once
 
 // Shared simulation view-model: ONE lossy projection for points-plus-scalars
@@ -29,15 +38,28 @@
 #include <vector>
 namespace wengine::link {
 
+/**
+ * @brief One generic spatial glyph: position, optional velocity, glyph hints, and stable particle identity.
+ * @note Positions/velocities are plain doubles in engine units; dimensional checks live at the engine edge, not in the carrier.
+ */
 struct FrameItem {
+/** @brief X position (engine length units). */
   double x = 0.0;
+/** @brief Y position (engine length units). */
   double y = 0.0;
+/** @brief Z position (engine length units; 0 for 2D domains). */
   double z = 0.0;
+/** @brief X velocity (engine velocity units; meaningful only when has_velocity is true). */
   double vx = 0.0;
+/** @brief Y velocity (engine velocity units; meaningful only when has_velocity is true). */
   double vy = 0.0;
+/** @brief Z velocity (engine velocity units; meaningful only when has_velocity is true). */
   double vz = 0.0;
+/** @brief True when vx/vy/vz carry data (false: position-only glyph). */
   bool has_velocity = true;
+/** @brief Glyph scale hint (rigid bodies render bigger). */
   double size = 1.0; // glyph scale hint (rigid bodies render bigger)
+/** @brief Glyph color tag (0 = palette by index; future: heat/color data). */
   std::uint32_t color = 0; // 0 = palette by index (future: heat/color data)
   // Stable particle identity (entity slot index + generation, see
   // world/entity.hpp). Set by frame_from_snapshot when the source Snapshot
@@ -45,32 +67,53 @@ struct FrameItem {
   // (UNAVAILABLE) — dense position never substitutes for a stable ID.
   // GUI rendering ignores these fields (glyphs by dense order); trajectory
   // use of the IDs is a separate follow-up.
+/** @brief Stable particle entity slot index (valid only when has_identity is true). */
   std::uint32_t entity_index = 0;
+/** @brief Stable particle entity generation (valid only when has_identity is true). */
   std::uint32_t entity_generation = 0;
+/** @brief True when entity_index/entity_generation carry identity; false means UNAVAILABLE (dense order never substitutes for a stable id; GUI rendering ignores these fields). */
   bool has_identity = false;
 
+/** @brief Exact field-wise equality. @return True when every field compares equal. */
   bool operator==(const FrameItem &) const noexcept = default;
 };
 
+/**
+ * @brief One named scalar probe: channel name plus its sampled value.
+ * @note Names are stable per source (e.g. `sig.<serial>.U`); order per source is the deterministic slot order.
+ */
 struct FrameChannel {
+/** @brief Channel name (owned; stable per source). */
   std::string name;
+/** @brief Sampled scalar value (SI units of the stamped quantity). */
   double value = 0.0;
 
+/** @brief Exact field-wise equality. @return True when name and value compare equal. */
   bool operator==(const FrameChannel &) const noexcept = default;
 };
 
+/**
+ * @brief Generic frame: simulation clock plus dense items plus named scalar channels.
+ * @note The single view-model shared by the wire encoder and the GUI layer; transport evolution must not ripple into views and view needs must never grow this struct for transport reasons.
+ */
 struct Frame {
+/** @brief Step index copied from the source Snapshot. */
   std::uint64_t step = 0;
+/** @brief Simulation time in seconds (SI) copied from the source Snapshot. */
   double time = 0.0;
+/** @brief Dense item list in source slot order. */
   std::vector<FrameItem> items;
+/** @brief Scalar channels in stable per-source order. */
   std::vector<FrameChannel> channels; // stable order per source
 
+/** @brief Exact field-wise equality. @return True when clock, items and channels compare equal. */
   bool operator==(const Frame &) const noexcept = default;
 };
 
 // Domain adapter: Snapshot (or future domain state) -> generic Frame.
 // One per solver; publishers and the GUI registry take it as a parameter
 // so new domains plug in without touching either consumer.
+/** @brief Domain adapter signature: Snapshot (or future domain state) to generic Frame. @note One adapter per solver; publishers and the GUI registry take it as a parameter so new domains plug in without touching either consumer. */
 using FrameAdapter = Frame (*)(const world::Snapshot &);
 
 // Particle adapter: the only domain adapter today. Preserves dense slot
@@ -79,6 +122,12 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
 // voltages, field probes, ...) expose their scalars the same way.
 // Allocates in the same cost class as take_snapshot(). Snapshots without
 // identity (legacy/manual) yield items with has_identity false.
+/**
+ * @brief Particle domain adapter: Snapshot to generic Frame (the only domain adapter today).
+ * @param[in] s source snapshot (dense slot order preserved; identity carried when the snapshot has it).
+ * @return Frame with slot-ordered items plus `count`/`p0.*` channels. Allocates in the same cost class as take_snapshot(); never call inside the sim loop.
+ * @note Snapshots without identity yield items with has_identity false.
+ */
 [[nodiscard]] inline Frame frame_from_snapshot(const world::Snapshot &s) {
   Frame f;
   f.step = s.step_index;
@@ -118,6 +167,11 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
 // bounds it is exact — snapshot_from_frame(frame_from_snapshot(s)) == s —
 // so a bus recording of a CSV playback is byte-identical to the source
 // log. May allocate (vectors); never call inside the sim loop.
+/**
+ * @brief Inverse particle adapter for the record path (bus to CSV): Frame items become dense Snapshot slots in order.
+ * @param[in] f source frame (step/time carried over; identity carried only when every item has it, else UNAVAILABLE — never fabricated from dense order).
+ * @return Snapshot with dense slots; z/vz have no CSV column and are dropped, channels are ignored (CSV is particle-shaped). Within those bounds snapshot_from_frame(frame_from_snapshot(s)) == s, so a bus recording of a CSV playback is byte-identical. May allocate; never call inside the sim loop.
+ */
 [[nodiscard]] inline world::Snapshot snapshot_from_frame(const Frame &f) {  world::Snapshot s;
   s.step_index = f.step;
   s.sim_time = f.time;
@@ -154,6 +208,11 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
 // plus the live count; no items (signals are scalar probes, not glyphs).
 // Deterministic: dense slot order in, channel order out, so round-trips
 // are exactly equal. Allocates like the particle adapter above.
+/**
+ * @brief Signal adapter (SIG-2): Snapshot signal arrays to generic Frame (one channel per live source, no items).
+ * @param[in] s source snapshot (dense signal slot order in, channel order out).
+ * @return Frame with a `sig.count` channel plus one `sig.<serial>.<suffix>` channel per live source (suffix per stamped quantity). Deterministic: round-trips are exactly equal. Allocates like the particle adapter.
+ */
 [[nodiscard]] inline Frame frame_from_signal_snapshot(const world::Snapshot &s) {
   Frame f;
   f.step = s.step_index;
@@ -175,6 +234,11 @@ using FrameAdapter = Frame (*)(const world::Snapshot &);
 // Deterministic: dense slot order in, channel order out. Serials are NOT
 // ascending after slot recycling — consumers validate uniqueness within a
 // step, preserving order. Allocates like the adapters above.
+/**
+ * @brief Sequential adapter: Snapshot flop arrays to generic Frame (one channel per live flop, no items).
+ * @param[in] s source snapshot (dense slot order in, channel order out; serials are NOT ascending after slot recycling — consumers validate uniqueness within a step, preserving order).
+ * @return Frame with a `seq.count` channel plus one `seq.<serial>.Q` channel (0/1) per live flop. Allocates like the adapters above.
+ */
 [[nodiscard]] inline Frame frame_from_logic_snapshot(const world::Snapshot &s) {
   Frame f;
   f.step = s.step_index;

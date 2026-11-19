@@ -1,3 +1,6 @@
+// test_s0: S0 pulse-meter solver — unit conversions, forward/inverse energy
+// consistency, typed API, full-result shape, and CLI run paths. Guards
+// meter golden regressions.
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/solvers/s0_pulse.hpp"

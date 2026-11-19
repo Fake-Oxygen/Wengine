@@ -1,3 +1,9 @@
+// bench_ohm: throughput microbenchmark for the OhmLawSolver closed-form
+// path (solve_from_ui over U in [1, 24] V and I in [0.1, 5] A, folding
+// each R + P into a checksum). Inputs come from a runtime xorshift PRNG
+// seeded from argc and the sink is pinned via do_not_optimize, so the
+// compiler can neither constant-fold the divide+multiply nor discard the
+// loop. Reports ns/iter plus the sink value against dead-code elimination.
 #include "wengine/solvers/ohm_law.hpp"
 
 #include <chrono>

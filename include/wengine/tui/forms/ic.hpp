@@ -1,10 +1,31 @@
 #pragma once
 
+/**
+ * @file
+ * The `ic` guided-form definition (F3 browser entry): registry-derived
+ * chip/op calculators (one profile per chip-op pair, e.g.
+ * ap63205-inductor, ina219-cal, tmc22xx-chop). Chip and op vocabularies
+ * resolve from `cli::IcRegistry` (`ic_chip_names`/`ic_op_names`), so new
+ * parts appear with no form-side change; only the INA219 enum fields
+ * declare static `choices`. The form composes one `ic <chip> <op> ...`
+ * argv line for the shared CLI path and never validates: empty fields
+ * are omitted and the CLI owns every error. Consumers: the registry in
+ * `wengine/tui/forms.hpp`, the form pane in
+ * `src/tui/panes_forms.cpp`.
+ */
+
 #include "wengine/cli/commands.hpp"
 #include "wengine/tui/forms/types.hpp"
 
 namespace wengine::tui::forms::definitions {
 
+/**
+ * @brief Build the `ic` guided-form definition.
+ *
+ * @return The FormDef for `ic`: chip/op positional pickers plus every
+ *         chip option field, with one profile per chip-op pair and a
+ *         generic catch-all fallback for unknown chips.
+ */
 [[nodiscard]] inline FormDef ic() {
   using cli::commands::IcSpec;
   using definition::all_arguments;

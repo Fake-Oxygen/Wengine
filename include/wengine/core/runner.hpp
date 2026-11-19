@@ -1,5 +1,17 @@
 #pragma once
 
+/**
+ * @file
+ * The fixed-step simulation engine loop: owns one world::State, advances
+ * sim_time/step_index by a validated dt, invokes registered ISolver
+ * steps in registration order, and emits snapshots to attached sinks at
+ * a decimated rate. Driven headless (CLI `sim run`), by the GUI frame
+ * loop, and by tests. The Runner owns no solver and no sink — both are
+ * non-owning references the app edge supplies and must re-attach after
+ * every rebuild; this header must never grow I/O, wall-clock input, or
+ * frontend types.
+ */
+
 // Fixed-step simulation runner: owns world::State, advances sim_time and
 // step_index, calls registered ISolver steps in order, and emits snapshots
 // to attached ISink lists at a decimated rate.
@@ -47,15 +59,43 @@
 
 namespace wengine::core {
 
+/**
+ * @brief Fixed-step loop tuning: dt, snapshot cadence, and the
+ *        real-time stall guard.
+ *
+ * @note Validated through validate_runner_config so every frontend
+ *       (C++ API, CLI, GUI) rejects the same inputs identically.
+ */
 struct RunnerConfig {
+  /**
+   * @brief Fixed step size in seconds (_s); must be finite and > 0.
+   */
   double dt = 0.01; // fixed step [s], must be finite and > 0
+  /**
+   * @brief Emit a snapshot every N completed steps; 0 = never.
+   *
+   * @note Emission cadence is one of the four independent clocks
+   *       (simulation dt, emitted sample rate, wall-clock packet rate,
+   *       UI refresh rate) — it is not the waveform frequency.
+   */
   std::uint64_t emit_every = 1; // snapshot every N steps, 0 = never
+  /**
+   * @brief Maximum fixed steps consumed by one advance() call
+   *        (spiral-of-death guard for real-time driving).
+   */
   std::uint64_t max_substeps = 8; // per advance() call (stall guard)
 };
 
-// Shared loop-config edge: the Runner entries and the configured-run
-// builder (PHYSI-35, all frontends) validate through this one function so
-// C++, CLI, and GUI reject identical inputs identically.
+/**
+ * @brief Shared loop-config edge: the Runner entries and the
+ *        configured-run builder (PHYSI-35, all frontends) validate
+ *        through this one function so C++, CLI, and GUI reject
+ *        identical inputs identically.
+ *
+ * @param[in] cfg loop configuration to validate.
+ * @return kOk when dt is finite and > 0; kInvalidArgument when dt is
+ *         NaN, <= 0, or infinite (state unchanged).
+ */
 [[nodiscard]] inline Status validate_runner_config(const RunnerConfig &cfg) noexcept {
   if (!(cfg.dt > 0.0) || !std::isfinite(cfg.dt)) {
     return {StatusCode::kInvalidArgument}; // NaN, <= 0, or infinite step
@@ -63,22 +103,97 @@ struct RunnerConfig {
   return Status::success();
 }
 
+/**
+ * @brief Fixed-step simulation runner: clock, solvers, and snapshot
+ *        emission over one owned world::State.
+ *
+ * @note Solvers run in registration order and sinks are fanned out in
+ *       attach order every emit step — both orders are part of the
+ *       deterministic-output contract. The Runner performs no I/O and
+ *       no wall-clock reads inside run(); failure behavior (latched
+ *       solver failures, clock-range guards) is specified in the file
+ *       header above.
+ */
 class Runner {
 public:
+  /**
+   * @brief Construct with the loop configuration.
+   *
+   * @param[in] cfg loop tuning (dt, emit_every, max_substeps); validated
+   *            on every run()/advance() entry.
+   */
   explicit Runner(RunnerConfig cfg = {}) : config_(cfg) {}
 
+  /**
+   * @brief Register a solver to be stepped once per fixed step.
+   *
+   * @param[in] solver solver to register; called in registration order.
+   * @note Non-owning: the caller owns the solver and must keep it alive
+   *       for the Runner's lifetime and re-attach it after any rebuild
+   *       of the configured run.
+   */
   void add_solver(ISolver &solver) { solvers_.push_back(&solver); }
+  /**
+   * @brief Register a sink to receive snapshots at the emit cadence.
+   *
+   * @param[in] sink best-effort observer; must not throw.
+   * @note Non-owning: the app edge owns the sink and re-attaches it
+   *       after every rebuild — sinks stay unaware of rebuilds by
+   *       construction.
+   */
   void add_sink(emit::ISink &sink) { sinks_.push_back(&sink); }
 
+  /**
+   * @brief The loop configuration supplied at construction.
+   *
+   * @return const reference to the stored RunnerConfig.
+   */
   [[nodiscard]] const RunnerConfig &config() const noexcept { return config_; }
+  /**
+   * @brief Live simulation state (mutable access for setup and solvers).
+   *
+   * @return reference to the owned world::State.
+   */
   [[nodiscard]] world::State &state() noexcept { return state_; }
+  /**
+   * @brief Live simulation state (read-only view for observers).
+   *
+   * @return const reference to the owned world::State.
+   */
   [[nodiscard]] const world::State &state() const noexcept { return state_; }
 
-  // Advance exactly `steps` fixed steps (0 is a no-op success).
+  /**
+   * @brief Advance exactly `steps` fixed steps (0 is a no-op success).
+   *
+   * @param[in] steps exact number of fixed steps to complete.
+   * @return kOk when all steps completed; kInvalidArgument when the
+   *         stored config fails validation; kOutOfRange on a
+   *         clock-range guard (step-index or sim-time exhaustion,
+   *         rejected before any solver mutation); the latched solver
+   *         failure Status from this or an earlier call otherwise.
+   * @note Deterministic: identical config and steps produce identical
+   *       state trajectories and snapshots; no wall-clock input.
+   */
   Status run(std::uint64_t steps) {
     return run_until(steps, nullptr);
   }
 
+  /**
+   * @brief Run until `steps` are complete or the optional callback
+   *        requests a stop.
+   *
+   * @param[in] steps maximum number of fixed steps to complete.
+   * @param[in] stop_requested optional predicate polled at fixed-step
+   *            boundaries, before the next solver invocation; null
+   *            runs all steps. Requesting a stop returns kOk for the
+   *            partial run (interruption is not an error).
+   * @return kOk when the run completed or was stopped; kInvalidArgument
+   *         on invalid config; kOutOfRange on a clock-range guard;
+   *         otherwise the latched solver failure Status.
+   * @note The callback is checked at fixed-step boundaries so
+   *       interruption never leaves a partially advanced step. A
+   *       latched solver failure (see file header) returns immediately.
+   */
   // Run until `steps` are complete or the optional callback requests a stop.
   // The callback is checked at fixed-step boundaries, before the next solver
   // invocation, so interruption never leaves a partially advanced step.
@@ -103,6 +218,25 @@ public:
     return Status::success();
   }
 
+  /**
+   * @brief Fold `frame_dt_seconds` of wall time into fixed steps.
+   *
+   * @param[in] frame_dt_seconds elapsed wall-clock time in seconds (_s);
+   *            must be finite and >= 0. This is frame time, not the
+   *            simulation dt and not the emit cadence (independent
+   *            clocks, see RunnerConfig::emit_every).
+   * @return kOk when the fold completed; kInvalidArgument when the
+   *         config is invalid or the wall time is NaN/negative
+   *         (nothing consumed); kOutOfRange on a clock-range guard;
+   *         otherwise the latched solver failure Status (the remainder
+   *         accumulator is reset so a rebuilt run starts clean).
+   * @note Keeps the fractional remainder for the next call and drops
+   *       backlog beyond max_substeps worth after stalls
+   *       (spiral-of-death guard). Non-deterministic by design: it
+   *       converts wall time into the deterministic fixed-step
+   *       sequence. A latched solver failure (see file header) returns
+   *       immediately without consuming wall time.
+   */
   // Fold `frame_dt_seconds` of wall time into fixed steps. Keeps the
   // fractional remainder for the next call; drops backlog beyond
   // max_substeps worth after stalls. A latched solver failure (see header

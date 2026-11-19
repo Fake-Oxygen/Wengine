@@ -1,3 +1,6 @@
+// test_sim: `sim run` CLI — projectile solver golden, detached-slot holes
+// and determinism, bad-dt/usage errors, CSV/SHM emission, solver selection,
+// signal runs, per-output sampling, and ros flags. Guards CLI-run regressions.
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/core/runner.hpp"

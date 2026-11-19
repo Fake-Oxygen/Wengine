@@ -1,3 +1,6 @@
+// test_determinism: fixed-dt determinism harness for the stepped projectile
+// path — semi-implicit Euler golden, repeat-exact runs, snapshot timing,
+// exact CSV replay, and dt sensitivity. Guards ordering/timing drift.
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/csv_sink.hpp"
 #include "wengine/solvers/projectile.hpp"

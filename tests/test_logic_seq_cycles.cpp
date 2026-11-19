@@ -1,3 +1,6 @@
+// test_logic_seq_cycles: topology validation with sequential gates —
+// combinational cycles stay rejected while flop/clock/latch feedback loops
+// are allowed. Guards the comb-vs-sequential cycle distinction.
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/seq_state.hpp"

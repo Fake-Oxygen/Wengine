@@ -1,3 +1,14 @@
+/**
+ * @file
+ * Batched signal samples (PHYSI-44): bounded SampleBlock builder + codec over world::Snapshot.
+ * @note Carries consecutive signal ticks without decimating their values: the channel schema
+ *       (stable source serial + quantity tag) is stored ONCE per block, then N consecutive
+ *       samples as numeric arrays. Pure helpers over snapshots: no sockets, no SHM, no
+ *       publishers, no queue — queue/endpoint wiring is a separate task. Hot encode path is
+ *       noexcept/allocation-free like encode_record; decode and the builder may allocate
+ *       (cold edges only). Headers stay platform-free (no POSIX TU for this header).
+ *       Consumers: TcpBlockWorker, output_queue bridge, UDP sample paths.
+ */
 #pragma once
 
 // Batched signal samples (PHYSI-44): bounded SampleBlock builder + codec
@@ -75,39 +86,62 @@
 namespace wengine::link::sample {
 
 // Fixed block-header size: 4+4+1+3+8+8+32+4+4.
+/** @brief Fixed block-header size in bytes (4+4+1+3+8+8+32+4+4; == compact::kMinV2HeaderSize). */
 inline constexpr std::size_t kBlockHeaderSize = 68;
 static_assert(kBlockHeaderSize == compact::kMinV2HeaderSize);
 // One schema entry: serial u64 + quantity u8 + reserved u8[3].
+/** @brief One schema entry in bytes (serial u64 + quantity u8 + reserved u8[3]). */
 inline constexpr std::size_t kChannelEntrySize = 12;
 // One sample overhead: step u64 + time f64 (values append 8 per channel).
+/** @brief One sample overhead in bytes (step u64 + time f64; values append 8 per channel). */
 inline constexpr std::size_t kSampleOverhead = 16;
 // Declared record budget: channels far above the LinkFrame cap (64), so
 // batches above 63 sources round-trip; samples bound block memory even
 // before the byte limit seals; bytes keep every block datagram-sized.
+/** @brief Declared record budget: channels far above the 64-channel LinkFrame cap, so batches above 63 sources round-trip. */
 inline constexpr std::size_t kBlockChannelsMax = 1024;
+/** @brief Declared record budget: samples bound block memory even before the byte limit seals. */
 inline constexpr std::size_t kBlockSamplesMax = 1024;
 // Largest encodable block: fits a maximum-size UDP payload, so one codec
 // serves datagram and stream transports alike (same budget as frames).
+/** @brief Largest encodable block: fits a maximum-size UDP payload, so one codec serves datagram and stream transports alike. */
 inline constexpr std::size_t kBlockMaxBytes = compact::kMaxRecordBytes;
 
 // Owned block storage: schema (serials + quantity codes in snapshot slot
 // order) plus dense row-major samples. Consumers receive blocks by value /
 // const-ref — never views into builder or Snapshot lifetime.
+/**
+ * @brief Owned block storage: schema (serials + quantity codes in snapshot slot order) plus dense row-major samples.
+ * @note Consumers receive blocks by value / const-ref — never views into builder or Snapshot lifetime.
+ */
 struct SampleBlock {
+/** @brief Stable source serials in snapshot slot order (schema; opaque ids). */
   std::vector<std::uint64_t> serials;
+/** @brief Quantity codes per channel (signal::QuantityId codes; future quantities refuse loudly, never silently re-tagged). */
   std::vector<std::uint8_t> quantities;
+/** @brief Step index per sample (actual stepped instants, never a dt multiple). */
   std::vector<std::uint64_t> steps;
+/** @brief Accumulated sim_time per sample in seconds (SI; bit-exact carrier). */
   std::vector<double> times;
+/** @brief Row-major sample values: values[s * channels + c] (SI, bit-exact). */
   std::vector<double> values; // row-major: values[s * channels + c]
 
+/** @brief Schema width. @return Channel count. */
   [[nodiscard]] std::size_t channel_count() const noexcept { return serials.size(); }
+/** @brief Sealed sample depth. @return Sample count. */
   [[nodiscard]] std::size_t sample_count() const noexcept { return steps.size(); }
 
+/** @brief Exact field-wise equality. @return True when schema and samples compare equal. */
   bool operator==(const SampleBlock &) const noexcept = default;
 };
 
 // Exact encoded length for a block, or 0 when over-bound (counts or total
 // vs kBlockMaxBytes). Pure/noexcept: buffer sizing without touching output.
+/**
+ * @brief Exact encoded length for a block, or 0 when over-bound (counts or total vs kBlockMaxBytes).
+ * @param[in] in block to measure (schema/sample consistency, count bounds, value shape).
+ * @return Encoded byte count, or 0 when over-bound. Pure/noexcept: buffer sizing without touching output.
+ */
 [[nodiscard]] inline std::size_t encoded_size(const SampleBlock &in) noexcept {
   const std::size_t channels = in.serials.size();
   const std::size_t samples = in.steps.size();
@@ -140,6 +174,18 @@ struct SampleBlock {
 // vs kBlockMaxBytes); violations are kInvalidArgument/kOutOfRange with `out`
 // and `out_len` untouched — loud, never silently truncated. Doubles cross
 // as exact IEEE-754 bit patterns (NaN payloads preserved).
+/**
+ * @brief Encode a block into v2 kind-2 record bytes (hot path: noexcept, allocation-free, bounded copies).
+ * @param[in] in block to encode (order preserved).
+ * @param[in] domain NUL-terminated solver/domain tag (non-empty, shorter than kDomainSize).
+ * @param[in] run_id publisher-run identity (opaque).
+ * @param[in] block_seq monotonic block id per run (loss source like frame_seq).
+ * @param[out] out destination buffer of at least encoded_size(in) bytes.
+ * @param[in] capacity size of out in bytes.
+ * @param[out] out_len encoded byte count on success.
+ * @return kOk on success; kInvalidArgument for bad domain shape, null out, schema/sample inconsistency, or unknown quantity codes; kOutOfRange when over-bound or beyond capacity (out and out_len untouched — loud, never silently truncated).
+ * @note Doubles cross as exact IEEE-754 bit patterns (NaN payloads preserved).
+ */
 [[nodiscard]] inline core::Status encode_block(const SampleBlock &in,
                                               std::string_view domain,
                                               std::uint64_t run_id,
@@ -223,6 +269,18 @@ struct SampleBlock {
 // nothing — same loud-kind policy as decode_record. Round-trip is exactly
 // equal (==), including empty selections (0 channels + N ticks) and
 // non-finite doubles (bit-exact carrier).
+/**
+ * @brief Decode v2 kind-2 record bytes into a SampleBlock (cold edge: may allocate, NOT noexcept — never inside the sim loop).
+ * @param[in] bytes record bytes to decode.
+ * @param[in] len available bytes.
+ * @param[in] want_domain exact-match domain gate (empty matches any domain).
+ * @param[out] out decoded block (untouched on failure).
+ * @param[out] out_run_id publisher-run identity.
+ * @param[out] out_seq monotonic block id.
+ * @param[out] out_kind record kind observed (frame bytes report but decode nothing here — same loud-kind policy as decode_record).
+ * @return kOk on success; kInvalidArgument for any validation failure (magic, schema, kind, zero reserved, domain shape, count bounds, quantity codes, reserved bytes, exact total length).
+ * @note Round-trip is exactly equal (==), including empty selections (0 channels + N ticks) and non-finite doubles.
+ */
 [[nodiscard]] inline core::Status decode_block(const unsigned char *bytes, std::size_t len,
                                               std::string_view want_domain,
                                               SampleBlock &out,
@@ -317,8 +375,14 @@ struct SampleBlock {
 // (size seal). Sampling stride lives upstream (StrideSink/emit_every) —
 // the builder retains every pushed tick. Defaults pack 64 consecutive
 // ticks or one datagram-sized block, whichever seals first.
+/**
+ * @brief Builder configuration: samples-per-block (count seal) and byte budget (size seal).
+ * @note Sampling stride lives upstream (StrideSink/emit_every) — the builder retains every pushed tick.
+ */
 struct SampleBlockConfig {
+/** @brief Samples per block before sealing (0 or above kBlockSamplesMax sanitizes to kBlockSamplesMax). */
   std::size_t max_samples = 64;
+/** @brief Byte budget before sealing (0 or above kBlockMaxBytes sanitizes to kBlockMaxBytes). */
   std::size_t max_bytes = kBlockMaxBytes;
 };
 
@@ -334,19 +398,36 @@ struct SampleBlockConfig {
 // mutating the builder; a sample that cannot fit the byte budget seals
 // prior pending first and then fails loudly if the single sample still
 // does not fit (raise the budget — defaults always fit one tick).
+/**
+ * @brief Accumulates consecutive Snapshots into owned SampleBlocks (pure edge logic: no clocks, no I/O).
+ * @note The caller pushes every selected tick and calls flush() on its own deadline/shutdown to emit
+ *       the short final block. Seals on configured sample/byte limits or on schema change
+ *       (serial/quantity/order — add/drop/respawn all seal, so flatten(batch(stream)) == stream
+ *       exactly). Empty selections latch an empty schema and still record every tick (zero values),
+ *       preserving tick observability like SignalSubsetSink.
+ */
 class SampleBlockBuilder {
 public:
+/**
+ * @brief Construct with sanitized config.
+ * @param[in] cfg samples-per-block and byte budget.
+ */
   explicit SampleBlockBuilder(SampleBlockConfig cfg = {}) : cfg_(sanitize(cfg)) {}
 
+/** @brief Ticks held in the active block. @return Pending sample count. */
   [[nodiscard]] std::size_t pending_samples() const noexcept {
     return active_.steps.size();
   }
+/** @brief Latched schema width (0 before the first push). @return Channel count. */
   [[nodiscard]] std::size_t channel_count() const noexcept {
     return has_schema_ ? active_.serials.size() : 0;
   }
+/** @brief Schema-latch flag. @return True once a schema is latched. */
   [[nodiscard]] bool has_schema() const noexcept { return has_schema_; }
+/** @brief Effective configuration. @return Sanitized config. */
   [[nodiscard]] const SampleBlockConfig &config() const noexcept { return cfg_; }
 
+/** @brief Drop the active block and the latched schema. */
   void reset() {
     active_ = SampleBlock{};
     has_schema_ = false;
@@ -363,6 +444,13 @@ public:
   // into `out_sealed` (`has_sealed` true) and kOutOfRange is returned with
   // the sample rejected — the builder holds the fresh schema with zero
   // pending. Raise the budget and re-push.
+/**
+ * @brief Push one tick; seals the active block on schema change or size limits.
+ * @param[in] snap source snapshot (serials/quantities/values read in dense slot order).
+ * @param[out] out_sealed sealed block when has_sealed is true (untouched otherwise, except the documented single-sample byte-budget path below).
+ * @param[out] has_sealed true when a sealed block was produced (schema change or size seal); the builder already holds the new pending state.
+ * @return kOk on success; kOutOfRange when the snapshot exceeds the channel bound or carries an unknown quantity (builder unmutated), or when a single sample cannot fit the byte budget (prior pending sealed into out_sealed with has_sealed true, sample rejected — raise the budget and re-push); kInvalidArgument for unknown quantity codes.
+ */
   [[nodiscard]] core::Status push(const world::Snapshot &snap, SampleBlock &out_sealed,
                                  bool &has_sealed) {
     const std::size_t channels = snap.signal_count();
@@ -427,6 +515,12 @@ public:
   // Seal pending ticks into an owned block. Empty pending produces no
   // block (`has_block` false) and keeps the latched schema for the next
   // push; non-empty pending moves out and keeps the schema latched.
+/**
+ * @brief Seal pending ticks into an owned block (empty pending produces no block and keeps the latched schema).
+ * @param[out] out sealed block when has_block is true.
+ * @param[out] has_block true when pending ticks moved out (schema stays latched for subsequent pushes).
+ * @return kOk always (flush never fails).
+ */
   [[nodiscard]] core::Status flush(SampleBlock &out, bool &has_block) {
     if (!has_schema_ || active_.steps.empty()) {
       has_block = false;

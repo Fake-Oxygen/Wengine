@@ -1,3 +1,6 @@
+// test_logic_seq_state: sequential pool state — fresh/empty init, attach,
+// reinit retaining Q and serials, detach retiring serials, slot recycle with
+// fresh serials, and reset lifetimes. Guards serial-stability regressions.
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"

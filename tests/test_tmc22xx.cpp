@@ -1,3 +1,6 @@
+// test_tmc22xx: TMC22xx stepper-driver IC solver goldens (current/Rdson/
+// chop/velocity/stealth/standby/thermal/UART/OTP/CRC equations) plus the
+// `ic tmc22xx` CLI glue, shell run paths, and completion. Guards driver math.
 #include "wengine/cli/command_registry.hpp"
 #include "wengine/cli/ic/tmc22xx.hpp"
 #include "wengine/cli/ic_dispatch.hpp"

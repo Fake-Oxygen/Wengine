@@ -1,5 +1,31 @@
 #pragma once
 
+/**
+ * @file
+ * Structural optimization passes (O0/O1) plus the shared
+ * classification machinery of the optimize stage of the logic pipeline
+ * (netlist parse -> state -> eval -> layout/topo -> optimize):
+ * recount/retag/classify bookkeeping, dead-gate elimination, BUF/
+ * double-NOT bypass, constant folding, and the De Morgan fusion
+ * sweep. optimize.hpp only orchestrates these into the O0/O1
+ * fixpoint; the O2 fresh build lives in optimize_o2_*.hpp and the
+ * barrier vocabulary in optimize_barrier.hpp.
+ *
+ * What each pass preserves: function (truth table) exactly; the net
+ * never grows (O0 passes); sequential gates are opaque barriers — no
+ * pass retypes, folds, drops, bypasses, fuses, or rewires through a
+ * state element or its input pins (feeds_seq guards every rewire).
+ * Cost class: linear sweeps over slots/inputs per fixpoint iteration
+ * (fixed stack arrays, no allocation).
+ *
+ * Dependency rules: header-only, allocation-free, exception-free,
+ * noexcept throughout. Lives in the wengine::logic::detail seam —
+ * internal to the optimizer family; depends on eval/netlist/types
+ * plus the barrier and exact seams. Never depends on CLI types.
+ * Consumers: optimize.hpp (fixpoint driver) and optimize_o2_*.hpp
+ * (classify/recount reuse).
+ */
+
 #include "wengine/core/status.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
@@ -15,6 +41,12 @@ namespace wengine::logic {
 
 namespace detail {
 
+/**
+ * @brief Recompute output_fanout for every gate from the wire list
+ *        (deterministic; avoids drift after direct driver surgery).
+ *
+ * @param[in,out] nl Netlist whose fanout counters are rebuilt in place.
+ */
 inline void recount_fanout(Netlist &nl) noexcept {
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     nl.gates[s].output_fanout = 0;
@@ -36,9 +68,16 @@ inline void recount_fanout(Netlist &nl) noexcept {
 // detach_slot_ties lives in tie_set.hpp (the TieSet seam owns all tie_rep
 // writes); this file calls it for constant-collapse paths.
 
-// Fresh per-kind counter after an in-place kind change: display names stay
-// unique (resolve_gate returns the first slot match, so duplicates would be
-// ambiguous). Deterministic: sweep order is fixed.
+/**
+ * @brief Fresh per-kind counter after an in-place kind change: display
+ *        names stay unique (resolve_gate returns the first slot match,
+ *        so duplicates would be ambiguous). Deterministic: sweep order
+ *        is fixed.
+ *
+ * @param[out] nl Netlist holding the gate and counters.
+ * @param[in] slot Slot to retag.
+ * @param[in] kind New kind.
+ */
 inline void retag(Netlist &nl, std::uint16_t slot, GateKind kind) noexcept {
   const std::uint8_t ord = kind_ordinal(kind);
   Gate &g = nl.gates[slot];
@@ -49,9 +88,15 @@ inline void retag(Netlist &nl, std::uint16_t slot, GateKind kind) noexcept {
   }
 }
 
-// Classify every live gate output in topo order. Ignored dangling inputs
-// read as C0 (they tie low in eval); wired inputs inherit the driver's
-// label; dangling block inputs are V.
+/**
+ * @brief Classify every live gate output in topo order: ignored
+ *        dangling inputs read as C0 (they tie low in eval); wired inputs
+ *        inherit the driver's label; dangling block inputs are V.
+ *        Sequential outputs always classify as V (opaque barrier).
+ *
+ * @param[in] nl Netlist to classify (topology must be compiled).
+ * @param[out] label Per-slot Constness labels.
+ */
 inline void classify(const Netlist &nl, Constness *label) noexcept {
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     label[s] = Constness::kV;
@@ -118,9 +163,17 @@ inline void classify(const Netlist &nl, Constness *label) noexcept {
   }
 }
 
-// Delete every live gate that cannot reach a root sink. Roots are the
-// original sinks (see header note): optimization orphans vanish, user
-// logic (including ignored-output cones) is never deleted.
+/**
+ * @brief Delete every live gate that cannot reach a root sink.
+ *
+ * Roots are the original sinks (see optimize.hpp): optimization orphans
+ * vanish, user logic (including ignored-output cones) is never deleted.
+ *
+ * @param[out] nl Netlist to prune.
+ * @param[in] is_root Per-slot root flags (barrier roots: original sinks
+ *            plus every live sequential gate).
+ * @return True when any gate was removed.
+ */
 inline bool dce_pass(Netlist &nl, const bool *is_root) noexcept {
   bool keep[kMaxGates] = {};
   follow_drivers(nl, is_root, keep);
@@ -137,10 +190,18 @@ inline bool dce_pass(Netlist &nl, const bool *is_root) noexcept {
   return changed;
 }
 
-// Rewire every input currently driven by `from_slot` to `target`. When the
-// target dangles, the new block input must be visible: clear its ignored
-// bit (the mark was inert while wired; keeping it would silently tie the
-// pin low instead of exposing the real dependency).
+/**
+ * @brief Rewire every input currently driven by from_slot to target.
+ *
+ * When the target dangles, the new block input must be visible: clear
+ * its ignored bit (the mark was inert while wired; keeping it would
+ * silently tie the pin low instead of exposing the real dependency).
+ *
+ * @param[out] nl Netlist receiving the rewiring.
+ * @param[in] from_slot Driver slot being replaced.
+ * @param[in] target Replacement driver (kNoDriver exposes a dangling
+ *            block input).
+ */
 inline void rewire_users(Netlist &nl, std::uint16_t from_slot, std::uint16_t target) noexcept {
   for (std::uint16_t u = 0; u < kMaxGates; ++u) {
     Gate &user = nl.gates[u];
@@ -159,21 +220,36 @@ inline void rewire_users(Netlist &nl, std::uint16_t from_slot, std::uint16_t tar
   }
 }
 
-// True when any live sequential gate reads gate `s`. Prefer the
-// precomputed feeds_seq bit (see optimize_barrier.hpp) inside passes;
-// this helper stays for single-shot queries.
+/**
+ * @brief True when any live sequential gate reads gate s.
+ *
+ * Prefer the precomputed feeds_seq bit (see optimize_barrier.hpp)
+ * inside passes; this helper stays for single-shot queries.
+ *
+ * @param[in] nl Netlist to scan.
+ * @param[in] s Slot to test.
+ * @return True when a live sequential gate is driven by s.
+ */
 inline bool has_live_seq_user(const Netlist &nl, std::uint16_t s) noexcept {
   bool feeds[kMaxGates] = {};
   compute_feeds_seq(nl, feeds);
   return s < kMaxGates && feeds[s];
 }
 
-// BUF(x) -> x and NOT(NOT(x)) -> x for internal gates (fanout > 0; block
-// outputs are preserved for interface stability). Single ascending sweep
-// collapses chains regardless of slot order. Gates feeding a sequential
-// gate are never removed (opaque barrier: flop/latch input pins freeze).
-// feeds_seq is the precomputed barrier bit (nullptr == no sequential gates,
-// skip the check).
+/**
+ * @brief BUF(x) to x and NOT(NOT(x)) to x for internal gates (fanout
+ *        greater than 0; block outputs are preserved for interface
+ *        stability).
+ *
+ * Single ascending sweep collapses chains regardless of slot order.
+ * Gates feeding a sequential gate are never removed (opaque barrier:
+ * flop/latch input pins freeze). feeds_seq is the precomputed barrier
+ * bit (nullptr means no sequential gates: skip the check).
+ *
+ * @param[out] nl Netlist to simplify.
+ * @param[in] feeds_seq Per-slot sequential-user flags, or nullptr.
+ * @return True when any gate was bypassed.
+ */
 inline bool bypass_pass(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
   recount_fanout(nl);
   bool changed = false;
@@ -212,14 +288,30 @@ inline bool bypass_pass(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
   return changed;
 }
 
-// Drop every input of gate `s` whose class matches (drop_any drops all C0/C1
-// inputs; otherwise only drop_c). Odd C1 count flips XOR<->XNOR when asked.
-// Single remainders become BUF (AND/OR/XOR) or NOT (NAND/NOR/XNOR). An
-// all-constant gate is left alone (label-only; the caller collapses roots
-// and DCE removes the rest). Remaining inputs are all varying, so the gate
-// relabels to V. Tied pins are always varying (dangling, non-ignored), so
-// dropped pins are untied — but kept tied pins shift indices, so their
-// classes re-elect around the new flats (outside members follow).
+/**
+ * @brief Drop constant inputs of gate s (drop_any drops all C0/C1
+ *        inputs; otherwise only drop_c). Odd C1 count flips XOR to XNOR
+ *        when asked.
+ *
+ * Single remainders become BUF (AND/OR/XOR) or NOT (NAND/NOR/XNOR). An
+ * all-constant gate is left alone (label-only; the caller collapses
+ * roots and DCE removes the rest). Remaining inputs are all varying, so
+ * the gate relabels to V. Tied pins are always varying (dangling,
+ * non-ignored), so dropped pins are untied — but kept tied pins shift
+ * indices, so their classes re-elect around the new flats (outside
+ * members follow).
+ *
+ * @param[out] nl Netlist holding the gate.
+ * @param[in] s Slot to compact.
+ * @param[out] label Per-slot Constness labels (s relabels to V).
+ * @param[in] ic Per-input Constness of s.
+ * @param[in] drop_any True drops every constant input.
+ * @param[in] drop_c Constant class to drop when drop_any is false.
+ * @param[in] flip True flips XOR/XNOR on an odd dropped-C1 count.
+ * @return True when inputs were dropped.
+ * @note Opaque barrier: sequential gates are never re-typed (returns
+ *       false at once).
+ */
 inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Constness *ic, bool drop_any, Constness drop_c, bool flip) noexcept {
   Gate &g = nl.gates[s];
   if (is_frozen_kind(g.kind)) {
@@ -300,9 +392,19 @@ inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Co
   return true;
 }
 
-// Constant folding + annihilator/identity sweep (forward topo order, labels
-// updated in place so one sweep propagates whole chains). Assumes a fresh
-// topology on entry; leaves dirty when structural.
+/**
+ * @brief Constant folding plus annihilator/identity sweep (forward topo
+ *        order, labels updated in place so one sweep propagates whole
+ *        chains). Assumes a fresh topology on entry; leaves dirty when
+ *        structural.
+ *
+ * @param[out] nl Netlist to fold.
+ * @param[in] is_root Per-slot root flags (constant roots collapse in
+ *            place so outputs stay positional).
+ * @return True when the net changed.
+ * @note Opaque barrier: frozen (sequential) gates are never folded or
+ *       dropped; constant roots collapse to canonical AND/NAND form.
+ */
 inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
   Constness label[kMaxGates];
   classify(nl, label);
@@ -424,10 +526,22 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
   return changed;
 }
 
-// De Morgan bubble-push (O1): fuse every NOT driven by a live gate into the
-// complementary kind in place (same slot, fresh counter). NOT(BUF) rewires
-// through; output double-negations are preserved (interface stability).
-// feeds_seq is the precomputed barrier bit (nullptr == no sequential gates).
+/**
+ * @brief De Morgan bubble-push (O1): fuse every NOT driven by a live
+ *        gate into the complementary kind in place (same slot, fresh
+ *        counter).
+ *
+ * NOT(BUF) rewires through; output double-negations are preserved
+ * (interface stability). feeds_seq is the precomputed barrier bit
+ * (nullptr means no sequential gates).
+ *
+ * @param[out] nl Netlist to fuse.
+ * @param[in] feeds_seq Per-slot sequential-user flags, or nullptr.
+ * @return True when any fusion fired.
+ * @note Opaque barrier: never fuses through a state-element driver and
+ *       never rewires a sequential-gate input pin. Tie classes of fused
+ *       pins follow their source counterparts.
+ */
 inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
   recount_fanout(nl);
   bool changed = false;

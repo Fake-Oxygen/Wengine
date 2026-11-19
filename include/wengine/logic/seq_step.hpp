@@ -1,64 +1,60 @@
 #pragma once
 
-// Scalar single-step sequential eval (LOGIC-V2-SEQ4 + 004-sr-d-latches).
-//
-// Zero-delay stepper for edge-triggered DFF/JK/T plus level-sensitive
-// DLATCH/SRLATCH, with deterministic end-of-step evaluation. One call
-// advances every edge flop by one rising edge and re-settles every latch
-// from the current nets:
-//   edge kinds (DFF/JK/T): CLK pins are validated Low/High but do not
-//   gate; the edge itself is the call (same as the signals two-phase
-//   convention where generators evaluate at time T and sums commit at T+1).
-//   level kinds (DLATCH/SRLATCH): Q resolves immediately from the settled
-//   nets with no advance (transparent D follows D while EN is High and
-//   holds while EN is Low; SR sets/resets/holds, S=R=1 refused loudly).
-//   Advances never gate level Q.
-//
-// Two-phase (mirrors signals: generators then sums):
-//   Phase 1: combinational eval at time T with OLD Qs + block inputs.
-//   Level settle: every latch's inputs resolved from phase 1, in slot
-//     order; DLATCH Q follows/holds, SR holds (US2 adds set/reset plus
-//     the S=R=1 refusal). Committed in slot order (parallel update).
-//   Snapshot: every edge flop's D (input 0) resolved from the
-//     level-settled phase 1, in slot order.
-//   Commit: all Qs updated from snapshots, in slot order (parallel update —
-//     no ordering dependency, swaps and counters behave synchronously).
-//   Phase 2: combinational re-eval with NEW Qs for block outputs (zero-delay
-//     settling, so outputs are end-of-step values at T+1).
-//
-// Rules (SEQ4 + 004):
-// - Rising-edge only for edge kinds. CLK (DFF input 1, JK input 2, T
-//   input 1) must resolve to kLow/kHigh; HighZ/Unknown fail loudly. The
-//   value does not gate the update. DLATCH/SR never snapshot from an
-//   edge (level-exempt); their frozen Q holds across any number of
-//   advances while a transparent D latch re-tracks D at every step top.
-// - DLATCH (004): EN=1 transparent (Q follows D), EN=0 frozen (Q holds,
-//   D ignored). Resolved in the level settle, visible with no advance.
-// - SRLATCH (004, US2): S/R level arm lands with set/reset plus the loud
-//   S=R=1 refusal; until then the level settle validates S/R and holds Q.
-// - Full-control DFFs (5 inputs: D/CLK/RST/SET/EN) resolve with total
-//   priority RST > SET > EN-hold > D (reset wins simultaneous RST+SET).
-//   JK/T resolve their excitation tables instead (003-jk-t-flops):
-//   JK J=0,K=0 hold / J=0,K=1 reset / J=1,K=0 set / J=1,K=1 toggle from
-//   pre-edge Q; T=0 hold, T=1 toggle.
-//   RST/SET are asynchronous (see apply_async_controls below); EN gates
-//   only the edge capture. Unconnected RST/SET read inactive (kLow);
-//   unconnected EN reads asserted (kHigh, FR-008). Bare 2-input flops
-//   behave exactly as before (controls absent → inactive).
-// - X/Z rejected loudly: block inputs must be kLow/kHigh (same rule as
-//   solve()), flop Qs are always kLow/kHigh by construction (power-on kLow,
-//   commits only write snapshots resolved to kLow/kHigh); any other value
-//   fails without committing.
-// - Determinism: slot-order snapshot + slot-order commit; sync via
-//   init_seq_state is idempotent, so calling seq_step every step (or
-//   sporadically) keeps state. No allocation, no exceptions, noexcept.
-// - solve()/eval_block_word() stay combinational-only (untouched by SEQ4):
-//   do not call them on nets with sequential gates — topo::rebuild(kAll) sees
-//   ALL edges and fails loudly on flop feedback loops by design; use
-//   validate via topo::validate(kCombOnly) + seq_step() instead.
-//
-// Header-only, allocation-free, exception-free, noexcept throughout.
-// Fixed stack arrays (kMaxGates bounds), no syscalls, no iostream.
+/**
+ * @file
+ * Scalar single-step sequential eval: the clocking stage of the logic
+ * pipeline (netlist parse -> state -> eval -> layout/topo -> optimize).
+ * Zero-delay stepper for edge-triggered DFF/JK/T plus level-sensitive
+ * DLATCH/SRLATCH, with deterministic end-of-step evaluation. One call
+ * advances every edge flop by one rising edge and re-settles every latch
+ * from the current nets.
+ *
+ * Edge kinds (DFF/JK/T): CLK pins are validated Low/High but do not
+ * gate; the edge itself is the call (same as the signals two-phase
+ * convention where generators evaluate at time T and sums commit at
+ * T+1). Level kinds (DLATCH/SRLATCH): Q resolves immediately from the
+ * settled nets with no advance (transparent D follows D while EN is
+ * High and holds while EN is Low; SR sets/resets/holds, S=R=1 refused
+ * loudly). Advances never gate level Q.
+ *
+ * Two-phase (mirrors signals: generators then sums): phase 1 is
+ * combinational eval at time T with OLD Qs plus block inputs; the level
+ * settle resolves every latch's inputs from phase 1, in slot order
+ * (committed in slot order — parallel update); every edge flop's D
+ * snapshots from the level-settled phase 1, in slot order; all Qs commit
+ * from snapshots, in slot order (parallel update — no ordering
+ * dependency, so swaps and counters behave synchronously); phase 2 is
+ * combinational re-eval with NEW Qs for block outputs (zero-delay
+ * settling, so outputs are end-of-step values at T+1).
+ *
+ * Rules: rising-edge only for edge kinds; full-control DFFs (5 inputs:
+ * D/CLK/RST/SET/EN) resolve with total priority RST > SET > EN-hold > D
+ * (reset wins simultaneous RST+SET); JK resolves its excitation table
+ * (J=0,K=0 hold / J=0,K=1 reset / J=1,K=0 set / J=1,K=1 toggle from
+ * pre-edge Q), T holds on 0 and toggles on 1; RST/SET are asynchronous
+ * (see apply_async_controls); EN gates only the edge capture;
+ * unconnected RST/SET read inactive (kLow), unconnected EN reads
+ * asserted (kHigh). Bare 2-input flops behave exactly as before
+ * (controls absent read inactive). X/Z rejected loudly: block inputs
+ * must be kLow/kHigh (same rule as solve()), flop Qs are always
+ * kLow/kHigh by construction (power-on kLow, commits only write
+ * snapshots resolved to kLow/kHigh); any other value fails without
+ * committing.
+ *
+ * solve()/eval_block_word() stay combinational-only: do not call them on
+ * nets with sequential gates — topo::rebuild(kAll) sees ALL edges and
+ * fails loudly on flop feedback loops by design; use topo::validate
+ * with EdgeFilter::kCombOnly plus seq_step() instead.
+ *
+ * Dependency rules (docs/logic.md section 4): header-only,
+ * allocation-free, exception-free; fixed stack arrays (kMaxGates
+ * bounds), no syscalls, no iostream. Determinism: slot-order snapshot
+ * plus slot-order commit; sync via init_seq_state is idempotent, so
+ * calling seq_step every step (or sporadically) keeps state. Logic is a
+ * standalone domain: this header must never depend on CLI types.
+ * Consumers: the CLI step/poke/peek verbs, the SequentialSolver engine
+ * path, and the test_logic_seq_step suite.
+ */
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/eval.hpp"
@@ -76,9 +72,18 @@ namespace wengine::logic {
 
 namespace detail {
 
-// Subset-step membership (T013): a null member list means every live flop
-// (the global SEQ4 edge); otherwise only listed slots snapshot/commit.
-// Linear scan — member counts are small and stepping is CLI-paced.
+/**
+ * @brief Subset-step membership (T013: selective clock domains): a
+ *        null member list means every live flop (the global edge);
+ *        otherwise only listed slots snapshot/commit.
+ *
+ * Linear scan — member counts are small and stepping is CLI-paced.
+ *
+ * @param[in] members Member slots, or nullptr for every live flop.
+ * @param[in] n_members Member count (ignored when members is nullptr).
+ * @param[in] slot Slot to test.
+ * @return True when slot steps on this edge.
+ */
 [[nodiscard]] inline bool is_step_member(const std::uint16_t *members, std::size_t n_members, std::uint16_t slot) noexcept {
   if (members == nullptr) {
     return true;
@@ -91,10 +96,23 @@ namespace detail {
   return false;
 }
 
-// Phase 1 combinational eval at time T with OLD Qs (shared): seeds
-// gate_out with flop Qs, then settles combinational gates in the
-// deterministic comb order. Used by the stepper snapshot and the
-// async-apply path alike so wired RST/SET resolve identically.
+/**
+ * @brief Phase 1 combinational eval at time T with OLD Qs (shared):
+ *        seeds gate_out with flop Qs, then settles combinational gates
+ *        in the deterministic comb order.
+ *
+ * Used by the stepper snapshot and the async-apply path alike so wired
+ * RST/SET resolve identically.
+ *
+ * @param[in] nl Netlist to evaluate.
+ * @param[in] st Clocked state providing OLD Qs.
+ * @param[in] resolved Pre-resolved dangling values from fill_resolved.
+ * @param[out] gate_out Per-slot settled outputs.
+ * @param[out] comb_order Combinational order from compile_comb_order.
+ * @param[out] n_comb Number of combinational slots emitted.
+ * @return kOk on success; kInvalidArgument on combinational cycles,
+ *         dangling drivers, or X/Z inputs.
+ */
 [[nodiscard]] inline core::Status eval_comb_phase1(const Netlist &nl, const SeqState &st, const LogicValue *resolved,
                                                    LogicValue *gate_out, std::uint16_t *comb_order,
                                                    std::size_t &n_comb) noexcept {
@@ -123,12 +141,24 @@ namespace detail {
   return core::Status::success();
 }
 
-// DFF control-pin resolution (full-control flops). Wired pins resolve the
-// net (with NQ polarity); dangling pins read the pre-resolved block value
-// (poke value, tie share, or dangling Low — except ignored dangling EN,
-// which reads kHigh: FR-008 unconnected enable is asserted). Pins absent
-// from the flop's fan-in read the inactive default (RST/SET kLow,
-// EN kHigh). X/Z anywhere fails loudly. Pure readout: no state mutated.
+/**
+ * @brief DFF control-pin resolution (full-control flops).
+ *
+ * Wired pins resolve the net (with NQ polarity); dangling pins read the
+ * pre-resolved block value (poke value, tie share, or dangling Low —
+ * except ignored dangling EN, which reads kHigh: FR-008 unconnected
+ * enable is asserted). Pins absent from the flop's fan-in read the inactive
+ * default (RST/SET kLow, EN kHigh). X/Z anywhere fails loudly. Pure
+ * readout: no state mutated.
+ *
+ * @param[in] nl Netlist holding drivers and ignore marks.
+ * @param[in] slot Flop slot.
+ * @param[in] input Control input index (2 RST, 3 SET, 4 EN).
+ * @param[in] gate_out Per-slot settled gate outputs.
+ * @param[in] resolved Pre-resolved dangling values.
+ * @param[out] out Resolved control value.
+ * @return True on success; false on X/Z values.
+ */
 [[nodiscard]] inline bool resolve_control(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
                                          const LogicValue *gate_out, const LogicValue *resolved,
                                          LogicValue &out) noexcept {
@@ -148,17 +178,34 @@ namespace detail {
   return resolve_input(nl, slot, input, gate_out, resolved, out);
 }
 
-// Level-sensitive kinds (004-sr-d-latches): DLATCH (D + EN) and SRLATCH
-// (S + R). The edge snapshot never touches these; they resolve here, in
-// slot order, from the phase-1 settled nets + OLD Q, then commit in slot
-// order (parallel update among latches, same discipline as the edge
-// commit). Resolve-all-then-commit: any X/Z (or, from US2, S=R=1)
-// fails with state untouched. Committed Qs are re-seeded into gate_out
-// so edge flops wired from latch Q see end-of-level values.
+/**
+ * @brief True for the level-sensitive kinds (DLATCH and SRLATCH),
+ *        resolved in the level settle instead of the edge snapshot.
+ *
+ * @param[in] k Kind to test.
+ * @return True for kDlatch/kSrlatch, false otherwise.
+ */
 [[nodiscard]] inline bool is_level_kind(GateKind k) noexcept {
   return k == GateKind::kDlatch || k == GateKind::kSrlatch;
 }
 
+/**
+ * @brief Level settle for DLATCH (D + EN) and SRLATCH (S + R).
+ *
+ * The edge snapshot never touches these; they resolve here, in slot
+ * order, from the phase-1 settled nets plus OLD Q, then commit in slot
+ * order (parallel update among latches, same discipline as the edge
+ * commit). Resolve-all-then-commit: any X/Z (or S=R=1) fails with state
+ * untouched. Committed Qs are re-seeded into gate_out so edge flops
+ * wired from latch Q see end-of-level values.
+ *
+ * @param[in] nl Netlist holding the latches.
+ * @param[out] st Pool receiving the committed latch Qs.
+ * @param[in] resolved Pre-resolved dangling values.
+ * @param[out] gate_out Phase-1 outputs, re-seeded with new latch Qs.
+ * @return kOk on success; kInvalidArgument on X/Z latch inputs or an
+ *         illegal S=R=1 net (state untouched).
+ */
 [[nodiscard]] inline core::Status apply_level_resolve(const Netlist &nl, SeqState &st, const LogicValue *resolved,
                                                      LogicValue *gate_out) noexcept {
   LogicValue next_q[kMaxGates];
@@ -214,13 +261,27 @@ namespace detail {
 
 } // namespace detail
 
-// Single rising edge over a flop subset (T013: selective clock domains).
-// Null `members` steps every live flop (the global SEQ4 edge); otherwise
-// only listed slots snapshot/commit, in slot order (parallel update among
-// members, same as the global edge). Combinational settle (phase 1 and
-// phase 2) is always whole-netlist, so observed outputs are end-of-step
-// values. Otherwise the SEQ4 contract above holds unchanged: validation
-// first, untouched state on failure, no Netlist topology mutation.
+/**
+ * @brief Single rising edge over a flop subset (T013: selective clock
+ *        domains).
+ *
+ * Null members steps every live flop (the global edge); otherwise only
+ * listed slots snapshot/commit, in slot order (parallel update among
+ * members, same as the global edge). Combinational settle (phase 1 and
+ * phase 2) is always whole-netlist, so observed outputs are end-of-step
+ * values. Otherwise the file contract above holds unchanged: validation
+ * first, untouched state on failure, no Netlist topology mutation.
+ *
+ * @param[out] nl Netlist to step (topology validated, never mutated).
+ * @param[out] st Pool synced (via init_seq_state) and committed.
+ * @param[in] block_inputs Input values in interface order.
+ * @param[out] block_outputs End-of-step values in interface order.
+ * @param[in] members Member slots to step, or nullptr for every live flop.
+ * @param[in] n_members Member count (ignored when members is nullptr).
+ * @return kOk on success; kInvalidArgument on topology errors
+ *         (combinational cycle under kCombOnly), size mismatches, X/Z
+ *         inputs or state, or S=R=1 nets (state untouched).
+ */
 [[nodiscard]] inline core::Status seq_step_filtered(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
                                                    std::span<LogicValue> block_outputs, const std::uint16_t *members,
                                                    std::size_t n_members) noexcept {
@@ -411,21 +472,42 @@ namespace detail {
   return core::Status::success();
 }
 
-// Single rising edge over the whole netlist (global clock): every live
-// flop steps. Exact SEQ4 semantics, via the filtered core.
+/**
+ * @brief Single rising edge over the whole netlist (global clock):
+ *        every live flop steps. Exact SEQ4 semantics, via the filtered
+ *        core.
+ *
+ * @param[out] nl Netlist to step.
+ * @param[out] st Pool synced and committed.
+ * @param[in] block_inputs Input values in interface order.
+ * @param[out] block_outputs End-of-step values in interface order.
+ * @return kOk on success; kInvalidArgument on any seq_step_filtered
+ *         failure (state untouched).
+ */
 [[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
                                           std::span<LogicValue> block_outputs) noexcept {
   return seq_step_filtered(nl, st, block_inputs, block_outputs, nullptr, 0);
 }
 
-// Immediate async-apply for full-control DFFs (FR-002/FR-003): resolves
-// RST/SET nets for every live 5-input DFF and forces Q per priority
-// (RST→0, else SET→1), in slot order — taking effect with no clock
-// advance. Session calls this after every control-net mutation
-// (poke/wire/tie/load) and at step top; it never touches cycle counters,
-// EN, or D, and is a success no-op on nets without full-control flops.
-// Resolve-all-then-commit: X/Z on any resolved control fails loudly with
-// state untouched. Same validation/size contract as seq_step_filtered.
+/**
+ * @brief Immediate async-apply for full-control DFFs
+ *        (FR-002/FR-003): resolves RST/SET nets for every live 5-input
+ *        DFF and forces Q per priority (RST to 0, else SET to 1), in
+ *        slot order — taking effect with no clock advance.
+ *
+ * Session calls this after every control-net mutation (poke/wire/tie/load)
+ * and at step top; it never touches cycle counters, EN, or D, and is a
+ * success no-op on nets without full-control flops.
+ * Resolve-all-then-commit: X/Z on any resolved control fails loudly with
+ * state untouched. Same validation/size contract as seq_step_filtered.
+ *
+ * @param[out] nl Netlist holding the control nets.
+ * @param[out] st Pool receiving forced Qs.
+ * @param[in] block_inputs Input values in interface order.
+ * @return kOk on success (including no-op nets); kInvalidArgument on
+ *         topology errors, size mismatches, or X/Z controls (state
+ *         untouched).
+ */
 [[nodiscard]] inline core::Status apply_async_controls(Netlist &nl, SeqState &st,
                                                       std::span<const LogicValue> block_inputs) noexcept {
   init_seq_state(st, nl);
@@ -480,16 +562,27 @@ namespace detail {
   return core::Status::success();
 }
 
-// Immediate level-settle for DLATCH/SRLATCH (004-sr-d-latches): resolves
-// latch nets and commits Q per the level rule (transparent D follows D
-// while EN is High, frozen hold otherwise; SR holds in US1, set/reset
-// plus S=R=1 refusal from US2), in slot order — taking effect with no
-// clock advance. Session calls this after every control-net mutation
-// (poke/wire/tie/load) and at step top; it never touches cycle counters
-// or edge-flop state, and is a success no-op on nets without latches.
-// Resolve-all-then-commit: X/Z on any resolved latch input fails loudly
-// with state untouched. Same validation/size contract as
-// apply_async_controls.
+/**
+ * @brief Immediate level-settle for DLATCH/SRLATCH
+ *        (004-sr-d-latches): resolves latch nets and commits Q per the
+ *        level rule (transparent D follows D while EN is High, frozen
+ *        hold otherwise; SR holds, set/reset plus S=R=1 refusal), in
+ *        slot order — taking effect with no clock advance.
+ *
+ * Session calls this after every control-net mutation (poke/wire/tie/load)
+ * and at step top; it never touches cycle counters or edge-flop state,
+ * and is a success no-op on nets without latches.
+ * Resolve-all-then-commit: X/Z on any resolved latch input fails loudly
+ * with state untouched. Same validation/size contract as
+ * apply_async_controls.
+ *
+ * @param[out] nl Netlist holding the latch nets.
+ * @param[out] st Pool receiving settled latch Qs.
+ * @param[in] block_inputs Input values in interface order.
+ * @return kOk on success (including no-op nets); kInvalidArgument on
+ *         topology errors, size mismatches, X/Z inputs, or S=R=1 nets
+ *         (state untouched).
+ */
 [[nodiscard]] inline core::Status apply_level_latches(Netlist &nl, SeqState &st,
                                                       std::span<const LogicValue> block_inputs) noexcept {
   init_seq_state(st, nl);
@@ -518,9 +611,17 @@ namespace detail {
   return detail::apply_level_resolve(nl, st, resolved, gate_out);
 }
 
-// Convenience: step with block outputs discarded (state observed via
-// SeqState.q / find_seq_serial). Computes the same end-of-step values;
-// only the caller-visible copy is dropped.
+/**
+ * @brief Step with block outputs discarded (state observed via SeqState
+ *        Q / find_seq_serial). Computes the same end-of-step values;
+ *        only the caller-visible copy is dropped.
+ *
+ * @param[out] nl Netlist to step.
+ * @param[out] st Pool synced and committed.
+ * @param[in] block_inputs Input values in interface order.
+ * @return kOk on success; kInvalidArgument on any seq_step failure
+ *         (state untouched).
+ */
 [[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs) noexcept {
   const std::size_t n_out = block_output_count(nl);
   LogicValue scratch[kMaxGates];

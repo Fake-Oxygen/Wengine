@@ -1,10 +1,29 @@
 #pragma once
 
+/**
+ * @file
+ * The `s0` guided-form definition (F3 browser entry): S0 meter pulse math
+ * over the rate/power/energy/pulses/convert/full modes. The form composes
+ * one `s0 ...` argv line for the shared CLI path and never validates:
+ * empty fields are omitted and the CLI owns every error, so unit text is
+ * parsed by the same `units::` suffix tables as the REPL. Consumers: the
+ * registry in `wengine/tui/forms.hpp`, the form pane in
+ * `src/tui/panes_forms.cpp`.
+ */
+
 #include "wengine/cli/commands.hpp"
 #include "wengine/tui/forms/types.hpp"
 
 namespace wengine::tui::forms::definitions {
 
+/**
+ * @brief Build the `s0` guided-form definition.
+ *
+ * @return The FormDef for `s0`: the mode positional picker
+ *         (Space-opened choice dialog) plus power/freq/pulses/const/
+ *         time/energy/U/I/pf fields, with one profile per mode and an
+ *         `auto` catch-all fallback.
+ */
 [[nodiscard]] inline FormDef s0() {
   using cli::commands::S0Spec;
   using definition::all_arguments;

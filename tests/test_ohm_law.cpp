@@ -1,3 +1,5 @@
+// test_ohm_law: OhmLawSolver goldens — solve_from_ui (R = U/I, P = U*I)
+// plus the solve_from_ir / solve_from_ur round-trips. Guards law regressions.
 #include "wengine/solvers/ohm_law.hpp"
 
 #include <cassert>

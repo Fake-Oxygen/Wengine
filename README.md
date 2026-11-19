@@ -28,6 +28,22 @@ cmake -S . -B build
 cmake --build build
 ```
 
+### Documentation suite
+
+The complete documentation (user guide, developer guide, API reference,
+test/benchmark/example catalogs) is generated as a logically indexed
+HTML site with Sphinx + MyST + Doxygen + Breathe:
+
+```sh
+pip install -r docs/requirements.txt   # pinned docs toolchain (once)
+docs/build.sh                          # doxygen → sphinx; output in build/docs/html/
+python3 docs/audit_catalogs.py        # catalog completeness (tests/benchmarks/examples)
+python3 docs/check_api_coverage.py     # API comment coverage (include/wengine/**)
+```
+
+See `docs/dev/regeneration.md` for the refresh procedure after code
+changes.
+
 Options (CLI/tests/benchmarks default `ON`, GUI defaults `OFF`):
 
 ```sh
@@ -489,7 +505,7 @@ tests/  benchmarks/  examples/
 | `solvers` | `wengine/solvers/ohm_law.hpp`, `s0_pulse.hpp`, `i2c.hpp`, `ldo.hpp`, `led.hpp`, `projectile.hpp`, `signal.hpp`, `sequential.hpp`, `registry.hpp`, `solver_registry.hpp`, `run.hpp`, `signal_control.hpp` | Pure stepping/calculation functions, e.g. `OhmLawSolver::solve_from_ui/ir/ur`, `S0PulseSolver::frequency_hz/power_w_from_frequency/pulses_from_power_time`, `I2cBusSolver::solve_pullup/solve_series`, `LdoSolver::solve` (headroom/dropout, pass+quiescent power, efficiency, TJ), `LedSolver::solve` (series Rs, E12 pick, actual current, power-rating check), `ProjectileSolver::step`, `SignalSolver::step`, `SequentialSolver::step` (fixed-step flop/latch edge over the singleton sequential pool, driven by the nested `RunConfig` section) — no I/O; compile-time `SolverRegistry` catalog (mirrors the CLI registry); `ControlBus` step-boundary command drain with fixed channel order, last-writer-wins, and replay log (SIG-10). Part-specific datasheet calculators live apart in `wengine/solvers/ic/` (starter: `template.hpp`), all served through the single `ic` command |
 | `signal` | `wengine/signal/types.hpp`, `expr.hpp`, `table.hpp`, `lua.hpp`, `control.hpp` | Signal kinds/params/quantity tags, pure `eval_signal` closed forms, seeded splitmix64 noise, kind/quantity parsing + validation, single quantity table + `DimensionFor`/`stamp` typed binding, sum combinator (operands by stable serial), closed expression programs (RPN, from_chars parsing, div-by-zero/out-of-domain to Status), table CSV replay (linear interp, clamped, bit-exact hits), Lua scripting source (sandboxed 5.4 runtime in an isolated TU — this header is Lua-free), control-plane line protocol vocabulary (strict verb parsing + response builders, no state, no I/O) — no I/O; pool lives in `world` |
 | `core` | `wengine/core/status.hpp`, `solver.hpp`, `runner.hpp`, `run_config.hpp` | Unified errors: `Status`/`StatusCode` + `Result<T>` (no exceptions/heap strings), `to_exit_code`/`kExitOk/Runtime/Usage` mapping, `ISolver::step(State&, dt)` interface, `Runner` fixed-step loop (`run`/`advance`) |
-| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, expression programs, append-only table/script stores, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ stable particle index+generation + serial-carrying signal arrays, `select_signals` subset filter; `fill_snapshot`/`select_signals_into` reuse caller-owned capacity so steady emission is allocation-free, `take_snapshot` stays the owning-copy convenience), versioned binary save/load (v5; v4 loads with empty script ranges, v3 with zeroed custom columns, v2 with synthesized serials, v1 with empty signals) |
+| `world` | `wengine/world/entity.hpp`, `particles.hpp`, `signals.hpp`, `state.hpp`, `serialize.hpp` | `Entity` registry (freelist + generations), `Particles` SoA pool, `Signals` SoA pool (stable serials, sum operands, expression programs, append-only table/script stores, entity-attached), `State` (clock + entities + pools), deep-copy `Snapshot` (+ stable particle index+generation + serial-carrying signal arrays, `select_signals` subset filter; `fill_snapshot`/`select_signals_into` reuse caller-owned capacity so steady emission is allocation-free, `take_snapshot` stays the owning-copy convenience), versioned binary save/load (v6; v5/v4/v3/v2/v1 load with an empty sequential pool; v4 loads with empty script ranges, v3 with zeroed custom columns, v2 with synthesized serials, v1 with empty signals) |
 | `link` | `wengine/link/frame.hpp`, `protocol.hpp`, `socket_publisher.hpp`, `shm_publisher.hpp`, `control_server.hpp`, `uart_codec.hpp`, `uart_publisher.hpp` | Solver-agnostic `Frame` adapters (stable particle IDs) + versioned wire codec (SHM v3 72 B items, socket v3 70 B items); app-edge SHM publisher and POSIX TCP/UDP stream publishers (`wengine_link_net`), exact version/domain gates, compact UDP frames, and lag/loss accounting; domain-free TCP line server for the control plane (same package); UART serial publisher + control pump with COBS framing (same package) |
 | `emit` | `wengine/emit/sink.hpp`, `console_sink.hpp`, `csv_sink.hpp`, `signal_sink.hpp`, `routing.hpp` | `ISink::on_snapshot()` observers: human-readable console lines, replay-grade CSV log (`step,time,slot,entity_index,entity_generation,x,y,vx,vy` v3 with stable IDs, legacy 7-col still parses as unavailable, full double precision), signals CSV log (`step,time,sig_id,value,quantity`, exact round-trip + parser), routing wrappers (`SignalSubsetSink` serial subscriptions over a reused scratch buffer, `StrideSink` step-aligned decimation, drop counters); the snapshot reference is valid only for the call — retaining sinks copy or enqueue-owned before returning |
 | `physics` | `wengine/physics/components.hpp` | Component declarations solvers operate on |

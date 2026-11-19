@@ -1,5 +1,22 @@
 #pragma once
 
+/**
+ * @file
+ * Universal CLI argument parser: zero-copy tokenizer (string_view into
+ * the caller-owned line buffer), ArgCursor over token spans, and the
+ * parse_* scalar/quantity helpers. Goals: no exceptions, no allocations
+ * or string-stream machinery in the hot path, constexpr-friendly
+ * primitives, noexcept where possible. Unit knowledge (suffix-to-SI
+ * scale tables) lives in units/scales.hpp - the single source of truth;
+ * this header keeps only the generic parsing machinery plus thin
+ * per-quantity forwarders (parse_voltage, parse_quantity_value, and
+ * friends) and must never grow independent unit tables. Consumers: every
+ * command implementation plus the GUI, which includes this header alone
+ * with no wengine_cli link (suffix tables stay owned by units/).
+ * Named arguments take the `--key value` and `--key=value` forms; stray
+ * positionals are errors, never silently ignored.
+ */
+
 // Universal, high-performance CLI argument parser.
 //
 // Goals: zero-copy (string_view into caller-owned line buffer), no exceptions,
@@ -32,6 +49,11 @@ namespace wengine::cli {
 // resolved by *keeping both chars* to stay zero-copy — callers needing full
 // unescaping can copy. For the physics CLI this is the right perf tradeoff.
 
+/**
+ * @brief Skip leading ASCII whitespace (space, tab, newline, carriage return).
+ * @param[in] s View to trim (caller-owned storage).
+ * @return The view minus its leading whitespace run.
+ */
 [[nodiscard]] constexpr std::string_view trim_front(std::string_view s) noexcept {
   std::size_t i = 0;
   while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) {
@@ -42,6 +64,15 @@ namespace wengine::cli {
 
 // Consume one token from front of `rest` (mutated to remainder).
 // Returns empty view only when no token remains.
+/**
+ * @brief Consume one token from the front of a line.
+ * @param[in,out] rest Line remainder; advanced past the token and framing.
+ * @return The token view (outer quotes stripped for quoted tokens);
+ *         empty only when no token remains.
+ * @note Single/double quotes group words; escape handling inside quotes
+ *       keeps both characters (zero-copy), so callers needing full
+ *       unescaping must copy. Views alias the caller line.
+ */
 [[nodiscard]] constexpr std::string_view next_token(std::string_view &rest) noexcept {
   rest = trim_front(rest);
   if (rest.empty()) {
@@ -75,6 +106,13 @@ namespace wengine::cli {
 
 // Tokenize `line` into pre-allocated `out`. Returns token count (may exceed
 // out.size(); extra tokens are counted but not stored).
+/**
+ * @brief Tokenize a line into a pre-allocated span.
+ * @param[in] line Caller-owned line to split (views alias it).
+ * @param[out] out Span receiving one view per token, up to its size.
+ * @return Token count, possibly exceeding out.size() (extra tokens are
+ *         counted, not stored).
+ */
 inline std::size_t tokenize_into(std::string_view line,
                                  std::span<std::string_view> out) noexcept {
   std::size_t n = 0;
@@ -101,6 +139,14 @@ inline std::size_t tokenize_into(std::string_view line,
   return n;
 }
 
+/**
+ * @brief Tokenize a line into an owned vector of views.
+ * @param[in] line Caller-owned line to split (views alias it; it must
+ *                 outlive the result).
+ * @return One view per token, with a small head reserve to avoid regrowth.
+ * @note Allocates the vector (unlike tokenize_into); the views stay
+ *       zero-copy into the caller line.
+ */
 inline std::vector<std::string_view> tokenize_view(std::string_view line) {
   std::vector<std::string_view> out;
   out.reserve(8);
@@ -126,6 +172,12 @@ inline std::vector<std::string_view> tokenize_view(std::string_view line) {
 
 namespace detail {
 
+/**
+ * @brief Parse a bare number (from_chars, full consumption required).
+ * @param[in] s Text to parse (must be non-empty).
+ * @return Success with the value; failure (kInvalidArgument) on empty
+ *         text, partial consumption, or a malformed number.
+ */
 inline core::Result<double> parse_double_impl(std::string_view s) noexcept {
   if (s.empty()) {
     return core::Result<double>::failure("expected number, got empty");
@@ -140,6 +192,12 @@ inline core::Result<double> parse_double_impl(std::string_view s) noexcept {
   return core::Result<double>::success(v);
 }
 
+/**
+ * @brief Parse a bare integer (from_chars, full consumption required).
+ * @param[in] s Text to parse (must be non-empty).
+ * @return Success with the value; failure (kInvalidArgument) on empty
+ *         text, partial consumption, or a malformed integer.
+ */
 inline core::Result<long long> parse_i64_impl(std::string_view s) noexcept {
   if (s.empty()) {
     return core::Result<long long>::failure("expected integer, got empty");
@@ -154,6 +212,12 @@ inline core::Result<long long> parse_i64_impl(std::string_view s) noexcept {
   return core::Result<long long>::success(v);
 }
 
+/**
+ * @brief Parse a boolean word (1/true/on/yes and 0/false/off/no).
+ * @param[in] s Text to parse.
+ * @return Success with the value; failure (kInvalidArgument) on any
+ *         other word.
+ */
 inline core::Result<bool> parse_bool_impl(std::string_view s) noexcept {
   if (s == "1" || s == "true" || s == "on" || s == "yes") {
     return core::Result<bool>::success(true);
@@ -165,6 +229,12 @@ inline core::Result<bool> parse_bool_impl(std::string_view s) noexcept {
 }
 
 // Split "12.4kV" -> {"12.4", "kV"}. Numeric prefix = [0-9+-.eE], rest = suffix.
+/**
+ * @brief Split quantity text into numeric prefix plus unit suffix.
+ * @param[in] s Text to split (numeric prefix is the leading run of
+ *            sign/digit/dot/exponent characters).
+ * @return Pair of numeric text and suffix text (either may be empty).
+ */
 inline std::pair<std::string_view, std::string_view> split_number_suffix(
     std::string_view s) noexcept {
   std::size_t i = 0;
@@ -177,6 +247,15 @@ inline std::pair<std::string_view, std::string_view> split_number_suffix(
 
 // Suffix tables live in units/scales.hpp (single source of truth); this
 // stays generic over any such table.
+/**
+ * @brief Parse a number with an optional unit suffix from any table.
+ * @param[in] s Text to parse.
+ * @param[in] table Suffix-to-scale table (a units-owned row set; this
+ *                  stays generic over any such table).
+ * @return Bare SI value on an empty suffix, scaled SI value on a known
+ *         suffix; failure (kInvalidArgument) on empty numeric text, a bad
+ *         number, or an unknown suffix.
+ */
 inline core::Result<double> parse_scaled_impl(
     std::string_view s, std::span<const units::SuffixScale> table) noexcept {
   auto [num, suf] = split_number_suffix(s);
@@ -201,33 +280,93 @@ inline core::Result<double> parse_scaled_impl(
 } // namespace detail
 
 // Public scalar parsers (thin, noexcept wrappers).
+/**
+ * @brief Parse a bare number (thin wrapper, no suffix).
+ * @param[in] s Text to parse.
+ * @return Success with the value; failure (kInvalidArgument) on a
+ *         malformed number.
+ */
 [[nodiscard]] inline core::Result<double> parse_double(std::string_view s) noexcept {
   return detail::parse_double_impl(s);
 }
+/**
+ * @brief Parse a bare integer (thin wrapper, no suffix).
+ * @param[in] s Text to parse.
+ * @return Success with the value; failure (kInvalidArgument) on a
+ *         malformed integer.
+ */
 [[nodiscard]] inline core::Result<long long> parse_i64(std::string_view s) noexcept {
   return detail::parse_i64_impl(s);
 }
+/**
+ * @brief Parse a boolean word (thin wrapper).
+ * @param[in] s Text to parse.
+ * @return Success with the value; failure (kInvalidArgument) on any
+ *         other word.
+ */
 [[nodiscard]] inline core::Result<bool> parse_bool(std::string_view s) noexcept {
   return detail::parse_bool_impl(s);
 }
 
 // Per-quantity forwarders onto the units-owned suffix tables
 // (units::scales_for — the single source of truth).
+/**
+ * @brief Parse voltage text with the units-owned potential table.
+ * @param[in] s Text such as `12.4V` (spellings owned by units/).
+ * @return SI volts; failure (kInvalidArgument) on a bad number or an
+ *         unknown suffix.
+ * @note Thin forwarder into units/scales.hpp; no suffix knowledge here.
+ */
 [[nodiscard]] inline core::Result<double> parse_voltage(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::ElectricPotential>::value);
 }
+/**
+ * @brief Parse current text with the units-owned current table.
+ * @param[in] s Text such as `0.54A` (spellings owned by units/).
+ * @return SI amperes; failure (kInvalidArgument) on a bad number or an
+ *         unknown suffix.
+ * @note Thin forwarder into units/scales.hpp; no suffix knowledge here.
+ */
 [[nodiscard]] inline core::Result<double> parse_current(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::ElectricCurrent>::value);
 }
+/**
+ * @brief Parse resistance text with the units-owned resistance table.
+ * @param[in] s Text such as `4.7kOhm` (spellings owned by units/).
+ * @return SI ohms; failure (kInvalidArgument) on a bad number or an
+ *         unknown suffix.
+ * @note Thin forwarder into units/scales.hpp; no suffix knowledge here.
+ */
 [[nodiscard]] inline core::Result<double> parse_resistance(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::ElectricResistance>::value);
 }
+/**
+ * @brief Parse power text with the units-owned power table.
+ * @param[in] s Text such as `2kW` (spellings owned by units/).
+ * @return SI watts; failure (kInvalidArgument) on a bad number or an
+ *         unknown suffix.
+ * @note Thin forwarder into units/scales.hpp; no suffix knowledge here.
+ */
 [[nodiscard]] inline core::Result<double> parse_power(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Power>::value);
 }
+/**
+ * @brief Parse energy text with the units-owned energy table.
+ * @param[in] s Text such as `2kWh` (spellings owned by units/).
+ * @return SI joules; failure (kInvalidArgument) on a bad number or an
+ *         unknown suffix.
+ * @note Thin forwarder into units/scales.hpp; no suffix knowledge here.
+ */
 [[nodiscard]] inline core::Result<double> parse_energy(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Energy>::value);
 }
+/**
+ * @brief Parse frequency text with the units-owned frequency table.
+ * @param[in] s Text such as `1kHz` (spellings owned by units/).
+ * @return SI hertz; failure (kInvalidArgument) on a bad number or an
+ *         unknown suffix.
+ * @note Thin forwarder into units/scales.hpp; no suffix knowledge here.
+ */
 [[nodiscard]] inline core::Result<double> parse_frequency(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Frequency>::value);
 }
@@ -235,6 +374,18 @@ inline core::Result<double> parse_scaled_impl(
 // of the stamped quantity (the single table in signal::kQuantities).
 // This is the only quantity-aware parser commands need — no ad-hoc
 // voltage/current switches at call sites.
+/**
+ * @brief Parse signal-stamped text against one quantity row.
+ * @param[in] q Quantity id selecting the units-owned suffix table (the
+ *                single signal::kQuantities row).
+ * @param[in] s Text such as `3.3V` or `2mA` (cross-dimension text fails:
+ *                volts text against a current quantity is refused).
+ * @return SI value in the quantity dimension; failure
+ *         (kInvalidArgument) on an unknown quantity, a bad number, or an
+ *         unknown suffix.
+ * @note The only quantity-aware parser commands need - no voltage/current
+ *       switches at call sites.
+ */
 [[nodiscard]] inline core::Result<double>
 parse_quantity_value(signal::QuantityId q, std::string_view s) noexcept {
   const signal::QuantityDesc *d = nullptr;
@@ -248,15 +399,36 @@ parse_quantity_value(signal::QuantityId q, std::string_view s) noexcept {
     return core::Result<double>::failure("unknown quantity");
   }
   return detail::parse_scaled_impl(s, d->scales);
-}[[nodiscard]] inline core::Result<double> parse_time(std::string_view s) noexcept {
+}[[nodiscard]] inline core::Result<double> parse_time(std::string_view s) noexcept/**< @brief Parse time text with the units-owned time table. @param[in] s Text such as `10ms` (spellings owned by units/). @return SI seconds; failure (kInvalidArgument) on a bad number or an unknown suffix. @note Thin forwarder into units/scales.hpp; no suffix knowledge here. */ {
   return detail::parse_scaled_impl(s, units::scales_for<units::Time>::value);
 }
+/**
+ * @brief Parse meter-constant text with the units-owned table.
+ * @param[in] s Text such as `1000imp/kWh` (spellings owned by units/).
+ * @return SI-consistent meter constant; failure (kInvalidArgument) on a
+ *         bad number or an unknown suffix.
+ * @note Thin forwarder into units/scales.hpp; no suffix knowledge here.
+ */
 [[nodiscard]] inline core::Result<double> parse_meter_const(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::MeterConstant>::value);
 }
+/**
+ * @brief Parse pulse-count text with the units-owned count table.
+ * @param[in] s Text such as `500` or `500imp` (spellings owned by units/).
+ * @return Pulse count; failure (kInvalidArgument) on a bad number or an
+ *         unknown suffix.
+ * @note Thin forwarder into units/scales.hpp; no suffix knowledge here.
+ */
 [[nodiscard]] inline core::Result<double> parse_pulses(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Count>::value);
 }
+/**
+ * @brief Parse capacitance text with the units-owned capacitance table.
+ * @param[in] s Text such as `200pF` (spellings owned by units/).
+ * @return SI farads; failure (kInvalidArgument) on a bad number or an
+ *         unknown suffix.
+ * @note Thin forwarder into units/scales.hpp; no suffix knowledge here.
+ */
 [[nodiscard]] inline core::Result<double> parse_capacitance(std::string_view s) noexcept {
   return detail::parse_scaled_impl(s, units::scales_for<units::Capacitance>::value);
 }
@@ -266,12 +438,32 @@ parse_quantity_value(signal::QuantityId q, std::string_view s) noexcept {
 // Supports mixed positional + named/flag styles without allocation:
 //   --key value | --key=value | -k value | positional
 //   --flag (bool, no value) | --no-flag (negated)
+/**
+ * @brief Cursor over a token span with a consumed bitmask (up to 64 tokens).
+ * @note Mixed positional plus named/flag styles without allocation:
+ *       `--key value`, `--key=value`, short `-k`, bare positionals, plus
+ *       `--flag` and `--no-flag` negation. The bitmask covers 64 tokens;
+ *       longer lines are rejected by callers via kMaxArgs. Views alias
+ *       the caller token storage, which must outlive the cursor.
+ */
 class ArgCursor {
 public:
+  /**
+   * @brief Cursor over caller-owned token views.
+   * @param[in] tokens Token span to walk (must outlive the cursor).
+   */
   explicit ArgCursor(std::span<const std::string_view> tokens) noexcept
       : tokens_(tokens), consumed_(0) {}
 
+  /**
+   * @brief Token count in the walked span.
+   * @return Number of tokens (consumed or not).
+   */
   [[nodiscard]] std::size_t size() const noexcept { return tokens_.size(); }
+  /**
+   * @brief Whether the walked span is empty.
+   * @return True when there are no tokens at all.
+   */
   [[nodiscard]] bool empty() const noexcept { return tokens_.empty(); }
 
   // -- options -----------------------------------------------------------
@@ -279,6 +471,14 @@ public:
   // "name=" prefix. On "--key value": consumes key + next token as value.
   // On "--key=value": consumes key token, returns suffix after '='.
   // Returns nullopt when absent.
+  /**
+   * @brief Take the value of the first unconsumed matching option.
+   * @param[in] names Option spellings to match.
+   * @return The value view (`--key value` consumes the key plus the next
+   *         unconsumed token; `--key=value` consumes the key token and
+   *         returns the suffix after `=`); nullopt when absent, or when a
+   *         `--key` form has no following value.
+   */
   std::optional<std::string_view> take_option(
       std::initializer_list<std::string_view> names) noexcept {
     for (std::size_t i = 0; i < tokens_.size(); ++i) {
@@ -309,6 +509,15 @@ public:
 
   // Boolean flag: presence of any of `names` (consumes it). Supports
   // "--no-<name>" negation when `allow_negation` and names are long opts.
+  /**
+   * @brief Take a boolean flag (presence wins; `--no-` prefix negates).
+   * @param[in] names Flag spellings to match.
+   * @param[in] allow_negation False disables `--no-` handling (long
+   *            `--opt` forms only; short forms never negate).
+   * @return True when a positive spelling was present (consumed); false
+   *         when absent or explicitly negated (a negation still consumes
+   *         its token, so it never leaks into positionals).
+   */
   bool take_flag(std::initializer_list<std::string_view> names,
                  bool allow_negation = true) noexcept {
     for (std::size_t i = 0; i < tokens_.size(); ++i) {
@@ -334,6 +543,11 @@ public:
     return false;
   }
 
+  /**
+   * @brief Peek for a flag spelling without consuming it.
+   * @param[in] names Flag spellings to look for.
+   * @return True when any spelling is present unconsumed.
+   */
   [[nodiscard]] bool has_flag(std::initializer_list<std::string_view> names) const noexcept {
     for (std::size_t i = 0; i < tokens_.size(); ++i) {
       if (is_consumed(i)) {
@@ -351,6 +565,13 @@ public:
   // -- positionals --------------------------------------------------------
   // Next unconsumed token that does not look like an option ("-..."),
   // or any unconsumed token if `include_options` is true.
+  /**
+   * @brief Take the next unconsumed positional token.
+   * @param[in] include_options True also matches dash-leading tokens.
+   * @return The token view; nullopt when none remains.
+   * @note Dash-leading tokens are skipped unless include_options is set,
+   *       so options are never eaten as positionals by accident.
+   */
   std::optional<std::string_view> next_positional(bool include_options = false) noexcept {
     for (std::size_t i = 0; i < tokens_.size(); ++i) {
       if (is_consumed(i)) {
@@ -367,6 +588,11 @@ public:
   }
 
   // -- typed helpers ------------------------------------------------------
+  /**
+   * @brief Take the next positional as a number.
+   * @return Success with the value; failure (kInvalidArgument) when no
+   *         positional remains or the text is not a number.
+   */
   core::Result<double> next_double() noexcept {
     auto o = next_positional();
     if (!o) {
@@ -375,6 +601,12 @@ public:
     return parse_double(*o);
   }
 
+  /**
+   * @brief Take a named option value as a number.
+   * @param[in] names Option spellings to match.
+   * @return Success with the value; failure (kInvalidArgument) when the
+   *         option is absent or its text is not a number.
+   */
   core::Result<double> take_double_option(
       std::initializer_list<std::string_view> names) noexcept {
     auto o = take_option(names);
@@ -385,6 +617,11 @@ public:
   }
 
   // -- diagnostics ---------------------------------------------------------
+  /**
+   * @brief Whether any unconsumed token remains.
+   * @return True when at least one token is still unconsumed (stray
+   *         input commands must refuse loudly, never silently ignore).
+   */
   [[nodiscard]] bool has_remaining() const noexcept {
     for (std::size_t i = 0; i < tokens_.size(); ++i) {
       if (!is_consumed(i)) {
@@ -394,6 +631,11 @@ public:
     return false;
   }
 
+  /**
+   * @brief First unconsumed token without consuming it.
+   * @return The token view; nullopt when nothing remains (used to echo
+   *         the stray token in usage errors).
+   */
   [[nodiscard]] std::optional<std::string_view> first_remaining() const noexcept {
     for (std::size_t i = 0; i < tokens_.size(); ++i) {
       if (!is_consumed(i)) {
@@ -403,6 +645,10 @@ public:
     return std::nullopt;
   }
 
+  /**
+   * @brief Count of consumed tokens (cursor progress, not a limit check).
+   * @return How many tokens take_option/take_flag/next_positional took.
+   */
   [[nodiscard]] std::size_t consumed_count() const noexcept {
     std::size_t n = 0;
     for (std::size_t i = 0; i < tokens_.size(); ++i) {
@@ -430,6 +676,10 @@ private:
   std::uint64_t consumed_;
 };
 
+/**
+ * @brief Maximum CLI tokens per line (matches the consumed-bitmask width).
+ * @note Callers reject longer lines; tokens past 64 would alias the mask.
+ */
 inline constexpr std::size_t kMaxArgs = 64;
 
 } // namespace wengine::cli

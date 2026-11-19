@@ -1,3 +1,6 @@
+// test_ic: `ic` two-level dispatch — routing to per-chip specs, completion
+// vocabulary, and the empty-registry production guard. Guards dispatch
+// regressions (chip math lives in the per-chip suites).
 #include "wengine/cli/command_registry.hpp"
 #include "wengine/cli/commands.hpp"
 #include "wengine/cli/complete.hpp"

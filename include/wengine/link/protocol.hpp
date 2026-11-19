@@ -1,3 +1,16 @@
+/**
+ * @file
+ * External-app transport link ("wengine-link"): wire protocol v3 (seqlock snapshot bus).
+ * @note Versioned snapshot bus for realtime local consumers (GUI, sample readers, future
+ *       TCP bridge): wire layout, seqlock slot mechanics, encode/decode, versioning, and
+ *       drop-oldest/lag policy. OS endpoints (SHM segment open/attach, TCP framing) reuse
+ *       everything defined here — no endpoint code lives in this header. link -> world
+ *       (+ core/status vocabulary); engine never includes link. Publishers are emit::ISink
+ *       implementations built and owned by the caller (CLI/GUI edge), never in RunConfig.
+ *       Headers stay platform-free; POSIX syscalls live in the POSIX TUs under src/link/ under
+ *       wengine_link_shm — a Windows port replaces the TU, never this header.
+ *       Consumers: ShmPublisher/ShmReader, socket publishers, GUI frame-source registry.
+ */
 #pragma once
 
 // External-app transport link ("wengine-link"): wire protocol v1.
@@ -223,36 +236,61 @@ namespace wengine::link {
 // v3: stable particle identity per item (PHYSI particle-identity task).
 // v2: atomic slot payload (PHYSI-31). Socket-schema versions evolve
 // independently (compact_codec.hpp) and never see this word.
+/** @brief Protocol version peers must match exactly at attach (v3: stable particle identity per item). */
 inline constexpr std::uint32_t kVersion = 3;
 // v1 segment version, refused loudly by v2/v3 readers (and vice versa).
+/** @brief v1 segment version (plain-payload layout): refused loudly by v2/v3 readers, and vice versa. */
 inline constexpr std::uint32_t kVersionV1 = 1;
 // v2 segment version (64 B items, no identity), refused loudly by v3.
+/** @brief v2 segment version (64 B items, no identity): refused loudly by v3 readers, and vice versa. */
 inline constexpr std::uint32_t kVersionV2 = 2;
 // Fixed frame bounds: every peer agrees without negotiation (see S1/S7).
+/** @brief Fixed frame bound: max generic spatial items per frame (every peer agrees without negotiation). */
 inline constexpr std::size_t kMaxItems = 1024;
+/** @brief Fixed frame bound: max named scalar channels per frame (every peer agrees without negotiation). */
 inline constexpr std::size_t kMaxChannels = 64;
 // NUL-terminated channel name (31 usable chars); solver/domain tag (S2).
+/** @brief NUL-terminated channel name capacity (31 usable chars); solver/domain tag rule S2. */
 inline constexpr std::size_t kChannelNameSize = 32;
+/** @brief NUL-terminated solver/domain tag capacity (non-empty; empty or over-long domains are kInvalidArgument, never truncated). */
 inline constexpr std::size_t kDomainSize = 32;
 // Ring depth: 8 slots at 60 Hz emit ~= 130 ms of reader jitter cover.
+/** @brief Ring depth: 8 slots at 60 Hz emit cover ~130 ms of reader jitter (bounded jitter cover only, never a completeness promise). */
 inline constexpr std::size_t kSlotCount = 8;
 
 // Fixed-capacity wire structs. Trivially copyable by construction: the only
 // types ever memcpy'd across the transport. Host-side model (Frame) lives
 // in link/frame.hpp; the particle adapter with it.
+/**
+ * @brief Fixed-capacity wire item: the local POD codec type (only types ever memcpy'd across the transport).
+ * @note Trivially copyable by construction; only the atomic word image ever sits in shared memory — slots are never memcpy'd as a whole.
+ */
 struct LinkItem {
+/** @brief X position (engine length units). */
   double x = 0.0;
+/** @brief Y position (engine length units). */
   double y = 0.0;
+/** @brief Z position (engine length units; 0 for 2D domains). */
   double z = 0.0;
+/** @brief X velocity (engine velocity units). */
   double vx = 0.0;
+/** @brief Y velocity (engine velocity units). */
   double vy = 0.0;
+/** @brief Z velocity (engine velocity units). */
   double vz = 0.0;
+/** @brief Glyph scale hint (rigid bodies render bigger). */
   double size = 1.0;
+/** @brief Glyph color tag (0 = palette by index; future: heat/color data). */
   std::uint32_t color = 0;
+/** @brief Velocity-valid flag (0/1 only, checked on decode). */
   std::uint8_t has_velocity = 1;
+/** @brief Identity-valid flag (0/1 only, checked on decode; 0 = legacy frame, unavailable — never fabricated from dense order). */
   std::uint8_t has_identity = 0; // 0/1 only (checked on decode)
+/** @brief Explicit pad: stable 72 B layout (always zeroed on encode). */
   std::uint8_t reserved[2] = {}; // explicit pad: stable 72 B layout
+/** @brief Stable particle entity slot index (valid iff has_identity != 0). */
   std::uint32_t entity_index = 0; // valid iff has_identity != 0
+/** @brief Stable particle entity generation (valid iff has_identity != 0). */
   std::uint32_t entity_generation = 0; // valid iff has_identity != 0
 };
 
@@ -260,8 +298,14 @@ static_assert(std::is_standard_layout_v<LinkItem>);
 static_assert(std::is_trivially_copyable_v<LinkItem>);
 static_assert(sizeof(LinkItem) == 72);
 
+/**
+ * @brief Fixed-capacity wire channel: NUL-terminated name plus scalar value.
+ * @note Trivially copyable by construction.
+ */
 struct LinkChannel {
+/** @brief Channel name, NUL-terminated (checked on decode; unterminated is corrupt). */
   char name[kChannelNameSize] = {}; // NUL-terminated (checked on decode)
+/** @brief Scalar value (SI units of the stamped quantity). */
   double value = 0.0;
 };
 
@@ -269,13 +313,24 @@ static_assert(std::is_standard_layout_v<LinkChannel>);
 static_assert(std::is_trivially_copyable_v<LinkChannel>);
 static_assert(sizeof(LinkChannel) == kChannelNameSize + sizeof(double));
 
+/**
+ * @brief Local POD codec type: clock plus fixed-capacity items and channels (frame_seq 0 = never written).
+ * @note Only this struct's atomic word image is ever shared; reader-local LinkFrame objects stay ordinary POD.
+ */
 struct LinkFrame {
+/** @brief Monotonic publish id (0 = never written; LagStats loss source). */
   std::uint64_t frame_seq = 0; // monotonic publish id (0 = never written)
+/** @brief Simulation step index. */
   std::uint64_t step_index = 0;
+/** @brief Simulation time in seconds (SI). */
   double sim_time = 0.0;
+/** @brief Populated items in items[] (bounded by kMaxItems). */
   std::uint64_t item_count = 0;
+/** @brief Fixed-capacity item storage (only item_count entries valid). */
   LinkItem items[kMaxItems] = {};
+/** @brief Populated channels in channels[] (bounded by kMaxChannels). */
   std::uint64_t channel_count = 0;
+/** @brief Fixed-capacity channel storage (only channel_count entries valid). */
   LinkChannel channels[kMaxChannels] = {};
 };
 
@@ -288,6 +343,7 @@ static_assert(sizeof(LinkFrame) == 5U * sizeof(std::uint64_t) +
 // Payload word count of the atomic slot image: LinkFrame bits carried as
 // u64 words. LinkFrame stays the local POD codec type; only this word
 // image is ever shared.
+/** @brief Payload word count of the atomic slot image (LinkFrame bits carried as u64 words; LinkFrame stays the local POD codec type, only this word image is ever shared). */
 inline constexpr std::size_t kFrameWords =
     sizeof(LinkFrame) / sizeof(std::uint64_t);
 static_assert(sizeof(LinkFrame) % sizeof(std::uint64_t) == 0);
@@ -298,19 +354,30 @@ static_assert(offsetof(LinkFrame, frame_seq) == 0);
 // (writer stores, reader loads). Reader-local LinkFrame objects stay
 // ordinary POD — only the shared image is atomic. Slots are never
 // memcpy'd as a whole — only word images cross the critical section.
+/**
+ * @brief One seqlock slot: the seq word is the seqlock parity; payload words are the only shared frame storage and are ALWAYS accessed atomically (writer stores, reader loads).
+ * @note Slots are never memcpy'd as a whole — only word images cross the critical section. Not copyable/movable.
+ */
 struct Slot {
+/** @brief Seqlock parity word (odd = writer active, even = ready, 0 = never written). */
   std::atomic<std::uint64_t> seq;
+/** @brief Shared frame payload (atomic word image; reader-local LinkFrame objects stay ordinary POD). */
   std::array<std::atomic<std::uint64_t>, kFrameWords> words;
 
+/** @brief Zero-initialize seq and all payload words. */
   Slot() noexcept : seq(0) {
     for (auto &w : words) {
       w.store(0, std::memory_order_relaxed);
     }
   }
 
+/** @brief Non-copyable (owns atomic shared state). */
   Slot(const Slot &) = delete;
+/** @brief Non-copyable (owns atomic shared state). */
   Slot &operator=(const Slot &) = delete;
+/** @brief Non-movable (owns atomic shared state). */
   Slot(Slot &&) = delete;
+/** @brief Non-movable (owns atomic shared state). */
   Slot &operator=(Slot &&) = delete;
 };
 
@@ -329,12 +396,24 @@ static_assert(sizeof(Slot) == sizeof(std::uint64_t) + sizeof(LinkFrame));
 // memcpy'd as a whole — only slot word images cross the wire by value.
 // version is the commit word: plain readers must observe it via acquire
 // (see inspect_header); version == 0 means mid-construction.
+/**
+ * @brief Segment header, written once at creation before readers attach (version is the commit word).
+ * @note publish_count is the only field mutated post-init (writer only). Not copyable (atomic members):
+ *       init in place via init_header, never memcpy'd as a whole — only slot word images cross by value.
+ *       Plain readers must observe version via acquire; version == 0 means mid-construction, never a verdict.
+ */
 struct SegmentHeader {
+/** @brief kVersion once committed (commit word LAST with release semantics; 0 = mid-construction marker, never assigned to a real writer). */
   std::atomic<std::uint32_t> version{0}; // kVersion once committed
+/** @brief Solver/domain tag, NUL-terminated (provenance S2; drives reader adapter choice). */
   char domain[kDomainSize] = {}; // solver/domain tag, NUL-terminated (S2)
+/** @brief == kMaxItems once initialized (capacity gate). */
   std::uint64_t max_items = 0; // == kMaxItems once initialized
+/** @brief == kMaxChannels once initialized (capacity gate). */
   std::uint64_t max_channels = 0; // == kMaxChannels once initialized
+/** @brief == kSlotCount once initialized (capacity gate). */
   std::uint64_t slot_count = 0; // == kSlotCount once initialized
+/** @brief Successful publishes (writer-side accounting, visible to readers). */
   std::atomic<std::uint64_t> publish_count{0}; // successful publishes
 };
 
@@ -370,23 +449,48 @@ struct SegmentHeader {
 //   (emit/routing.hpp), never here; pending/abandoned-at-close is
 //   publisher state (has_pending_frame/pending_bytes), reported by the
 //   edge at finish/close rather than as a cumulative counter.
+/**
+ * @brief Process-local publisher bookkeeping (PHYSI-39 per-cause vocabulary; publish_count mirrors into the header for readers).
+ * @note Local acceptance only (SHM bus / kernel) — remote receipt is unknown unless a receiver
+ *       reports its own LagStats. Intentional stride/subset skips live in the routing wrappers
+ *       (emit/routing.hpp), never here; pending/abandoned-at-close is publisher edge state.
+ */
 struct PublisherStats {
+/** @brief Every on_snapshot call counts exactly once (the source of truth every downstream count is cut against). */
   std::uint64_t attempted = 0;
+/** @brief Frames accepted locally (mirrors SHM header publish_count). */
   std::uint64_t published = 0;
+/** @brief Over-bound refusals (shared encode gate; sticky kOutOfRange, never silently truncated). */
   std::uint64_t dropped_over_bound = 0;
+/** @brief Socket backpressure (TCP zero-byte EAGAIN, UDP datagram refusal) — transient, counted, never sticky. */
   std::uint64_t dropped_send = 0;
+/** @brief TCP only: new frame dropped while the depth-1 pending tail is still blocked (stream framing forbids discarding a partial prefix). */
   std::uint64_t dropped_pending_blocked = 0;
+/** @brief Bounded-queue refusals (link/output_queue.hpp stage; 0 with no queue stage). */
   std::uint64_t dropped_queue_full = 0;
+/** @brief Snapshots ignored once sticky (including the frame that triggered a sticky local failure). */
   std::uint64_t disabled_after_error = 0;
+/** @brief Wire bytes accepted locally (SHM slot image / TCP prefix+record / UDP datagram) for effective bytes/s. */
   std::uint64_t bytes_accepted = 0;
 };
 
 // Reader outcome: only kOk yields a usable frame. Busy/Torn mean "retry
 // later"; Empty means "no frame published to this slot yet".
+/**
+ * @brief Reader outcome: only kOk yields a usable frame. kEmpty means no frame published to this slot yet;
+ *        kBusy means the writer is active (retry later); kTorn means discard the copy (retry later).
+ * @note A Torn/Busy read never yields corrupt data, and no shared access is a C++ data race.
+ */
 enum class SlotRead : std::uint8_t { kOk, kEmpty, kBusy, kTorn };
 
 // Initialize a segment header before readers attach. Loud on misuse:
 // empty or over-long domain is kInvalidArgument, never truncated (S7).
+/**
+ * @brief Initialize a segment header in place before readers attach (commit word published LAST with release).
+ * @param[out] h header to initialize (version kept unready at 0 throughout so concurrent attachers observe only unready or complete valid headers).
+ * @param[in] domain solver/domain tag (non-empty, shorter than kDomainSize).
+ * @return kOk on success; kInvalidArgument for empty or over-long domain (loud misuse, never truncated).
+ */
 [[nodiscard]] inline core::Status init_header(SegmentHeader &h,
                                               std::string_view domain) noexcept {
   if (domain.empty() || domain.size() >= kDomainSize) {
@@ -416,6 +520,10 @@ enum class SlotRead : std::uint8_t { kOk, kEmpty, kBusy, kTorn };
 // segment actually carries — the "clear error" behind every refusal.
 // First failure wins, checked in negotiation order (version, capacities,
 // domain), so the reported cause is always the actionable one.
+/**
+ * @brief Structured attach-gate verdict: what failed, checked in negotiation order (version, capacities, domain) so the reported cause is always the actionable one.
+ * @note kNone means no issue; kVersionMismatch/kCapacityMismatch/kDomainMismatch name the first failing gate.
+ */
 enum class HeaderIssue : std::uint8_t {
   kNone,
   kVersionMismatch,
@@ -423,12 +531,24 @@ enum class HeaderIssue : std::uint8_t {
   kDomainMismatch
 };
 
+/**
+ * @brief Attach-gate report: what failed, and which version the segment actually carries (the clear error behind every refusal).
+ * @note First failure wins, checked in negotiation order (version, capacities, domain).
+ */
 struct HeaderReport {
+/** @brief Gate verdict (kOk when attached; kInvalidArgument on refusal). */
   core::Status status{};
+/** @brief Failing gate (kNone when attached). */
   HeaderIssue issue = HeaderIssue::kNone;
+/** @brief Version word actually observed (0 = mid-construction marker, never a real writer). */
   std::uint32_t found_version = 0;
 };
 
+/**
+ * @brief Inspect a header and classify the attach verdict (the reason behind every refusal).
+ * @param[in] h header to inspect (observed via acquire).
+ * @return Report with status, first-failure issue, and found version.
+ */
 [[nodiscard]] inline HeaderReport inspect_header(const SegmentHeader &h) noexcept {
   HeaderReport r{};
   r.found_version = h.version.load(std::memory_order_acquire);
@@ -464,6 +584,11 @@ struct HeaderReport {
 // Corrupt or foreign segments (bad version, missing NUL, capacity drift)
 // fail loudly here instead of mid-stream. For the reason behind a
 // refusal, see inspect_header.
+/**
+ * @brief Exact-match version/capacity/domain gate for attaching readers.
+ * @param[in] h header to gate.
+ * @return kOk on exact match; kInvalidArgument for corrupt or foreign segments (loud at open, never silent mid-stream). For the reason, see inspect_header.
+ */
 [[nodiscard]] inline core::Status check_header(const SegmentHeader &h) noexcept {
   return inspect_header(h).status;
 }
@@ -471,6 +596,11 @@ struct HeaderReport {
 // Shared POSIX segment-name rule (single leading slash, nothing else):
 // used by both endpoints so tools can validate upfront (exit 2) instead
 // of failing at open time.
+/**
+ * @brief Shared POSIX segment-name rule (single leading slash, nothing else).
+ * @param[in] name candidate segment name.
+ * @return True for "/name" shape; used by endpoints to fail upfront (usage error) instead of at open time.
+ */
 [[nodiscard]] inline bool valid_segment_name(std::string_view name) noexcept {
   if (name.size() < 2 || name.front() != '/') {
     return false;
@@ -482,6 +612,12 @@ struct HeaderReport {
 // "Error: "). Shared so every consumer — sample, bridge, future GUI
 // subscriber — reports the same clear error for the same verdict. Edge
 // code may allocate; never called on hot paths.
+/**
+ * @brief Human refusal line for a HeaderReport (tools print it verbatim after "Error: ").
+ * @param[in] segment segment name refused.
+ * @param[in] rep gate report to render.
+ * @return Refusal message naming the found version / capacities / domain verdict. Edge code may allocate; never called on hot paths.
+ */
 [[nodiscard]] inline std::string describe_refusal(std::string_view segment,
                                                   const HeaderReport &rep) {
   std::string msg = "segment '";
@@ -508,6 +644,14 @@ struct HeaderReport {
 // allocation-free, bounded copies. Every bound is validated BEFORE
 // touching `out`, so over-bound input is kOutOfRange with `out` untouched
 // (drop loudly, S7). Order preserved, so decode(encode(f)) == f exactly.
+/**
+ * @brief Frame to wire (S1/S3/S4; hot publisher path: noexcept, allocation-free, bounded memcpy).
+ * @param[in] in source frame (order preserved).
+ * @param[out] out wire frame (untouched on failure).
+ * @param[in] frame_seq monotonic publish id stamped into the wire frame.
+ * @return kOk on success; kOutOfRange for over-bound input (items/channels/name lengths) with out untouched — drop loudly (S7), never silently truncate.
+ * @note decode(encode(f)) == f exactly. Publish path performs no syscalls or I/O beyond this encode plus the seqlock copy.
+ */
 [[nodiscard]] inline core::Status encode_frame(const Frame &in, LinkFrame &out,
                                                std::uint64_t frame_seq) noexcept {
   if (in.items.size() > kMaxItems || in.channels.size() > kMaxChannels) {
@@ -559,6 +703,13 @@ struct HeaderReport {
 // kInvalidArgument, never an OOB read. Items without identity
 // (has_identity 0, e.g. legacy publishers) yield Frames with
 // has_identity false — unavailable, never fabricated.
+/**
+ * @brief Wire to Frame (S3/S4; cold reader side: may allocate, so NOT noexcept — never call inside the sim loop).
+ * @param[in] frame wire frame to decode.
+ * @param[out] out decoded frame (untouched on failure).
+ * @return kOk on success; kInvalidArgument for corrupt counts, unterminated channel names, or non-0/1 identity flags (never an OOB read).
+ * @note Items without identity (has_identity 0) yield Frames with has_identity false — unavailable, never fabricated.
+ */
 [[nodiscard]] inline core::Status decode_frame(const LinkFrame &frame, Frame &out) {
   if (frame.item_count > static_cast<std::uint64_t>(kMaxItems) ||
       frame.channel_count > static_cast<std::uint64_t>(kMaxChannels)) {
@@ -613,11 +764,19 @@ struct HeaderReport {
 // Writer side of the seqlock: mark active (odd), caller stores the staged
 // frame words into the slot, then mark ready (even, release). The release
 // store publishes the relaxed payload stores sequenced before it.
+/**
+ * @brief Writer side of the seqlock: mark active (odd). The release store in slot_end_write publishes the relaxed payload stores sequenced before it.
+ * @param[in,out] slot slot to mark.
+ */
 inline void slot_begin_write(Slot &slot) noexcept {
   const std::uint64_t s = slot.seq.load(std::memory_order_relaxed);
   slot.seq.store(s + std::uint64_t{1}, std::memory_order_relaxed);
 }
 
+/**
+ * @brief Writer side of the seqlock: mark ready (even, release).
+ * @param[in,out] slot slot to publish.
+ */
 inline void slot_end_write(Slot &slot) noexcept {
   const std::uint64_t s = slot.seq.load(std::memory_order_relaxed);
   slot.seq.store(s + std::uint64_t{1}, std::memory_order_release);
@@ -626,6 +785,11 @@ inline void slot_end_write(Slot &slot) noexcept {
 // Copy a reader-local frame into shared atomic words. Writer-only, called
 // strictly between slot_begin_write and slot_end_write; `frame` itself is
 // never shared, so plain byte access to it is race-free.
+/**
+ * @brief Copy a reader-local frame into shared atomic words (writer-only, strictly between slot_begin_write and slot_end_write).
+ * @param[in,out] slot destination slot.
+ * @param[in] frame reader-local frame (plain byte access is race-free: the frame itself is never shared).
+ */
 inline void slot_store_frame(Slot &slot, const LinkFrame &frame) noexcept {
   const auto *src = reinterpret_cast<const unsigned char *>(&frame);
   for (std::size_t i = 0; i < kFrameWords; ++i) {
@@ -638,6 +802,11 @@ inline void slot_store_frame(Slot &slot, const LinkFrame &frame) noexcept {
 // Peek the frame_seq word without a full copy. Must be bracketed by the
 // caller with seq loads (see ShmReader::read_latest): the peek alone
 // proves nothing, the unchanged seq around it does.
+/**
+ * @brief Peek the frame_seq word without a full copy (must be bracketed by seq loads: the peek alone proves nothing, the unchanged seq around it does).
+ * @param[in] slot slot to peek.
+ * @return frame_seq word image (acquire).
+ */
 [[nodiscard]] inline std::uint64_t slot_peek_seq(const Slot &slot) noexcept {
   return slot.words[0].load(std::memory_order_acquire);
 }
@@ -645,6 +814,12 @@ inline void slot_store_frame(Slot &slot, const LinkFrame &frame) noexcept {
 // Reader side: torn/busy reads report without the caller using `out`
 // (out is clobbered on Torn, matching the historic contract — callers
 // must only consume it on kOk).
+/**
+ * @brief Seqlock read: torn/busy reads report without the caller using out (out is clobbered on Torn — callers must only consume it on kOk).
+ * @param[in] slot slot to read.
+ * @param[out] out reader-local copy (valid only on kOk).
+ * @return kOk/kEmpty/kBusy/kTorn per SlotRead.
+ */
 [[nodiscard]] inline SlotRead slot_try_read(const Slot &slot, LinkFrame &out) noexcept {
   const std::uint64_t before = slot.seq.load(std::memory_order_acquire);
   if ((before & std::uint64_t{1}) != std::uint64_t{0}) {
@@ -667,6 +842,12 @@ inline void slot_store_frame(Slot &slot, const LinkFrame &frame) noexcept {
 
 // Ring position for a monotonic write index. Callers use validated headers
 // (check_header), so slot_count > 0 holds; the guard only avoids UB.
+/**
+ * @brief Ring position for a monotonic write index (callers use validated headers, so slot_count > 0 holds; the guard only avoids UB).
+ * @param[in] write_index monotonic write index.
+ * @param[in] slot_count ring depth.
+ * @return write_index % slot_count (0 when slot_count is 0).
+ */
 [[nodiscard]] inline constexpr std::uint64_t ring_slot(std::uint64_t write_index,
                                                        std::uint64_t slot_count) noexcept {
   return slot_count == 0 ? 0 : write_index % slot_count;
@@ -674,6 +855,12 @@ inline void slot_store_frame(Slot &slot, const LinkFrame &frame) noexcept {
 
 // Exact reader lag from per-frame ids: frames strictly between prev and
 // current were overwritten before this reader saw them (drop-oldest).
+/**
+ * @brief Exact reader lag from per-frame ids: frames strictly between prev and current were overwritten before this reader saw them (drop-oldest).
+ * @param[in] prev_seq last consumed frame_seq.
+ * @param[in] cur_seq newly observed frame_seq.
+ * @return cur_seq - prev_seq - 1 when positive, else 0.
+ */
 [[nodiscard]] inline constexpr std::uint64_t reader_missed(std::uint64_t prev_seq,
                                                            std::uint64_t cur_seq) noexcept {
   return (cur_seq > prev_seq + 1) ? (cur_seq - prev_seq - 1) : 0;
@@ -685,15 +872,30 @@ inline void slot_store_frame(Slot &slot, const LinkFrame &frame) noexcept {
 // report exactly what this reader saw vs. what the bus carried.
 // First observation counts pre-attach frames as missed — they existed on
 // the bus and this reader never saw them (same display as the sample app).
+/**
+ * @brief Reader-side lag/overflow counters: one cursor per reader (share-nothing across threads; the mapping itself is multi-reader safe).
+ * @note Feed every clean frame_seq observed (e.g. beside poll_newer); counters report exactly what this
+ *       reader saw vs. what the bus carried. First observation counts pre-attach frames as missed.
+ */
 struct LagStats {
+/** @brief Last consumed frame_seq (0 = none yet). */
   std::uint64_t last_seq = 0; // last consumed frame_seq (0 = none yet)
+/** @brief Clean frames consumed. */
   std::uint64_t received = 0; // clean frames consumed
+/** @brief Frames overwritten before observation (per-frame frame_seq gaps; latest-only skips are intentional coalescing, ordered-drain skips are ring overruns — same counters, different interpretation). */
   std::uint64_t missed = 0; // frames overwritten before observation
+/** @brief Largest single-span loss. */
   std::uint64_t max_gap = 0; // largest single-span loss
 };
 
 // Record one clean frame_seq; returns this span's loss. noexcept,
 // allocation-free: safe beside any read loop, including the GUI subscriber.
+/**
+ * @brief Record one clean frame_seq (noexcept, allocation-free: safe beside any read loop, including the GUI subscriber).
+ * @param[in,out] cur reader cursor to advance.
+ * @param[in] seq observed frame_seq.
+ * @return This span's loss (reader_missed(old, seq)).
+ */
 [[nodiscard]] inline std::uint64_t lag_observe(LagStats &cur,
                                                std::uint64_t seq) noexcept {
   const std::uint64_t gap = reader_missed(cur.last_seq, seq);
@@ -707,10 +909,19 @@ struct LagStats {
 }
 
 // Writer-side publish accounting (header side, visible to readers).
+/**
+ * @brief Writer-side publish accounting (header side, visible to readers).
+ * @param[in,out] h header whose publish_count increments (writer only).
+ */
 inline void header_note_publish(SegmentHeader &h) noexcept {
   h.publish_count.fetch_add(1, std::memory_order_relaxed);
 }
 
+/**
+ * @brief Total frames published into the segment (0 while publisher missing/unready).
+ * @param[in] h header to read (acquire).
+ * @return publish_count value.
+ */
 [[nodiscard]] inline std::uint64_t header_published(const SegmentHeader &h) noexcept {
   return h.publish_count.load(std::memory_order_acquire);
 }

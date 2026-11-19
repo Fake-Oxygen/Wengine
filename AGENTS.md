@@ -439,9 +439,11 @@ Signal state (`world::Signals` pool, entity-attached like `Particles`):
   channels (`sig.<serial>.U`), and control-plane addressing use serials;
 * `Snapshot` carries dense serial/value/quantity arrays in slot order;
   `select_signals` filters by serial at the edge (never in `Runner`);
-* serialization versions bump with fallback loaders (`v3` current:
-  serials + operands; `v2` synthesizes serials as slot indices; `v1`
-  loads with empty signals); kind bytes are append-only;
+* serialization versions bump with fallback loaders (`v6` current:
+  sequential pool + expr/table/Lua columns and stores; `v5`–`v1` load
+  with an empty sequential pool, `v4` with empty script ranges, `v3`
+  with zeroed custom columns, `v2` synthesizes serials as slot indices,
+  `v1` loads with empty signals); kind bytes are append-only;
 * N:M routing lives in edge-side wrappers (`emit/routing.hpp`):
   `SignalSubsetSink` (serial allowlists, mid-run reconfig, every tick
   forwarded even when empty so reader lag accounting stays exact) and

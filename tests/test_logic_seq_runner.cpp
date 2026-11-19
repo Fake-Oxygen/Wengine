@@ -1,3 +1,6 @@
+// test_logic_seq_runner: sequential solver + configured driver — counter/
+// divider/latch goldens, determinism replay, clock-domain selection, snapshot
+// and CSV observation parity, and loud mid-run refusals. Guards runner parity.
 #include "wengine/core/runner.hpp"
 #include "wengine/emit/logic_sink.hpp"
 #include "wengine/logic/clock_domains.hpp"
