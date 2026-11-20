@@ -686,7 +686,7 @@ void test_history() {
 void test_logic_session() {
   // Module registry shape (LOGIC-8: full v1 verb set, 17 specs;
   // LOGIC-14: + tie/untie, 19 specs; 012: + pull/unpull, 25 specs).
-  static_assert(logic::LogicRegistry::all().size() == 25);
+  static_assert(logic::LogicRegistry::all().size() == 27);
   static_assert(logic::LogicRegistry::find("help") != nullptr);
   static_assert(logic::LogicRegistry::find("back") != nullptr);
   static_assert(logic::LogicRegistry::find("add") != nullptr);
@@ -696,6 +696,8 @@ void test_logic_session() {
   static_assert(logic::LogicRegistry::find("unshare") != nullptr);
   static_assert(logic::LogicRegistry::find("pull") != nullptr);
   static_assert(logic::LogicRegistry::find("unpull") != nullptr);
+  static_assert(logic::LogicRegistry::find("set-delay") != nullptr);
+  static_assert(logic::LogicRegistry::find("unset-delay") != nullptr);
   static_assert(logic::LogicRegistry::find("remove") != nullptr);
   static_assert(logic::LogicRegistry::find("ignore") != nullptr);
   static_assert(logic::LogicRegistry::find("use") != nullptr);
@@ -812,14 +814,15 @@ void test_logic_session() {
            has(verbs, "use") && has(verbs, "tie") && has(verbs, "untie") && has(verbs, "reset") && has(verbs, "solve") &&
            has(verbs, "truth") && has(verbs, "optimize") && has(verbs, "draw") &&
            has(verbs, "save") && has(verbs, "load") && has(verbs, "export") && has(verbs, "step") && has(verbs, "poke") &&
-           has(verbs, "peek") && has(verbs, "pull") && has(verbs, "unpull"));
-    assert(verbs.size() == 25);
+           has(verbs, "peek") && has(verbs, "pull") && has(verbs, "unpull") && has(verbs, "set-delay") &&
+           has(verbs, "unset-delay"));
+    assert(verbs.size() == 27);
     assert(!has(verbs, "ohm") && !has(verbs, "--help")); // flags need a '-' prefix
     const std::vector<std::string> want_dash_help{"--help"};
     assert(complete_line("logic --h", 9, all) == want_dash_help);
     const std::vector<std::string> want_help{"help"};
     assert(complete_line("logic h", 7, all) == want_help);
-    assert(complete_line("logic help ", 11, all).size() == 25); // every verb
+    assert(complete_line("logic help ", 11, all).size() == 27); // every verb
     // Session help lists module verbs only (never top-level commands).
     {
       std::ostringstream help_out;
@@ -1759,11 +1762,11 @@ void test_logic_completion() {
   // Verb-name prefixes follow registry order.
   const std::vector<std::string> want_a{"add"};
   assert(complete_line("logic a", 7, all) == want_a);
-  const std::vector<std::string> want_s{"solve", "save", "step"};
+  const std::vector<std::string> want_s{"set-delay", "solve", "save", "step"};
   assert(complete_line("logic s", 7, all) == want_s);
   const std::vector<std::string> want_p{"pull", "poke", "peek"};
   assert(complete_line("logic p", 7, all) == want_p);
-  const std::vector<std::string> want_u{"unwire", "unshare", "unpull", "use", "untie"};
+  const std::vector<std::string> want_u{"unwire", "unshare", "unpull", "unset-delay", "use", "untie"};
   assert(complete_line("logic u", 7, all) == want_u);
   const std::vector<std::string> want_t{"tie", "truth"};
   assert(complete_line("logic t", 7, all) == want_t);
@@ -2001,6 +2004,58 @@ void test_logic_completion() {
     assert(sh.execute("logic list", relisted) == 0);
     assert(relisted.str().find("AND3.2(down)") == std::string::npos);
     assert(relisted.str().find("pulls=AND2.1(up)") != std::string::npos);
+  }
+
+  // 013: propagation-delay annotation — gate names, then nothing (delay
+  // values are free-form, not an enumeration); flags in flag position.
+  {
+    const auto c = complete_line("logic set-delay ", 16, all);
+    assert(has(c, "AND1") && has(c, "NOT2"));
+  }
+  assert(complete_line("logic set-delay AND1 ", 21, all).empty());
+  {
+    const auto c = complete_line("logic unset-delay ", 18, all);
+    assert(has(c, "AND1") && has(c, "NOT2"));
+  }
+  assert(complete_line("logic unset-delay AND1 ", 23, all).empty());
+  assert(has(complete_line("logic set-delay --", 18, all), "--help"));
+  assert(has(complete_line("logic unset-delay --", 20, all), "--help"));
+  // One-shot/direct parity: the same verb prints the same bytes
+  // headless (`logic set-delay ...`) and through the spec entry,
+  // accept and refusal alike.
+  {
+    std::ostringstream one_shot, direct;
+    assert(sh.execute("logic set-delay AND1 1.5ns", one_shot) == 0);
+    const std::string_view pargs[] = {"AND1", "1.5ns"};
+    const std::span<const std::string_view> parg_span{pargs, 2};
+    ArgCursor parc{parg_span};
+    assert(logic::LogicSetDelaySpec::run(parc, direct) == 0);
+    assert(one_shot.str() == direct.str());
+    assert(one_shot.str() == "set AND1 delay=1500ps\n");
+  }
+  {
+    std::ostringstream one_shot, direct;
+    assert(sh.execute("logic set-delay AND1 -1", one_shot) == 2);
+    const std::string_view pargs[] = {"AND1", "-1"};
+    const std::span<const std::string_view> parg_span{pargs, 2};
+    ArgCursor parc{parg_span};
+    assert(logic::LogicSetDelaySpec::run(parc, direct) == 2);
+    assert(one_shot.str() == direct.str());
+    assert(one_shot.str().find("non-negative") != std::string::npos);
+  }
+  {
+    std::ostringstream one_shot, direct;
+    assert(sh.execute("logic unset-delay AND1", one_shot) == 0);
+    const std::string_view uargs[] = {"AND1"};
+    const std::span<const std::string_view> uarg_span{uargs, 1};
+    ArgCursor uarc{uarg_span};
+    assert(logic::LogicUnsetDelaySpec::run(uarc, direct) == 2);
+    // Direct re-clear refuses (already cleared one-shot above); the
+    // refusal text matches the headless form exactly.
+    std::ostringstream one_refuse;
+    assert(sh.execute("logic unset-delay AND1", one_refuse) == 2);
+    assert(one_refuse.str() == direct.str());
+    assert(one_shot.str() == "cleared AND1 delay\n");
   }
 
   // File paths / numeric values: no candidates, never option leakage.

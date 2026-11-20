@@ -47,6 +47,11 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
     if (wengine::logic::is_sequential_kind(g.kind)) {
       out << " nqfanout=" << g.nq_fanout;
     }
+    // Propagation-delay annotation (013): canonical picoseconds, present
+    // only — un-annotated workspaces list byte-identically.
+    if (g.propagation_delay_ps != 0) {
+      out << " delay=" << g.propagation_delay_ps << "ps";
+    }
     bool first_ign = true;
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
       if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) == 0) {

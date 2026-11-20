@@ -65,8 +65,7 @@ struct OhmSpec {
    * @param[in] partial Partial token under the cursor.
    * @param[out] out Candidates appended without trailing space.
    */
-  static void complete(std::span<const std::string_view> prior_args, std::string_view partial,
-                       std::vector<std::string> &out);
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
 };
 
 /**
@@ -640,7 +639,7 @@ struct LogicSpec {
       "logic <verb> [args]  (one-shot, no session entered)\n"
       "logic --help         (this text plus the verb list)\n"
       "Session verbs (combinational block: add, wire, solve, optimize, ...):\n"
-      "  help back add list wire unwire unshare remove ignore use pull unpull reset solve truth\n"
+      "  help back add list wire unwire unshare remove ignore use pull unpull set-delay unset-delay reset solve truth\n"
       "  optimize draw save load export   (exit/quit also leave the session)";
 
   /**

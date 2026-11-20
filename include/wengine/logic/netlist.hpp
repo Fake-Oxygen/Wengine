@@ -406,6 +406,52 @@ namespace detail {
 }
 
 /**
+ * @brief Set the propagation-delay annotation on a gate (013): whole picoseconds of stored response lag.
+ *
+ * Stored now, honored later: no evaluation, stepping, truth-table,
+ * export, or draw path reads this field (docs/logic.md §12 — the
+ * delay-honoring evaluator is the named follow-on). Legal on every
+ * live gate kind — combinational and sequential alike; per-kind timing
+ * semantics belong to that future evaluator, so the seam performs no
+ * kind check. Idempotent: re-setting replaces the value (last write
+ * wins, deterministic). Zero is a legal write equal to clearing.
+ *
+ * @param[out] nl Netlist receiving the annotation.
+ * @param[in] slot Gate slot.
+ * @param[in] value_ps Whole picoseconds to store.
+ * @return kOk on set; kInvalidArgument for dead/out-of-range slots. The netlist is untouched on failure.
+ */
+[[nodiscard]] inline core::Status set_gate_delay(Netlist &nl, std::uint16_t slot, std::uint64_t value_ps) noexcept {
+  if (slot >= kMaxGates || !nl.gates[slot].live) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  nl.gates[slot].propagation_delay_ps = value_ps;
+  return core::Status::success();
+}
+
+/**
+ * @brief Clear the propagation-delay annotation on a gate (013).
+ *
+ * Refused loudly when the stored value is zero (the `clear_pull`
+ * precedent: an un-annotated gate has nothing to clear). The netlist is
+ * untouched on failure.
+ *
+ * @param[out] nl Netlist holding the annotation.
+ * @param[in] slot Gate slot.
+ * @return kOk on clear; kInvalidArgument for dead/out-of-range slots or un-annotated (zero-valued) gates.
+ */
+[[nodiscard]] inline core::Status clear_gate_delay(Netlist &nl, std::uint16_t slot) noexcept {
+  if (slot >= kMaxGates || !nl.gates[slot].live) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (nl.gates[slot].propagation_delay_ps == 0) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // no delay set
+  }
+  nl.gates[slot].propagation_delay_ps = 0;
+  return core::Status::success();
+}
+
+/**
  * @brief Single-driver wire, with the shared-net opt-in (011).
  *
  * Exactly one wire per destination input — unless that input is marked

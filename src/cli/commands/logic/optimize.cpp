@@ -66,6 +66,16 @@ int LogicOptimizeSpec::run(ArgCursor &args, std::ostream &out) {
     opts.target = target.value;
   }
   Netlist &nl = workspace();
+  // Pre-scan for stored propagation delays (013): O2 reshapes the
+  // network and its emitter zeroes the field, so an O2 run over an
+  // annotated netlist reports the reset below. The scan rides the
+  // verb — the engine contract is unchanged.
+  std::uint16_t annotated = 0;
+  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
+    if (nl.gates[s].live && nl.gates[s].propagation_delay_ps != 0) {
+      ++annotated;
+    }
+  }
   // Snapshot the pre-optimize interface: folding drops dead pins, O2
   // duplicates pins for inversion (NAND(a,a) = NOT a), and gates are
   // renamed — so the new truth table only matches the old one under pin
@@ -109,6 +119,12 @@ int LogicOptimizeSpec::run(ArgCursor &args, std::ostream &out) {
         << " outputs [" << after_out_text << "]\n";
     out << "note: interface changed (folding drops dead pins, O2 duplicates pins for inversion); re-run truth on "
            "the new pins and compare under pin replication, not row-for-row.\n";
+  }
+  // Conditional O2 delay-reset note (013): printed iff the level is O2
+  // and the pre-scan found >=1 annotation. Zero-annotation runs print
+  // nothing extra (byte-identical).
+  if (level_o2 && annotated > 0) {
+    out << "note: O2 reshaped the network; reset the propagation delay on " << annotated << " gate(s) (docs/logic.md §12)\n";
   }
   return core::kExitOk;
 }

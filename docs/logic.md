@@ -415,6 +415,7 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
 add <KIND> [--inputs N]     list [--wires] [--iface]   wire <FROM.out> <TO.in> [--shared]
 unwire [FROM.out] <TO.i>    unshare <TO.i>             remove <GATE>
 ignore <PIN> / use <PIN>    pull <TO.i> <up|down>      unpull <TO.i>
+set-delay <GATE> <VALUE>  unset-delay <GATE>
 tie <A.i> <B.j>             untie <PIN.i>              reset [--force]
 solve [--in bits] [--from pin=0|1 ...]
 truth [--csv p] [--limit N] optimize [--to nand|nor] [--level O0|O1|O2]
@@ -431,7 +432,20 @@ enable-gated buffer (exactly 2 inputs: pin 1 = data, pin 2 = enable
 active-high; released enable drives high-Z). `pull`/`unpull` set and
 clear the per-input idle level (`list` annotates `pulls=PIN(up|down)`);
 `solve`/`step` render floating block outputs as `Z` (reachable only
-with buffers, so buffer-free flows print byte-identically). `truth`
+with buffers, so buffer-free flows print byte-identically).
+`set-delay`/`unset-delay` annotate a gate with a propagation delay in
+whole picoseconds (`list` annotates `delay=<N>ps` iff nonzero, so
+un-annotated workspaces list byte-identically): bare integers mean
+picoseconds, suffixed forms (`s sec ms us ns min h ps`) convert
+exactly through the owned time table with pure integer arithmetic —
+sub-picosecond remainders, field overflow, negatives, and
+unknown/cross-dimension suffixes refuse loudly. Zero is legal and
+equal to clearing (`set-delay GATE 0` ≡ `unset-delay GATE`, which
+refuses when no delay is set). Stored only: evaluation stays
+zero-delay, and `optimize --level O2` (which reshapes the network and
+resets the field per its documented contract) prints a conditional
+note naming the reset iff ≥1 annotation existed — O0/O1 preserve
+delays in place with no note. `truth`
 refuses netlists with 2+ attachments on a shared input or any live
 buffer (the word path is 1-bit per lane) and points at scalar `solve`;
 pull-only netlists stream unchanged. `optimize --level O2` refuses
@@ -557,9 +571,12 @@ below).
   tidy `LogicCsvSink`, and `sim run --solver logic` with
   `--seq-file/--seq-clocks/--seq-from` options.
 - **Timing / delay.** Every gate already stores `propagation_delay_ps`
-  (default 0; v1 eval is zero-delay, loader stores any value). Delay
-  simulation later reads the field — no schema or struct change, only
-  an evaluator that honors it plus a `set-delay` verb.
+  (default 0; v1 eval is zero-delay, loader stores any value). The
+  annotation verbs shipped in 013 (`set-delay <GATE> <VALUE>` /
+  `unset-delay <GATE>`: exact whole-picosecond parse, `list`
+  readback, save/load round-trip, O0/O1 preserve with an O2 reset
+  note). Delay simulation later reads the field — no schema or struct
+  change, only a delay-honoring evaluator as the named follow-on.
 - **Verilog / VHDL import.** Importers are pure `Netlist` builders
   (`parse_verilog(text) -> Result<Netlist>`) in their own TUs, reusing
   the same validation (`wire` single-driver/cycle checks) as the CLI

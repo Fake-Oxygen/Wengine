@@ -366,6 +366,8 @@ if(BUILD_CLI)
         src/cli/commands/logic/peek.cpp
         src/cli/commands/logic/pull.cpp
         src/cli/commands/logic/unpull.cpp
+        src/cli/commands/logic/set_delay.cpp
+        src/cli/commands/logic/unset_delay.cpp
         src/cli/commands/logic/tie.cpp
         src/cli/commands/logic/truth.cpp
         src/cli/commands/logic/unwire.cpp
@@ -770,6 +772,16 @@ if(BUILD_TESTS)
     add_executable(test_logic_buffer tests/test_logic_buffer.cpp)
     target_link_libraries(test_logic_buffer PRIVATE wengine_cli wengine_logic_yaml)
     add_test(NAME logic_buffer COMMAND test_logic_buffer)
+
+    # 013-delay-annotation-verbs: exact whole-ps parse through verb
+    # lifecycle, inertness, optimizer preserve/reset, save/load
+    # round-trip, removal pins. Links wengine_cli + wengine_logic_yaml
+    # to prove the seam-to-verb-to-artifact chain.
+    add_executable(test_logic_delay tests/test_logic_delay.cpp)
+    target_link_libraries(test_logic_delay PRIVATE wengine_cli wengine_logic_yaml)
+    target_compile_definitions(test_logic_delay PRIVATE
+        "WENGINE_LOGIC_EXAMPLE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/examples/logic\"")
+    add_test(NAME logic_delay COMMAND test_logic_delay)
 
     # LOGIC-7 schematic layout: pure header-only geometry (no SDL), links
     # wengine_core alone like test_logic.

@@ -207,6 +207,53 @@ schema contract (round-trip + refusals) lives in `test_logic_yaml`;
 the `buffer_bus` example golden lives in `test_logic_yaml`
 (`test_examples`).
 
+## test_logic_delay
+
+**What it checks**: propagation-delay annotation end to end —
+value-exactness goldens hand-derived from the contract (bare ps,
+`s sec ms us ns min h ps` suffixes via pure integer arithmetic to the
+full u64 range, every refusal class: negative, sub-picosecond,
+overflow, unknown/cross-dimension suffix, malformed grammar); the
+engine seam (live-slot validation, zero-field clear refusal,
+zero-as-legal-write, every-kind legality); verb lifecycle
+(`set-delay` canonical-ps echo, `list` present-only annotation,
+last-write-wins, zero-is-clean, usage refusals with state untouched,
+un-annotated byte-identity); inertness (solve/step/truth/export-truth
+byte-identical with every gate heavily annotated, including over
+pulled/tied nets; the export schema differs exactly in `delay_ps`);
+clear lifecycle (`unset-delay` success line, `no delay set` refusal,
+unknown/stray loud, `set-delay X 0` equivalence, removal recycles
+clean); save/load round-trip (verb-written value in `delay_ps`,
+identical replay, cleared-file clean, pre-feature `tieoff.yaml`
+with stored 1500/250 loads and solves as before); optimizer policy
+(O0/O1 preserve in place with no note, O2 resets with the
+conditional note iff ≥1 annotation existed, optimize-of-optimize
+idempotent, zero-annotation runs silent); world binary checkpoint
+round-trip of the u64 column; and TUI parity (executor vs Shell
+byte-identical over the new vocabulary).
+
+**Purpose**: pins the 013 annotation seam (exact parse, field
+write/clear) through the session verbs to the YAML and binary
+round-trips, so stored delays stay exact, visible, and inert.
+
+**Guards against**: silent rounding of stored delays, sub-picosecond
+truncation, evaluation paths reading the annotation, optimizer
+silently dropping stored values, and headless/TUI divergence.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_delay
+./build/test_logic_delay
+```
+
+**Prerequisites**: standard build only.
+
+**Boundaries**: registry-size and completion pins live in
+`test_cli_args` (25 → 26 → 27 with the verbs, `want_s`/`want_u`
+vectors); the YAML schema contract (required key, u64 validation,
+`tieoff` fixture pins) lives in `test_logic_yaml`.
+
 ## test_logic_seq_kinds
 
 **What it checks**: sequential kind vocabulary: append-only ordinals

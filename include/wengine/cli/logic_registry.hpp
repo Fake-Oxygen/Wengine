@@ -469,6 +469,91 @@ struct LogicUnpullSpec {
 };
 
 /**
+ * @brief `set-delay` verb: annotate a gate with a propagation delay (013).
+ */
+struct LogicSetDelaySpec {
+  /**
+   * @brief Verb name (`set-delay`), valid in-session and one-shot.
+   */
+  static constexpr std::string_view kName = "set-delay";
+  /**
+   * @brief One-line description for session help listings.
+   */
+  static constexpr std::string_view kDescription = "Annotate a gate with a propagation delay";
+  /**
+   * @brief Usage text printed by `help set-delay` and usage errors.
+   */
+  static constexpr std::string_view kUsage =
+      "set-delay <GATE> <VALUE>\n"
+      "  set-delay AND1 1500\n"
+      "  set-delay AND1 1.5ns\n"
+      "Annotates the gate with a propagation delay in whole picoseconds,\n"
+      "stored on the gate (bare integers mean picoseconds, suffixed forms\n"
+      "convert exactly through the owned time table: s sec ms us ns min h\n"
+      "ps). Zero is legal and equal to clearing. Stored only: evaluation\n"
+      "stays zero-delay (docs/logic.md §12; a future delay simulator reads\n"
+      "it). Re-setting replaces the value (last write wins).";
+
+  /**
+   * @brief Execute the `set-delay` verb.
+   * @param[in] args Cursor over the argument tokens after the verb
+   *                 (`<GATE>` plus `<VALUE>` positionals).
+   * @param[out] out Result, usage, and error text.
+   * @return 0 (kExitOk) on success; 2 (kExitUsage) on a usage error.
+   *         Errors change no state.
+   */
+  static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Tab-complete `set-delay` arguments (gate names, then nothing:
+   *        delay values are free-form, not an enumeration).
+   * @param[in] prior_args Tokens after the verb, before the partial.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates (no trailing spaces).
+   */
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
+/**
+ * @brief `unset-delay` verb: clear a gate's propagation delay (013).
+ */
+struct LogicUnsetDelaySpec {
+  /**
+   * @brief Verb name (`unset-delay`), valid in-session and one-shot.
+   */
+  static constexpr std::string_view kName = "unset-delay";
+  /**
+   * @brief One-line description for session help listings.
+   */
+  static constexpr std::string_view kDescription = "Clear a gate's propagation delay";
+  /**
+   * @brief Usage text printed by `help unset-delay` and usage errors.
+   */
+  static constexpr std::string_view kUsage =
+      "unset-delay <GATE>\n"
+      "  unset-delay AND1\n"
+      "Clears the propagation delay on the gate (fails loudly when no\n"
+      "delay is set — mirroring `unpull`'s lifecycle refusals). Zero and\n"
+      "cleared are the same state: `set-delay GATE 0` is equivalent.";
+
+  /**
+   * @brief Execute the `unset-delay` verb.
+   * @param[in] args Cursor over the argument tokens after the verb
+   *                 (`<GATE>` positional).
+   * @param[out] out Result, usage, and error text.
+   * @return 0 (kExitOk) on success; 2 (kExitUsage) on a usage error.
+   *         Errors change no state.
+   */
+  static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Tab-complete `unset-delay` arguments (gate names).
+   * @param[in] prior_args Tokens after the verb, before the partial.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates (no trailing spaces).
+   */
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
+/**
  * @brief `remove` verb: remove one gate from the workspace.
  */
 struct LogicRemoveSpec {
@@ -1154,7 +1239,7 @@ struct LogicPeekSpec {
  */
 using LogicRegistry = Registry<LogicHelpSpec, LogicBackSpec, LogicAddSpec, LogicListSpec,
                                LogicWireSpec, LogicUnwireSpec, LogicUnshareSpec, LogicPullSpec, LogicUnpullSpec,
-                               LogicRemoveSpec, LogicIgnoreSpec, LogicUseSpec, LogicTieSpec, LogicUntieSpec,
+                               LogicSetDelaySpec, LogicUnsetDelaySpec, LogicRemoveSpec, LogicIgnoreSpec, LogicUseSpec, LogicTieSpec, LogicUntieSpec,
                                LogicResetSpec, LogicSolveSpec, LogicTruthSpec, LogicOptimizeSpec,
                                LogicDrawSpec, LogicSaveSpec, LogicLoadSpec,
                                LogicExportSpec, LogicStepSpec, LogicPokeSpec, LogicPeekSpec>;
