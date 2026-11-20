@@ -10,8 +10,9 @@
  * This is the ONLY logic engine header that talks about YAML, and it
  * knows nothing about yaml-cpp: no yaml headers are included here (or
  * in any other engine header), so every existing target keeps linking
- * `wengine_core` alone. The single TU allowed to know yaml-cpp exists
- * is `src/logic/yaml_store.cpp` (same seam as
+ * `wengine_core` alone. The store TUs under `src/logic/`
+ * (`wengine_logic_yaml`: orchestration, checkers, replay, save) are
+ * the only ones allowed to know yaml-cpp exists (same seam as
  * `src/signal/lua_solver.cpp`).
  *
  * File-format expectations — schema v1, new generation (006): the

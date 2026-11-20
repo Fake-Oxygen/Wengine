@@ -297,11 +297,14 @@ target_compile_options(wengine_yaml PRIVATE
     $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-include cstdint>
 )
 
-# Versioned workspace store: the single TU allowed to know yaml-cpp exists.
-# Engine headers stay yaml-free (see logic/yaml_store.hpp); strict warnings
-# like wengine_cli.
+# Versioned workspace store: the store TUs under src/logic/ are the only
+# ones allowed to know yaml-cpp exists. Engine headers stay yaml-free
+# (see logic/yaml_store.hpp); strict warnings like wengine_cli.
 add_library(wengine_logic_yaml STATIC
     src/logic/yaml_store.cpp
+    src/logic/yaml_store_check.cpp
+    src/logic/yaml_store_replay.cpp
+    src/logic/yaml_store_save.cpp
 )
 target_include_directories(wengine_logic_yaml PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

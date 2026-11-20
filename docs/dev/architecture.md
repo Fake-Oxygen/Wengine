@@ -41,7 +41,7 @@ Platform code lives in `src/`, and only there:
   translation units while the headers stay platform-free, so a future
   Windows port replaces the TU and never the header.
 - `src/signal/lua_solver.cpp` is the single TU allowed to know Lua exists.
-- `src/logic/yaml_store.cpp` is the single TU allowed to know yaml-cpp exists.
+- `src/logic/yaml_store*.cpp` are the store TUs allowed to know yaml-cpp exists.
 - `src/ros2/` and `src/tui/` hold the ROS 2 transport and TUI domain TUs.
 
 The GUI lives in `apps/gui/`, layered so each layer has one job:

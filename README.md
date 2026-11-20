@@ -610,7 +610,7 @@ canonical-subset parser users will fight; the submodule pin + from-source
 build keeps it auditable and warning-clean. Vendored + built from source
 (no system headers needed): `wengine_yaml` (`STATIC`, parser + emitter
 core `src/*.cpp` only, no contrib graphbuilder, `SYSTEM` includes) plus
-`wengine_logic_yaml` (`STATIC`: `src/logic/yaml_store.cpp`, the single TU
+`wengine_logic_yaml` (`STATIC`: `src/logic/yaml_store*.cpp`, the only TUs
 allowed to know yaml-cpp exists, strict warnings) — engine headers stay
 yaml-free (see `logic/yaml_store.hpp`), so existing tests keep linking
 `wengine_core` alone. Strict v1 schema (new generation: `version: 1`,
