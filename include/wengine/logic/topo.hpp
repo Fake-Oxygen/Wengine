@@ -81,6 +81,117 @@ namespace detail {
   return n;
 }
 
+// (011) Per-gate Kahn indegree over primary + extra driver edges.
+// comb_only=false counts every present primary (kAll: a dangling primary
+// counts and never drains, like a dangling extra saturating below);
+// comb_only=true counts only non-sequential drivers and returns 0xFF on
+// any dangling primary/extra so the caller fails loudly. Unmarked
+// netlists hold no extras and read exactly today's counts.
+[[nodiscard]] inline std::uint8_t gate_indeg(const Netlist &nl, const Gate &g, std::uint16_t s, bool comb_only) noexcept {
+  std::uint8_t d = 0;
+  for (std::uint8_t i = 0; i < g.input_count; ++i) {
+    const std::uint16_t drv = g.drivers[i];
+    if (drv == kNoDriver) {
+      continue;
+    }
+    if (!comb_only) {
+      ++d;
+      continue;
+    }
+    if (drv >= kMaxGates || !nl.gates[drv].live) {
+      // Dangling-driver defect marker: 0xFF is unreachable for
+      // legitimate counts (at most input_count * 4 = 32 edges per
+      // gate), so only truly dangling graphs trip the caller check.
+      // (011 correction: the old kMaxInputs saturation collided with
+      // fully-wired 8-input gates, which are legal — not dangling.)
+      return 0xFF;
+    }
+    if (!is_sequential_kind(nl.gates[drv].kind)) {
+      ++d;
+    }
+  }
+  // (011) Extras are driver-graph edges: a dangling extra saturates
+  // (never drains, like a dangling primary on the kAll path).
+  const std::uint8_t extra_d = extra_edge_count(nl, g, s, comb_only);
+  if (extra_d == 0xFF) {
+    return 0xFF;
+  }
+  return static_cast<std::uint8_t>(d + extra_d);
+}
+
+// (011) Max driver level + 1 over primary + extra edges: extra drivers
+// order the sink the same way primaries do. level_out may be nullptr
+// (the stepper path skips levels); out-of-range drivers read 0.
+[[nodiscard]] inline std::uint16_t emit_depth(const Netlist &nl, std::uint16_t cur, const std::uint16_t *level_out) noexcept {
+  std::uint16_t depth = 0;
+  const Gate &cg = nl.gates[cur];
+  for (std::uint8_t i = 0; i < cg.input_count; ++i) {
+    const std::uint16_t drv = cg.drivers[i];
+    if (drv == kNoDriver || drv >= kMaxGates) {
+      continue;
+    }
+    const std::uint16_t base = (level_out != nullptr) ? level_out[drv] : 0;
+    const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
+    if (cand > depth) {
+      depth = cand;
+    }
+  }
+  for (std::uint8_t i = 0; i < cg.input_count; ++i) {
+    for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
+      if (edrv >= kMaxGates) {
+        return;
+      }
+      const std::uint16_t base = (level_out != nullptr) ? level_out[edrv] : 0;
+      const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
+      if (cand > depth) {
+        depth = cand;
+      }
+    });
+  }
+  return depth;
+}
+
+// (011) Per-pop successor update: drain one indegree unit per
+// primary/extra edge from cur, queueing newly-ready gates. Single
+// for_each_extra walk (no separate uses_extra pre-scan); extra edges
+// drain symmetrically with primaries. kCombOnly skips sequential sinks
+// (seq edges cost 0 and seq gates never pop).
+inline void drain_successors(const Netlist &nl, EdgeFilter filter, std::uint16_t cur, std::uint8_t *indeg, std::uint16_t *queue, std::size_t &tail) noexcept {
+  const bool skip_seq = (filter == EdgeFilter::kCombOnly);
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    const Gate &g = nl.gates[s];
+    if (!g.live || indeg[s] == 0) {
+      continue;
+    }
+    if (skip_seq && is_sequential_kind(g.kind)) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      if (g.drivers[i] == cur) {
+        --indeg[s];
+        if (indeg[s] == 0) {
+          queue[tail++] = s;
+          break; // one push per gate (remaining inputs from cur already counted)
+        }
+      }
+    }
+    if (indeg[s] != 0) {
+      bool drained = false;
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
+          if (edrv == cur) {
+            --indeg[s];
+            drained = true;
+          }
+        });
+      }
+      if (drained && indeg[s] == 0) {
+        queue[tail++] = s;
+      }
+    }
+  }
+}
+
 // (011) True when cur drives s through any extra attachment (seam
 // adapter: single-input predicate is shared_uses_driver_flat).
 // Retained for detail-level callers; the Kahn drains below use the
@@ -105,32 +216,7 @@ inline void count_comb_indeg(const Netlist &nl, std::uint8_t *indeg, std::size_t
       continue;
     }
     ++n_comb;
-    std::uint8_t d = 0;
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t drv = g.drivers[i];
-      if (drv == kNoDriver) {
-        continue;
-      }
-      if (drv >= kMaxGates || !nl.gates[drv].live) {
-        // Dangling-driver defect marker: 0xFF is unreachable for
-        // legitimate counts (at most input_count * 4 = 32 edges per
-        // gate), so only truly dangling graphs trip the caller check.
-        // (011 correction: the old kMaxInputs saturation collided with
-        // fully-wired 8-input gates, which are legal — not dangling.)
-        d = 0xFF;
-        break;
-      }
-      if (!is_sequential_kind(nl.gates[drv].kind)) {
-        ++d;
-      }
-    }
-    const std::uint8_t extra_d = detail::extra_edge_count(nl, g, s, true);
-    if (extra_d == 0xFF) {
-      d = 0xFF;
-    } else {
-      d = static_cast<std::uint8_t>(d + extra_d);
-    }
-    indeg[s] = d;
+    indeg[s] = gate_indeg(nl, g, s, true);
   }
 }
 
@@ -173,22 +259,8 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
       if (!g.live) {
         continue;
       }
-    ++live;
-    std::uint8_t d = 0;
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        ++d;
-      }
-    }
-    // (011) Extras are driver-graph edges: a dangling extra saturates
-    // (never drains, like a dangling primary on this path).
-    const std::uint8_t extra_d = detail::extra_edge_count(nl, g, s, false);
-    if (extra_d == 0xFF) {
-      d = 0xFF;
-    } else {
-      d = static_cast<std::uint8_t>(d + extra_d);
-    }
-    indeg[s] = d;
+      ++live;
+      indeg[s] = gate_indeg(nl, g, s, false);
       if (level_out != nullptr) {
         level_out[s] = 0;
       }
@@ -204,70 +276,15 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
     std::size_t n_emit = 0;
     while (head < tail) {
       const std::uint16_t cur = queue[head++];
-      std::uint16_t depth = 0;
-      const Gate &cg = nl.gates[cur];
-      for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-        const std::uint16_t drv = cg.drivers[i];
-        if (drv == kNoDriver || drv >= kMaxGates) {
-          continue;
-        }
-        const std::uint16_t base = (level_out != nullptr) ? level_out[drv] : 0;
-        const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
-        if (cand > depth) {
-          depth = cand;
-        }
+      const std::uint16_t depth = emit_depth(nl, cur, level_out);
+      if (level_out != nullptr) {
+        level_out[cur] = depth;
       }
-    // (011) Extra drivers order the sink the same way primaries do.
-    for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-      for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
-        if (edrv >= kMaxGates) {
-          return;
-        }
-        const std::uint16_t base = (level_out != nullptr) ? level_out[edrv] : 0;
-        const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
-        if (cand > depth) {
-          depth = cand;
-        }
-      });
+      order_out[n_emit++] = cur;
+      drain_successors(nl, EdgeFilter::kAll, cur, indeg, queue, tail);
     }
-    if (level_out != nullptr) {
-      level_out[cur] = depth;
-    }
-    order_out[n_emit++] = cur;
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
-      if (!g.live || indeg[s] == 0) {
-        continue;
-      }
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] == cur) {
-          --indeg[s];
-          if (indeg[s] == 0) {
-            queue[tail++] = s;
-            break; // one push per gate (remaining inputs from cur already counted)
-          }
-        }
-      }
-      // (011) Extra edges drain indegree symmetrically with primaries
-      // (single walk: no separate uses_extra pre-scan).
-      if (indeg[s] != 0) {
-        bool drained = false;
-        for (std::uint8_t i = 0; i < g.input_count; ++i) {
-          for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
-            if (edrv == cur) {
-              --indeg[s];
-              drained = true;
-            }
-          });
-        }
-        if (drained && indeg[s] == 0) {
-          queue[tail++] = s;
-        }
-      }
-    }
-  }
-  n_out = n_emit;
-  return n_emit == live;
+    n_out = n_emit;
+    return n_emit == live;
   }
   // kCombOnly: sequential gates are always-ready roots (level 0). Only
   // combinational pops decrement successors — seq edges cost 0 and seq
@@ -314,68 +331,13 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
   std::size_t n_comb_emit = 0;
   while (head < tail) {
     const std::uint16_t cur = queue[head++];
-    std::uint16_t depth = 0;
-    const Gate &cg = nl.gates[cur];
-    for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-      const std::uint16_t drv = cg.drivers[i];
-      if (drv == kNoDriver || drv >= kMaxGates) {
-        continue;
-      }
-      const std::uint16_t base = (level_out != nullptr) ? level_out[drv] : 0;
-      const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
-      if (cand > depth) {
-        depth = cand;
-      }
-    }
-    // (011) Extra drivers order the sink the same way primaries do.
-    for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-      for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
-        if (edrv >= kMaxGates) {
-          return;
-        }
-        const std::uint16_t base = (level_out != nullptr) ? level_out[edrv] : 0;
-        const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
-        if (cand > depth) {
-          depth = cand;
-        }
-      });
-    }
+    const std::uint16_t depth = emit_depth(nl, cur, level_out);
     if (level_out != nullptr) {
       level_out[cur] = depth;
     }
     order_out[n_emit++] = cur;
     ++n_comb_emit;
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
-      if (!g.live || is_sequential_kind(g.kind) || indeg[s] == 0) {
-        continue;
-      }
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] == cur) {
-          --indeg[s];
-          if (indeg[s] == 0) {
-            queue[tail++] = s;
-            break; // one push per gate (remaining inputs counted already)
-          }
-        }
-      }
-      // (011) Extra edges drain indegree symmetrically with primaries
-      // (single walk: no separate uses_extra pre-scan).
-      if (indeg[s] != 0) {
-        bool drained = false;
-        for (std::uint8_t i = 0; i < g.input_count; ++i) {
-          for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
-            if (edrv == cur) {
-              --indeg[s];
-              drained = true;
-            }
-          });
-        }
-        if (drained && indeg[s] == 0) {
-          queue[tail++] = s;
-        }
-      }
-    }
+    drain_successors(nl, EdgeFilter::kCombOnly, cur, indeg, queue, tail);
   }
   n_out = n_emit;
   return n_comb_emit == n_comb;
