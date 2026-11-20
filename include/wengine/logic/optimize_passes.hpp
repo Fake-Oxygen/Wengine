@@ -32,6 +32,7 @@
 #include "wengine/logic/optimize_types.hpp"
 #include "wengine/logic/optimize_barrier.hpp"
 #include "wengine/logic/optimize_exact.hpp"
+#include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -65,14 +66,11 @@ inline void recount_fanout(Netlist &nl) noexcept {
     // 011: every extra edge counts exactly like a primary (same
     // recount semantics the barrier roots rely on).
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::size_t flat = tie_flat(s, i);
-      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
-      for (std::uint8_t j = 0; j < extra_n; ++j) {
-        const std::uint16_t d = nl.extra_drivers[flat * kMaxSharedExtra + j];
+      for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, std::uint16_t d, std::uint8_t) {
         if (d < kMaxGates && nl.gates[d].live) {
           ++nl.gates[d].output_fanout;
         }
-      }
+      });
     }
   }
 }

@@ -805,22 +805,13 @@ struct ClockRow {
       return false;
     }
     if (dst.drivers[to.value.input] != kNoDriver) {
-      // 011: repeated `to:` on a marked input appends an extra — the
-      // same cap the engine enforces, loudly, never truncated.
-      const std::uint8_t extra_n = shared_extra_count(tmp, to.value.slot, to.value.input);
-      if (extra_n >= kMaxSharedExtra) {
+      // 011: repeated `to:` on a marked input appends an extra via the
+      // SharedNet/engine seam (same cap the engine enforces, loudly,
+      // never truncated).
+      const std::uint8_t inv = from.value.negated ? 1 : 0;
+      if (!detail::append_shared_extra(tmp, from.value.slot, to.value.slot, to.value.input, inv).ok()) {
         err = at + "shared net full (cap 4) '" + w.to + "'";
         return false;
-      }
-      const std::size_t flat = tie_flat(to.value.slot, to.value.input);
-      tmp.extra_drivers[flat * kMaxSharedExtra + extra_n] = from.value.slot;
-      const std::uint8_t inv = from.value.negated ? 1 : 0;
-      tmp.extra_inv[flat * kMaxSharedExtra + extra_n] = inv;
-      tmp.shared_meta[flat] = static_cast<std::uint8_t>((tmp.shared_meta[flat] & 0x01u) | ((extra_n + 1u) << 1));
-      if (inv != 0) {
-        ++tmp.gates[from.value.slot].nq_fanout;
-      } else {
-        ++tmp.gates[from.value.slot].output_fanout;
       }
       continue;
     }
@@ -1057,16 +1048,14 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
       // index order (legal on load iff the input is marked, which the
       // `shared:` section below guarantees).
       const std::size_t flat = tie_flat(s, i);
-      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
-      for (std::uint8_t j = 0; j < extra_n; ++j) {
-        const std::uint16_t edrv = nl.extra_drivers[flat * kMaxSharedExtra + j];
-        const bool eneg = nl.extra_inv[flat * kMaxSharedExtra + j] != 0;
+      for_each_extra(nl, flat, [&](std::uint8_t, std::uint16_t edrv, std::uint8_t einv) {
+        const bool eneg = einv != 0;
         out += "  - {from: ";
         out += pin_text(nl, edrv, true, 0, eneg);
         out += ", to: ";
         out += pin_text(nl, s, false, i);
         out += "}\n";
-      }
+      });
     }
   }
   // 011: optional `shared:` section, emitted iff >= 1 mark exists, one

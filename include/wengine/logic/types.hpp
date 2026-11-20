@@ -19,9 +19,11 @@
  * vocabulary; fallible ops use core::Status/Result at the eval/io
  * layer, never here). No iostream. Logic is a standalone domain: this
  * header (and every logic header below it) must never depend on CLI
- * types. Consumers: pins/netlist/eval/topo/tie_set/block_interface and
- * the rest of the logic pipeline, the CLI `logic` verbs, and the
- * test_logic* suite.
+ * types. Consumers: pins/netlist/topo/tie_set/shared_net/block_interface
+ * and the rest of the logic pipeline, the CLI `logic` verbs, and the
+ * test_logic* suite. Shared-mark vocabulary lives in shared_net.hpp
+ * (the SharedNet seam owns shared_meta/extra_* directly); pull
+ * vocabulary stays here beside the pool.
  */
 
 #include <array>
@@ -381,8 +383,10 @@ struct Netlist {
    */
   std::array<std::uint16_t, kMaxGates * kMaxInputs> tie_rep{};
   /**
-   * @brief Shared-net mark + extra count per input (011): byte value 0
-   *        is unmarked (the fast test on both eval paths); bit0 is the
+   * @brief Shared-net mark + extra count per input (011): owned by the
+   *        SharedNet seam (shared_net.hpp) — only that header may
+   *        read/write these three arrays directly. Byte value 0 is
+   *        unmarked (the fast test on both eval paths); bit0 is the
    *        shared mark, bits1..2 hold the extra-attachment count 0..3.
    *        Indexed by tie_flat(slot, input). Marks are persistent
    *        topology state; counts are diagnostic session state beside
@@ -390,16 +394,18 @@ struct Netlist {
    */
   std::array<std::uint8_t, kMaxGates * kMaxInputs> shared_meta{};
   /**
-   * @brief Extra source slots per shared input (011): dense entries
-   *        0..count-1 at flat * kMaxSharedExtra + j. The primary
-   *        attachment stays in Gate::drivers (kNoDriver semantics
-   *        preserved); extras never dangle behind a kNoDriver primary.
+   * @brief Extra source slots per shared input (011): owned by the
+   *        SharedNet seam. Dense entries 0..count-1 at
+   *        flat * kMaxSharedExtra + j. The primary attachment stays in
+   *        Gate::drivers (kNoDriver semantics preserved); extras never
+   *        dangle behind a kNoDriver primary.
    */
   std::array<std::uint16_t, kMaxGates * kMaxInputs * kMaxSharedExtra> extra_drivers{};
   /**
-   * @brief Per-extra NQ polarity (011): extra_inv at the same index as
-   *        extra_drivers; nonzero inverts that attachment's value before
-   *        the resolve_net fold (Q+NQ self-contention resolves to X).
+   * @brief Per-extra NQ polarity (011): owned by the SharedNet seam.
+   *        extra_inv at the same index as extra_drivers; nonzero inverts
+   *        that attachment's value before the resolve_net fold (Q+NQ
+   *        self-contention resolves to X).
    */
   std::array<std::uint8_t, kMaxGates * kMaxInputs * kMaxSharedExtra> extra_inv{};
   /**
@@ -437,48 +443,14 @@ struct Netlist {
 };
 
 /**
- * @brief True when the flat destination input carries the shared mark
- *        (011): bit0 of shared_meta[flat].
- *
- * Flat-index form of the mark test, usable from headers that cannot
- * see pin vocabulary (tie_set.hpp): marks and ties are disjoint per
- * flat — a tied input is never marked and a marked input is never
- * tied, enforced loudly on both seams.
- *
- * @param[in] nl Netlist holding the mark table.
- * @param[in] flat Flat pin index (slot * kMaxInputs + input).
- * @return True when the flat position carries the shared mark.
- */
-[[nodiscard]] inline bool is_shared_flat(const Netlist &nl, std::size_t flat) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
-    return false;
-  }
-  return (nl.shared_meta[flat] & 0x01u) != 0;
-}
-
-/**
- * @brief Extra-attachment count at a flat position, 0..kMaxSharedExtra
- *        (011): bits1..2 of shared_meta[flat].
- *
- * @param[in] nl Netlist holding the mark table.
- * @param[in] flat Flat pin index (slot * kMaxInputs + input).
- * @return Extra count (0 when unmarked or out of range).
- */
-[[nodiscard]] inline std::uint8_t shared_extra_flat(const Netlist &nl, std::size_t flat) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
-    return 0;
-  }
-  return static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-}
-
-/**
  * @brief True when the flat destination input carries a pull (012):
  *        pull_cfg[flat] is 1 (up) or 2 (down). Zero (none) and
  *        out-of-range flats read unpulled.
  *
- * Flat-index form of the pull test (usable beside is_shared_flat):
- * pulls and ties/ignores are disjoint per flat — a pulled input is
- * never tied or ignored, enforced loudly on both seams.
+ * Flat-index form of the pull test (usable beside
+ * shared_net::is_shared_flat): pulls and ties/ignores are disjoint per
+ * flat — a pulled input is never tied or ignored, enforced loudly on
+ * both seams.
  *
  * @param[in] nl Netlist holding the pull table.
  * @param[in] flat Flat pin index (slot * kMaxInputs + input).

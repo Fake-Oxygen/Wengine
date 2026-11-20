@@ -12,13 +12,17 @@
  *
  * Dependency rules (docs/logic.md sections 4, 8): header-only,
  * allocation-free, exception-free; caller-owned buffers throughout
- * (same contract as block_interface). Depends only on tie_set.hpp,
- * types.hpp, and core/status. Logic is a standalone domain: this header
- * must never depend on CLI types. Consumers: eval.hpp, seq_step.hpp,
- * the CLI solve/truth/poke verbs, and the test_logic* suite.
+ * (same contract as block_interface). Depends only on shared_net.hpp,
+ * tie_set.hpp, types.hpp, and core/status. Shared representation
+ * (shared_meta / extra_*) is owned by shared_net.hpp — this header
+ * calls that seam and never names bit shifts, masks, or strides.
+ * Logic is a standalone domain: this header must never depend on CLI
+ * types. Consumers: eval.hpp, seq_step.hpp, the CLI solve/truth/poke
+ * verbs, and the test_logic* suite.
  */
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/tie_set.hpp"
 #include "wengine/logic/types.hpp"
 
@@ -441,14 +445,19 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
       }
       span[n++] = apply_polarity(gate_out[drv], nl.driver_inv[flat]);
     }
-    const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-    for (std::uint8_t j = 0; j < extra_n; ++j) {
-      const std::size_t eij = flat * kMaxSharedExtra + j;
-      const std::uint16_t edrv = nl.extra_drivers[eij];
-      if (edrv >= kMaxGates || !nl.gates[edrv].live) {
-        return false;
+    bool dangling_extra = false;
+    for_each_extra(nl, flat, [&](std::uint8_t, std::uint16_t edrv, std::uint8_t einv) {
+      if (dangling_extra) {
+        return;
       }
-      span[n++] = apply_polarity(gate_out[edrv], nl.extra_inv[eij]);
+      if (edrv >= kMaxGates || !nl.gates[edrv].live) {
+        dangling_extra = true;
+        return;
+      }
+      span[n++] = apply_polarity(gate_out[edrv], einv);
+    });
+    if (dangling_extra) {
+      return false;
     }
     LogicValue sunk = LogicValue::kLow;
     if (!resolve_net(span, n, sunk)) {

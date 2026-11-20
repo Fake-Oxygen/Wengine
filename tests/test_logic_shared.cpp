@@ -28,11 +28,8 @@ namespace {
 void test_fresh_state_unmarked() {
   logic::Netlist nl{};
   for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
-    assert(nl.shared_meta[f] == 0);
-  }
-  for (std::size_t i = 0; i < nl.extra_drivers.size(); ++i) {
-    assert(nl.extra_drivers[i] == 0);
-    assert(nl.extra_inv[i] == 0);
+    assert(!logic::is_shared_flat(nl, f));
+    assert(logic::shared_extra_flat(nl, f) == 0);
   }
   logic::SolveDiag diag{};
   for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {

@@ -19,16 +19,20 @@
  * clears the mark. Both are idempotent.
  *
  * Dependency rules (docs/logic.md section 4): depends on
- * block_interface.hpp, pins.hpp, tie_set.hpp, topo.hpp, types.hpp, and
- * core/status. Logic is a standalone domain: this header must never
- * depend on CLI types. Consumers: the CLI add/remove/wire/ignore verbs,
- * eval.hpp, seq_step.hpp, yaml_store.hpp, the optimize pipeline, and
- * the test_logic* suite.
+ * block_interface.hpp, pins.hpp, shared_net.hpp, tie_set.hpp, topo.hpp,
+ * types.hpp, and core/status. Logic is a standalone domain: this header
+ * must never depend on CLI types. Shared representation (shared_meta /
+ * extra_drivers / extra_inv) is owned by shared_net.hpp — this header
+ * calls that seam and never names bit shifts, masks, or strides.
+ * Consumers: the CLI add/remove/wire/ignore verbs, eval.hpp,
+ * seq_step.hpp, yaml_store.hpp, the optimize pipeline, and the
+ * test_logic* suite.
  */
 
 #include "wengine/core/status.hpp"
 #include "wengine/logic/block_interface.hpp"
 #include "wengine/logic/pins.hpp"
+#include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/tie_set.hpp"
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
@@ -165,12 +169,9 @@ namespace wengine::logic {
     // Release every extra attachment on this input (polarity-aware) and
     // drop the mark: marks die with their gate's slot.
     const std::size_t flat = tie_flat(slot, i);
-    const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-    for (std::uint8_t j = 0; j < extra_n; ++j) {
-      const std::size_t eii = flat * kMaxSharedExtra + j;
-      const std::uint16_t edrv = nl.extra_drivers[eii];
+    for_each_extra(nl, flat, [&](std::uint8_t, std::uint16_t edrv, std::uint8_t einv) {
       if (edrv < kMaxGates && nl.gates[edrv].live) {
-        if (nl.extra_inv[eii] != 0) {
+        if (einv != 0) {
           if (nl.gates[edrv].nq_fanout > 0) {
             --nl.gates[edrv].nq_fanout;
           }
@@ -178,10 +179,8 @@ namespace wengine::logic {
           --nl.gates[edrv].output_fanout;
         }
       }
-      nl.extra_drivers[eii] = 0;
-      nl.extra_inv[eii] = 0;
-    }
-    nl.shared_meta[flat] = 0;
+    });
+    shared_clear_flat(nl, flat);
   }
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
     Gate &o = nl.gates[s];
@@ -197,12 +196,8 @@ namespace wengine::logic {
         // Extra attachment of the removed gate: release exactly that
         // edge (left-compact; remaining drivers resolve unchanged).
         const std::size_t flat = tie_flat(s, i);
-        const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-        for (std::uint8_t j = 0; j < extra_n; ++j) {
-          if (nl.extra_drivers[flat * kMaxSharedExtra + j] == slot) {
-            (void)unwire_driver(nl, slot, s, i);
-            break; // one named edge per (from, to, input) scan position
-          }
+        if (shared_uses_driver_flat(nl, flat, slot)) {
+          (void)unwire_driver(nl, slot, s, i);
         }
       }
     }
@@ -244,56 +239,10 @@ namespace wengine::logic {
   return remove_gate(nl, gate.value);
 }
 
-/**
- * @brief True when the destination input is marked as a shared (multi-driver) net (011): bit0 of shared_meta[flat].
- *
- * Out-of-range pins read unmarked (never shared); the mark is per
- * input, explicit, and inspectable.
- *
- * @param[in] nl Netlist holding the mark table.
- * @param[in] slot Sink slot.
- * @param[in] input 0-based sink input index.
- * @return True when the input carries the shared mark.
- */
-[[nodiscard]] inline bool is_shared_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || input >= kMaxInputs) {
-    return false;
-  }
-  return is_shared_flat(nl, tie_flat(slot, input));
-}
-
-/**
- * @brief Extra-attachment count on a shared input, 0..kMaxSharedExtra (011): bits1..2 of shared_meta[flat].
- *
- * @param[in] nl Netlist holding the mark table.
- * @param[in] slot Sink slot.
- * @param[in] input 0-based sink input index.
- * @return Extra count (0 when unmarked or out of range).
- */
-[[nodiscard]] inline std::uint8_t shared_extra_count(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || input >= kMaxInputs) {
-    return 0;
-  }
-  return shared_extra_flat(nl, tie_flat(slot, input));
-}
-
-/**
- * @brief Total attachments on an input (011): the primary driver (when
- *        present) plus extras. A shared net legally holds 0..4 across
- *        its lifetime; 0 attachments resolve kHighZ.
- *
- * @param[in] nl Netlist holding drivers and extras.
- * @param[in] slot Sink slot.
- * @param[in] input 0-based sink input index.
- * @return Attachment count (0 when unwired/out of range).
- */
-[[nodiscard]] inline std::uint8_t shared_attachment_count(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || input >= kMaxInputs || !nl.gates[slot].live) {
-    return 0;
-  }
-  const std::uint8_t primary = (input < nl.gates[slot].input_count && nl.gates[slot].drivers[input] != kNoDriver) ? 1 : 0;
-  return static_cast<std::uint8_t>(primary + shared_extra_count(nl, slot, input));
-}
+// Shared slot vocabulary (is_shared_input, shared_extra_count,
+// shared_attachment_count) lives in the SharedNet seam
+// (shared_net.hpp); this header calls it and never touches the
+// representation directly.
 
 namespace detail {
 
@@ -315,13 +264,10 @@ namespace detail {
                                                       std::uint16_t to_slot, std::uint8_t to_input,
                                                       std::uint8_t inv) noexcept {
   const std::size_t flat = tie_flat(to_slot, to_input);
-  const std::uint8_t count = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-  if (count >= kMaxSharedExtra) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument); // cap 4: loud, never truncated
+  const core::Status st = shared_push_extra(nl, flat, from_slot, inv);
+  if (!st.ok()) {
+    return st; // cap: loud, never truncated
   }
-  nl.extra_drivers[flat * kMaxSharedExtra + count] = from_slot;
-  nl.extra_inv[flat * kMaxSharedExtra + count] = inv;
-  nl.shared_meta[flat] = static_cast<std::uint8_t>((nl.shared_meta[flat] & 0x01u) | ((count + 1u) << 1));
   Gate &from = nl.gates[from_slot];
   if (inv != 0) {
     ++from.nq_fanout;
@@ -358,7 +304,7 @@ namespace detail {
   if (is_tied(nl, slot, input)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
   }
-  nl.shared_meta[tie_flat(slot, input)] |= 0x01u; // idempotent
+  shared_set_mark(nl, tie_flat(slot, input)); // idempotent
   return core::Status::success();
 }
 
@@ -383,13 +329,13 @@ namespace detail {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t flat = tie_flat(slot, input);
-  if ((nl.shared_meta[flat] & 0x01u) == 0) {
+  if (!is_shared_flat(nl, flat)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // not shared
   }
-  if (((nl.shared_meta[flat] >> 1) & 0x03u) != 0) {
+  if (shared_extra_flat(nl, flat) != 0) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // unwire extras first
   }
-  nl.shared_meta[flat] = 0;
+  shared_clear_flat(nl, flat);
   return core::Status::success();
 }
 
@@ -570,18 +516,13 @@ namespace detail {
     // sequences in different orders converge to identical array
     // states). The promoted edge keeps its counted fanout — the source
     // still drives this input.
-    const std::uint8_t count = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-    if (count > 0) {
-      to.drivers[to_input] = nl.extra_drivers[flat * kMaxSharedExtra + 0];
-      nl.driver_inv[flat] = nl.extra_inv[flat * kMaxSharedExtra + 0];
-      for (std::uint8_t j = 0; j < static_cast<std::uint8_t>(count - 1u); ++j) {
-        nl.extra_drivers[flat * kMaxSharedExtra + j] = nl.extra_drivers[flat * kMaxSharedExtra + static_cast<std::size_t>(j) + 1];
-        nl.extra_inv[flat * kMaxSharedExtra + j] = nl.extra_inv[flat * kMaxSharedExtra + static_cast<std::size_t>(j) + 1];
+    if (shared_extra_flat(nl, flat) > 0) {
+      std::uint16_t promoted = kNoDriver;
+      std::uint8_t promoted_inv = 0;
+      if (shared_pop_front(nl, flat, promoted, promoted_inv)) {
+        to.drivers[to_input] = promoted;
+        nl.driver_inv[flat] = promoted_inv;
       }
-      const std::size_t tail = flat * kMaxSharedExtra + (count - 1u);
-      nl.extra_drivers[tail] = 0;
-      nl.extra_inv[tail] = 0;
-      nl.shared_meta[flat] = static_cast<std::uint8_t>((nl.shared_meta[flat] & 0x01u) | ((count - 1u) << 1));
     }
   }
   nl.dirty = true;
@@ -620,28 +561,21 @@ namespace detail {
     return unwire(nl, to_slot, to_input); // primary edge (promotion included)
   }
   const std::size_t flat = tie_flat(to_slot, to_input);
-  const std::uint8_t count = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+  const std::uint8_t count = shared_extra_flat(nl, flat);
   for (std::uint8_t j = 0; j < count; ++j) {
-    const std::size_t eij = flat * kMaxSharedExtra + j;
-    if (nl.extra_drivers[eij] != from_slot) {
+    if (shared_extra_driver(nl, flat, j) != from_slot) {
       continue;
     }
     // Polarity-aware release of exactly this edge.
-    if (nl.extra_inv[eij] != 0) {
+    const std::uint8_t einv = shared_extra_inv(nl, flat, j);
+    if (einv != 0) {
       if (nl.gates[from_slot].nq_fanout > 0) {
         --nl.gates[from_slot].nq_fanout;
       }
     } else if (nl.gates[from_slot].output_fanout > 0) {
       --nl.gates[from_slot].output_fanout;
     }
-    for (std::uint8_t k = j; k < static_cast<std::uint8_t>(count - 1u); ++k) {
-      nl.extra_drivers[flat * kMaxSharedExtra + k] = nl.extra_drivers[flat * kMaxSharedExtra + static_cast<std::size_t>(k) + 1];
-      nl.extra_inv[flat * kMaxSharedExtra + k] = nl.extra_inv[flat * kMaxSharedExtra + static_cast<std::size_t>(k) + 1];
-    }
-    const std::size_t tail = flat * kMaxSharedExtra + (count - 1u);
-    nl.extra_drivers[tail] = 0;
-    nl.extra_inv[tail] = 0;
-    nl.shared_meta[flat] = static_cast<std::uint8_t>((nl.shared_meta[flat] & 0x01u) | ((count - 1u) << 1));
+    shared_erase_at(nl, flat, j);
     nl.dirty = true;
     nl.topo_size = 0;
     return core::Status::success();
@@ -689,8 +623,8 @@ namespace detail {
     }
     ++src.nq_fanout;
     const std::size_t flat = tie_flat(to.slot, to.input);
-    const std::uint8_t count = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-    nl.extra_inv[flat * kMaxSharedExtra + (count - 1u)] = 1;
+    const std::uint8_t count = shared_extra_flat(nl, flat);
+    shared_set_extra_inv(nl, flat, static_cast<std::uint8_t>(count - 1u), 1);
     return core::Status::success();
   }
   // Move the edge from the Q fanout to the NQ fanout and mark the sink
@@ -834,12 +768,10 @@ inline void reset_netlist(Netlist &nl) noexcept {
     for (std::size_t i = 0; i < kMaxInputs; ++i) {
       nl.driver_inv[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
       nl.pull_cfg[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
-      nl.shared_meta[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
-      for (std::size_t j = 0; j < kMaxSharedExtra; ++j) {
-        const std::size_t eij = (static_cast<std::size_t>(s) * kMaxInputs + i) * kMaxSharedExtra + j;
-        nl.extra_drivers[eij] = 0;
-        nl.extra_inv[eij] = 0;
-      }
+    }
+    // Shared representation clears through its owning seam.
+    for (std::size_t i = 0; i < kMaxInputs; ++i) {
+      shared_clear_flat(nl, static_cast<std::size_t>(s) * kMaxInputs + i);
     }
   }
   reset_all_ties(nl);

@@ -31,6 +31,7 @@
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -86,11 +87,8 @@ namespace wengine::logic::detail {
       if (g.drivers[i] == s) {
         return true;
       }
-      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
-      for (std::uint8_t j = 0; j < extra_n; ++j) {
-        if (nl.extra_drivers[flat * kMaxSharedExtra + j] == s) {
-          return true;
-        }
+      if (shared_uses_driver_flat(nl, flat, s)) {
+        return true;
       }
     }
   }
@@ -211,15 +209,12 @@ inline void follow_drivers(const Netlist &nl, const bool *seeds, bool *keep) noe
     // 011: extras are driver-graph edges — a pass that dropped an extra
     // would silently shrink a span (correctness, not policy).
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::size_t flat = tie_flat(cur, i);
-      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
-      for (std::uint8_t j = 0; j < extra_n; ++j) {
-        const std::uint16_t d = nl.extra_drivers[flat * kMaxSharedExtra + j];
+      for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, std::uint16_t d, std::uint8_t) {
         if (d < kMaxGates && nl.gates[d].live && !keep[d]) {
           keep[d] = true;
           stack[top++] = d;
         }
-      }
+      });
     }
   }
 }
@@ -262,14 +257,11 @@ inline void compute_feeds_seq(const Netlist &nl, bool *feeds_seq) noexcept {
         feeds_seq[d] = true;
       }
       // 011: extras feed the same way primaries do.
-      const std::size_t flat = tie_flat(u, i);
-      const std::uint8_t extra_n = shared_extra_flat(nl, flat);
-      for (std::uint8_t j = 0; j < extra_n; ++j) {
-        const std::uint16_t e = nl.extra_drivers[flat * kMaxSharedExtra + j];
+      for_each_extra(nl, tie_flat(u, i), [&](std::uint8_t, std::uint16_t e, std::uint8_t) {
         if (e < kMaxGates && nl.gates[e].live) {
           feeds_seq[e] = true;
         }
-      }
+      });
     }
   }
 }

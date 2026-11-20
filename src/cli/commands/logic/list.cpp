@@ -4,6 +4,7 @@
 #include "wengine/cli/status.hpp"
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/shared_net.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -119,8 +120,8 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
         const std::size_t flat = static_cast<std::size_t>(s) * wengine::logic::kMaxInputs + i;
         const std::uint8_t extra_n = wengine::logic::shared_extra_count(nl, s, i);
         for (std::uint8_t j = 0; j < extra_n; ++j) {
-          const std::uint16_t edrv = nl.extra_drivers[flat * wengine::logic::kMaxSharedExtra + j];
-          const bool eneg = nl.extra_inv[flat * wengine::logic::kMaxSharedExtra + j] != 0;
+          const std::uint16_t edrv = wengine::logic::shared_extra_driver(nl, flat, j);
+          const bool eneg = wengine::logic::shared_extra_inv(nl, flat, j) != 0;
           out << "  " << support::pin_text(nl, edrv, true, 0, eneg) << " -> " << support::pin_text(nl, s, false, i) << '\n';
         }
       }

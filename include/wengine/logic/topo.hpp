@@ -17,9 +17,9 @@
  * combinational cycles still fail loudly).
  *
  * Dependency rules (docs/logic.md section 4): header-only,
- * allocation-free, exception-free; depends on types.hpp, tie_set.hpp
- * (flat indexing for the shared-extra driver-edge scan — tie_set
- * itself needs only types.hpp plus core/status, so no include cycle),
+ * allocation-free, exception-free; depends on types.hpp, shared_net.hpp
+ * (shared-extra driver-edge scan), tie_set.hpp (flat indexing — tie_set
+ * itself needs only types.hpp plus shared_net.hpp, so no include cycle),
  * plus core/status (Netlist lives in types.hpp, so netlist/eval/seq_step/cli
  * can all include this with no cycle). Logic is a standalone domain:
  * this header must never depend on CLI types. Consumers: eval.hpp,
@@ -28,6 +28,7 @@
  */
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/tie_set.hpp"
 #include "wengine/logic/types.hpp"
 
@@ -60,33 +61,30 @@ namespace detail {
   std::uint8_t n = 0;
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     const std::size_t flat = tie_flat(s, i);
-    const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-    for (std::uint8_t j = 0; j < extra_n; ++j) {
-      const std::uint16_t edrv = nl.extra_drivers[flat * kMaxSharedExtra + j];
+    bool dangling = false;
+    for_each_extra(nl, flat, [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
+      if (dangling) {
+        return;
+      }
       if (edrv >= kMaxGates || !nl.gates[edrv].live) {
-        return 0xFF; // dangling extra: loud, never partial
+        dangling = true; // dangling extra: loud, never partial
+        return;
       }
       if (!comb_only || !is_sequential_kind(nl.gates[edrv].kind)) {
         ++n;
       }
+    });
+    if (dangling) {
+      return 0xFF;
     }
   }
   return n;
 }
 
-// (011) True when cur drives s through any extra attachment.
-[[nodiscard]] inline bool uses_extra(const Netlist &nl, const Gate &g, std::uint16_t s, std::uint16_t cur) noexcept {
-  for (std::uint8_t i = 0; i < g.input_count; ++i) {
-    const std::size_t flat = tie_flat(s, i);
-    const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-    for (std::uint8_t j = 0; j < extra_n; ++j) {
-      if (nl.extra_drivers[flat * kMaxSharedExtra + j] == cur) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
+// (011) True when cur drives s through any extra attachment (seam
+// adapter: single-input predicate is shared_uses_driver_flat).
+// Retained for detail-level callers; the Kahn drains below use the
+// single-walk for_each form directly.
 
 /**
  * @brief Combinational indegree over comb-only edges: flop outputs read
@@ -221,19 +219,16 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
       }
     // (011) Extra drivers order the sink the same way primaries do.
     for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-      const std::size_t flat = tie_flat(cur, i);
-      const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-      for (std::uint8_t j = 0; j < extra_n; ++j) {
-        const std::uint16_t edrv = nl.extra_drivers[flat * kMaxSharedExtra + j];
+      for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
         if (edrv >= kMaxGates) {
-          continue;
+          return;
         }
         const std::uint16_t base = (level_out != nullptr) ? level_out[edrv] : 0;
         const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
         if (cand > depth) {
           depth = cand;
         }
-      }
+      });
     }
     if (level_out != nullptr) {
       level_out[cur] = depth;
@@ -253,18 +248,19 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
           }
         }
       }
-      // (011) Extra edges drain indegree symmetrically with primaries.
-      if (indeg[s] != 0 && detail::uses_extra(nl, g, s, cur)) {
+      // (011) Extra edges drain indegree symmetrically with primaries
+      // (single walk: no separate uses_extra pre-scan).
+      if (indeg[s] != 0) {
+        bool drained = false;
         for (std::uint8_t i = 0; i < g.input_count; ++i) {
-          const std::size_t flat = tie_flat(s, i);
-          const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-          for (std::uint8_t j = 0; j < extra_n; ++j) {
-            if (nl.extra_drivers[flat * kMaxSharedExtra + j] == cur) {
+          for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
+            if (edrv == cur) {
               --indeg[s];
+              drained = true;
             }
-          }
+          });
         }
-        if (indeg[s] == 0) {
+        if (drained && indeg[s] == 0) {
           queue[tail++] = s;
         }
       }
@@ -333,19 +329,16 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
     }
     // (011) Extra drivers order the sink the same way primaries do.
     for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-      const std::size_t flat = tie_flat(cur, i);
-      const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-      for (std::uint8_t j = 0; j < extra_n; ++j) {
-        const std::uint16_t edrv = nl.extra_drivers[flat * kMaxSharedExtra + j];
+      for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
         if (edrv >= kMaxGates) {
-          continue;
+          return;
         }
         const std::uint16_t base = (level_out != nullptr) ? level_out[edrv] : 0;
         const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
         if (cand > depth) {
           depth = cand;
         }
-      }
+      });
     }
     if (level_out != nullptr) {
       level_out[cur] = depth;
@@ -366,18 +359,19 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
           }
         }
       }
-      // (011) Extra edges drain indegree symmetrically with primaries.
-      if (indeg[s] != 0 && detail::uses_extra(nl, g, s, cur)) {
+      // (011) Extra edges drain indegree symmetrically with primaries
+      // (single walk: no separate uses_extra pre-scan).
+      if (indeg[s] != 0) {
+        bool drained = false;
         for (std::uint8_t i = 0; i < g.input_count; ++i) {
-          const std::size_t flat = tie_flat(s, i);
-          const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-          for (std::uint8_t j = 0; j < extra_n; ++j) {
-            if (nl.extra_drivers[flat * kMaxSharedExtra + j] == cur) {
+          for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
+            if (edrv == cur) {
               --indeg[s];
+              drained = true;
             }
-          }
+          });
         }
-        if (indeg[s] == 0) {
+        if (drained && indeg[s] == 0) {
           queue[tail++] = s;
         }
       }
@@ -521,13 +515,8 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
         // flop-aware check as any wire. Unmarked netlists hold no
         // extras, so this loop is a no-op there.
         for (std::uint8_t i = 0; i < g.input_count && !uses_cur; ++i) {
-          const std::size_t flat = tie_flat(s, i);
-          const std::uint8_t extra_n = static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
-          for (std::uint8_t j = 0; j < extra_n; ++j) {
-            if (nl.extra_drivers[flat * kMaxSharedExtra + j] == cur) {
-              uses_cur = true;
-              break;
-            }
+          if (shared_uses_driver_flat(nl, tie_flat(s, i), cur)) {
+            uses_cur = true;
           }
         }
       }

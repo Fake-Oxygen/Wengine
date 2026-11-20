@@ -83,16 +83,10 @@ bool netlists_equal(const logic::Netlist &a, const logic::Netlist &b) {
     }
   }
   // 011: shared marks + extras participate in test equality — a pass
-  // that dropped or duplicated an extra is a correctness bug.
-  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
-    if (a.shared_meta[f] != b.shared_meta[f]) {
-      return false;
-    }
-  }
-  for (std::size_t e = 0; e < logic::kMaxGates * logic::kMaxInputs * logic::kMaxSharedExtra; ++e) {
-    if (a.extra_drivers[e] != b.extra_drivers[e] || a.extra_inv[e] != b.extra_inv[e]) {
-      return false;
-    }
+  // that dropped or duplicated an extra is a correctness bug (owned by
+  // the SharedNet seam).
+  if (!logic::shared_equal(a, b)) {
+    return false;
   }
   // 012: pulls participate in test equality — a pass that dropped or
   // moved a pull is a correctness bug.

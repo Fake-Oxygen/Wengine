@@ -16,14 +16,16 @@
  *
  * Dependency rules (docs/logic.md section 4): header-only,
  * allocation-free, exception-free; depends only on types.hpp plus
- * core/status (never netlist.hpp: PinRef lives in types.hpp precisely
- * to keep this include one-directional). Logic is a standalone domain:
+ * shared_net.hpp (mark/tie disjointness) plus core/status (never
+ * netlist.hpp: PinRef lives in types.hpp precisely to keep this
+ * include one-directional). Logic is a standalone domain:
  * this header must never depend on CLI types. Consumers: netlist.hpp
  * mutation, the O0/O1/O2 optimizer passes, eval.hpp, seq_step.hpp, the
  * CLI tie/untie verbs, and the test_logic* suite.
  */
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <array>

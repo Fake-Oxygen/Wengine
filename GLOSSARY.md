@@ -11,6 +11,12 @@ new deepened modules take their names from this file.
   `leader_flat + 1`). Canonical rep is the lowest `(slot, input)`; enumeration
   is slot order. Only seam that may read/write `tie_rep` directly
   (`tie_set.hpp`); everyone else calls `tie/untie/leader/members`.
+- **SharedNet**: multi-driver (shared) input spans. Stored dense in
+  `Netlist::shared_meta` (bit0 = mark, bits1–2 = extra count) plus
+  `extra_drivers` / `extra_inv` at `flat * kMaxSharedExtra + j`.
+  Primary attachment stays in `Gate::drivers`. Only seam that may
+  read/write those three arrays directly (`shared_net.hpp`); everyone
+  else calls `is_shared/for_each_extra/append/clear`.
 - **BlockInterface**: derived block boundary, never stored. One block input
   per tie class (canonical leader in slot order) plus dangling outputs in
   slot order, minus `ignore`d pins. Owned by `block_interface.hpp`:
