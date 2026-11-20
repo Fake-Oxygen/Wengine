@@ -173,5 +173,170 @@ int main(int argc, char **argv) {
   std::cout << "bench_logic: " << gates << " gates (" << width << "w x " << depth << "d) x "
             << words << " words, " << static_cast<double>(ns) / gate_words
             << " ns/gate-word (checksum=" << checksum << ")\n";
+
+  // Scalar shared-path bench (VAL2 measurement baseline): marked nets with
+  // mixed attachments + pulls, opaque xorshift inputs like the word bench.
+  // Motifs (all consensus/deterministic so every solve succeeds):
+  //  - 32 consensus buses: 3 BUFs with tied inputs (one block input each)
+  //    share one marked OR input (primary + 2 extras, Q polarity); the OR
+  //    second input is pull-terminated (alternating up/down), exercising
+  //    fill_resolved termination beside the span.
+  //  - 1 inverted bus: 2 DFF NQ sources share one marked OR input (primary
+  //    inverted + 1 inverted extra) with a pull (driven+pull inert path);
+  //    DFF data/clock inputs are pull-terminated so the block vector stays
+  //    the 32 bus leaders.
+  //  - 1 floating bus: marked OR input with no drivers + pull (all-floating
+  //    span maps through the pull to idle).
+  // The timed solve loop passes a SolveDiag channel, so contention counting
+  // runs every shared resolution; the timed rebuild loop (dirty forced)
+  // baselines the extra-edge Kahn compile. Neither path may optimize
+  // before this measurement.
+  {
+    Netlist snl;
+    bool shared_ok = true;
+    constexpr std::size_t kBuses = 32;
+    for (std::size_t b = 0; b < kBuses && shared_ok; ++b) {
+      auto bufa = add_gate(snl, GateKind::kBuf, 1);
+      auto bufb = add_gate(snl, GateKind::kBuf, 1);
+      auto bufc = add_gate(snl, GateKind::kBuf, 1);
+      auto sink = add_gate(snl, GateKind::kOr, 2);
+      if (!bufa.ok() || !bufb.ok() || !bufc.ok() || !sink.ok()) {
+        shared_ok = false;
+        break;
+      }
+      const PinRef pa{bufa.value, false, 0};
+      const PinRef pb{bufb.value, false, 0};
+      const PinRef pc{bufc.value, false, 0};
+      if (!tie_pins(snl, pa, pb).ok() || !tie_pins(snl, pb, pc).ok()) {
+        shared_ok = false;
+        break;
+      }
+      if (!wire(snl, bufa.value, sink.value, 0).ok() ||
+          !mark_shared(snl, sink.value, 0).ok() ||
+          !wire(snl, bufb.value, sink.value, 0).ok() ||
+          !wire(snl, bufc.value, sink.value, 0).ok()) {
+        shared_ok = false;
+        break;
+      }
+      // Alternating idle: even buses force High (constant output), odd
+      // buses pass the opaque input through (varying checksum).
+      const std::uint8_t level = ((b % 2) == 0) ? 1 : 2;
+      if (!set_pull(snl, sink.value, 1, level).ok()) {
+        shared_ok = false;
+        break;
+      }
+    }
+    // Inverted bus (extra_inv path): two constant-High NQ sources agree.
+    std::uint16_t inv_sink = 0;
+    if (shared_ok) {
+      auto dff1 = add_gate(snl, GateKind::kDff, 2);
+      auto dff2 = add_gate(snl, GateKind::kDff, 2);
+      auto sink = add_gate(snl, GateKind::kOr, 2);
+      if (!dff1.ok() || !dff2.ok() || !sink.ok()) {
+        shared_ok = false;
+      } else {
+        inv_sink = sink.value;
+        const PinRef nq1{dff1.value, true, 0, true};
+        const PinRef nq2{dff2.value, true, 0, true};
+        const PinRef dst{sink.value, false, 0};
+        if (!wire_pins(snl, nq1, dst).ok() || !mark_shared(snl, sink.value, 0).ok() ||
+            !wire_pins(snl, nq2, dst).ok()) {
+          shared_ok = false;
+        }
+        // Driven + pull is inert (exercises the check on a driven span);
+        // the second input + all four flop pins terminate.
+        if (shared_ok &&
+            (!set_pull(snl, sink.value, 0, 1).ok() || !set_pull(snl, sink.value, 1, 2).ok() ||
+             !set_pull(snl, dff1.value, 0, 2).ok() || !set_pull(snl, dff1.value, 1, 1).ok() ||
+             !set_pull(snl, dff2.value, 0, 2).ok() || !set_pull(snl, dff2.value, 1, 1).ok())) {
+          shared_ok = false;
+        }
+      }
+    }
+    // Floating bus (pull map path): marked input, no drivers, pull-up.
+    if (shared_ok) {
+      auto sink = add_gate(snl, GateKind::kOr, 2);
+      if (!sink.ok() || !mark_shared(snl, sink.value, 0).ok() ||
+          !set_pull(snl, sink.value, 0, 1).ok() || !set_pull(snl, sink.value, 1, 2).ok()) {
+        shared_ok = false;
+      }
+    }
+    const std::size_t n_in = block_input_count(snl);
+    const std::size_t n_out = block_output_count(snl);
+    if (!shared_ok || n_in != kBuses || n_out == 0 ||
+        !wengine::logic::topo::rebuild(snl, wengine::logic::EdgeFilter::kAll).ok()) {
+      std::cout << "bench_logic_shared: setup failed\n";
+      return 1;
+    }
+    // The inverted bus must actually hold the inverted extra (else the
+    // bench silently times the wrong path).
+    if (shared_attachment_count(snl, inv_sink, 0) != 2 ||
+        shared_extra_inv(snl, tie_flat(inv_sink, 0), 0) == 0) {
+      std::cout << "bench_logic_shared: setup failed (inverted extra missing)\n";
+      return 1;
+    }
+
+    std::vector<LogicValue> bin(n_in, LogicValue::kLow);
+    std::vector<LogicValue> bout(n_out, LogicValue::kLow);
+    SolveDiag diag{};
+    // Warmup: one solve so topology/scratch are hot before timing.
+    for (std::size_t j = 0; j < n_in; ++j) {
+      bin[j] = (((xorshift(rng) & 1u) != 0u) ? LogicValue::kHigh : LogicValue::kLow);
+    }
+    if (!solve(snl, std::span<const LogicValue>(bin.data(), n_in),
+               std::span<LogicValue>(bout.data(), n_out), &diag)
+             .ok()) {
+      std::cout << "bench_logic_shared: setup failed (solve)\n";
+      return 1;
+    }
+
+    auto s0 = std::chrono::high_resolution_clock::now();
+    for (std::uint64_t it = 0; it < words; ++it) {
+      for (std::size_t j = 0; j < n_in; ++j) {
+        bin[j] = (((xorshift(rng) & 1u) != 0u) ? LogicValue::kHigh : LogicValue::kLow);
+      }
+      if (!solve(snl, std::span<const LogicValue>(bin.data(), n_in),
+                 std::span<LogicValue>(bout.data(), n_out), &diag)
+               .ok()) {
+        std::cout << "bench_logic_shared: run failed\n";
+        return 1;
+      }
+    }
+    auto s1 = std::chrono::high_resolution_clock::now();
+
+    std::uint64_t schecksum = 0;
+    for (std::size_t i = 0; i < n_out; ++i) {
+      schecksum ^= static_cast<std::uint64_t>(bout[i]) * 0x9E3779B97F4A7C15ULL + i;
+    }
+    for (std::size_t f = 0; f < kMaxGates * kMaxInputs; ++f) {
+      schecksum += static_cast<std::uint64_t>(diag.per_net[f]);
+    }
+    schecksum ^= static_cast<std::uint64_t>(n_in) * 0xBF58476D1CE4E5B9ULL;
+    do_not_optimize(schecksum);
+
+    const auto sns = std::chrono::duration_cast<std::chrono::nanoseconds>(s1 - s0).count();
+    const double sgates = static_cast<double>(snl.live_count);
+    std::cout << "bench_logic_shared: " << snl.live_count << " gates (" << kBuses
+              << " buses + inv + float) x " << words << " solves, "
+              << static_cast<double>(sns) / static_cast<double>(words) << " ns/solve ("
+              << static_cast<double>(sns) / (sgates * static_cast<double>(words))
+              << " ns/gate-solve, checksum=" << schecksum << ")\n";
+
+    // Extra-edge Kahn baseline: force a full recompile every iteration.
+    constexpr std::uint64_t kRebuildIters = 2000;
+    auto r0 = std::chrono::high_resolution_clock::now();
+    for (std::uint64_t it = 0; it < kRebuildIters; ++it) {
+      snl.dirty = true;
+      if (!wengine::logic::topo::rebuild(snl, wengine::logic::EdgeFilter::kAll).ok()) {
+        std::cout << "bench_logic_shared_rebuild: run failed\n";
+        return 1;
+      }
+    }
+    auto r1 = std::chrono::high_resolution_clock::now();
+    const auto rns = std::chrono::duration_cast<std::chrono::nanoseconds>(r1 - r0).count();
+    std::cout << "bench_logic_shared_rebuild: " << snl.live_count << " gates x " << kRebuildIters
+              << " rebuilds, " << static_cast<double>(rns) / static_cast<double>(kRebuildIters)
+              << " ns/rebuild\n";
+  }
   return 0;
 }

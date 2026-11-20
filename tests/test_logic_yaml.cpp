@@ -997,6 +997,45 @@ void test_shared_round_trip() {
   assert(etext == etext2);
 }
 
+// 011 US4 (inverted extra): a DFF NQ attachment rides the extra span
+// with polarity — save emits the NQ spelling for the extra row, load
+// restores extra_inv, re-save is byte-identical. No fixture ever set a
+// non-zero extra_inv, so netlists_equal compared it all-zero on both
+// sides until this test.
+void test_shared_inverted_extra_round_trip() {
+  logic::Netlist nl{};
+  assert(logic::add_gate(nl, logic::GateKind::kNot, 1).ok()); // NOT1 @0
+  assert(logic::add_gate(nl, logic::GateKind::kDff, 2).ok());  // DFF1 @1
+  assert(logic::add_gate(nl, logic::GateKind::kOr, 2).ok());   // OR1 @2
+  assert(logic::wire(nl, 0, 2, 0).ok());                       // NOT1.Y -> OR1.1
+  assert(logic::mark_shared(nl, 2, 0).ok());
+  auto nq = logic::parse_pin(nl, "DFF1.NQ");
+  assert(nq.ok());
+  auto dst = logic::parse_pin(nl, "OR1.1");
+  assert(dst.ok());
+  assert(logic::wire_pins(nl, nq.value, dst.value).ok()); // DFF1.NQ -> OR1.1 (extra, inv)
+  assert(logic::is_shared_input(nl, 2, 0));
+  assert(logic::shared_attachment_count(nl, 2, 0) == 2);
+  const std::size_t flat = logic::tie_flat(2, 0);
+  assert(logic::shared_extra_inv(nl, flat, 0) == 1);
+  std::string text;
+  logic::yaml::save_text(nl, zero_inits(), text);
+  assert(contains(text, "{from: DFF1.NQ, to: OR1.1}"));
+  assert(contains(text, "shared:\n  - {net: OR1.1}\n"));
+  logic::yaml::Workspace ws{};
+  std::string err;
+  assert(logic::yaml::load_text(text, ws, err));
+  assert(netlists_equal(nl, ws.netlist));
+  // Polarity itself survives (not just the shared_equal byte match):
+  // the reloaded extra still reads inverted, with the NQ fanout moved.
+  assert(logic::shared_extra_inv(ws.netlist, flat, 0) == 1);
+  assert(ws.netlist.gates[1].nq_fanout == 1);
+  assert(ws.netlist.gates[1].output_fanout == 0);
+  std::string again;
+  logic::yaml::save_text(ws.netlist, ws.init, again);
+  assert(again == text); // byte-identical
+}
+
 // 011 US4: the additive schema is loud everywhere — no silent
 // reinterpretation.
 void test_shared_schema_refusals() {
@@ -1252,6 +1291,7 @@ int main() {
   test_sequential_feedback_round_trip();
   test_malformed_line_numbers();
   test_shared_round_trip();
+  test_shared_inverted_extra_round_trip();
   test_shared_schema_refusals();
   test_pull_round_trip();
   test_pull_schema_refusals();
