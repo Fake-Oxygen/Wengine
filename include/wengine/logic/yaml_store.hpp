@@ -29,6 +29,9 @@
  *   shared:                       # optional, 011 additive: one row per
  *     - {net: BUS.1}              # marked input, slot order; emitted
  *                                 # iff >= 1 mark exists
+ *   pulls:                        # optional, 012 additive: one row per
+ *     - {net: BUS.1, pull: up}    # pulled input, slot order; emitted
+ *                                 # iff >= 1 pull exists
  *   ties:
  *     - {a: NAND1.1, b: NAND1.2}
  *   clocks:
@@ -60,6 +63,16 @@
  * Repeated `to:` wire rows are legal iff the destination is marked;
  * an unmarked duplicate keeps the exact pre-011 refusal. Marks and
  * tied pins are disjoint: tying a marked input fails loudly.
+ *
+ * Additive 012 policy (no generation retired, marker stays
+ * `version: 1`): the optional `pulls:` section lists pulled inputs
+ * (one `{net: PIN, pull: up|down}` row per pulled input, slot order;
+ * input index breaks ties deterministically). Absent `pulls:` means no
+ * pulls — pre-012 files load byte-identically. `none` is never written
+ * (absence expresses it); `tbuf` gate rows ride the existing lowercase
+ * kind spelling. Duplicate `net:` rows, unknown levels (including
+ * `none`), and tied/ignored destinations fail loudly. Canonical save
+ * order: version, gates, wires, shared, pulls, ties, clocks, meta.
  *
  * Dependency rules: header-only engine seam; logic is a standalone
  * domain — never depends on CLI types. Consumers: the CLI `save`/

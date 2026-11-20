@@ -228,7 +228,7 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
  * @param[in] b Second input pin (must dangle, live, non-ignored).
  * @return kOk on success (including idempotent re-tie);
  *         kInvalidArgument for output pins, dead/out-of-range pins,
- *         wired or ignored pins, or tying a pin to itself.
+ *         wired, ignored, or pulled pins, or tying a pin to itself.
  */
 [[nodiscard]] inline core::Status tie_pins(Netlist &nl, PinRef a, PinRef b) noexcept {
   if (a.is_output || b.is_output) {
@@ -258,6 +258,9 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
   const std::size_t fb = tie_flat(b.slot, b.input);
   if (is_shared_flat(nl, fa) || is_shared_flat(nl, fb)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // shared: never tied
+  }
+  if (is_pulled_flat(nl, fa) || is_pulled_flat(nl, fb)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // pulled: unpull first
   }
   const std::size_t la = tie_leader_flat(nl, fa);
   const std::size_t lb = tie_leader_flat(nl, fb);

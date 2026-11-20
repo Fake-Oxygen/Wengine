@@ -12,7 +12,9 @@
  * against the same level order.
  *
  * Gate semantics (v1, zero-delay): AND/OR/NAND/NOR over 2..8 inputs;
- * NOT/BUF exactly 1; XOR is odd parity over 2..8 (XNOR = NOT(XOR),
+ * NOT/BUF exactly 1; TBUF exactly 2 (data + active-high enable:
+ * enabled drives data, released drives kHighZ — the first legal Z
+ * producer in gate_out); XOR is odd parity over 2..8 (XNOR = NOT(XOR),
  * i.e. even parity). 74-series cascade equivalence holds only for 2
  * inputs. Only kLow/kHigh flow; kHighZ/kUnknown inputs fail loudly
  * (V2 tri-state slot, docs/logic.md section 12).
@@ -89,6 +91,12 @@ namespace wengine::logic {
     return is_high(inputs[0]) ? LogicValue::kLow : LogicValue::kHigh;
   case GateKind::kBuf:
     return is_high(inputs[0]) ? LogicValue::kHigh : LogicValue::kLow;
+  case GateKind::kTbuf:
+    // (012) Enable-gated buffer: asserted enable drives the data
+    // level, released enable drives high-Z. Precondition (both Low/
+    // High, n == 2) is enforced by resolve_input at the buffer's own
+    // input seams — eval_gate never observes X/Z here.
+    return is_high(inputs[1]) ? inputs[0] : LogicValue::kHighZ;
   case GateKind::kDff:
   case GateKind::kDlatch:
   case GateKind::kJk:
@@ -282,6 +290,13 @@ namespace wengine::logic {
       acc = resolve_word(nl, s, 0, gate_scratch.data(), in_pos, word_index);
       break;
     }
+    case GateKind::kTbuf:
+      // (012) Four values do not fit in one bit: word eval over a live
+      // buffer netlist is refused loudly at the word-loop entries
+      // (truth/export check has_buffer_gates first), so this arm is a
+      // safety net for future callers — unreachable, zero per-word
+      // cost, keeps -Wswitch clean.
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
     case GateKind::kDff:
     case GateKind::kDlatch:
     case GateKind::kJk:

@@ -685,8 +685,8 @@ void test_history() {
 
 void test_logic_session() {
   // Module registry shape (LOGIC-8: full v1 verb set, 17 specs;
-  // LOGIC-14: + tie/untie, 19 specs).
-  static_assert(logic::LogicRegistry::all().size() == 23);
+  // LOGIC-14: + tie/untie, 19 specs; 012: + pull/unpull, 25 specs).
+  static_assert(logic::LogicRegistry::all().size() == 25);
   static_assert(logic::LogicRegistry::find("help") != nullptr);
   static_assert(logic::LogicRegistry::find("back") != nullptr);
   static_assert(logic::LogicRegistry::find("add") != nullptr);
@@ -694,6 +694,8 @@ void test_logic_session() {
   static_assert(logic::LogicRegistry::find("wire") != nullptr);
   static_assert(logic::LogicRegistry::find("unwire") != nullptr);
   static_assert(logic::LogicRegistry::find("unshare") != nullptr);
+  static_assert(logic::LogicRegistry::find("pull") != nullptr);
+  static_assert(logic::LogicRegistry::find("unpull") != nullptr);
   static_assert(logic::LogicRegistry::find("remove") != nullptr);
   static_assert(logic::LogicRegistry::find("ignore") != nullptr);
   static_assert(logic::LogicRegistry::find("use") != nullptr);
@@ -810,14 +812,14 @@ void test_logic_session() {
            has(verbs, "use") && has(verbs, "tie") && has(verbs, "untie") && has(verbs, "reset") && has(verbs, "solve") &&
            has(verbs, "truth") && has(verbs, "optimize") && has(verbs, "draw") &&
            has(verbs, "save") && has(verbs, "load") && has(verbs, "export") && has(verbs, "step") && has(verbs, "poke") &&
-           has(verbs, "peek"));
-    assert(verbs.size() == 23);
+           has(verbs, "peek") && has(verbs, "pull") && has(verbs, "unpull"));
+    assert(verbs.size() == 25);
     assert(!has(verbs, "ohm") && !has(verbs, "--help")); // flags need a '-' prefix
     const std::vector<std::string> want_dash_help{"--help"};
     assert(complete_line("logic --h", 9, all) == want_dash_help);
     const std::vector<std::string> want_help{"help"};
     assert(complete_line("logic h", 7, all) == want_help);
-    assert(complete_line("logic help ", 11, all).size() == 23); // every verb
+    assert(complete_line("logic help ", 11, all).size() == 25); // every verb
     // Session help lists module verbs only (never top-level commands).
     {
       std::ostringstream help_out;
@@ -1759,9 +1761,9 @@ void test_logic_completion() {
   assert(complete_line("logic a", 7, all) == want_a);
   const std::vector<std::string> want_s{"solve", "save", "step"};
   assert(complete_line("logic s", 7, all) == want_s);
-  const std::vector<std::string> want_p{"poke", "peek"};
+  const std::vector<std::string> want_p{"pull", "poke", "peek"};
   assert(complete_line("logic p", 7, all) == want_p);
-  const std::vector<std::string> want_u{"unwire", "unshare", "use", "untie"};
+  const std::vector<std::string> want_u{"unwire", "unshare", "unpull", "use", "untie"};
   assert(complete_line("logic u", 7, all) == want_u);
   const std::vector<std::string> want_t{"tie", "truth"};
   assert(complete_line("logic t", 7, all) == want_t);
@@ -1869,6 +1871,136 @@ void test_logic_completion() {
     std::ostringstream err;
     assert(sh.execute("logic wire NOT1.Y OR1.1", err) == 2);
     assert(err.str().find("already wired") != std::string::npos);
+  }
+
+  // 012: gated-buffer + pull vocabulary — kind strings, verb goldens,
+  // completion, and one-shot/direct parity (same verb, same text).
+  {
+    std::ostringstream out;
+    assert(sh.execute("logic add TBUF", out) == 0);
+    assert(out.str().find("added TBUF1 kind=TBUF inputs=2") != std::string::npos);
+    assert(sh.execute("logic add TBUF --inputs 2", sink) == 0); // TBUF2
+    assert(sh.execute("logic add TBUF --inputs 1", out) == 2);
+    assert(out.str().find("bad fan-in for kind") != std::string::npos);
+    assert(sh.execute("logic add TBUF --inputs 3", out) == 2);
+    assert(sh.execute("logic help add", out) == 0);
+    assert(out.str().find("TBUF") != std::string::npos);
+    assert(out.str().find("pin 1 = data") != std::string::npos);
+  }
+  {
+    // `add T` completes the kind in registry order.
+    const auto c = complete_line("logic add T", 11, all);
+    assert(has(c, "TBUF") && has(c, "T"));
+  }
+  {
+    const auto c = complete_line("logic add TBUF --", 17, all);
+    assert(has(c, "--inputs") && has(c, "--help"));
+  }
+  // pull/unpull through the session verbs (same refusals as the engine
+  // seam: loud, netlist-untouched, never silent).
+  assert(sh.execute("logic add NOT", sink) == 0); // NOT2
+  {
+    std::ostringstream ok;
+    assert(sh.execute("logic pull NOT2.1 up", ok) == 0);
+    assert(ok.str().find("pulled NOT2.1 up") != std::string::npos);
+  }
+  {
+    std::ostringstream ok;
+    assert(sh.execute("logic pull NOT2.1 down", ok) == 0);
+    assert(ok.str().find("pulled NOT2.1 down") != std::string::npos);
+  }
+  {
+    std::ostringstream err;
+    assert(sh.execute("logic pull NOT2.1", err) == 2);
+    assert(sh.execute("logic pull NOT2.1 sideways", err) == 2);
+    assert(err.str().find("bad pull level") != std::string::npos);
+    assert(sh.execute("logic pull NOT2.Y up", err) == 2);
+    assert(err.str().find("outputs carry no pull") != std::string::npos);
+    assert(sh.execute("logic pull NOPE.1 up", err) == 2);
+    assert(sh.execute("logic pull NOT2.1 up extra", err) == 2);
+  }
+  {
+    std::ostringstream ok;
+    assert(sh.execute("logic unpull NOT2.1", ok) == 0);
+    assert(ok.str().find("unpulled NOT2.1") != std::string::npos);
+  }
+  {
+    std::ostringstream err;
+    assert(sh.execute("logic unpull NOT2.1", err) == 2);
+    assert(err.str().find("no pull set") != std::string::npos);
+    assert(sh.execute("logic unpull NOT2.Y", err) == 2);
+    assert(err.str().find("outputs carry no pull") != std::string::npos);
+  }
+  // Tie/pull disjointness names the conflict both directions.
+  assert(sh.execute("logic add AND", sink) == 0); // AND2
+  assert(sh.execute("logic add AND", sink) == 0); // AND3
+  assert(sh.execute("logic tie AND2.1 AND2.2", sink) == 0);
+  {
+    std::ostringstream err;
+    assert(sh.execute("logic pull AND2.1 up", err) == 2);
+    assert(err.str().find("tied (untie it first)") != std::string::npos);
+  }
+  assert(sh.execute("logic untie AND2.1", sink) == 0);
+  assert(sh.execute("logic pull AND2.1 up", sink) == 0);
+  {
+    std::ostringstream err;
+    assert(sh.execute("logic tie AND2.1 AND2.2", err) == 2);
+    assert(err.str().find("unpull first") != std::string::npos);
+  }
+  assert(sh.execute("logic ignore AND3.1", sink) == 0);
+  {
+    std::ostringstream err;
+    assert(sh.execute("logic pull AND3.1 up", err) == 2);
+    assert(err.str().find("ignored (use it first)") != std::string::npos);
+  }
+  // Completion: input pins, then levels; flags in flag position.
+  {
+    const auto c = complete_line("logic pull ", 11, all);
+    assert(has(c, "AND1.1") && has(c, "NOT2.1"));
+  }
+  {
+    const std::vector<std::string> want{"up", "down"};
+    assert(complete_line("logic pull AND1.1 ", 19, all) == want);
+  }
+  {
+    const auto c = complete_line("logic unpull ", 13, all);
+    assert(has(c, "AND1.1") && has(c, "NOT2.1"));
+  }
+  {
+    const auto c = complete_line("logic pull --", 13, all);
+    assert(has(c, "--help"));
+  }
+  // One-shot/direct parity: the same verb prints the same bytes
+  // headless (`logic pull ...`) and through the spec entry.
+  {
+    std::ostringstream one_shot, direct;
+    assert(sh.execute("logic pull NOT2.1 up", one_shot) == 0);
+    const std::string_view pargs[] = {"NOT2.1", "up"};
+    const std::span<const std::string_view> parg_span{pargs, 2};
+    ArgCursor parc{parg_span};
+    assert(logic::LogicPullSpec::run(parc, direct) == 0);
+    assert(one_shot.str() == direct.str()); // idempotent re-pull
+    std::ostringstream direct_un, one_un;
+    const std::string_view uargs[] = {"NOT2.1"};
+    const std::span<const std::string_view> uarg_span{uargs, 1};
+    ArgCursor uarc{uarg_span};
+    assert(logic::LogicUnpullSpec::run(uarc, direct_un) == 0);
+    assert(sh.execute("logic pull NOT2.1 up", one_shot) == 0); // re-pull
+    assert(sh.execute("logic unpull NOT2.1", one_un) == 0);
+    assert(one_un.str() == direct_un.str());
+  }
+  // Pulls show in `list`, vanish after `unpull` (other pulls persist).
+  {
+    std::ostringstream listed;
+    assert(sh.execute("logic pull AND3.2 down", listed) == 0);
+    assert(sh.execute("logic list", listed) == 0);
+    assert(listed.str().find("pulls=AND3.2(down)") != std::string::npos);
+    assert(listed.str().find("pulls=AND2.1(up)") != std::string::npos);
+    assert(sh.execute("logic unpull AND3.2", sink) == 0);
+    std::ostringstream relisted;
+    assert(sh.execute("logic list", relisted) == 0);
+    assert(relisted.str().find("AND3.2(down)") == std::string::npos);
+    assert(relisted.str().find("pulls=AND2.1(up)") != std::string::npos);
   }
 
   // File paths / numeric values: no candidates, never option leakage.

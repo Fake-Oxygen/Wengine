@@ -139,6 +139,15 @@ struct SharedRow {
   std::size_t line = 1;
 };
 
+// 012: one `{net: PIN, pull: up|down}` row per pulled input. The level
+// spellings are lowercase, matching the lowercase kind convention;
+// `none` is absence, never written or accepted.
+struct PullRow {
+  std::string net;
+  std::uint8_t level = 0; // 1 = up, 2 = down
+  std::size_t line = 1;
+};
+
 struct TieRow {
   std::string a;
   std::string b;
@@ -185,12 +194,12 @@ struct ClockRow {
   }
   row.id = id.Scalar();
   if (!kind.IsScalar()) {
-    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T|SRLATCH)");
+    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|TBUF|DFF|DLATCH|JK|T|SRLATCH)");
     return false;
   }
   const auto parsed_kind = parse_gate_kind(kind.Scalar());
   if (!parsed_kind.ok()) {
-    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T|SRLATCH)");
+    err = at_line(kind, "bad gate kind (want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|TBUF|DFF|DLATCH|JK|T|SRLATCH)");
     return false;
   }
   row.kind = parsed_kind.value;
@@ -414,6 +423,36 @@ struct ClockRow {
   return true;
 }
 
+// 012: one `{net: PIN, pull: up|down}` row per pulled input — the pull
+// is the property; absence of a row (or of the section) is `none`.
+[[nodiscard]] bool check_pull_map(const YAML::Node &n, PullRow &row, std::string &err) {
+  for (auto it = n.begin(); it != n.end(); ++it) {
+    const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
+    if (key != "net" && key != "pull") {
+      err = at_line(it->first, "unknown pulls key '" + key + "' (want 'net: ..., pull: up|down')");
+      return false;
+    }
+  }
+  const YAML::Node net = n["net"];
+  const YAML::Node pull = n["pull"];
+  if (!net || !net.IsDefined() || !pull || !pull.IsDefined()) {
+    err = at_line(n, "pulls entry needs 2 fields (net, pull)");
+    return false;
+  }
+  if (!net.IsScalar() || net.Scalar().empty()) {
+    err = at_line(n, "empty pull net");
+    return false;
+  }
+  if (!pull.IsScalar() || (pull.Scalar() != "up" && pull.Scalar() != "down")) {
+    err = at_line(n, "bad pull level (want up|down)");
+    return false;
+  }
+  row.net = net.Scalar();
+  row.level = (pull.Scalar() == "up") ? 1u : 2u;
+  row.line = line_of(n);
+  return true;
+}
+
 [[nodiscard]] bool load_impl(const std::string &text, Workspace &out, std::string &err) {
   if (text.find_first_not_of(" \t\r\n#") == std::string::npos) {
     // Cheap empty/whitespace fast path; comment-only files fall through
@@ -452,9 +491,9 @@ struct ClockRow {
   }
   for (auto it = root.begin(); it != root.end(); ++it) {
     const std::string key = it->first.IsScalar() ? it->first.Scalar() : std::string{};
-    if (key != "version" && key != "gates" && key != "wires" && key != "shared" && key != "ties" && key != "clocks" &&
-        key != "meta") {
-      err = at_line(it->first, "unknown workspace key '" + key + "' (want version|gates|wires|shared|ties|clocks|meta)");
+    if (key != "version" && key != "gates" && key != "wires" && key != "shared" && key != "pulls" && key != "ties" &&
+        key != "clocks" && key != "meta") {
+      err = at_line(it->first, "unknown workspace key '" + key + "' (want version|gates|wires|shared|pulls|ties|clocks|meta)");
       return false;
     }
   }
@@ -462,6 +501,7 @@ struct ClockRow {
   const YAML::Node gates = root["gates"];
   const YAML::Node wires = root["wires"];
   const YAML::Node shared = root["shared"];
+  const YAML::Node pulls = root["pulls"];
   const YAML::Node ties = root["ties"];
   const YAML::Node clocks = root["clocks"];
   const YAML::Node meta = root["meta"];
@@ -527,6 +567,12 @@ struct ClockRow {
     err = at_line(shared, "'shared:' must read a sequence");
     return false;
   }
+  // 012: `pulls:` is optional (absent = no pulls, pre-012 files load
+  // byte-identically); present-but-malformed is loud, never tolerated.
+  if (pulls && pulls.IsDefined() && !pulls.IsSequence() && !pulls.IsNull()) {
+    err = at_line(pulls, "'pulls:' must read a sequence");
+    return false;
+  }
   if (ties && ties.IsDefined() && !ties.IsSequence() && !ties.IsNull()) {
     err = at_line(ties, "'ties:' must read a sequence");
     return false;
@@ -555,6 +601,7 @@ struct ClockRow {
   std::vector<GateRow> gate_rows;
   std::vector<WireRow> wire_rows;
   std::vector<SharedRow> shared_rows;
+  std::vector<PullRow> pull_rows;
   std::vector<TieRow> tie_rows;
   std::vector<ClockRow> clock_rows;
   if (gates.IsSequence()) {
@@ -600,6 +647,22 @@ struct ClockRow {
         return false;
       }
       shared_rows.push_back(std::move(row));
+    }
+  }
+  // 012: optional `pulls:` section — absent means no pulls.
+  if (pulls && pulls.IsDefined() && pulls.IsSequence()) {
+    pull_rows.reserve(pulls.size());
+    for (std::size_t i = 0; i < pulls.size(); ++i) {
+      const YAML::Node n = pulls[i];
+      if (!n.IsMap()) {
+        err = at_line(n, "pulls entry must read '{net: ..., pull: up|down}'");
+        return false;
+      }
+      PullRow row;
+      if (!check_pull_map(n, row, err)) {
+        return false;
+      }
+      pull_rows.push_back(std::move(row));
     }
   }
   if (ties && ties.IsDefined() && ties.IsSequence()) {
@@ -820,6 +883,38 @@ struct ClockRow {
       return false;
     }
   }
+  // 012: pulls land after ties (so a pull on a tied input fails with
+  // the pull diagnostic, mirroring the interactive verbs) and after
+  // wires (pulled destinations wire normally). Replay order is file
+  // order; row validation replays the engine seams exactly.
+  for (const PullRow &pr : pull_rows) {
+    const std::string at = "line " + std::to_string(pr.line) + ": ";
+    const auto pin = parse_pin(tmp, pr.net);
+    if (!pin.ok()) {
+      err = at + "bad pull net '" + pr.net + "'";
+      return false;
+    }
+    if (pin.value.is_output) {
+      err = at + "bad pull net '" + pr.net + "' (outputs carry no pull)";
+      return false;
+    }
+    if (is_pulled_flat(tmp, tie_flat(pin.value.slot, pin.value.input))) {
+      err = at + "duplicate pull net '" + pr.net + "'";
+      return false;
+    }
+    if (is_tied(tmp, pin.value.slot, pin.value.input)) {
+      err = at + "bad pull net '" + pr.net + "' (tied, untie it first)";
+      return false;
+    }
+    if ((tmp.gates[pin.value.slot].ignored_mask & static_cast<std::uint8_t>(1u << pin.value.input)) != 0) {
+      err = at + "bad pull net '" + pr.net + "' (ignored, use it first)";
+      return false;
+    }
+    if (!set_pull(tmp, pin.value.slot, pin.value.input, pr.level).ok()) {
+      err = at + "bad pull net '" + pr.net + "'";
+      return false;
+    }
+  }
   tmp.dirty = true;
   tmp.topo_size = 0;
   // Flop-aware cycle check (mirrors the wire verb): combinational loops
@@ -1002,6 +1097,44 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
           }
           out += "  - {net: ";
           out += pin_text(nl, s, false, i);
+          out += "}\n";
+        }
+      }
+    }
+  }
+  // 012: optional `pulls:` section, emitted iff >= 1 pull exists, one
+  // `{net: PIN, pull: up|down}` row per pulled input in slot order
+  // (input index breaks ties deterministically). Absent on read means
+  // no pulls (pre-012 files load byte-identically); `none` is absence,
+  // never written.
+  {
+    bool have_pull = false;
+    for (std::uint16_t s = 0; s < kMaxGates && !have_pull; ++s) {
+      if (!nl.gates[s].live) {
+        continue;
+      }
+      for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+        if (is_pulled_flat(nl, tie_flat(s, i))) {
+          have_pull = true;
+          break;
+        }
+      }
+    }
+    if (have_pull) {
+      out += "pulls:\n";
+      for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+        if (!nl.gates[s].live) {
+          continue;
+        }
+        for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+          const std::uint8_t level = pull_level_flat(nl, tie_flat(s, i));
+          if (level == 0) {
+            continue;
+          }
+          out += "  - {net: ";
+          out += pin_text(nl, s, false, i);
+          out += ", pull: ";
+          out += (level == 1) ? "up" : "down";
           out += "}\n";
         }
       }

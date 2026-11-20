@@ -65,8 +65,8 @@ namespace wengine::logic {
     return core::Result<std::uint16_t>::failure("bad fan-in for kind");
   }
   const std::uint8_t ord = kind_ordinal(kind);
-  if (ord >= 8 && !is_sequential_kind(kind)) {
-    // No such kind exists today (ordinals are 0..7 + 16..20); the guard
+  if (ord > 8 && !is_sequential_kind(kind)) {
+    // No such kind exists today (ordinals are 0..8 + 16..20); the guard
     // stays so future appended kinds fail loudly until wired up.
     return core::Result<std::uint16_t>::failure("bad gate kind");
   }
@@ -129,7 +129,8 @@ namespace wengine::logic {
  *
  * Counters never reused; slot recycles. Tied pins of the removed gate
  * leave their classes (remaining members re-elect the lowest surviving
- * pin as leader).
+ * pin as leader). The gate's own pulls die with its slot (like shared
+ * marks).
  *
  * @param[out] nl Netlist holding the gate.
  * @param[in] slot Slot to remove.
@@ -216,6 +217,7 @@ namespace wengine::logic {
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     g.drivers[i] = kNoDriver;
     nl.driver_inv[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0;
+    nl.pull_cfg[tie_flat(slot, static_cast<std::uint8_t>(i))] = 0; // pulls die with their slot
     // tie entries already cleared by detach_slot_ties above.
   }
   if (nl.live_count > 0) {
@@ -388,6 +390,72 @@ namespace detail {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // unwire extras first
   }
   nl.shared_meta[flat] = 0;
+  return core::Status::success();
+}
+
+/**
+ * @brief Set the pull on a destination input (012): 1 = pull-up,
+ *        2 = pull-down. An all-floating net maps through the pull to
+ *        its idle level; driven nets are inert under every setting.
+ *
+ * Legal on wired inputs (any attachment count, marked or not) and on
+ * dangling inputs (termination). Idempotent: re-setting the same level
+ * succeeds; re-setting the other level replaces it. Refused loudly on
+ * tied inputs ("untie first") and on ignored inputs ("use first") —
+ * pulls and ties/ignores are disjoint per flat in both directions.
+ *
+ * @param[out] nl Netlist receiving the pull.
+ * @param[in] slot Sink slot.
+ * @param[in] input 0-based sink input index.
+ * @param[in] level Pull level: 1 (up) or 2 (down).
+ * @return kOk on set; kInvalidArgument for dead/out-of-range pins,
+ *         tied or ignored destinations, or levels other than 1/2.
+ *         The netlist is untouched on failure.
+ */
+[[nodiscard]] inline core::Status set_pull(Netlist &nl, std::uint16_t slot, std::uint8_t input, std::uint8_t level) noexcept {
+  if (slot >= kMaxGates || !nl.gates[slot].live) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (input >= nl.gates[slot].input_count) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (level != 1 && level != 2) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (is_tied(nl, slot, input)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
+  }
+  if ((nl.gates[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // ignored: use first
+  }
+  nl.pull_cfg[tie_flat(slot, input)] = level;
+  return core::Status::success();
+}
+
+/**
+ * @brief Clear the pull on a destination input (012).
+ *
+ * Refused loudly when no pull is set. The netlist is untouched on
+ * failure.
+ *
+ * @param[out] nl Netlist holding the pull.
+ * @param[in] slot Sink slot.
+ * @param[in] input 0-based sink input index.
+ * @return kOk on clear; kInvalidArgument for dead/out-of-range pins or
+ *         unpulled inputs.
+ */
+[[nodiscard]] inline core::Status clear_pull(Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+  if (slot >= kMaxGates || !nl.gates[slot].live) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (input >= nl.gates[slot].input_count) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  const std::size_t flat = tie_flat(slot, input);
+  if (!is_pulled_flat(nl, flat)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // no pull set
+  }
+  nl.pull_cfg[flat] = 0;
   return core::Status::success();
 }
 
@@ -677,7 +745,8 @@ namespace detail {
  *
  * Idempotent: marking twice still succeeds. Ignoring a tied input
  * fails loudly (untie first); tied pins are never ignored by
- * construction.
+ * construction. Ignoring a pulled input fails loudly (unpull first);
+ * pulls and ignores are disjoint per flat in both directions.
  *
  * @param[out] nl Netlist holding the pin.
  * @param[in] pin Pin to ignore (inputs mark the ignored bit, outputs
@@ -703,6 +772,9 @@ namespace detail {
   }
   if (is_tied(nl, pin.slot, pin.input)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
+  }
+  if (is_pulled_flat(nl, tie_flat(pin.slot, pin.input))) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // pulled: unpull first
   }
   g.ignored_mask = static_cast<std::uint8_t>(g.ignored_mask | (1u << pin.input));
   return core::Status::success();
@@ -761,6 +833,7 @@ inline void reset_netlist(Netlist &nl) noexcept {
     }
     for (std::size_t i = 0; i < kMaxInputs; ++i) {
       nl.driver_inv[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
+      nl.pull_cfg[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
       nl.shared_meta[static_cast<std::size_t>(s) * kMaxInputs + i] = 0;
       for (std::size_t j = 0; j < kMaxSharedExtra; ++j) {
         const std::size_t eij = (static_cast<std::size_t>(s) * kMaxInputs + i) * kMaxSharedExtra + j;

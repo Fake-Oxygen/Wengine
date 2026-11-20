@@ -179,8 +179,9 @@ struct KindInfo {
  *
  * @note Append-only: persisted byte values (DFF=16, DLATCH=17, JK=18,
  *       T=19, SRLATCH=20) must never shift. Fan-in masks: combinational
- *       2..8 = 0xFE; NOT/BUF exactly 1 = 0x01; DFF {2,5} = 0x12;
- *       DLATCH/T/SRLATCH exactly 2 = 0x02; JK exactly 3 = 0x04.
+ *       2..8 = 0xFE; NOT/BUF exactly 1 = 0x01; TBUF exactly 2 = 0x02;
+ *       DFF {2,5} = 0x12; DLATCH/T/SRLATCH exactly 2 = 0x02; JK exactly
+ *       3 = 0x04.
  */
 inline constexpr KindInfo kKinds[] = {
     {GateKind::kAnd, "AND", 2, 0xFEu, 0, {}},
@@ -191,6 +192,7 @@ inline constexpr KindInfo kKinds[] = {
     {GateKind::kXnor, "XNOR", 2, 0xFEu, 0, {}},
     {GateKind::kNot, "NOT", 1, 0x01u, 0, {}},
     {GateKind::kBuf, "BUF", 1, 0x01u, 0, {}},
+    {GateKind::kTbuf, "TBUF", 2, 0x02u, 0, {}},
     {GateKind::kDff, "DFF", 2, 0x12u, 5,
      {{"D", 0, 2, 1}, {"CLK", 1, 2, 2, true}, {"RST", 2, 3, 3}, {"SET", 3, 4, 4}, {"EN", 4, 5, 5}}, "D"},
     {GateKind::kDlatch, "DLATCH", 2, 0x02u, 2, {{"D", 0, 2, 1}, {"EN", 1, 2, 2, false, true}}, "DL"},
@@ -211,7 +213,7 @@ inline constexpr KindInfo kKinds[] = {
     (void)e;
     ++n;
   }
-  if (n != 13) {
+  if (n != 14) {
     return false;
   }
   for (const KindInfo &e : kKinds) {
@@ -343,7 +345,7 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
       return core::Result<GateKind>::success(e.kind);
     }
   }
-  return core::Result<GateKind>::failure("bad gate kind: want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|DFF|DLATCH|JK|T|SRLATCH");
+  return core::Result<GateKind>::failure("bad gate kind: want AND|OR|NAND|NOR|XOR|XNOR|NOT|BUF|TBUF|DFF|DLATCH|JK|T|SRLATCH");
 }
 
 /**

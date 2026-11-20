@@ -640,7 +640,7 @@ struct LogicSpec {
       "logic <verb> [args]  (one-shot, no session entered)\n"
       "logic --help         (this text plus the verb list)\n"
       "Session verbs (combinational block: add, wire, solve, optimize, ...):\n"
-      "  help back add list wire unwire unshare remove ignore use reset solve truth\n"
+      "  help back add list wire unwire unshare remove ignore use pull unpull reset solve truth\n"
       "  optimize draw save load export   (exit/quit also leave the session)";
 
   /**

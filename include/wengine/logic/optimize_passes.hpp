@@ -150,6 +150,10 @@ inline void classify(const Netlist &nl, Constness *label) noexcept {
       label[s] = Constness::kV;
       continue;
     }
+    // 012: kTbuf intentionally has no switch arm below — an enable-gated
+    // buffer resolves Z (released) or its data level, never a constant,
+    // so it holds kV through the default arm and no fold can lift it
+    // (buffer-gate freeze, research D7).
     switch (g.kind) {
     case GateKind::kAnd:
       out = any_c0 ? Constness::kC0 : (any_v ? Constness::kV : Constness::kC1);
@@ -283,6 +287,11 @@ inline bool bypass_pass(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
     if (drives_shared(nl, s)) {
       continue; // 011 driver-side freeze: never rewire a shared-net span
     }
+    if (has_pulled_input(nl, s)) {
+      continue; // 012: never bypass a pulled-input gate — its resolved
+      // output carries the idle mapping, which the raw driver target
+      // below would bypass (value + interface change)
+    }
     std::uint16_t target = kNoDriver;
     bool fire = false;
     if (g.kind == GateKind::kBuf) {
@@ -290,7 +299,10 @@ inline bool bypass_pass(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
       fire = true;
     } else if (g.kind == GateKind::kNot) {
       const std::uint16_t h = g.drivers[0];
-      if (h != kNoDriver && h != s && nl.gates[h].live && nl.gates[h].kind == GateKind::kNot) {
+      if (h != kNoDriver && h != s && nl.gates[h].live && nl.gates[h].kind == GateKind::kNot && !has_pulled_input(nl, h)) {
+        // 012: never rewire through a pulled-input NOT — its resolved
+        // output carries the idle mapping, which the raw target below
+        // would bypass (value + interface change)
         target = nl.gates[h].drivers[0];
         fire = true;
       }
@@ -466,6 +478,13 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
       continue; // 011 sink-side skip: never fold, drop, or retag through
       // a marked input (index shifts would desynchronize flat-keyed extras)
     }
+    if (has_pulled_input(nl, s) || g.kind == GateKind::kTbuf) {
+      continue; // 012 sink-side skip: never fold, drop, or retag through
+      // a pulled input (index shifts would desynchronize flat-keyed
+      // pull_cfg), and never touch a buffer gate (its 2-input shape is
+      // load-bearing — dropping to n=1 would retag a fan-in-invalid
+      // 1-input buffer)
+    }
     switch (g.kind) {
     case GateKind::kAnd:
       if (!has_c0) {
@@ -509,6 +528,10 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
     }
     if (has_marked_input(nl, s)) {
       continue; // 011 sink-side skip: collapsing would destroy the span
+    }
+    if (has_pulled_input(nl, s) || g.kind == GateKind::kTbuf) {
+      continue; // 012 sink-side skip: collapsing would destroy the pull
+      // mapping or the buffer's load-bearing shape (see const_fold skip)
     }
     if (label[s] == Constness::kC0) {
       const bool canonical = g.kind == GateKind::kAnd && g.input_count == 2 && g.ignored_mask == 0x03u &&
@@ -587,6 +610,15 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq = nullptr) noexcept 
     // users would miss extras) or sink-side (the driver-array copy
     // below only moves primaries and would corrupt the span).
     if (drives_shared(nl, s) || has_marked_input(nl, s) || has_marked_input(nl, h)) {
+      continue;
+    }
+    // 012: never fuse through a pulled sink or a pulled driver — the
+    // driver-array copy below moves primaries without their flat-keyed
+    // pulls (the victim gate in test_optimizer_skips_pulled_sink fuses
+    // NAND-ward and goes wrong), mirroring the 011 driver/sink pair.
+    // (s is always NOT in this sweep, so no buffer-gate check is needed
+    // here; the general fuse above carries the kTbuf freeze.)
+    if (has_pulled_input(nl, s) || has_pulled_input(nl, h)) {
       continue;
     }
     const GateKind hk = nl.gates[h].kind;

@@ -361,6 +361,8 @@ if(BUILD_CLI)
         src/cli/commands/logic/step.cpp
         src/cli/commands/logic/poke.cpp
         src/cli/commands/logic/peek.cpp
+        src/cli/commands/logic/pull.cpp
+        src/cli/commands/logic/unpull.cpp
         src/cli/commands/logic/tie.cpp
         src/cli/commands/logic/truth.cpp
         src/cli/commands/logic/unwire.cpp
@@ -757,6 +759,14 @@ if(BUILD_TESTS)
     add_executable(test_logic_shared tests/test_logic_shared.cpp)
     target_link_libraries(test_logic_shared PRIVATE wengine_cli wengine_logic_yaml)
     add_test(NAME logic_shared COMMAND test_logic_shared)
+
+    # 012-gated-buffer-pulls: enable-gated buffer + per-net pulls.
+    # Engine seam through CLI verbs to YAML round-trip; reference-
+    # anchored goldens (FR-013). Links wengine_cli + wengine_logic_yaml
+    # to prove the seam-to-verb-to-artifact chain.
+    add_executable(test_logic_buffer tests/test_logic_buffer.cpp)
+    target_link_libraries(test_logic_buffer PRIVATE wengine_cli wengine_logic_yaml)
+    add_test(NAME logic_buffer COMMAND test_logic_buffer)
 
     # LOGIC-7 schematic layout: pure header-only geometry (no SDL), links
     # wengine_core alone like test_logic.

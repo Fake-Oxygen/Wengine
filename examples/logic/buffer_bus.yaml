@@ -1,0 +1,41 @@
+# buffer_bus.yaml: enable-gated tri-state bus with a pull-up (012).
+#
+# TBUF1 carries AND1.Y onto the shared sink OR1.1 while AND2.Y (the
+# active-high enable) holds; AND1.Y also drives OR1.1 directly as the
+# second attachment, so the bus agrees whenever the buffer conducts.
+# OR1.1 is marked in `shared:` (the explicit per-input opt-in) and
+# pulled up in `pulls:` (the idle level when every driver floats).
+# OR1.2 is ignored (tied 0). Block inputs are AND1.1, AND1.2, AND2.1,
+# AND2.2; the block output is OR1.Y, in slot order.
+#
+# Run:
+#   printf 'logic load examples/logic/buffer_bus.yaml\nlogic list\nlogic solve --in 1111\nlogic solve --in 1100\nlogic pull OR1.1 down\nlogic solve --in 1100\nexit\n' | ./build/PhysicsSimApp
+# Expect: `list` shows `shared=OR1.1(2)` plus `pulls=OR1.1(up)`;
+#   `--in 1111` (enable high) solves OR1.Y=1 (buffer conducts AND1=1);
+#   `--in 1100` (enable low) solves OR1.Y=1 too — the direct AND1
+#   attachment still drives while the buffer floats (Z is transparent).
+#   Unwire the direct driver and the parked bus idles: pull-up reads 1,
+#   `unpull` fails the parked solve loudly.
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: AND2, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: TBUF1, kind: tbuf, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: OR1, kind: or, inputs: 2, ignore: [2], ignore_output: false, delay_ps: 0}
+wires:
+  - {from: AND1.Y, to: TBUF1.1}
+  - {from: AND2.Y, to: TBUF1.2}
+  - {from: TBUF1.Y, to: OR1.1}
+  - {from: AND1.Y, to: OR1.1}
+shared:
+  - {net: OR1.1}
+pulls:
+  - {net: OR1.1, pull: up}
+ties:
+clocks:
+meta:
+  tool: wengine-logic

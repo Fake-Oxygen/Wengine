@@ -158,6 +158,55 @@ ctest --test-dir build -R logic_shared
 schema contract lives in `test_logic_yaml`; span unit tables live in
 `test_logic`.
 
+## test_logic_buffer
+
+**What it checks**: enable-gated buffers plus per-net pulls end to
+end — kind identity (byte 8, `TBUF` naming, exactly-2 fan-in,
+never-reused counters, `T`-prefix fallthrough) and the independently
+derived EN×D truth table; the netlist seam (full wire validation,
+enable gating identical to an ordinary driver, released-Z loud failure
+with the netlist uncorrupted, X/Z/dangling seams loud with state and
+timing untouched); pull mapping (all-Z → idle under `up`/`down`, loud
+without a pull; driven/contention/unknown spans inert under every
+setting; permutation invariance forward and reverse); termination
+(terminated inputs invisible to interface derivation and `poke`,
+idle resolve with no column); tie/pull and ignore/pull disjointness
+both directions with the netlist untouched; pull lifecycle
+(unwire-to-dangling keeps the pull, remove/reset clear it);
+exhaustive gated spans (every enabled/disabled × ordinary mix up to
+the cap, every pull setting, order-invariant values and counts against
+the independent reference); optimizer soundness (O0/O1 preserve gated
+buses, freeze buffers and pulled sinks — collapse, drop, bypass, and
+fusion guards — with idempotence; O2 refuses naming buffers/pulls with
+the input untouched); word-path guards (`truth` refuses live buffers,
+pull-only streams); YAML round-trip (tbuf rows, `pulls:` section,
+canonical order, byte-identical replay); and TUI parity (executor vs
+Shell byte-identical over the new vocabulary).
+
+**Purpose**: pins the 012 seam (buffer eval, pull mapping,
+termination, optimizer freeze) through the session verbs to the YAML
+round-trip, so usable buses stay explicit, visible, and
+regression-safe.
+
+**Guards against**: silent float defaults, swallowed contention,
+desynchronized flat-keyed pulls behind optimizer rewrites, word-path
+misrepresentation of Z, and headless/TUI divergence.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_buffer
+./build/test_logic_buffer
+```
+
+**Prerequisites**: standard build only.
+
+**Boundaries**: kind-table pins live in `test_logic_seq_kinds`; CLI
+verb goldens and registry pins live in `test_cli_args`; the YAML
+schema contract (round-trip + refusals) lives in `test_logic_yaml`;
+the `buffer_bus` example golden lives in `test_logic_yaml`
+(`test_examples`).
+
 ## test_logic_seq_kinds
 
 **What it checks**: sequential kind vocabulary: append-only ordinals

@@ -45,7 +45,9 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 namespace {
 
 [[nodiscard]] char bit_of(wengine::logic::LogicValue v) noexcept {
-  return (v == wengine::logic::LogicValue::kHigh) ? '1' : '0';
+  // (012) Z renders explicitly (see step.cpp bit_of): poke/step values
+  // stay Low/High, so those lines print byte-identically.
+  return (v == wengine::logic::LogicValue::kHigh) ? '1' : ((v == wengine::logic::LogicValue::kLow) ? '0' : 'Z');
 }
 
 } // namespace
@@ -272,6 +274,11 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
   if (wengine::logic::shared_word_blocked(nl)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
+  // (012) Word-loop entry guard: live buffers drive Z (no 1-bit lane);
+  // pull-only netlists stream unchanged.
+  if (wengine::logic::has_buffer_gates(nl)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
   // Header: input pins then output pins.
   bool first = true;
   for (const PinRef &p : in_pins) {
@@ -337,6 +344,11 @@ core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t t
   // (011) Word-loop entry guard (see eval_block_word): four-value nets
   // refuse loudly once, never per word.
   if (wengine::logic::shared_word_blocked(nl)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  // (012) Word-loop entry guard: live buffers drive Z (no 1-bit lane);
+  // pull-only netlists stream unchanged.
+  if (wengine::logic::has_buffer_gates(nl)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t nin = in_pins.size();

@@ -55,7 +55,7 @@ bool netlists_equal(const logic::Netlist &a, const logic::Netlist &b) {
   if (a.live_count != b.live_count) {
     return false;
   }
-  for (std::size_t k = 0; k < 8; ++k) {
+  for (std::size_t k = 0; k < a.next_counter.size(); ++k) {
     if (a.next_counter[k] != b.next_counter[k]) {
       return false;
     }
@@ -76,6 +76,10 @@ bool netlists_equal(const logic::Netlist &a, const logic::Netlist &b) {
       if (x.drivers[i] != y.drivers[i]) {
         return false;
       }
+      if (a.driver_inv[logic::tie_flat(s, static_cast<std::uint8_t>(i))] !=
+          b.driver_inv[logic::tie_flat(s, static_cast<std::uint8_t>(i))]) {
+        return false;
+      }
     }
   }
   // 011: shared marks + extras participate in test equality — a pass
@@ -87,6 +91,13 @@ bool netlists_equal(const logic::Netlist &a, const logic::Netlist &b) {
   }
   for (std::size_t e = 0; e < logic::kMaxGates * logic::kMaxInputs * logic::kMaxSharedExtra; ++e) {
     if (a.extra_drivers[e] != b.extra_drivers[e] || a.extra_inv[e] != b.extra_inv[e]) {
+      return false;
+    }
+  }
+  // 012: pulls participate in test equality — a pass that dropped or
+  // moved a pull is a correctness bug.
+  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+    if (a.pull_cfg[f] != b.pull_cfg[f]) {
       return false;
     }
   }
@@ -826,6 +837,25 @@ void test_examples() {
     check_solve(nl, {kL, kL, kL, kL, kL}, {kL});
     check_stable(nl);
   }
+  // buffer_bus.yaml: gated tri-state bus with a pull-up (012). The
+  // TBUF kind row, the shared mark, both attachments, and the pull all
+  // load; the buffer conducts while enabled and floats transparently
+  // beside the agreeing direct driver when released.
+  {
+    logic::yaml::Workspace ws;
+    logic::Netlist &nl = ws.netlist;
+    std::string err;
+    assert(logic::yaml::load_text(load("buffer_bus"), ws, err));
+    assert(nl.live_count == 4);
+    assert(nl.gates[2].kind == logic::GateKind::kTbuf);
+    assert(logic::is_shared_input(nl, 3, 0));
+    assert(logic::shared_attachment_count(nl, 3, 0) == 2);
+    assert(logic::pull_level_flat(nl, logic::tie_flat(3, 0)) == 1);
+    check_solve(nl, {kH, kH, kH, kH}, {kH}); // enabled, data high
+    check_solve(nl, {kH, kH, kL, kL}, {kH}); // released, direct driver high
+    check_solve(nl, {kL, kL, kL, kL}, {kL}); // released, direct driver low
+    check_stable(nl);
+  }
   // tieoff.yaml: AND1.2 ignored (tied 0) plus stored delays.
   {
     logic::yaml::Workspace ws;
@@ -1039,6 +1069,173 @@ void test_shared_schema_refusals() {
   }
 }
 
+// 012 US4: pulls + tbuf rows survive save→load→save byte-identically
+// (marks, attachments, pulls, outputs); canonical section order holds;
+// pre-012 files (no `pulls:`, no `tbuf`) load byte-identically.
+void test_pull_round_trip() {
+  logic::Netlist nl{};
+  assert(logic::add_gate(nl, logic::GateKind::kAnd, 2).ok());  // AND1 @0
+  assert(logic::add_gate(nl, logic::GateKind::kTbuf, 2).ok()); // TBUF1 @1
+  assert(logic::add_gate(nl, logic::GateKind::kNot, 1).ok());  // NOT1 @2
+  assert(logic::wire(nl, 0, 1, 0).ok());
+  assert(logic::wire(nl, 1, 2, 0).ok());
+  assert(logic::set_pull(nl, 0, 0, 2).ok()); // AND1.1 down (terminated)
+  assert(logic::set_pull(nl, 1, 1, 1).ok()); // TBUF1.2 up (terminated enable)
+  std::string text;
+  logic::yaml::save_text(nl, zero_inits(), text);
+  assert(contains(text, "  - {id: TBUF1, kind: tbuf, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"));
+  assert(contains(text, "pulls:\n  - {net: AND1.1, pull: down}\n  - {net: TBUF1.2, pull: up}\n"));
+  // Canonical section order: version, gates, wires, shared, pulls,
+  // ties, clocks, meta (no shared section here — no marks).
+  const std::size_t p_gates = text.find("gates:\n");
+  const std::size_t p_wires = text.find("wires:\n");
+  const std::size_t p_pulls = text.find("pulls:\n");
+  const std::size_t p_ties = text.find("ties:\n");
+  const std::size_t p_clocks = text.find("clocks:\n");
+  const std::size_t p_meta = text.find("meta:\n");
+  assert(p_gates < p_wires && p_wires < p_pulls && p_pulls < p_ties && p_ties < p_clocks && p_clocks < p_meta);
+  logic::yaml::Workspace ws{};
+  std::string err;
+  assert(logic::yaml::load_text(text, ws, err));
+  assert(netlists_equal(nl, ws.netlist));
+  assert(logic::pull_level_flat(ws.netlist, logic::tie_flat(0, 0)) == 2);
+  assert(logic::pull_level_flat(ws.netlist, logic::tie_flat(1, 1)) == 1);
+  assert(logic::block_input_count(ws.netlist) == 1); // only AND1.2
+  std::string text2;
+  logic::yaml::save_text(ws.netlist, zero_inits(), text2);
+  assert(text == text2);
+  // Replay outputs identical: AND(idle-L, in) -> TBUF(enable idle-H) ->
+  // NOT, for both block values.
+  for (int b = 0; b < 2; ++b) {
+    const logic::LogicValue in[1] = {(b != 0) ? kH : kL};
+    logic::LogicValue want[1] = {kL};
+    logic::LogicValue got[1] = {kL};
+    assert(logic::solve(nl, std::span<const logic::LogicValue>(in, 1), std::span<logic::LogicValue>(want, 1)).ok());
+    assert(logic::solve(ws.netlist, std::span<const logic::LogicValue>(in, 1),
+                        std::span<logic::LogicValue>(got, 1))
+               .ok());
+    assert(want[0] == kH && got[0] == want[0]); // NOT(L & .) regardless
+  }
+  // Pull-free workspaces save with no `pulls:` section (pre-012 bytes).
+  logic::Netlist plain = make_pair();
+  std::string ptext;
+  logic::yaml::save_text(plain, zero_inits(), ptext);
+  assert(ptext.find("pulls:") == std::string::npos);
+}
+
+// 012 US4: the additive schema is loud everywhere — no silent
+// reinterpretation.
+void test_pull_schema_refusals() {
+  const std::string head =
+      "version: 1\n"
+      "gates:\n"
+      "  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
+      "  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}\n"
+      "wires:\n";
+  const std::string mid = "ties:\nclocks:\n";
+  const std::string tail = "meta:\n  tool: wengine-logic\n";
+  // Unknown key in pulls: section.
+  {
+    const std::string text = head + mid + "pulls:\n  - {net: NOT1.1, pull: up, bogus: 1}\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "unknown pulls key"));
+  }
+  // Missing pull field.
+  {
+    const std::string text = head + mid + "pulls:\n  - {net: NOT1.1}\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "pulls entry needs 2 fields"));
+  }
+  // Unknown levels, including `none` (absence expresses it).
+  for (const char *level : {"none", "maybe", "UP", "1"}) {
+    const std::string text =
+        head + mid + "pulls:\n  - {net: NOT1.1, pull: " + level + "}\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "bad pull level"));
+  }
+  // Pull on a dead pin.
+  {
+    const std::string text = head + mid + "pulls:\n  - {net: NOPE.1, pull: up}\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "bad pull net"));
+  }
+  // Pull on an output pin.
+  {
+    const std::string text = head + mid + "pulls:\n  - {net: AND1.Y, pull: up}\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "bad pull net"));
+  }
+  // Duplicate pull rows.
+  {
+    const std::string text = head + mid + "pulls:\n  - {net: NOT1.1, pull: up}\n  - {net: NOT1.1, pull: down}\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "duplicate pull net"));
+  }
+  // Pull on a tied input: loud, never silently reinterpreted.
+  {
+    const std::string tied =
+        "version: 1\n"
+        "gates:\n"
+        "  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"
+        "wires:\n"
+        "ties:\n"
+        "  - {a: AND1.1, b: AND1.2}\n"
+        "clocks:\n"
+        "pulls:\n"
+        "  - {net: AND1.1, pull: up}\n" +
+        tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(tied, ws, err));
+    assert(contains(err, "tied, untie it first"));
+  }
+  // Pull on an ignored input: loud.
+  {
+    const std::string text =
+        "version: 1\n"
+        "gates:\n"
+        "  - {id: AND1, kind: and, inputs: 2, ignore: [1], ignore_output: false, delay_ps: 0}\n"
+        "wires:\n"
+        "ties:\n"
+        "clocks:\n"
+        "pulls:\n"
+        "  - {net: AND1.1, pull: up}\n" +
+        tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "ignored, use it first"));
+  }
+  // Non-sequence `pulls:` value.
+  {
+    const std::string text = head + mid + "pulls: up\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "'pulls:' must read a sequence"));
+  }
+  // Unknown root key (typo'd section).
+  {
+    const std::string text = head + mid + "pull: []\n" + tail;
+    logic::yaml::Workspace ws{};
+    std::string err;
+    assert(!logic::yaml::load_text(text, ws, err));
+    assert(contains(err, "unknown workspace key"));
+  }
+}
+
 } // namespace
 
 int main() {
@@ -1062,6 +1259,8 @@ int main() {
   test_malformed_line_numbers();
   test_shared_round_trip();
   test_shared_schema_refusals();
+  test_pull_round_trip();
+  test_pull_schema_refusals();
   test_examples();
   std::cout << "test_logic_yaml: OK\n";
   return 0;

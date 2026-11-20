@@ -303,6 +303,13 @@ inline std::uint16_t emit_gate(ConvertCtx &ctx, const Netlist &src, std::uint16_
     }
     return emit_not_fresh(ctx, t);
   }
+  case GateKind::kTbuf:
+    // 012: no verbatim-carry O2 emitter for buffers (a TBUF cannot be
+    // expressed in the universal-gate vocabulary without losing the
+    // release-to-Z shape). Unreachable: O2 refuses live-buffer netlists
+    // at entry (optimize.hpp) — defensive refusal, keeps -Wswitch
+    // clean, zero per-word cost.
+    return kNoDriver;
   case GateKind::kAnd:
   case GateKind::kOr:
   case GateKind::kNand:

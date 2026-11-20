@@ -9,7 +9,7 @@
  * state -> eval -> layout/topo -> optimize).
  *
  * Design (docs/logic.md §4): combinational block of gates with variable
- * fan-in (2..8, NOT/BUF exactly 1). Identity is per-kind monotonic
+ * fan-in (2..8, NOT/BUF exactly 1, TBUF exactly 2). Identity is per-kind monotonic
  * counters never reused (AND1, NOT5, ...), slots recycle — the same
  * convention as signal serials. Pins spell `<NAME>.Y` (output) or
  * `<NAME>.<1..k>` (input). Single-driver inputs, unlimited fan-out,
@@ -32,11 +32,11 @@
 namespace wengine::logic {
 
 /**
- * @brief Gate kind: combinational primitives (0..7) plus sequential
+ * @brief Gate kind: combinational primitives (0..8) plus sequential
  *        elements (16..20).
  *
  * Append-only: persisted as bytes in YAML v1 (docs/logic.md §9).
- * Values 0..7 are combinational; sequential kinds (DFF/LATCH/...)
+ * Values 0..8 are combinational; sequential kinds (DFF/LATCH/...)
  * append at >= 16 in V2 (docs/logic.md §12) — never renumber, never
  * reuse persisted byte values.
  */
@@ -57,6 +57,14 @@ enum class GateKind : std::uint8_t {
   kNot = 6,
   /** @brief Buffer, exactly 1 input (needed as an optimizer output). */
   kBuf = 7,
+  /**
+   * @brief Enable-gated buffer (TBUF), exactly 2 inputs: pin 1 is data,
+   *        pin 2 is the active-high enable. Enabled output drives the
+   *        data level; released output drives kHighZ (the first legal
+   *        Z producer in gate_out). V2 gated buses (012): combinational,
+   *        stateless, ordinary drivers[] consumers.
+   */
+  kTbuf = 8,
   /**
    * @brief Edge-triggered D flip-flop (D + CLK).
    *
@@ -239,6 +247,8 @@ inline constexpr std::size_t kMaxSharedExtra = 3;
     return "NOT";
   case GateKind::kBuf:
     return "BUF";
+  case GateKind::kTbuf:
+    return "TBUF";
   case GateKind::kDff:
     return "DFF";
   case GateKind::kDlatch:
@@ -353,8 +363,8 @@ struct Netlist {
   std::array<Gate, kMaxGates> gates{};
   /**
    * @brief Per-kind monotonic counters (never reused), indexed by
-   *        kind_ordinal: 0..7 combinational, 16 DFF, 17 DLATCH, 18 JK,
-   *        19 T, 20 SR (8..15 unused, stay 1).
+   *        kind_ordinal: 0..8 combinational (8 is TBUF), 16 DFF,
+   *        17 DLATCH, 18 JK, 19 T, 20 SR (9..15 unused, stay 1).
    */
   std::array<std::uint32_t, 21> next_counter{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
   /**
@@ -392,6 +402,20 @@ struct Netlist {
    *        the resolve_net fold (Q+NQ self-contention resolves to X).
    */
   std::array<std::uint8_t, kMaxGates * kMaxInputs * kMaxSharedExtra> extra_inv{};
+  /**
+   * @brief Per-input pull setting (012): 0 = none (the all-none default,
+   *        today's behavior), 1 = pull-up, 2 = pull-down. Indexed by
+   *        tie_flat(slot, input) — the same granularity as shared_meta.
+   *        An all-floating net maps through the pull to its idle level
+   *        (up → kHigh, down → kLow, none → kHighZ); driven nets are
+   *        inert under every setting. Zero-initialization is the
+   *        all-none state by construction, so Netlist{} starts
+   *        pull-free. Pulls are persistent topology state (set beside
+   *        the pool) and die with their slot (remove_gate clears,
+   *        reset_netlist zeroes); tied/ignored inputs never carry one
+   *        (loud disjointness on both seams).
+   */
+  std::array<std::uint8_t, kMaxGates * kMaxInputs> pull_cfg{};
   /** @brief Number of live gate slots. */
   std::uint16_t live_count = 0;
   /** @brief Set by every mutation; cleared by a successful topology rebuild. */
@@ -445,6 +469,43 @@ struct Netlist {
     return 0;
   }
   return static_cast<std::uint8_t>((nl.shared_meta[flat] >> 1) & 0x03u);
+}
+
+/**
+ * @brief True when the flat destination input carries a pull (012):
+ *        pull_cfg[flat] is 1 (up) or 2 (down). Zero (none) and
+ *        out-of-range flats read unpulled.
+ *
+ * Flat-index form of the pull test (usable beside is_shared_flat):
+ * pulls and ties/ignores are disjoint per flat — a pulled input is
+ * never tied or ignored, enforced loudly on both seams.
+ *
+ * @param[in] nl Netlist holding the pull table.
+ * @param[in] flat Flat pin index (slot * kMaxInputs + input).
+ * @return True when the flat position carries a pull-up or pull-down.
+ */
+[[nodiscard]] inline bool is_pulled_flat(const Netlist &nl, std::size_t flat) noexcept {
+  if (flat >= kMaxGates * kMaxInputs) {
+    return false;
+  }
+  const std::uint8_t v = nl.pull_cfg[flat];
+  return v == 1 || v == 2;
+}
+
+/**
+ * @brief Pull level at a flat position (012): 1 = up, 2 = down,
+ *        0 = none (or out of range).
+ *
+ * @param[in] nl Netlist holding the pull table.
+ * @param[in] flat Flat pin index (slot * kMaxInputs + input).
+ * @return The stored pull level (0/1/2); never anything else.
+ */
+[[nodiscard]] inline std::uint8_t pull_level_flat(const Netlist &nl, std::size_t flat) noexcept {
+  if (flat >= kMaxGates * kMaxInputs) {
+    return 0;
+  }
+  const std::uint8_t v = nl.pull_cfg[flat];
+  return (v == 1 || v == 2) ? v : 0;
 }
 
 } // namespace wengine::logic

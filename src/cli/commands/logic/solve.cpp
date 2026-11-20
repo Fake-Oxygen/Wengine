@@ -142,7 +142,10 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
     out << '\n';
   }
   for (std::size_t o = 0; o < nout; ++o) {
-    out << support::pin_text(nl, out_pins[o].slot, true, 0, out_pins[o].negated) << '=' << ((outputs[o] == LogicValue::kHigh) ? '1' : '0') << '\n';
+    // (012) Z renders explicitly: reachable only via released buffers
+    // (impossible pre-012), so v1 flows print byte-identically.
+    const char bit = (outputs[o] == LogicValue::kHigh) ? '1' : ((outputs[o] == LogicValue::kLow) ? '0' : 'Z');
+    out << support::pin_text(nl, out_pins[o].slot, true, 0, out_pins[o].negated) << '=' << bit << '\n';
   }
   // (011) Contention readback: visible without watching net values.
   support::report_contention(nl, support::solve_diag(), out);

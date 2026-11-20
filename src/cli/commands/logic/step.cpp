@@ -55,7 +55,10 @@ namespace {
 }
 
 [[nodiscard]] char bit_of(LogicValue v) noexcept {
-  return (v == LogicValue::kHigh) ? '1' : '0';
+  // (012) Z renders explicitly: combinational block outputs can float
+  // via released buffers (impossible pre-012); sequential Q values stay
+  // Low/High, so those lines print byte-identically.
+  return (v == LogicValue::kHigh) ? '1' : ((v == LogicValue::kLow) ? '0' : 'Z');
 }
 
 } // namespace

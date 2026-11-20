@@ -124,6 +124,13 @@ namespace wengine::logic {
   if (opts.level == OptLevel::kO2 && any_shared_mark(in)) {
     return core::Result<Netlist>::failure("optimize: shared nets unsupported at O2 (use O0/O1)", core::StatusCode::kInvalidArgument);
   }
+  // 012: O2's emitter has no buffer/pull vocabulary either (no Z in the
+  // universal-gate rebuild, no flat-keyed pull_cfg in the fresh pool).
+  // Refuse loudly, input untouched, O0/O1 remain available; a
+  // verbatim-carry O2 emitter is the named follow-on.
+  if (opts.level == OptLevel::kO2 && (has_buffer_gates(in) || any_pull(in))) {
+    return core::Result<Netlist>::failure("optimize: buffers/pulls unsupported at O2 (use O0/O1)", core::StatusCode::kInvalidArgument);
+  }
   Netlist nl = in;
   nl.dirty = true;
   nl.topo_size = 0;
@@ -246,8 +253,7 @@ namespace wengine::logic {
   {
     const detail::BuildError perr = detail::post_cleanup(out, nl, reach, emit_map, opts.target);
     if (perr != detail::BuildError::kNone) {
-      return core::Result<Netlist>::failure(detail::build_error_message(perr),
-                                            core::StatusCode::kInternal);
+      return core::Result<Netlist>::failure(detail::build_error_message(perr), core::StatusCode::kInternal);
     }
   }
   return detail::finish_o2(out, nl, opts.target);

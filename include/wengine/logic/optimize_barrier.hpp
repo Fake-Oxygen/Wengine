@@ -122,6 +122,32 @@ namespace wengine::logic::detail {
 }
 
 /**
+ * @brief True when slot s has any pulled input (012).
+ *
+ * Sink-side skip predicate (the has_marked_input pattern): no pass
+ * folds, drops, or retags through a pulled input (index-shifting
+ * transforms would desynchronize the flat-keyed pull_cfg — the exact
+ * 011 extras rationale). Pulls compose with marks; the predicates are
+ * independent and both consulted at every skip site.
+ *
+ * @param[in] nl Netlist holding the pull table.
+ * @param[in] s Slot to test.
+ * @return True when any configured input of s carries a pull.
+ */
+[[nodiscard]] inline bool has_pulled_input(const Netlist &nl, std::uint16_t s) noexcept {
+  if (s >= kMaxGates || !nl.gates[s].live) {
+    return false;
+  }
+  const Gate &g = nl.gates[s];
+  for (std::uint8_t i = 0; i < g.input_count; ++i) {
+    if (is_pulled_flat(nl, tie_flat(s, i))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * @brief DCE / reachability root rule: original sinks plus every live
  *        sequential gate (an unobserved flop stays observable through
  *        state readback), plus every shared feeder (011: driver-side
@@ -355,6 +381,13 @@ struct DedupKey {
   // 011: inputs of a marked sink never merge — the span (primary AND
   // extras) is the identity, and the key only sees the primary.
   if (has_marked_input(nl, s)) {
+    return DedupKey::unique(s, i);
+  }
+  // 012: inputs of a pulled sink never merge — the key ignores the
+  // pull, so merging would silently drop or share a pull level. Unique
+  // keys keep each pulled input's identity (O2-only path today, refused
+  // on pulls at entry — defense in depth for future callers).
+  if (has_pulled_input(nl, s)) {
     return DedupKey::unique(s, i);
   }
   const std::uint16_t d = nl.gates[s].drivers[i];

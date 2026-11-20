@@ -172,14 +172,17 @@ struct LogicAddSpec {
       "add <KIND> [--inputs N]\n"
       "  add AND\n"
       "  add OR --inputs 3\n"
+      "  add TBUF\n"
       "  add DFF\n"
       "  add DFF --inputs 5\n"
       "  add JK\n"
       "  add T\n"
       "  add SRLATCH\n"
-      "Kinds: AND OR NAND NOR XOR XNOR NOT BUF DFF DLATCH JK T SRLATCH\n"
+      "Kinds: AND OR NAND NOR XOR XNOR NOT BUF TBUF DFF DLATCH JK T SRLATCH\n"
       "(case-insensitive).\n"
-      "NOT/BUF take exactly 1 input; DLATCH exactly 2 (pins D/EN); T exactly\n"
+      "NOT/BUF take exactly 1 input; TBUF exactly 2 (pin 1 = data, pin 2 =\n"
+      "enable, active-high; released enable drives high-Z); DLATCH exactly\n"
+      "2 (pins D/EN); T exactly\n"
       "2 (pins T/CLK); JK exactly 3 (pins J/K/CLK); SRLATCH exactly 2 (pins\n"
       "S/R); DFF 2 (pins D/CLK, the default) or 5 (full control set\n"
       "D/CLK/RST/SET/EN); the rest 2..8 (default 2, NOT/BUF default 1).\n"
@@ -380,6 +383,84 @@ struct LogicUnshareSpec {
   static int run(ArgCursor &args, std::ostream &out);
   /**
    * @brief Tab-complete `unshare` arguments (input pin names).
+   * @param[in] prior_args Tokens after the verb, before the partial.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates (no trailing spaces).
+   */
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
+/**
+ * @brief `pull` verb: set the pull on a destination input pin (012).
+ */
+struct LogicPullSpec {
+  /**
+   * @brief Verb name (`pull`), valid in-session and one-shot.
+   */
+  static constexpr std::string_view kName = "pull";
+  /**
+   * @brief One-line description for session help listings.
+   */
+  static constexpr std::string_view kDescription = "Set the pull-up/down on an input pin";
+  /**
+   * @brief Usage text printed by `help pull` and usage errors.
+   */
+  static constexpr std::string_view kUsage =
+      "pull <TO.i> <up|down>\n"
+      "  pull BUS.1 up\n"
+      "Sets the pull on the destination input pin (wired or dangling, but\n"
+      "never tied, ignored, or an output): an all-floating net resolves to\n"
+      "the idle level (up -> 1, down -> 0); driven nets ignore the pull.\n"
+      "Re-setting the same level succeeds; a different level replaces it.";
+
+  /**
+   * @brief Execute the `pull` verb.
+   * @param[in] args Cursor over the argument tokens after the verb
+   *                 (`<TO.i>` plus `<up|down>` positionals).
+   * @param[out] out Result, usage, and error text.
+   * @return 0 (kExitOk) on success; 2 (kExitUsage) on a usage error.
+   */
+  static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Tab-complete `pull` arguments (input pin names, then levels).
+   * @param[in] prior_args Tokens after the verb, before the partial.
+   * @param[in] partial Partial token under the cursor.
+   * @param[out] out Candidates (no trailing spaces).
+   */
+  static void complete(std::span<const std::string_view> prior_args, std::string_view partial, std::vector<std::string> &out);
+};
+
+/**
+ * @brief `unpull` verb: clear the pull on a destination input pin (012).
+ */
+struct LogicUnpullSpec {
+  /**
+   * @brief Verb name (`unpull`), valid in-session and one-shot.
+   */
+  static constexpr std::string_view kName = "unpull";
+  /**
+   * @brief One-line description for session help listings.
+   */
+  static constexpr std::string_view kDescription = "Clear the pull on an input pin";
+  /**
+   * @brief Usage text printed by `help unpull` and usage errors.
+   */
+  static constexpr std::string_view kUsage =
+      "unpull <TO.i>\n"
+      "  unpull BUS.1\n"
+      "Clears the pull on the destination input pin (fails loudly when no\n"
+      "pull is set — mirroring `unshare`'s lifecycle refusals).";
+
+  /**
+   * @brief Execute the `unpull` verb.
+   * @param[in] args Cursor over the argument tokens after the verb
+   *                 (`<TO.i>` positional).
+   * @param[out] out Result, usage, and error text.
+   * @return 0 (kExitOk) on success; 2 (kExitUsage) on a usage error.
+   */
+  static int run(ArgCursor &args, std::ostream &out);
+  /**
+   * @brief Tab-complete `unpull` arguments (input pin names).
    * @param[in] prior_args Tokens after the verb, before the partial.
    * @param[in] partial Partial token under the cursor.
    * @param[out] out Candidates (no trailing spaces).
@@ -1072,8 +1153,8 @@ struct LogicPeekSpec {
  *       kept in sync when this list grows.
  */
 using LogicRegistry = Registry<LogicHelpSpec, LogicBackSpec, LogicAddSpec, LogicListSpec,
-                               LogicWireSpec, LogicUnwireSpec, LogicUnshareSpec, LogicRemoveSpec,
-                               LogicIgnoreSpec, LogicUseSpec, LogicTieSpec, LogicUntieSpec,
+                               LogicWireSpec, LogicUnwireSpec, LogicUnshareSpec, LogicPullSpec, LogicUnpullSpec,
+                               LogicRemoveSpec, LogicIgnoreSpec, LogicUseSpec, LogicTieSpec, LogicUntieSpec,
                                LogicResetSpec, LogicSolveSpec, LogicTruthSpec, LogicOptimizeSpec,
                                LogicDrawSpec, LogicSaveSpec, LogicLoadSpec,
                                LogicExportSpec, LogicStepSpec, LogicPokeSpec, LogicPeekSpec>;

@@ -108,6 +108,13 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
   if (any_shared_mark(nl)) {
     return false;
   }
+  // 012: conservative whole-net skip — the exact pass cannot prove
+  // safety for live buffers (Z is outside its two-value model) or for
+  // pulled nets (pull_cfg is flat-keyed; any reindexing would
+  // desynchronize it), so it leaves those netlists untouched.
+  if (has_buffer_gates(nl) || any_pull(nl)) {
+    return false;
+  }
   // Hidden outputs must be preserved exactly: if the user hid logic via
   // `ignore`, dead-input analysis over block outputs alone could break
   // the hidden cone (an input dead for visible outputs may be live for

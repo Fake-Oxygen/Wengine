@@ -144,6 +144,8 @@ void draw_gate_body(Scene &s, const wengine::logic::Gate &g, float x, float y, f
   const auto TW = [&](ImVec2 p) { return to_screen(s.view, p.x, p.y); };
   switch (g.kind) {
   case GateKind::kBuf:
+  case GateKind::kTbuf: // (012) tri-state buffer: the BUF triangle; the
+                        // enable enters via the flank stub drawn below.
   case GateKind::kNot: {
     const ImVec2 tri[3] = {T(lx, y + kPad), T(lx, y + h - kPad), T(tip_x, mid)};
     s.dl->AddTriangleFilled(tri[0], tri[1], tri[2], paper);
@@ -289,6 +291,15 @@ void draw_gate_body(Scene &s, const wengine::logic::Gate &g, float x, float y, f
   const wengine::logic::SeqSym stub_sym = is_seq ? wengine::logic::seq_symbol(stub_box, g) : wengine::logic::SeqSym{};
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     float yi = y + (static_cast<float>(i) + 1.0f) * h / (static_cast<float>(g.input_count) + 1.0f);
+    // (012) TBUF enable enters the triangle's lower flank diagonally
+    // (standard tri-state side entry): from the box-edge wire anchor
+    // to the flank, instead of the straight back stub.
+    if (g.kind == GateKind::kTbuf && i == 1) {
+      const float ex = lx + (tip_x - lx) * 2.0f / 5.0f;
+      const float ey = (y + h - kPad) + (mid - (y + h - kPad)) * (ex - lx) / (tip_x - lx);
+      s.dl->AddLine(T(x, yi), T(ex, ey), ink, s.wire_w);
+      continue;
+    }
     float x_end = lx + 1.0f;
     if (g.kind == GateKind::kOr || g.kind == GateKind::kNor || g.kind == GateKind::kXor || g.kind == GateKind::kXnor) {
       const float ex = xor_extra ? bx - 7.0f : bx;

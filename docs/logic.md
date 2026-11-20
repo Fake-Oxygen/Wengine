@@ -156,6 +156,15 @@ both raster paths consume it without changing it.
   to 4 drivers whose present values resolve through the shipped
   four-value funnel (agreement → level, low-vs-high → X, empty → Z)
   with per-net contention counted loudly in `solve`/`step` readback.
+  Enable-gated buffers (`add TBUF`, exactly 2 inputs: pin 1 = data,
+  pin 2 = active-high enable) wire like any gate; while enabled the
+  output drives the data level, while released it drives Z into the
+  funnel (transparent like an undriven net, loud at level consumers).
+  Per-input pulls (`pull <TO.i> up|down`, cleared by `unpull`, default
+  none) name the idle level of an all-floating net (up → 1, down → 0,
+  none → Z); driven nets ignore the pull, and contention counts before
+  the pull map, so a pull never creates or masks one. Pulls and
+  ties/ignores are disjoint (both directions fail loudly).
   Cycles are rejected at `wire` time via incremental DFS that is
   flop-aware: edges into sequential-gate inputs never close a cycle
   (flop Q outputs break loops), so legal feedback (`DFF Q -> comb ->
@@ -164,7 +173,9 @@ both raster paths consume it without changing it.
 - Block interface: derived on demand, never stored — dangling inputs and
   dangling outputs become the block's inputs/outputs in slot order,
   minus pins marked `ignore`. `ignore <pin>` / `use <pin>` toggles the
-  mark. `list` shows gates + wires + derived interface + ignored pins.
+  mark. A pulled dangling input is terminated (resolves to its idle
+  level, never a block input — `poke` refuses it as non-block). `list`
+  shows gates + wires + derived interface + ignored pins.
 - Tied inputs (input-input shorts as first-class nets): `tie A.1 B.2`
   merges two dangling input pins into one net, `untie A.1` removes one
   pin from its class. Equivalence classes are stored as a star in
@@ -366,6 +377,13 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   marked input in slot order, emitted iff ≥1 mark exists; absent means
   no marks, so pre-011 files load byte-identically; repeated `to:` rows
   are legal iff the destination is marked),
+  plus the optional additive `pulls: [{net: BUS.1, pull: up}]` (012:
+  one row per pulled input in slot order, emitted iff ≥1 pull exists;
+  absent means no pulls, so pre-012 files load byte-identically;
+  level spellings are `up`|`down` only — `none` is absence, never
+  written; duplicate `net:` rows, unknown levels, and tied/ignored
+  destinations fail loudly), canonical save order
+  `version, gates, wires, shared, pulls, ties, clocks, meta`,
   `ties: [{a: NAND1.1, b: NAND1.2}]` (one entry per non-leader tied
   member: `a` = class leader, `b` = member, ordered by `b` in slot
   order, so the bytes are canonical),
@@ -385,7 +403,7 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   `ignore_nq` gate key defaulting to false. DFF rows carry `inputs: 2`
   (bare) or `inputs: 5` (full control set).
   Runnable example workspaces live in `examples/logic/`
-  (`nand_pair`, `fanout`, `parity3`, `tieoff`, `tied_demorgan`, `shared_bus` plus the
+  (`nand_pair`, `fanout`, `parity3`, `tieoff`, `tied_demorgan`, `shared_bus`, `buffer_bus` plus the
   advanced sequential references `two_clock_counter`,
   `gated_async_counter`, `jk_t_latch_chain` — each header shows its run
   command and expected output); `test_logic_yaml` loads every file,
@@ -396,7 +414,7 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
 ```text
 add <KIND> [--inputs N]     list [--wires] [--iface]   wire <FROM.out> <TO.in> [--shared]
 unwire [FROM.out] <TO.i>    unshare <TO.i>             remove <GATE>
-ignore <PIN> / use <PIN>
+ignore <PIN> / use <PIN>    pull <TO.i> <up|down>      unpull <TO.i>
 tie <A.i> <B.j>             untie <PIN.i>              reset [--force]
 solve [--in bits] [--from pin=0|1 ...]
 truth [--csv p] [--limit N] optimize [--to nand|nor] [--level O0|O1|O2]
@@ -408,10 +426,17 @@ peek [GATE]
 
 `solve`/`step` append `contention: <NET>=<N> [...] (total <T>)` when
 the workspace holds any shared mark (zeros included, so counting is
-visibly live); mark-free output is byte-identical. `truth` refuses
-netlists with 2+ attachments on a shared input (the word path is 1-bit
-per lane) and points at scalar `solve`. `optimize --level O2` refuses
-shared netlists loudly (O0/O1 freeze shared-feeding gates instead).
+visibly live); mark-free output is byte-identical. `add TBUF` makes an
+enable-gated buffer (exactly 2 inputs: pin 1 = data, pin 2 = enable
+active-high; released enable drives high-Z). `pull`/`unpull` set and
+clear the per-input idle level (`list` annotates `pulls=PIN(up|down)`);
+`solve`/`step` render floating block outputs as `Z` (reachable only
+with buffers, so buffer-free flows print byte-identically). `truth`
+refuses netlists with 2+ attachments on a shared input or any live
+buffer (the word path is 1-bit per lane) and points at scalar `solve`;
+pull-only netlists stream unchanged. `optimize --level O2` refuses
+shared/buffer/pull netlists loudly (O0/O1 freeze shared-feeding gates,
+buffer gates, and pulled inputs instead).
 
 Sequential session verbs (all headless: REPL session, one-shot, pipes,
 scripts — zero GUI dependency):
@@ -438,8 +463,7 @@ entry + `static_assert` size check (same recipe as AGENTS.md §9).
 
 ## 11. Non-goals (v1) — each with a named V2 slot in §12
 
-Tri-state buses,
-timing/delay simulation, Verilog/VHDL import,
+Timing/delay simulation, Verilog/VHDL import,
 PNG/JPG codecs, GUI panel (separate epic, consumes the same headers).
 
 ## 12. V2 extension map (no redesign: every item below is a named slot)
@@ -456,8 +480,8 @@ below).
   Z is transparent, X dominates, and active low+high contention
   resolves to X. Level consumers (gate inputs, sequential control
   nets, block sinks) still reject Z/X loudly. No type change, no
-  call-site churn — the reservoir the v1 tri-state non-goal above
-  pointed at.
+  call-site churn — the reservoir the former v1 tri-state non-goal
+  pointed at (gated buses shipped in 012, see Drivers).
 - **Drivers (funnel + allowlist shipped).** Every input resolves
   through `resolve_net(span of driver values)`, now a total four-value
   wired resolution (single-pass fold; empty/all-Z spans resolve to Z).
@@ -467,15 +491,28 @@ below).
   attachment passes the same validation (live slots, range, untied
   destination, flop-aware cycle check over primary and extra edges);
   spans assemble primary-first in compact index order with per-attachment
-  polarity and fold through the unchanged funnel. Contention is a
+  polarity and fold   through the unchanged funnel. Contention is a
   per-net diagnostic channel (`SolveDiag` beside the session state:
   observation-only, cleared by `reset`, never serialized) surfaced in
   `solve`/`step` readback. The optimizer freezes shared-feeding gates
   (driver-side) and skips marked sinks (sink-side); `exact_simplify`
   skips marked netlists whole; O2 refuses them loudly (a verbatim-carry
-  O2 emitter is the named follow-on). What stays reserved is bus
-  primitives, importers, and tri-state gate kinds.
-- **Sequential / clocks (shipped).** `GateKind` values 0..7 are combinational;
+  O2 emitter is the named follow-on). Enable-gated buffers plus pulls
+  shipped in 012: `TBUF` (byte 8: data + active-high enable; enabled
+  drives data, released drives Z) composes with the funnel as an
+  ordinary span attachment within the existing cap; per-input
+  `pull up|down` (default none, `pull`/`unpull` verbs, persistent
+  topology state beside the pool, additive `pulls:` section) maps
+  all-floating nets to the idle level while driven nets stay inert;
+  pulled dangling inputs terminate out of the derived block interface
+  (idle resolve, no column); the optimizer freezes TBUF gates and
+  skips pulled inputs at O0/O1 (sink-side, plus bypass/fusion guards —
+  the flat-keyed rationale) and refuses O2 loudly; `truth`/`export`
+  refuse live-buffer netlists (pull-only streams unchanged). What stays
+  reserved is further bus primitives, importers, and additional
+  tri-state gate kinds.
+- **Sequential / clocks (shipped).** `GateKind` values 0..8 are combinational
+  (`TBUF`=8: data + active-high enable, see Drivers);
   sequential kinds append at ≥16, pinned: `DFF`=16 (D+CLK,
   edge-triggered; 2 inputs bare, or 5 with the RST/SET/EN control set),
   `DLATCH`=17 (D+EN, level-sensitive: EN=1 transparent, EN=0 frozen),

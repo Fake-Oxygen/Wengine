@@ -54,6 +54,12 @@ int LogicTieSpec::run(ArgCursor &args, std::ostream &out) {
       ((gb.ignored_mask & static_cast<std::uint8_t>(1u << b.value.input)) != 0)) {
     return cli::usage_error(out, "tie needs non-ignored pins (use first)", kUsage);
   }
+  // (012) Pulled pins never join a tie class: name the conflict before
+  // the engine seam refuses it.
+  if (wengine::logic::is_pulled_flat(nl, wengine::logic::tie_flat(a.value.slot, a.value.input)) ||
+      wengine::logic::is_pulled_flat(nl, wengine::logic::tie_flat(b.value.slot, b.value.input))) {
+    return cli::usage_error(out, "tie needs non-pulled pins (unpull first)", kUsage);
+  }
   // Snapshot the tie table: tie_pins can merge two existing classes, so
   // pin-level untie would not exactly revert a merge — restore wholesale.
   const auto tie_before = wengine::logic::snapshot_ties(nl);

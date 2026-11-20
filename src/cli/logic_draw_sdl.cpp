@@ -209,6 +209,15 @@ void draw_gate_body(SDL_Renderer *ren, const wengine::logic::Gate &g, int x, int
   (void)SDL_SetRenderDrawColor(ren, 20, 20, 20, 255);
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     const int yi = y + (static_cast<int>(i) + 1) * h / (n + 1);
+    // (012) TBUF enable enters the triangle's lower flank diagonally
+    // (standard tri-state side entry): from the box-edge wire anchor
+    // to the flank, instead of the straight back stub.
+    if (kind == GateKind::kTbuf && i == 1) {
+      const int ex = lx + (tip_x - lx) * 2 / 5;
+      const int ey = (y + h - kPad) + (mid - (y + h - kPad)) * (ex - lx) / (tip_x - lx);
+      stroke_seg(ren, x, yi, ex, ey);
+      continue;
+    }
     int x_end = lx;
     if (is_or_family) {
       const int ex = xor_extra ? bx - 7 : bx;
@@ -221,6 +230,8 @@ void draw_gate_body(SDL_Renderer *ren, const wengine::logic::Gate &g, int x, int
   }
   switch (kind) {
   case GateKind::kBuf:
+  case GateKind::kTbuf: // (012) tri-state buffer: the BUF triangle; the
+                        // enable enters via the flank stub drawn above.
   case GateKind::kNot: {
     const Pt a{lx, y + kPad};
     const Pt b{lx, y + h - kPad};

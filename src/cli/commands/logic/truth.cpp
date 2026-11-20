@@ -36,6 +36,13 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
   if (wengine::logic::shared_word_blocked(nl)) {
     return cli::runtime_error(out, "truth: shared nets with 2+ drivers need scalar solve (word path is 1-bit per lane)");
   }
+  // (012) Buffers drive Z, which has no 1-bit representation: refuse
+  // loudly, naming the construct and pointing at scalar solve.
+  // Pull-only netlists stream unchanged (termination shrinks the
+  // interface; pulled wired nets are pull-irrelevant).
+  if (wengine::logic::has_buffer_gates(nl)) {
+    return cli::runtime_error(out, "truth: enable-gated buffers need scalar solve (word path is 1-bit per lane)");
+  }
   std::vector<PinRef> in_pins;
   std::vector<PinRef> out_pins;
   support::interface_pins(nl, in_pins, out_pins);

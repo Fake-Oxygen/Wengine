@@ -77,6 +77,23 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
       }
       out << support::pin_text(nl, s, false, i) << '(' << static_cast<unsigned>(wengine::logic::shared_attachment_count(nl, s, i)) << ')';
     }
+    // Pull settings (012): per pulled input, the pin and level. Absent
+    // on pull-free netlists (output byte-identical).
+    bool first_pull = true;
+    for (std::uint8_t i = 0; i < g.input_count; ++i) {
+      const std::uint8_t pull_level = wengine::logic::pull_level_flat(
+          nl, static_cast<std::size_t>(s) * wengine::logic::kMaxInputs + i);
+      if (pull_level == 0) {
+        continue;
+      }
+      if (first_pull) {
+        out << " pulls=";
+        first_pull = false;
+      } else {
+        out << ',';
+      }
+      out << support::pin_text(nl, s, false, i) << '(' << (pull_level == 1 ? "up" : "down") << ')';
+    }
     out << '\n';
   }
   if (show_wires) {

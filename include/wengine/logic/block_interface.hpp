@@ -67,6 +67,12 @@ namespace detail {
  * @brief Shared block-input predicate: dangling pin that leads its tie
  *        class. The single filter behind every interface enumeration.
  *
+ * A pulled dangling input is *terminated* (012): it resolves to its
+ * idle level in fill_resolved and is never a block input — block
+ * counts, interface derivation, input_index, and poke all see a
+ * terminated net. Pulls and ties are disjoint by construction, so no
+ * tie interplay hides here.
+ *
  * @param[in] nl Netlist holding the gate and tie table.
  * @param[in] slot Gate slot.
  * @param[in] input 0-based input index.
@@ -77,6 +83,9 @@ namespace detail {
     return false;
   }
   const std::size_t flat = tie_flat(slot, input);
+  if (is_pulled_flat(nl, flat)) {
+    return false; // terminated: resolves to idle, consumes no column
+  }
   return tie_leader_flat(nl, flat) == flat;
 }
 } // namespace detail
@@ -351,6 +360,11 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
       if (!detail::is_block_input(nl, s, i)) {
         if ((g.ignored_mask & (1u << i)) != 0) {
           resolved[flat] = LogicValue::kLow; // ignored dangles tie off
+        } else if (is_pulled_flat(nl, flat)) {
+          // Terminated (012): pulled dangling inputs resolve to idle
+          // without consuming a block-input column (pull + tie/ignore
+          // are disjoint, so no interplay hides here).
+          resolved[flat] = (pull_level_flat(nl, flat) == 1) ? LogicValue::kHigh : LogicValue::kLow;
         }
         continue; // non-leader members share the leader's value below
       }
@@ -456,6 +470,15 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
         ++diag->per_net[flat];
       }
     }
+    // (012) Pull map: an all-floating span resolves through the
+    // destination input's pull to its idle level (up → kHigh,
+    // down → kLow, none → kHighZ). Driven spans (agreement,
+    // contention, unknown) are inert under every pull setting; counts
+    // above are computed at span assembly, before this map, so a pull
+    // neither creates nor masks one.
+    if (sunk == LogicValue::kHighZ && is_pulled_flat(nl, flat)) {
+      sunk = (pull_level_flat(nl, flat) == 1) ? LogicValue::kHigh : LogicValue::kLow;
+    }
     if (sunk != LogicValue::kLow && sunk != LogicValue::kHigh) {
       return false;
     }
@@ -469,6 +492,19 @@ inline void build_input_positions(const Netlist &nl, std::uint16_t *in_pos) noex
     }
     LogicValue sunk = LogicValue::kLow;
     if (!resolve_net(&gate_out[drv], 1, sunk)) {
+      return false;
+    }
+    // (012) Loud level check (the shared branch's rule, extended):
+    // a non-level sunk value is reachable only via Z-producing drivers
+    // (disabled buffers — impossible pre-012). Z maps through the
+    // pull to idle; unpulled Z (and anything else non-level) fails
+    // loudly instead of flowing into eval_gate (whose is_high arm
+    // would silently read Z as low).
+    if (sunk != LogicValue::kLow && sunk != LogicValue::kHigh) {
+      if (sunk == LogicValue::kHighZ && is_pulled_flat(nl, flat)) {
+        out = (pull_level_flat(nl, flat) == 1) ? LogicValue::kHigh : LogicValue::kLow;
+        return true;
+      }
       return false;
     }
     // NQ source: the sink reads the negated value (T005).
@@ -605,6 +641,50 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
 }
 
 /**
+ * @brief True when the netlist holds any live enable-gated buffer gate
+ *        (012): the word-path entry guards (truth/export) and the O2
+ *        refusal key on this.
+ *
+ * Live-gate scan only — mirrors shared_word_blocked.
+ *
+ * @param[in] nl Netlist to inspect.
+ * @return True when any live gate is kind kTbuf.
+ */
+[[nodiscard]] inline bool has_buffer_gates(const Netlist &nl) noexcept {
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (nl.gates[s].live && nl.gates[s].kind == GateKind::kTbuf) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @brief True when the netlist holds any pull setting (012):
+ *        persistent topology state beside any_shared_mark.
+ *
+ * Conservative whole-net predicate for passes that cannot prove safety
+ * for pulled nets (exact_simplify, O2): any live gate input pulled,
+ * regardless of wiring.
+ *
+ * @param[in] nl Netlist to inspect.
+ * @return True when any live gate input carries a pull.
+ */
+[[nodiscard]] inline bool any_pull(const Netlist &nl) noexcept {
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (!nl.gates[s].live) {
+      continue;
+    }
+    for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+      if (is_pulled_flat(nl, static_cast<std::size_t>(s) * kMaxInputs + i)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * @brief Bit-parallel twin of resolve_input: wired inputs read the
  *        source word (with NQ polarity); ignored dangling pins read
  *        word 0 (same rule as scalar kLow); dangling block inputs read
@@ -635,6 +715,13 @@ inline constexpr std::size_t kBitScratchWords = kMaxGates;
   }
   if ((nl.gates[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
     return 0;
+  }
+  // (012) Terminated (pull-only) dangling inputs never reach the
+  // procedural column map (is_block_input excludes them): up reads the
+  // all-ones word, down the all-zero word — the word twin of the idle
+  // rule in fill_resolved. Pull-only netlists stream truth unchanged.
+  if (is_pulled_flat(nl, tie_flat(slot, input))) {
+    return (pull_level_flat(nl, tie_flat(slot, input)) == 1) ? ~static_cast<std::uint64_t>(0ULL) : static_cast<std::uint64_t>(0ULL);
   }
   const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(slot) * kMaxInputs + input]);
   return input_column_word(p, word_index);

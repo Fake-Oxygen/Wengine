@@ -213,6 +213,26 @@ printf 'logic load examples/logic/shared_bus.yaml\nlogic list --wires\nlogic sol
 solve prints `OR1.Y=1` with `contention: OR1.1=0 (total 0)`; the
 contended solve refuses loudly with `contention: OR1.1=1 (total 1)`.
 
+## logic/buffer_bus.yaml
+
+**Demonstrates**: an enable-gated tri-state bus with a pull-up —
+`TBUF1` carries `AND1.Y` onto the shared sink `OR1.1` while `AND2.Y`
+(the active-high enable) holds, with `AND1.Y` as the second
+attachment; `OR1.1` is marked in `shared:` and idled in `pulls:`.
+
+**How to run**:
+
+```sh
+printf 'logic load examples/logic/buffer_bus.yaml\nlogic unwire AND1.Y OR1.1\nlogic solve --in 1100\nlogic pull OR1.1 down\nlogic solve --in 1100\nlogic unpull OR1.1\nlogic solve --in 1100\nexit\n' | ./build/PhysicsSimApp
+```
+
+**Expected outcome**: `loaded 4 gates 4 wires`; parking the bus
+(unwiring the direct driver) with the enable low solves `OR1.Y=1`
+(buffer released, pull-up idles high) with
+`contention: OR1.1=0 (total 0)`; after `pull OR1.1 down` the same
+parking solves `OR1.Y=0`; after `unpull` the parked solve refuses
+loudly (the float has no idle level).
+
 ## logic/tied_demorgan.yaml
 
 **Demonstrates**: the tied-input De Morgan mirror — NOT via

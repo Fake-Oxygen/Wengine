@@ -25,6 +25,7 @@ void test_ordinal_values() {
   static_assert(static_cast<std::uint8_t>(GateKind::kXnor) == 5);
   static_assert(static_cast<std::uint8_t>(GateKind::kNot) == 6);
   static_assert(static_cast<std::uint8_t>(GateKind::kBuf) == 7);
+  static_assert(static_cast<std::uint8_t>(GateKind::kTbuf) == 8);
   static_assert(static_cast<std::uint8_t>(GateKind::kDff) == 16);
   static_assert(static_cast<std::uint8_t>(GateKind::kDlatch) == 17);
   static_assert(static_cast<std::uint8_t>(GateKind::kJk) == 18);
@@ -37,6 +38,7 @@ void test_ordinal_values() {
   assert(logic::kind_ordinal(GateKind::kSrlatch) == 20);
   assert(logic::kind_ordinal(GateKind::kAnd) == 0);
   assert(logic::kind_ordinal(GateKind::kBuf) == 7);
+  assert(logic::kind_ordinal(GateKind::kTbuf) == 8);
 }
 
 void test_names() {
@@ -48,6 +50,7 @@ void test_names() {
   assert(logic::gate_kind_name(GateKind::kXnor) == "XNOR");
   assert(logic::gate_kind_name(GateKind::kNot) == "NOT");
   assert(logic::gate_kind_name(GateKind::kBuf) == "BUF");
+  assert(logic::gate_kind_name(GateKind::kTbuf) == "TBUF");
   assert(logic::gate_kind_name(GateKind::kDff) == "DFF");
   assert(logic::gate_kind_name(GateKind::kDlatch) == "DLATCH");
   assert(logic::gate_kind_name(GateKind::kJk) == "JK");
@@ -111,6 +114,12 @@ void test_parse_sequential() {
   assert(logic::parse_gate_kind("and").value == GateKind::kAnd);
   assert(logic::parse_gate_kind("Xnor").value == GateKind::kXnor);
   assert(logic::parse_gate_kind("buf").value == GateKind::kBuf);
+  assert(logic::parse_gate_kind("TBUF").value == GateKind::kTbuf);
+  assert(logic::parse_gate_kind("tbuf").value == GateKind::kTbuf);
+  assert(logic::parse_gate_kind("Tbuf").value == GateKind::kTbuf);
+  assert(!logic::parse_gate_kind("TBUF1").ok());
+  assert(!logic::parse_gate_kind("TBU").ok());
+  assert(!logic::parse_gate_kind("TBUFFF").ok());
   assert(!logic::parse_gate_kind("NAND2").ok());
   assert(!logic::parse_gate_kind("ANDD").ok());
 }
@@ -119,8 +128,8 @@ void test_round_trip() {
   constexpr GateKind kAll[] = {
       GateKind::kAnd, GateKind::kOr, GateKind::kNand, GateKind::kNor,
       GateKind::kXor, GateKind::kXnor, GateKind::kNot, GateKind::kBuf,
-      GateKind::kDff, GateKind::kDlatch, GateKind::kJk, GateKind::kT,
-      GateKind::kSrlatch,
+      GateKind::kTbuf, GateKind::kDff, GateKind::kDlatch, GateKind::kJk,
+      GateKind::kT, GateKind::kSrlatch,
   };
   for (GateKind k : kAll) {
     const std::string_view name = logic::gate_kind_name(k);
@@ -177,6 +186,14 @@ void test_fanin() {
   assert(!logic::valid_fanin(GateKind::kNot, 2));
   assert(logic::valid_fanin(GateKind::kBuf, 1));
   assert(!logic::valid_fanin(GateKind::kBuf, 0));
+  // TBUF (012): exactly 2 (data + active-high enable), default 2.
+  assert(logic::valid_fanin(GateKind::kTbuf, 2));
+  assert(logic::default_fanin(GateKind::kTbuf) == 2);
+  assert(!logic::valid_fanin(GateKind::kTbuf, 0));
+  assert(!logic::valid_fanin(GateKind::kTbuf, 1));
+  assert(!logic::valid_fanin(GateKind::kTbuf, 3));
+  assert(!logic::valid_fanin(GateKind::kTbuf, 8));
+  assert(!logic::is_sequential_kind(GateKind::kTbuf));
   assert(logic::default_fanin(GateKind::kNot) == 1);
   assert(logic::default_fanin(GateKind::kAnd) == 2);
 }
@@ -239,6 +256,21 @@ void test_creation() {
   assert(d2.ok());
   assert(nl.gates[d2.value].counter == 2);
   assert(logic::resolve_gate(nl, "DFF2").value == d2.value);
+  // TBUF creation (012): exactly 2 inputs (default 2) with per-kind
+  // never-reused counters (TBUF1, TBUF2, ...).
+  auto b1 = logic::add_gate(nl, GateKind::kTbuf);
+  assert(b1.ok());
+  assert(nl.gates[b1.value].counter == 1);
+  assert(nl.gates[b1.value].input_count == 2);
+  assert(logic::resolve_gate(nl, "TBUF1").value == b1.value);
+  assert(logic::resolve_gate(nl, "tbuf1").value == b1.value);
+  assert(!logic::add_gate(nl, GateKind::kTbuf, 1).ok());
+  assert(!logic::add_gate(nl, GateKind::kTbuf, 3).ok());
+  assert(logic::remove_gate(nl, b1.value).ok());
+  auto b2 = logic::add_gate(nl, GateKind::kTbuf, 2);
+  assert(b2.ok());
+  assert(nl.gates[b2.value].counter == 2);
+  assert(logic::resolve_gate(nl, "TBUF2").value == b2.value);
   // Combinational creation unchanged.
   auto a = logic::add_gate(nl, GateKind::kAnd, 2);
   assert(a.ok());
