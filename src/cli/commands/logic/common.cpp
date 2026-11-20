@@ -1,5 +1,7 @@
 #include "common.hpp"
 
+#include "wengine/cli/status.hpp"
+#include "wengine/core/status.hpp"
 #include "wengine/logic/clock_domains.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/seq_step.hpp"
@@ -24,6 +26,73 @@ using wengine::logic::Netlist;
 
 namespace support {
 
+bool handle_help(ArgCursor &args, std::ostream &out, std::string_view name, std::string_view description, std::string_view usage) {
+  if (!args.take_flag({"--help", "-h"})) {
+    return false;
+  }
+  out << name << " - " << description << "\nUsage:\n" << usage << '\n';
+  return true;
+}
+
+bool complete_opts(std::string_view partial, std::span<const std::string_view> opts, std::vector<std::string> &out) {
+  if (partial.empty() || partial.front() != '-') {
+    return false;
+  }
+  push_matches(partial, opts, out);
+  return true;
+}
+
+bool take_positionals(ArgCursor &args, std::ostream &out, std::string_view usage, std::vector<std::string_view> &out_pos, std::size_t min, std::size_t max,
+                      std::string_view missing_msg) {
+  out_pos.clear();
+  for (std::size_t i = 0; i < max; ++i) {
+    std::optional<std::string_view> p = args.next_positional();
+    if (!p) {
+      break;
+    }
+    out_pos.push_back(*p);
+  }
+  if (out_pos.size() < min) {
+    cli::usage_error(out, missing_msg, usage);
+    return false;
+  }
+  if (std::optional<std::string_view> extra = args.next_positional()) {
+    if (min == max) {
+      cli::unexpected_error(out, *extra, usage);
+    } else {
+      cli::usage_error(out, missing_msg, usage);
+    }
+    return false;
+  }
+  if (args.has_remaining()) {
+    const std::optional<std::string_view> stray = args.first_remaining();
+    cli::unexpected_error(out, stray ? *stray : std::string_view{}, usage);
+    return false;
+  }
+  return true;
+}
+
+bool parse_input_pin(const Netlist &nl, std::string_view text, PinRef &pin_out, std::ostream &out, std::string_view usage, std::string_view output_msg) {
+  const auto pin = wengine::logic::parse_pin(nl, text);
+  if (!pin.ok()) {
+    cli::usage_error(out, std::string("bad pin '") + std::string(text) + "' (want NAME.i)", usage);
+    return false;
+  }
+  if (pin.value.is_output) {
+    cli::usage_error(out, output_msg, usage);
+    return false;
+  }
+  pin_out = pin.value;
+  return true;
+}
+
+[[nodiscard]] char bit_of(wengine::logic::LogicValue v) noexcept {
+  // (012) Z renders explicitly: combinational block outputs can float
+  // via released buffers; sequential Q values stay Low/High, so those
+  // lines print byte-identically to the old per-TU copies.
+  return (v == wengine::logic::LogicValue::kHigh) ? '1' : ((v == wengine::logic::LogicValue::kLow) ? '0' : 'Z');
+}
+
 void push_matches(std::string_view partial, std::span<const std::string_view> options, std::vector<std::string> &out) {
   for (std::string_view o : options) {
     if (o.substr(0, partial.size()) == partial) {
@@ -41,16 +110,6 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
   s += std::to_string(nl.gates[slot].counter);
   return s;
 }
-
-namespace {
-
-[[nodiscard]] char bit_of(wengine::logic::LogicValue v) noexcept {
-  // (012) Z renders explicitly (see step.cpp bit_of): poke/step values
-  // stay Low/High, so those lines print byte-identically.
-  return (v == wengine::logic::LogicValue::kHigh) ? '1' : ((v == wengine::logic::LogicValue::kLow) ? '0' : 'Z');
-}
-
-} // namespace
 
 [[nodiscard]] std::string pin_text(const Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input, bool negated) {
   std::string s = gate_name(nl, slot);
@@ -554,9 +613,7 @@ namespace support {
 
 namespace yaml {
 
-bool load_text(const std::string &text, Netlist &out,
-               std::array<wengine::logic::LogicValue, wengine::logic::kMaxGates> &inits,
-               std::string &err) {
+bool load_text(const std::string &text, Netlist &out, std::array<wengine::logic::LogicValue, wengine::logic::kMaxGates> &inits, std::string &err) {
   // Strict v1 loader lives in the versioned store
   // (src/logic/yaml_store.cpp, the single TU allowed to know yaml-cpp
   // exists); this CLI wrapper forwards the bundle. Atomic: `out` and

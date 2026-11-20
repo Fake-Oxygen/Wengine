@@ -7,9 +7,11 @@
 // include/wengine/cli/logic_registry.hpp; the process-wide workspace is
 // declared there and defined in ../logic.cpp.
 
+#include "wengine/cli/args.hpp"
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/types.hpp"
 
 #include <array>
 #include <cstddef>
@@ -23,14 +25,25 @@
 
 namespace wengine::cli::logic::support {
 
+// Verb prelude (one line per site, no cloned wording): every `run`
+// starts with handle_help, collects positionals with take_positionals,
+// parses pins with parse_input_pin, and every `complete` routes the
+// dash-prefix through complete_opts. Z renders through bit_of.
+[[nodiscard]] bool handle_help(ArgCursor &args, std::ostream &out, std::string_view name, std::string_view description, std::string_view usage);
+[[nodiscard]] bool complete_opts(std::string_view partial, std::span<const std::string_view> opts, std::vector<std::string> &out);
+[[nodiscard]] bool take_positionals(ArgCursor &args, std::ostream &out, std::string_view usage, std::vector<std::string_view> &out_pos, std::size_t min,
+                                     std::size_t max, std::string_view missing_msg);
+[[nodiscard]] bool parse_input_pin(const wengine::logic::Netlist &nl, std::string_view text, wengine::logic::PinRef &pin_out, std::ostream &out,
+                                    std::string_view usage, std::string_view output_msg);
+[[nodiscard]] char bit_of(wengine::logic::LogicValue v) noexcept;
+
 void push_matches(std::string_view partial, std::span<const std::string_view> options, std::vector<std::string> &out);
 [[nodiscard]] bool starts_with(std::string_view text, std::string_view prefix) noexcept;
 
 // Display names (per-kind counters, never reused): "AND1", "AND1.Y", "AND1.2".
 // Sequential gates show named pins: "DFF1.D", "DFF1.CLK", "DFF1.Q", "DFF1.NQ".
 [[nodiscard]] std::string gate_name(const wengine::logic::Netlist &nl, std::uint16_t slot);
-[[nodiscard]] std::string pin_text(const wengine::logic::Netlist &nl, std::uint16_t slot, bool is_output,
-                                   std::uint8_t input, bool negated = false);
+[[nodiscard]] std::string pin_text(const wengine::logic::Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input, bool negated = false);
 
 void collect_gate_names(const wengine::logic::Netlist &nl, std::string_view partial, std::vector<std::string> &out);
 // Slot order; per gate the output pins first (Q then NQ on sequential gates),

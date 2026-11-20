@@ -54,13 +54,6 @@ namespace {
   return true;
 }
 
-[[nodiscard]] char bit_of(LogicValue v) noexcept {
-  // (012) Z renders explicitly: combinational block outputs can float
-  // via released buffers (impossible pre-012); sequential Q values stay
-  // Low/High, so those lines print byte-identically.
-  return (v == LogicValue::kHigh) ? '1' : ((v == LogicValue::kLow) ? '0' : 'Z');
-}
-
 } // namespace
 
 int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
@@ -220,8 +213,8 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
       if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind) || !is_stepped(s)) {
         continue;
       }
-      out << support::pin_text(nl, s, true, 0) << '=' << bit_of(st.q[s]) << " NQ="
-          << bit_of(st.q[s] == LogicValue::kHigh ? LogicValue::kLow : LogicValue::kHigh) << " (serial " << st.serial[s] << ")\n";
+      out << support::pin_text(nl, s, true, 0) << '=' << support::bit_of(st.q[s]) << " NQ="
+          << support::bit_of(st.q[s] == LogicValue::kHigh ? LogicValue::kLow : LogicValue::kHigh) << " (serial " << st.serial[s] << ")\n";
     }
     // 011: no resolutions ran, but the line stays visible when marked.
     support::report_contention(nl, support::solve_diag(), out);
@@ -247,15 +240,15 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     }
     const LogicValue now = st.q[s];
     if (now == old_q[s]) {
-      out << support::pin_text(nl, s, true, 0) << ": " << bit_of(now) << " (no change)\n";
+      out << support::pin_text(nl, s, true, 0) << ": " << support::bit_of(now) << " (no change)\n";
     } else {
-      out << support::pin_text(nl, s, true, 0) << ": " << bit_of(old_q[s]) << "->" << bit_of(now) << " (NQ "
-          << bit_of(old_q[s] == LogicValue::kHigh ? LogicValue::kLow : LogicValue::kHigh) << "->"
-          << bit_of(now == LogicValue::kHigh ? LogicValue::kLow : LogicValue::kHigh) << ")\n";
+      out << support::pin_text(nl, s, true, 0) << ": " << support::bit_of(old_q[s]) << "->" << support::bit_of(now) << " (NQ "
+          << support::bit_of(old_q[s] == LogicValue::kHigh ? LogicValue::kLow : LogicValue::kHigh) << "->"
+          << support::bit_of(now == LogicValue::kHigh ? LogicValue::kLow : LogicValue::kHigh) << ")\n";
     }
   }
   for (std::size_t o = 0; o < out_pins.size(); ++o) {
-    out << support::pin_text(nl, out_pins[o].slot, true, 0, out_pins[o].negated) << '=' << bit_of(outputs[o]) << '\n';
+    out << support::pin_text(nl, out_pins[o].slot, true, 0, out_pins[o].negated) << '=' << support::bit_of(outputs[o]) << '\n';
   }
   // (011) Contention readback, same line as solve.
   support::report_contention(nl, support::solve_diag(), out);

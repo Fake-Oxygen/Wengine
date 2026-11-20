@@ -21,8 +21,8 @@ namespace {
 
 void print_flop(std::ostream &out, const Netlist &nl, wengine::logic::SeqState &st, std::uint16_t slot) {
   const wengine::logic::LogicValue q = st.q[slot];
-  const char qb = (q == wengine::logic::LogicValue::kHigh) ? '1' : '0';
-  const char nb = (q == wengine::logic::LogicValue::kHigh) ? '0' : '1';
+  const char qb = support::bit_of(q);
+  const char nb = support::bit_of(q == wengine::logic::LogicValue::kHigh ? wengine::logic::LogicValue::kLow : wengine::logic::LogicValue::kHigh);
   out << support::pin_text(nl, slot, true, 0) << '=' << qb << " NQ=" << nb << " (serial " << st.serial[slot] << ")\n";
 }
 
@@ -60,8 +60,7 @@ int LogicPeekSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::usage_error(out, std::string("peek: unknown gate '") + std::string(*gate_text) + "'", kUsage);
   }
   if (!wengine::logic::is_sequential_kind(nl.gates[gate.value].kind)) {
-    return cli::usage_error(out, std::string("peek: '") + std::string(*gate_text) + "' is not a sequential gate",
-                            kUsage);
+    return cli::usage_error(out, std::string("peek: '") + std::string(*gate_text) + "' is not a sequential gate", kUsage);
   }
   print_flop(out, nl, st, gate.value);
   out << "flops: 1\n";
