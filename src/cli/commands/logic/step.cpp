@@ -278,7 +278,7 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
       }
       wengine::logic::TimingTrace trace;
       if (!wengine::logic::run_timing_window_inner(nl, seeds, trace, scratch, true).ok()) {
-        return cli::runtime_error(out, std::string("step: timing window refused (event budget ") + std::to_string(wengine::logic::kMaxTimingEvents) + " exceeded or picosecond time overflow)");
+        return cli::runtime_error(out, support::timing_window_refused("step"));
       }
       // Contract cli-verbs: one `timing (edge k): ...` block per edge.
       std::ostringstream edge_out;

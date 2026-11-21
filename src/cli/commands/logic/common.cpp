@@ -43,10 +43,10 @@ bool complete_opts(std::string_view partial, std::span<const std::string_view> o
 }
 
 bool take_positionals(ArgCursor &args, std::ostream &out, std::string_view usage, std::vector<std::string_view> &out_pos, std::size_t min, std::size_t max,
-                      std::string_view missing_msg) {
+                      std::string_view missing_msg, bool include_options) {
   out_pos.clear();
   for (std::size_t i = 0; i < max; ++i) {
-    std::optional<std::string_view> p = args.next_positional();
+    std::optional<std::string_view> p = args.next_positional(include_options);
     if (!p) {
       break;
     }
@@ -56,7 +56,7 @@ bool take_positionals(ArgCursor &args, std::ostream &out, std::string_view usage
     cli::usage_error(out, missing_msg, usage);
     return false;
   }
-  if (std::optional<std::string_view> extra = args.next_positional()) {
+  if (std::optional<std::string_view> extra = args.next_positional(include_options)) {
     if (min == max) {
       cli::unexpected_error(out, *extra, usage);
     } else {
@@ -674,6 +674,26 @@ bool load_text(const std::string &text, Netlist &out, std::array<wengine::logic:
   }
   const std::string_view suf = path.substr(path.size() - 4);
   return suf == ".bmp" || suf == ".BMP";
+}
+
+void build_block_seeds(const std::vector<PinRef> &in_pins, std::span<const wengine::logic::LogicValue> values,
+                       std::vector<wengine::logic::TimingSeed> &seeds) {
+  seeds.clear();
+  const std::size_t n = in_pins.size() < values.size() ? in_pins.size() : values.size();
+  for (std::size_t j = 0; j < n; ++j) {
+    if (values[j] == wengine::logic::LogicValue::kHigh) {
+      seeds.push_back(wengine::logic::TimingSeed{.slot = in_pins[j].slot,
+                                                 .input = in_pins[j].input,
+                                                 .is_flop = false,
+                                                 .fire_ps = 0,
+                                                 .new_value = wengine::logic::LogicValue::kHigh});
+    }
+  }
+}
+
+[[nodiscard]] std::string timing_window_refused(std::string_view verb) {
+  return std::string(verb) + ": timing window refused (event budget " + std::to_string(wengine::logic::kMaxTimingEvents) +
+         " exceeded or picosecond time overflow)";
 }
 
 [[nodiscard]] char timing_value_char(wengine::logic::LogicValue v) noexcept {

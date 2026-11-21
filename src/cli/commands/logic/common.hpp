@@ -32,8 +32,15 @@ namespace wengine::cli::logic::support {
 // dash-prefix through complete_opts. Z renders through bit_of.
 [[nodiscard]] bool handle_help(ArgCursor &args, std::ostream &out, std::string_view name, std::string_view description, std::string_view usage);
 [[nodiscard]] bool complete_opts(std::string_view partial, std::span<const std::string_view> opts, std::vector<std::string> &out);
+// Collect up to max positionals, then enforce the [min, max] count with
+// loud usage/extra/stray errors (false = already reported, caller returns
+// kExitUsage). include_options also collects dash-leading tokens as
+// positionals (default skips them so options are never eaten): set-delay
+// passes true so a negative VALUE reaches parse_time_ps (which refuses it
+// as non-negative) instead of vanishing into the flag filter. The
+// negative-value grammar lives here, not per verb.
 [[nodiscard]] bool take_positionals(ArgCursor &args, std::ostream &out, std::string_view usage, std::vector<std::string_view> &out_pos, std::size_t min,
-                                     std::size_t max, std::string_view missing_msg);
+                                    std::size_t max, std::string_view missing_msg, bool include_options = false);
 [[nodiscard]] bool parse_input_pin(const wengine::logic::Netlist &nl, std::string_view text, wengine::logic::PinRef &pin_out, std::ostream &out,
                                     std::string_view usage, std::string_view output_msg);
 [[nodiscard]] char bit_of(wengine::logic::LogicValue v) noexcept;
@@ -139,6 +146,20 @@ void save_yaml(std::ostream &os, const wengine::logic::Netlist &nl);
 // inputs only, zeros included so counting is visibly live); silent when
 // no input is marked (mark-free output stays byte-identical).
 void report_contention(const wengine::logic::Netlist &nl, const wengine::logic::SolveDiag &diag, std::ostream &out);
+
+// Block-input diff seeds for one timing window (solve/truth share it):
+// every High-valued block input seeds its leader pin at fire time 0
+// (non-flop, High) — the assignment's diffs against the all-zero
+// pre-state. Clears seeds first. Step's flop-force seeding stays
+// separate: post-edge Q forces at clock-to-Q are genuinely divergent.
+void build_block_seeds(const std::vector<wengine::logic::PinRef> &in_pins, std::span<const wengine::logic::LogicValue> values,
+                       std::vector<wengine::logic::TimingSeed> &seeds);
+
+// Shared timing-window refusal text (solve/step/truth name their verb):
+// "<verb>: timing window refused (event budget <K> exceeded or picosecond
+// time overflow)". Adapters keep their validation roles (they decide when
+// a window refused); only the wording lives here.
+[[nodiscard]] std::string timing_window_refused(std::string_view verb);
 
 // Timing mode (014): the one flag spelling shared by the solve/step/
 // truth verbs, and the one trace printer behind all three windows.

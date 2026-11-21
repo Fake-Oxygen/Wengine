@@ -106,19 +106,10 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
       if (!wengine::logic::timing_settle_initial(nl, std::span<const wengine::logic::LogicValue>(zero.data(), nin), scratch, wengine::logic::EdgeFilter::kAll).ok()) {
         return cli::runtime_error(out, "truth failed");
       }
-      seeds.clear();
-      for (std::size_t j = 0; j < nin; ++j) {
-        if (vals[j] == wengine::logic::LogicValue::kHigh) {
-          seeds.push_back(wengine::logic::TimingSeed{.slot = in_pins[j].slot,
-                                                      .input = in_pins[j].input,
-                                                      .is_flop = false,
-                                                      .fire_ps = 0,
-                                                      .new_value = wengine::logic::LogicValue::kHigh});
-        }
-      }
+      support::build_block_seeds(in_pins, vals, seeds);
       wengine::logic::TimingTrace trace;
       if (!wengine::logic::run_timing_window_inner(nl, seeds, trace, scratch, false).ok()) {
-        return cli::runtime_error(out, std::string("truth: timing window refused (event budget ") + std::to_string(wengine::logic::kMaxTimingEvents) + " exceeded or picosecond time overflow)");
+        return cli::runtime_error(out, support::timing_window_refused("truth"));
       }
       settle[static_cast<std::size_t>(r)] = trace.drain_ps;
     }

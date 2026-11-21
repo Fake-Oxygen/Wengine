@@ -8,7 +8,6 @@
 #include "wengine/logic/pins.hpp"
 
 #include <cstdint>
-#include <optional>
 #include <ostream>
 #include <span>
 #include <string>
@@ -23,23 +22,10 @@ int LogicSetDelaySpec::run(ArgCursor &args, std::ostream &out) {
   if (support::handle_help(args, out, kName, kDescription, kUsage)) {
     return core::kExitOk;
   }
-  // Dash-led tokens ride along as positionals (include_options): gate
-  // and pin names never start with '-', but a negative VALUE must reach
-  // parse_time_ps (which refuses it as non-negative) instead of
-  // vanishing into the flag filter. Strays stay loud below.
   std::vector<std::string_view> pos;
-  for (std::size_t i = 0; i < 2; ++i) {
-    const std::optional<std::string_view> p = args.next_positional(true);
-    if (!p) {
-      break;
-    }
-    pos.push_back(*p);
-  }
-  if (pos.size() < 2) {
-    return cli::usage_error(out, "set-delay needs GATE and VALUE (e.g. set-delay AND1 1.5ns)", kUsage);
-  }
-  if (const std::optional<std::string_view> extra = args.next_positional(true)) {
-    return cli::unexpected_error(out, *extra, kUsage);
+  if (!support::take_positionals(args, out, kUsage, pos, 2, 2, "set-delay needs GATE and VALUE (e.g. set-delay AND1 1.5ns)",
+                                 /*include_options=*/true)) {
+    return core::kExitUsage;
   }
   Netlist &nl = workspace();
   const auto gate = wengine::logic::resolve_gate(nl, pos[0]);

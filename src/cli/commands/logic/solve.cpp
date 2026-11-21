@@ -133,17 +133,9 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
       return cli::runtime_error(out, "solve failed");
     }
     std::vector<wengine::logic::TimingSeed> seeds;
-    for (std::size_t j = 0; j < nin; ++j) {
-      if (values[j] == LogicValue::kHigh) {
-        seeds.push_back(wengine::logic::TimingSeed{.slot = in_pins[j].slot,
-                                                   .input = in_pins[j].input,
-                                                   .is_flop = false,
-                                                   .fire_ps = 0,
-                                                   .new_value = LogicValue::kHigh});
-      }
-    }
+    support::build_block_seeds(in_pins, values, seeds);
     if (!wengine::logic::run_timing_window_inner(nl, seeds, trace, scratch, false).ok()) {
-      return cli::runtime_error(out, std::string("solve: timing window refused (event budget ") + std::to_string(wengine::logic::kMaxTimingEvents) + " exceeded or picosecond time overflow)");
+      return cli::runtime_error(out, support::timing_window_refused("solve"));
     }
   }
   if (nin == 0) {
