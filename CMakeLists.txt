@@ -797,6 +797,15 @@ if(BUILD_TESTS)
         "WENGINE_LOGIC_EXAMPLE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/examples/logic\"")
     add_test(NAME logic_timing COMMAND test_logic_timing)
 
+    # 014 four-state value tables: table-driven parity seam between the
+    # four_state.hpp tables and the zero-delay 2-state eval_gate (D10:
+    # never unified, agreement pinned by test). Links wengine_core alone
+    # like test_logic — value-only consumers never drag in
+    # shared_net/tie_set/topo.
+    add_executable(test_logic_four_state tests/test_logic_four_state.cpp)
+    target_link_libraries(test_logic_four_state PRIVATE wengine_core)
+    add_test(NAME logic_four_state COMMAND test_logic_four_state)
+
     # LOGIC-7 schematic layout: pure header-only geometry (no SDL), links
     # wengine_core alone like test_logic.
     add_executable(test_logic_layout tests/test_logic_layout.cpp)
