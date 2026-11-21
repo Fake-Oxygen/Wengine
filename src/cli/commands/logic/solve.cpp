@@ -127,6 +127,7 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
   wengine::logic::TimingTrace trace;
   if (with_delays) {
     wengine::logic::TimingScratch scratch{};
+    wengine::logic::timing_build_sink_maps(nl, scratch);
     std::vector<LogicValue> zero(nin, LogicValue::kLow);
     if (!wengine::logic::timing_settle_initial(nl, std::span<const LogicValue>{zero.data(), nin}, scratch, wengine::logic::EdgeFilter::kAll).ok()) {
       return cli::runtime_error(out, "solve failed");
@@ -141,7 +142,7 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
                                                    .new_value = LogicValue::kHigh});
       }
     }
-    if (!wengine::logic::run_timing_window(nl, seeds, trace, scratch, false).ok()) {
+    if (!wengine::logic::run_timing_window_inner(nl, seeds, trace, scratch, false).ok()) {
       return cli::runtime_error(out, std::string("solve: timing window refused (event budget ") + std::to_string(wengine::logic::kMaxTimingEvents) + " exceeded or picosecond time overflow)");
     }
   }

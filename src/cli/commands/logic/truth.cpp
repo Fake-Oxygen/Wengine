@@ -90,6 +90,9 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
         scratch.cur[s] = wengine::logic::LogicValue::kLow;
       }
     }
+    // Topology-invariant sink maps: build once, drain per row (no
+    // per-row rebuild over the 1024x8 flats).
+    wengine::logic::timing_build_sink_maps(nl, scratch);
     std::vector<wengine::logic::LogicValue> vals(nin, wengine::logic::LogicValue::kLow);
     const std::vector<wengine::logic::LogicValue> zero(nin, wengine::logic::LogicValue::kLow);
     std::vector<wengine::logic::TimingSeed> seeds;
@@ -114,7 +117,7 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
         }
       }
       wengine::logic::TimingTrace trace;
-      if (!wengine::logic::run_timing_window(nl, seeds, trace, scratch, false).ok()) {
+      if (!wengine::logic::run_timing_window_inner(nl, seeds, trace, scratch, false).ok()) {
         return cli::runtime_error(out, std::string("truth: timing window refused (event budget ") + std::to_string(wengine::logic::kMaxTimingEvents) + " exceeded or picosecond time overflow)");
       }
       settle[static_cast<std::size_t>(r)] = trace.drain_ps;

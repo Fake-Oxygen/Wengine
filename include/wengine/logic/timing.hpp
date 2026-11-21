@@ -151,7 +151,10 @@ struct TimingTrace {
  * driver-slot and leader-flat changes to consumer (slot, input)
  * pairs in slot order. Sized to the existing fixed caps; no heap,
  * no exceptions. The adapter settles `cur`/`blk` to the window's
- * pre-state before calling `run_timing_window`.
+ * pre-state before calling `run_timing_window`, and builds the
+ * topology-invariant sink maps once with `timing_build_sink_maps`
+ * (rebuilt only after connectivity changes; per-window drains reuse
+ * them untouched).
  */
 struct TimingScratch {
   /** @brief Current per-slot output (Q for sequential gates). */
@@ -592,47 +595,26 @@ namespace timing_detail {
 } // namespace timing_detail
 
 /**
- * @brief Run one transport-delay window to drain (research D4/D6).
+ * @brief Build the topology-invariant reverse sink maps once (research D1).
  *
- * Precondition: the adapter settled `scratch` (`cur`/`blk`) to the
- * window's pre-state with `timing_settle_initial` and preloaded
- * sequential `cur` (post-step Q for step windows, kLow otherwise).
- * Seeds apply at their fire times in slot order (block seeds at 0,
- * flop forces at their clock-to-Q); every input-net transition
- * schedules each consuming gate at (transition + gate delay) with no
- * cancellation and no inertial filtering; same-(gate, time) doubles
- * collapse; no-op evaluations stay silent. Events append in the
- * pinned total order (time, then slot order; an NQ sibling follows
- * its Q immediately at the same timestamp).
- *
- * Only this module's two new failure vocabularies arise here: the
- * event-cap breach and the time-axis overflow, both
- * `kInternal` (CLI exit 1) with the netlist, state, and settled
- * output untouched (the adapter refuses before printing anything).
- * The trace is cleared on refusal (no partial trace escapes).
+ * Routes driver-slot and leader-flat changes to consumer (slot,
+ * input) pairs in slot order: every consumer reachable from the net
+ * that changed (driver slot, shared extra, or dangling leader
+ * flat). Static nets (ignored, pulled, unmarked-shared empties)
+ * never change and take no entry. Depends only on connectivity
+ * (drivers, shared marks/extras, ties, ignored, pulls) — never on
+ * `cur`/`blk`, the pending schedule, or the trace — so adapters
+ * build once after the last connectivity change and reuse the maps
+ * across windows (`truth` rows, `step` edges). Rebuild after any
+ * wiring change; `timing_settle_initial` (topo order + `cur`/`blk`)
+ * never touches the maps and never invalidates them.
  *
  * @param[in] nl Netlist to observe (read-only; never mutated).
- * @param[in] seeds Seed span (slot order within each fire time).
- * @param[out] trace Filled trace (cleared on refusal).
- * @param[in,out] scratch Working state (sink maps rebuilt here).
- * @param[in] recompute_latches True in step windows: DLATCH/SRLATCH
- *            outputs recompute mid-window at their response delay;
- *            false in solve/truth windows (sequential gates are
- *            constants there, mirroring zero-delay `solve`).
- * @return kOk with a drained trace; kInternal on cap/overflow.
+ * @param[out] scratch Working state receiving `out_head`/`in_head`/
+ *            `sink_next`/`sink_slot`/`sink_input`/`n_sink` (pending
+ *            schedule, `cur`, and `blk` untouched).
  */
-[[nodiscard]] inline core::Status run_timing_window_inner(const Netlist &nl, std::span<const TimingSeed> seeds, TimingTrace &trace, TimingScratch &scratch,
-                                                           bool recompute_latches) noexcept {
-  trace.n_events = 0;
-  trace.drain_ps = 0;
-  trace.unit_ps = kTimingUnitPs;
-  trace.n_annotated = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && nl.gates[s].propagation_delay_ps != 0) {
-      ++trace.n_annotated;
-    }
-  }
-    scratch.n_pending = 0;
+inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) noexcept {
   scratch.n_sink = 0;
 
   for (std::uint16_t s = 0; s < kMaxGates; ++s) {
@@ -689,6 +671,54 @@ namespace timing_detail {
       }
     }
   }
+}
+
+/**
+ * @brief Run one transport-delay window to drain (research D4/D6).
+ *
+ * Precondition: the adapter settled `scratch` (`cur`/`blk`) to the
+ * window's pre-state with `timing_settle_initial` and preloaded
+ * sequential `cur` (post-step Q for step windows, kLow otherwise),
+ * and built the sink maps once with `timing_build_sink_maps` after
+ * the last connectivity change. This is the pure drain: it resets
+ * only the pending schedule and the trace, then applies seeds and
+ * propagates to drain reusing the prebuilt maps untouched.
+ * Seeds apply at their fire times in slot order (block seeds at 0,
+ * flop forces at their clock-to-Q); every input-net transition
+ * schedules each consuming gate at (transition + gate delay) with no
+ * cancellation and no inertial filtering; same-(gate, time) doubles
+ * collapse; no-op evaluations stay silent. Events append in the
+ * pinned total order (time, then slot order; an NQ sibling follows
+ * its Q immediately at the same timestamp).
+ *
+ * Only this module's two new failure vocabularies arise here: the
+ * event-cap breach and the time-axis overflow, both
+ * `kInternal` (CLI exit 1) with the netlist, state, and settled
+ * output untouched (the adapter refuses before printing anything).
+ * The trace is cleared on refusal (no partial trace escapes).
+ *
+ * @param[in] nl Netlist to observe (read-only; never mutated).
+ * @param[in] seeds Seed span (slot order within each fire time).
+ * @param[out] trace Filled trace (cleared on refusal).
+ * @param[in,out] scratch Working state with prebuilt sink maps
+ *            (pending schedule reset here; maps reused untouched).
+ * @param[in] recompute_latches True in step windows: DLATCH/SRLATCH
+ *            outputs recompute mid-window at their response delay;
+ *            false in solve/truth windows (sequential gates are
+ *            constants there, mirroring zero-delay `solve`).
+ * @return kOk with a drained trace; kInternal on cap/overflow.
+ */
+[[nodiscard]] inline core::Status run_timing_window_inner(const Netlist &nl, std::span<const TimingSeed> seeds, TimingTrace &trace, TimingScratch &scratch, bool recompute_latches) noexcept {
+  trace.n_events = 0;
+  trace.drain_ps = 0;
+  trace.unit_ps = kTimingUnitPs;
+  trace.n_annotated = 0;
+  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+    if (nl.gates[s].live && nl.gates[s].propagation_delay_ps != 0) {
+      ++trace.n_annotated;
+    }
+  }
+  scratch.n_pending = 0;
   // Seeds in span order (callers pass slot order): block nets apply
   // at 0, flop forces schedule at their fire time.
   for (const TimingSeed &seed : seeds) {
@@ -834,19 +864,24 @@ namespace timing_detail {
 /**
  * @brief Run one transport-delay window to drain (public entry).
  *
- * Clears the trace on refusal so no partial trace escapes (the
- * adapter refuses before printing anything in that case).
+ * Single-shot convenience: builds the sink maps, then drains via
+ * `run_timing_window_inner`. Hot loops (`truth` rows, `step` edges)
+ * build once with `timing_build_sink_maps` and call
+ * `run_timing_window_inner` per window instead. Clears the trace on
+ * refusal so no partial trace escapes (the adapter refuses before
+ * printing anything in that case).
  *
  * @param[in] nl Netlist to observe (read-only; never mutated).
  * @param[in] seeds Seed span (slot order within each fire time).
  * @param[out] trace Filled trace (cleared on refusal).
- * @param[in,out] scratch Working state (sink maps rebuilt here).
+ * @param[in,out] scratch Working state (sink maps built here).
  * @param[in] recompute_latches True in step windows, false in
  *            solve/truth windows (see `run_timing_window_inner`).
  * @return kOk with a drained trace; kInternal on cap/overflow.
  */
 [[nodiscard]] inline core::Status run_timing_window(const Netlist &nl, std::span<const TimingSeed> seeds, TimingTrace &trace, TimingScratch &scratch,
                                                     bool recompute_latches) noexcept {
+  timing_build_sink_maps(nl, scratch);
   const core::Status st = run_timing_window_inner(nl, seeds, trace, scratch, recompute_latches);
   if (!st.ok()) {
     trace.n_events = 0;

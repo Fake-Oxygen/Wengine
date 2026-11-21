@@ -223,6 +223,12 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     support::report_contention(nl, support::solve_diag(), out);
     return core::kExitOk;
   }
+  // Topology-invariant sink maps: build once, drain per edge (no
+  // per-edge rebuild over the 1024x8 flats).
+  wengine::logic::TimingScratch delay_scratch{};
+  if (with_delays) {
+    wengine::logic::timing_build_sink_maps(nl, delay_scratch);
+  }
   for (std::uint64_t e = 0; e < n; ++e) {
     // (014) Timing windows observe what each edge caused: snapshot
     // pre-edge Qs, run the unchanged edge, then run one wheel per
@@ -248,7 +254,7 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
       return cli::runtime_error(out, "step failed");
     }
     if (with_delays) {
-      wengine::logic::TimingScratch scratch{};
+      wengine::logic::TimingScratch &scratch = delay_scratch;
       for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
         if (nl.gates[s].live && wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
           scratch.cur[s] = pre_q[s];
@@ -271,7 +277,7 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
                                                    .new_value = st.q[s]});
       }
       wengine::logic::TimingTrace trace;
-      if (!wengine::logic::run_timing_window(nl, seeds, trace, scratch, true).ok()) {
+      if (!wengine::logic::run_timing_window_inner(nl, seeds, trace, scratch, true).ok()) {
         return cli::runtime_error(out, std::string("step: timing window refused (event budget ") + std::to_string(wengine::logic::kMaxTimingEvents) + " exceeded or picosecond time overflow)");
       }
       // Contract cli-verbs: one `timing (edge k): ...` block per edge.
