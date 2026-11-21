@@ -287,6 +287,41 @@ printf 'logic load examples/logic/two_clock_counter.yaml\nlogic peek\nlogic step
 BUF1.Y 1` reports `DFF1.Q: 0->1`; `step clk 1` reports `DFF2.Q:
 1->0`; `step 1` advances both (`DFF1.Q: 1->0`, `DFF2.Q: 0->1`).
 
+## logic/glitch_chain.yaml
+
+**Demonstrates**: the 014 inverter-chain hazard — one input net
+feeding `AND1` directly and through `NOT1 -> NOT2 -> NOT3`, so the
+zero-delay `solve` shows only the settled value while `solve
+--with-delays` exposes the 3ps transient pulse (unit 1ps per stage).
+
+**How to run**:
+
+```sh
+printf 'logic load examples/logic/glitch_chain.yaml\nlogic solve --in 1 --with-delays\nexit\n' | ./build/PhysicsSimApp
+```
+
+**Expected outcome**: `in: 1 (NOT1.1=1)`, the `timing: unit 1ps, 0
+annotated` block with `t=1ps AND1.Y: 0->1` and `t=4ps AND1.Y: 1->0`
+(the pulse), `settled in 4ps`, then the unchanged `AND1.Y=0` tail.
+
+## logic/race_window.yaml
+
+**Demonstrates**: the 014 sequential race window — `DFF1`
+(clock-to-Q 7ps) feeding `BUF1` (3ps) into `DFF2.D` on the shared
+`clk` domain, so the D arrival lands at the hand-derived 10ps offset
+while state trajectories match zero-delay stepping step-for-step.
+
+**How to run**:
+
+```sh
+printf 'logic load examples/logic/race_window.yaml\nlogic poke DFF1.D=1\nlogic step --with-delays\nexit\n' | ./build/PhysicsSimApp
+```
+
+**Expected outcome**: `clk: cycle 1 (1 edges)`, the `timing (edge
+1): unit 1ps, 2 annotated` block with `t=7ps DFF1.Q: 0->1` (+ NQ
+same instant) and `t=10ps BUF1.Y: 0->1`, `settled in 10ps`, then the
+unchanged flop report and `DFF2.Q=0`.
+
 ## zephyr/
 
 **Demonstrates**: the whole embedded sample — two minimal Zephyr

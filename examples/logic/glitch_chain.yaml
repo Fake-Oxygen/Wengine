@@ -1,0 +1,41 @@
+# glitch_chain.yaml: inverter-chain hazard vs direct path into one gate.
+#
+# The 014 delay-honoring demo: input net E feeds AND1.1 directly and the
+# NOT1 -> NOT2 -> NOT3 chain into AND1.2 (tied: one block input E).
+# Zero-delay `solve` shows only the settled AND1.Y; `solve --with-delays`
+# shows the transient pulse (width 3 x unit = 3ps) before settling.
+#
+# Run:
+#   printf 'logic load examples/logic/glitch_chain.yaml\nlogic solve --in 0\nlogic solve --in 1\nlogic solve --in 1 --with-delays\nexit\n' | ./build/PhysicsSimApp
+# Expect: --in 0 prints AND1.Y=0 with no trace; --in 1 prints AND1.Y=0
+#   with no trace (zero-delay shows the settled value only); the
+#   --with-delays run prints the same `in: 1 (NOT1.1=1)` echo, then
+#   `timing: unit 1ps, 0 annotated` with
+#     t=0ps NOT1.1: 0->1
+#     t=1ps NOT1.Y: 1->0
+#     t=1ps AND1.Y: 0->1
+#     t=2ps NOT2.Y: 0->1
+#     t=3ps NOT3.Y: 1->0
+#     t=4ps AND1.Y: 1->0
+#   `settled in 4ps`, then AND1.Y=0 (the settled tail is byte-identical
+#   to the flag-off run). The pulse (AND1.Y high over t=1..4) is 3ps
+#   wide: the hand-derived path difference (3 inverters x unit).
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: NOT2, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: NOT3, kind: not, inputs: 1, ignore: [], ignore_output: false, delay_ps: 0}
+  - {id: AND1, kind: and, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}
+wires:
+  - {from: NOT1.Y, to: NOT2.1}
+  - {from: NOT2.Y, to: NOT3.1}
+  - {from: NOT3.Y, to: AND1.2}
+ties:
+  - {a: NOT1.1, b: AND1.1}
+clocks:
+meta:
+  tool: wengine-logic

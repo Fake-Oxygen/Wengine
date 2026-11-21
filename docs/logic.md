@@ -299,6 +299,9 @@ Levels, explicit and composable (`optimize [--to nand] [--level O1]`):
   inputs ≤ 16 (65 536 rows); larger needs explicit `--limit`/`--csv`
   (refuse loudly, never print millions of rows to the terminal).
   Bit-exact vs `solve` (same word evaluator, same row convention).
+  `--with-delays` appends a `settle` column (pretty) / trailing
+  `settle_ps` column (`--csv`): each row's drain time in whole
+  picoseconds, values otherwise identical.
 - `solve [--in <bits>] [--from <pin>=<0|1> ...]`: single-assignment eval;
   unset block inputs default `0` loudly (the command echoes the assumed
   vector). Exit 0 with `Y=...` lines.
@@ -417,11 +420,11 @@ unwire [FROM.out] <TO.i>    unshare <TO.i>             remove <GATE>
 ignore <PIN> / use <PIN>    pull <TO.i> <up|down>      unpull <TO.i>
 set-delay <GATE> <VALUE>  unset-delay <GATE>
 tie <A.i> <B.j>             untie <PIN.i>              reset [--force]
-solve [--in bits] [--from pin=0|1 ...]
-truth [--csv p] [--limit N] optimize [--to nand|nor] [--level O0|O1|O2]
+solve [--in bits] [--from pin=0|1 ...] [--with-delays]
+truth [--csv p] [--limit N] [--with-delays]   optimize [--to nand|nor] [--level O0|O1|O2]
 draw [--out f.bmp]          save <f.yaml> / load <f.yaml>
 export --truth t --schema s [--bmp b]   help [verb]   back
-step [DOMAIN] [N] [--cycles N]   poke <PIN>=<0|1|release> [--from ...] [--clear]
+step [DOMAIN] [N] [--cycles N] [--with-delays]   poke <PIN>=<0|1|release> [--from ...] [--clear]
 peek [GATE]
 ```
 
@@ -450,7 +453,16 @@ refuses netlists with 2+ attachments on a shared input or any live
 buffer (the word path is 1-bit per lane) and points at scalar `solve`;
 pull-only netlists stream unchanged. `optimize --level O2` refuses
 shared/buffer/pull netlists loudly (O0/O1 freeze shared-feeding gates,
-buffer gates, and pulled inputs instead).
+buffer gates, and pulled inputs instead). The opt-in timing mode
+(`--with-delays` on `solve`/`step`/`truth`, shipped in 014) reads the
+field and reports an ordered event trace (`timing: unit 1ps, <K>
+annotated` header, `t=<T>ps <PIN>: <old>-><new>` lines in time-then-slot
+order through transients, `settled in <D>ps`); un-annotated gates take
+the 1ps unit, every default invocation stays byte-identical, and
+`truth --with-delays` appends a per-row `settle` column (the
+assignment's critical path). Setup/hold verdicts, per-pin/rise-fall
+splits, inertial delay, machine-readable trace export, GUI surfaces,
+and engine-runner timing integration stay named follow-ons.
 
 Sequential session verbs (all headless: REPL session, one-shot, pipes,
 scripts — zero GUI dependency):
@@ -575,8 +587,16 @@ below).
   annotation verbs shipped in 013 (`set-delay <GATE> <VALUE>` /
   `unset-delay <GATE>`: exact whole-picosecond parse, `list`
   readback, save/load round-trip, O0/O1 preserve with an O2 reset
-  note). Delay simulation later reads the field — no schema or struct
-  change, only a delay-honoring evaluator as the named follow-on.
+  note). The delay-honoring evaluator shipped in 014 as an opt-in
+  timing mode (`--with-delays` on `solve`/`step`/`truth`): a
+  header-only transport-delay wheel beside the zero-delay fast path
+  (which gains zero code and stays byte-identical), honoring each
+  gate's annotation (unit 1ps for un-annotated) and reporting ordered
+  event traces through transient X/Z to the drained settled state —
+  no schema, struct, checkpoint, Snapshot, or `RunConfig` change. What
+  stays named follow-ons: engine-runner (`sim run --solver logic`)
+  timing integration, machine-readable trace export, setup/hold
+  verdicts, per-pin/rise-fall splits, and inertial delay.
 - **Verilog / VHDL import.** Importers are pure `Netlist` builders
   (`parse_verilog(text) -> Result<Netlist>`) in their own TUs, reusing
   the same validation (`wire` single-driver/cycle checks) as the CLI

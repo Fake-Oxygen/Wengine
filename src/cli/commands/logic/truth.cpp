@@ -27,6 +27,7 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
   }
   std::optional<std::string_view> csv_path = args.take_option({"--csv"});
   std::optional<std::string_view> limit_text = args.take_option({"--limit"});
+  const bool with_delays = args.take_flag({support::kWithDelaysFlag});
   if (args.has_remaining()) {
     return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
@@ -75,12 +76,57 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
   if (rows == 0) {
     rows = huge ? limit : total;
   }
+  // (014) Opt-in settle column: one wheel per streamed row over the
+  // same row convention (block input j takes bit (r>>j)&1). Values
+  // still come from the unchanged word evaluator; the column adds
+  // each assignment's critical path in whole picoseconds.
+  std::vector<std::uint64_t> settle;
+  const std::uint64_t *settle_ptr = nullptr;
+  if (with_delays) {
+    settle.assign(rows, 0);
+    wengine::logic::TimingScratch scratch{};
+    for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
+      if (nl.gates[s].live && wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+        scratch.cur[s] = wengine::logic::LogicValue::kLow;
+      }
+    }
+    std::vector<wengine::logic::LogicValue> vals(nin, wengine::logic::LogicValue::kLow);
+    const std::vector<wengine::logic::LogicValue> zero(nin, wengine::logic::LogicValue::kLow);
+    std::vector<wengine::logic::TimingSeed> seeds;
+    for (std::uint64_t r = 0; r < rows; ++r) {
+      for (std::size_t j = 0; j < nin; ++j) {
+        const bool bit = (j < 64) && (((r >> j) & 1ULL) != 0ULL);
+        vals[j] = bit ? wengine::logic::LogicValue::kHigh : wengine::logic::LogicValue::kLow;
+      }
+      // Pre-state is the all-zero vector (same row convention as
+      // solve); seeds are the row's diffs against it.
+      if (!wengine::logic::timing_settle_initial(nl, std::span<const wengine::logic::LogicValue>(zero.data(), nin), scratch, wengine::logic::EdgeFilter::kAll).ok()) {
+        return cli::runtime_error(out, "truth failed");
+      }
+      seeds.clear();
+      for (std::size_t j = 0; j < nin; ++j) {
+        if (vals[j] == wengine::logic::LogicValue::kHigh) {
+          seeds.push_back(wengine::logic::TimingSeed{.slot = in_pins[j].slot,
+                                                      .input = in_pins[j].input,
+                                                      .is_flop = false,
+                                                      .fire_ps = 0,
+                                                      .new_value = wengine::logic::LogicValue::kHigh});
+        }
+      }
+      wengine::logic::TimingTrace trace;
+      if (!wengine::logic::run_timing_window(nl, seeds, trace, scratch, false).ok()) {
+        return cli::runtime_error(out, std::string("truth: timing window refused (event budget ") + std::to_string(wengine::logic::kMaxTimingEvents) + " exceeded or picosecond time overflow)");
+      }
+      settle[static_cast<std::size_t>(r)] = trace.drain_ps;
+    }
+    settle_ptr = settle.data();
+  }
   if (csv_path) {
     std::ofstream f(std::string(*csv_path), std::ios::binary | std::ios::trunc);
     if (!f) {
       return cli::runtime_error(out, std::string("cannot open CSV file '") + std::string(*csv_path) + "'");
     }
-    const core::Status st = support::write_truth_csv(nl, rows, in_pins, out_pins, f);
+    const core::Status st = support::write_truth_csv(nl, rows, in_pins, out_pins, f, settle_ptr);
     f.close();
     if (!st.ok() || !f) {
       return cli::runtime_error(out, std::string("cannot write CSV file '") + std::string(*csv_path) + "'");
@@ -88,7 +134,7 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
     out << "wrote " << rows << " rows to '" << *csv_path << "' (" << nin << " inputs, " << out_pins.size() << " outputs)\n";
     return core::kExitOk;
   }
-  const core::Status st = support::write_truth_pretty(nl, rows, huge ? rows : total, in_pins, out_pins, out);
+  const core::Status st = support::write_truth_pretty(nl, rows, huge ? rows : total, in_pins, out_pins, out, settle_ptr);
   if (!st.ok()) {
     return cli::runtime_error(out, "truth failed");
   }
@@ -100,7 +146,7 @@ void LogicTruthSpec::complete(std::span<const std::string_view> prior_args, std:
     return; // file path / number: nothing to complete
   }
   if (!partial.empty() && partial.front() == '-') {
-    constexpr std::string_view kOpts[] = {"--csv", "--limit", "--help", "-h"};
+    constexpr std::string_view kOpts[] = {"--csv", "--limit", "--with-delays", "--help", "-h"};
     support::push_matches(partial, kOpts, out);
     return;
   }

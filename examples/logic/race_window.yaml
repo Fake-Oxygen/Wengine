@@ -1,0 +1,38 @@
+# race_window.yaml: clock-to-Q flop feeding a downstream D path.
+#
+# The 014 sequential demo: DFF1 (clock-to-Q 7ps) fans into BUF1 (3ps)
+# driving DFF2.D. Both clocks tie into the implicit `clk` domain;
+# DFF1.D is the block-input stimulus.
+#
+# Run:
+#   printf 'logic load examples/logic/race_window.yaml\nlogic poke DFF1.D=1\nlogic step --with-delays\nlogic peek\nlogic step\nlogic peek\nexit\n' | ./build/PhysicsSimApp
+# Expect: the first step prints `clk: cycle 1 (1 edges)`, then
+#   timing (edge 1): unit 1ps, 2 annotated
+#     t=7ps DFF1.Q: 0->1
+#     t=7ps DFF1.NQ: 1->0
+#     t=10ps BUF1.Y: 0->1
+#   settled in 10ps
+#   (the D arrival at DFF2.D lands at the hand-derived offset 7+3),
+#   then the unchanged flop report (`DFF1.Q: 0->1 ...`,
+#   `DFF2.Q: 0 (no change)`) and settled outputs. `peek` after the
+#   timing run matches `peek` after the flag-off run step-for-step
+#   (the mode observes ordering without altering outcomes); the
+#   second step captures the arrived 1 into DFF2.Q.
+#
+# Notes: comments like this one load fine (`load` accepts the YAML
+# superset) but `save` rewrites in canonical comment-free form, so a
+# save/load round-trip is byte-identical only from the second save on.
+version: 1
+gates:
+  - {id: DFF1, kind: dff, inputs: 2, ignore: [], ignore_output: false, delay_ps: 7, init: 0}
+  - {id: BUF1, kind: buf, inputs: 1, ignore: [], ignore_output: false, delay_ps: 3}
+  - {id: DFF2, kind: dff, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0, init: 0}
+wires:
+  - {from: DFF1.Q, to: BUF1.1}
+  - {from: BUF1.Y, to: DFF2.D}
+ties:
+  - {a: DFF1.CLK, b: DFF2.CLK}
+clocks:
+  - {name: clk}
+meta:
+  tool: wengine-logic

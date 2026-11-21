@@ -805,12 +805,15 @@ struct LogicSolveSpec {
    * @brief Usage text printed by `help solve` and usage errors.
    */
   static constexpr std::string_view kUsage =
-      "solve [--in <bits>] [--from <pin>=<0|1> ...]\n"
+      "solve [--in <bits>] [--from <pin>=<0|1> ...] [--with-delays]\n"
       "  solve --in 01\n"
       "  solve --from AND1.1=1 --from AND1.2=0\n"
+      "  solve --in 1 --with-delays\n"
       "Single-assignment eval in derived interface order (slot order).\n"
       "Unset inputs default to 0 (the assumed vector is echoed). One <PIN>=<bit>\n"
-      "line per block output.";
+      "line per block output. --with-delays runs the opt-in timing mode:\n"
+      "a transport-delay event trace (unit 1ps, annotated gates honored)\n"
+      "before the unchanged settled lines.";
 
   /**
    * @brief Execute the `solve` verb.
@@ -846,14 +849,17 @@ struct LogicTruthSpec {
    * @brief Usage text printed by `help truth` and usage errors.
    */
   static constexpr std::string_view kUsage =
-      "truth [--csv <path>] [--limit N]\n"
+      "truth [--csv <path>] [--limit N] [--with-delays]\n"
       "  truth\n"
       "  truth --limit 8\n"
       "  truth --csv out.csv\n"
+      "  truth --with-delays\n"
       "Rows in interface order, input pins then output pins. The terminal\n"
       "prints a pretty aligned table; --csv writes raw 0/1 CSV to a file.\n"
       "Default cap: block inputs <= 16 (65536 rows); larger needs explicit\n"
-      "--limit/--csv, and >= 31 inputs always needs --limit.";
+      "--limit/--csv, and >= 31 inputs always needs --limit. --with-delays\n"
+      "appends each row's settle time (the assignment's critical path in\n"
+      "whole picoseconds); values are identical to the zero-delay table.";
 
   /**
    * @brief Execute the `truth` verb.
@@ -1101,17 +1107,21 @@ struct LogicStepSpec {
    * @brief Usage text printed by `help step` and usage errors.
    */
   static constexpr std::string_view kUsage =
-      "step [DOMAIN] [N] [--cycles N]\n"
+      "step [DOMAIN] [N] [--cycles N] [--with-delays]\n"
       "  step\n"
       "  step 5\n"
       "  step BUF1.Y 3\n"
       "  step --cycles 100\n"
+      "  step --with-delays\n"
       "Advances one rising edge per count: globally with no DOMAIN, else\n"
       "only flops clocked by DOMAIN (dangling CLK pins form domain\n"
       "`clk`). Level latches (DLATCH/SRLATCH) belong to no domain:\n"
       "they settle outside advances and never gate on them. Reports the\n"
       "cycle count, stepped flop transitions, and settled block outputs.\n"
-      "Zero count reports without stepping; errors change no state.";
+      "Zero count reports without stepping; errors change no state.\n"
+      "--with-delays adds one timing window per edge (clock-to-Q plus\n"
+      "downstream ripples) before the unchanged settled report; state\n"
+      "trajectories match zero-delay stepping step-for-step.";
 
   /**
    * @brief Execute the `step` verb.

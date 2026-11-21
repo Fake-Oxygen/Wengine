@@ -783,6 +783,20 @@ if(BUILD_TESTS)
         "WENGINE_LOGIC_EXAMPLE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/examples/logic\"")
     add_test(NAME logic_delay COMMAND test_logic_delay)
 
+    # 014-delay-honoring-evaluator: opt-in transport-delay wheel beside
+    # the zero-delay fast path. Hand-derived trace goldens (pulse
+    # widths, drain times, race offsets, 4-state transient windows),
+    # refusals (cap, overflow, settled X/Z, S=R=1), parity (wheel
+    # end-state == zero-delay; trajectories equal), determinism
+    # re-runs, and --with-delays CLI representation. Links
+    # wengine_cli + wengine_logic_yaml to prove the seam-to-verb
+    # chain. wengine_logic stays INTERFACE (no TU added).
+    add_executable(test_logic_timing tests/test_logic_timing.cpp)
+    target_link_libraries(test_logic_timing PRIVATE wengine_cli wengine_logic_yaml)
+    target_compile_definitions(test_logic_timing PRIVATE
+        "WENGINE_LOGIC_EXAMPLE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/examples/logic\"")
+    add_test(NAME logic_timing COMMAND test_logic_timing)
+
     # LOGIC-7 schematic layout: pure header-only geometry (no SDL), links
     # wengine_core alone like test_logic.
     add_executable(test_logic_layout tests/test_logic_layout.cpp)

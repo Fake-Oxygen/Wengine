@@ -30,6 +30,7 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
   while (auto f = args.take_option({"--from"})) {
     from_vals.push_back(*f);
   }
+  const bool with_delays = args.take_flag({support::kWithDelaysFlag});
   if (args.has_remaining()) {
     return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
@@ -119,6 +120,31 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
     support::report_contention(nl, support::solve_diag(), out);
     return cli::runtime_error(out, "solve failed");
   }
+  // (014) Opt-in timing window: the settled values above are the
+  // reported tail (parity by construction); the wheel below only
+  // observes ordering. Nothing prints before both succeed, so a wheel
+  // refusal leaves output untouched.
+  wengine::logic::TimingTrace trace;
+  if (with_delays) {
+    wengine::logic::TimingScratch scratch{};
+    std::vector<LogicValue> zero(nin, LogicValue::kLow);
+    if (!wengine::logic::timing_settle_initial(nl, std::span<const LogicValue>{zero.data(), nin}, scratch, wengine::logic::EdgeFilter::kAll).ok()) {
+      return cli::runtime_error(out, "solve failed");
+    }
+    std::vector<wengine::logic::TimingSeed> seeds;
+    for (std::size_t j = 0; j < nin; ++j) {
+      if (values[j] == LogicValue::kHigh) {
+        seeds.push_back(wengine::logic::TimingSeed{.slot = in_pins[j].slot,
+                                                   .input = in_pins[j].input,
+                                                   .is_flop = false,
+                                                   .fire_ps = 0,
+                                                   .new_value = LogicValue::kHigh});
+      }
+    }
+    if (!wengine::logic::run_timing_window(nl, seeds, trace, scratch, false).ok()) {
+      return cli::runtime_error(out, std::string("solve: timing window refused (event budget ") + std::to_string(wengine::logic::kMaxTimingEvents) + " exceeded or picosecond time overflow)");
+    }
+  }
   if (nin == 0) {
     out << "in: (none)\n";
   } else {
@@ -140,6 +166,9 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
     }
     out << '\n';
   }
+  if (with_delays) {
+    support::print_timing_trace(nl, trace, out);
+  }
   for (std::size_t o = 0; o < nout; ++o) {
     const char bit = support::bit_of(outputs[o]);
     out << support::pin_text(nl, out_pins[o].slot, true, 0, out_pins[o].negated) << '=' << bit << '\n';
@@ -160,7 +189,7 @@ void LogicSolveSpec::complete(std::span<const std::string_view> prior_args, std:
     return; // bits: nothing to complete
   }
   if (!partial.empty() && partial.front() == '-') {
-    constexpr std::string_view kOpts[] = {"--in", "--from", "--help", "-h"};
+    constexpr std::string_view kOpts[] = {"--in", "--from", "--with-delays", "--help", "-h"};
     support::push_matches(partial, kOpts, out);
     return;
   }

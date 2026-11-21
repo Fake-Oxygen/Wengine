@@ -1820,6 +1820,12 @@ void test_logic_completion() {
   assert(has(complete_line("logic list --", 13, all), "--iface"));
   assert(has(complete_line("logic wire --", 13, all), "--shared"));
 
+  // 014: opt-in timing flag completes on its three verbs (registry
+  // size unchanged at 27 — no new verbs, see test_logic_session).
+  assert(has(complete_line("logic solve --", 14, all), "--with-delays"));
+  assert(has(complete_line("logic step --", 13, all), "--with-delays"));
+  assert(has(complete_line("logic truth --", 14, all), "--with-delays"));
+
   // 011: shared-net vocabulary — verb + option completion, then the
   // opt-in gate through the session verbs (same refusals as the engine
   // seam: loud, netlist-untouched, never silent).

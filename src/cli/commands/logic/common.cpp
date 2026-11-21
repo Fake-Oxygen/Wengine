@@ -326,8 +326,7 @@ core::Status apply_async_and_report(Netlist &nl, std::ostream &out) {
   return core::Status::success();
 }
 
-core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<PinRef> &in_pins,
-                             const std::vector<PinRef> &out_pins, std::ostream &os) {
+core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<PinRef> &in_pins, const std::vector<PinRef> &out_pins, std::ostream &os, const std::uint64_t *settle_ps) {
   // (011) Word-loop entry guard (see eval_block_word): four-value nets
   // refuse loudly once, never per word.
   if (wengine::logic::shared_word_blocked(nl)) {
@@ -353,6 +352,13 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
     }
     first = false;
     os << pin_text(nl, p.slot, true, 0, p.negated);
+  }
+  const bool want_settle = (settle_ps != nullptr) && (rows != 0) && (!in_pins.empty() || !out_pins.empty());
+  if (want_settle) {
+    if (!first) {
+      os << ',';
+    }
+    os << "settle_ps";
   }
   os << '\n';
   if (!os) {
@@ -388,6 +394,9 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
         col_first = false;
         os << ((((words[o] >> b) & 1ULL) != 0ULL) ? '1' : '0');
       }
+      if (want_settle) {
+        os << ',' << settle_ps[row];
+      }
       os << '\n';
       if (!os) {
         return core::Status::failure(core::StatusCode::kInternal);
@@ -397,9 +406,8 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
   return core::Status::success();
 }
 
-core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t total_rows,
-                                const std::vector<PinRef> &in_pins, const std::vector<PinRef> &out_pins,
-                                std::ostream &os) {
+core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t total_rows, const std::vector<PinRef> &in_pins, const std::vector<PinRef> &out_pins,
+                                std::ostream &os, const std::uint64_t *settle_ps) {
   // (011) Word-loop entry guard (see eval_block_word): four-value nets
   // refuse loudly once, never per word.
   if (wengine::logic::shared_word_blocked(nl)) {
@@ -428,6 +436,22 @@ core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t t
   for (const PinRef &p : out_pins) {
     headers.push_back(pin_text(nl, p.slot, true, 0, p.negated));
   }
+  // (014) Optional settle column: right-aligned whole-picosecond
+  // drain times, width fit to the widest value (header included).
+  const bool want_settle = (settle_ps != nullptr);
+  std::size_t settle_width = 6; // "settle"
+  if (want_settle) {
+    for (std::uint64_t r = 0; r < rows; ++r) {
+      std::size_t digits = 1;
+      for (std::uint64_t v = settle_ps[r]; v >= 10; v /= 10) {
+        ++digits;
+      }
+      if (digits > settle_width) {
+        settle_width = digits;
+      }
+    }
+    headers.emplace_back("settle");
+  }
   std::vector<std::size_t> widths;
   widths.reserve(ncols);
   for (const std::string &h : headers) {
@@ -439,12 +463,18 @@ core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t t
     }
     os << headers[i];
   }
+  if (want_settle) {
+    os << " | " << headers[ncols];
+  }
   os << '\n';
   for (std::size_t i = 0; i < ncols; ++i) {
     if (i != 0) {
       os << "-+-";
     }
     os << std::string(widths[i], '-');
+  }
+  if (want_settle) {
+    os << "-+-" << std::string(settle_width, '-');
   }
   os << '\n';
   if (!os) {
@@ -474,6 +504,14 @@ core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t t
         const std::size_t left = (width - 1) / 2;
         const std::size_t right = width - 1 - left;
         os << std::string(left, ' ') << bit << std::string(right, ' ');
+      }
+      if (want_settle) {
+        std::uint64_t v = settle_ps[row];
+        std::size_t digits = 1;
+        for (std::uint64_t t = v; t >= 10; t /= 10) {
+          ++digits;
+        }
+        os << " | " << std::string(settle_width - digits, ' ') << v;
       }
       os << '\n';
       if (!os) {
@@ -636,6 +674,38 @@ bool load_text(const std::string &text, Netlist &out, std::array<wengine::logic:
   }
   const std::string_view suf = path.substr(path.size() - 4);
   return suf == ".bmp" || suf == ".BMP";
+}
+
+[[nodiscard]] char timing_value_char(wengine::logic::LogicValue v) noexcept {
+  if (v == wengine::logic::LogicValue::kHigh) {
+    return '1';
+  }
+  if (v == wengine::logic::LogicValue::kLow) {
+    return '0';
+  }
+  if (v == wengine::logic::LogicValue::kHighZ) {
+    return 'Z';
+  }
+  return 'X';
+}
+
+void print_timing_trace(const Netlist &nl, const wengine::logic::TimingTrace &trace, std::ostream &out, std::string_view edge) {
+  out << "timing";
+  if (!edge.empty()) {
+    out << " (" << edge << ')';
+  }
+  out << ": unit " << trace.unit_ps << "ps, " << trace.n_annotated << " annotated\n";
+  for (std::size_t i = 0; i < trace.n_events; ++i) {
+    const wengine::logic::TimingEvent &ev = trace.events[i];
+    std::string pin;
+    if (ev.is_input) {
+      pin = pin_text(nl, ev.slot, false, ev.input);
+    } else {
+      pin = pin_text(nl, ev.slot, true, 0, ev.nq);
+    }
+    out << "  t=" << ev.t_ps << "ps " << pin << ": " << timing_value_char(ev.old_value) << "->" << timing_value_char(ev.new_value) << '\n';
+  }
+  out << "settled in " << trace.drain_ps << "ps\n";
 }
 
 } // namespace support

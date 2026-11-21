@@ -254,6 +254,60 @@ ctest --test-dir build -R logic_delay
 vectors); the YAML schema contract (required key, u64 validation,
 `tieoff` fixture pins) lives in `test_logic_yaml`.
 
+## test_logic_timing
+
+**What it checks**: the opt-in delay-honoring evaluator (014) end to
+end — hand-derived trace goldens, never the implementation's
+readback: 3-inverter hazard pulse (3ps width, placement at the
+gate's own delay; annotated variant scaling 5ps per stage, 15ps
+pulse, drain 17), transport semantics (overlapping pending output
+events both fire, no inertial cancellation; a slow gate's direct
+evaluation fires at its own offset), unit floor (un-annotated gates
+take exactly 1ps, stored 0 stays un-annotated, empty window drains
+0ps), same-instant order (time first, then slot order) with
+byte-identical re-runs, and wheel end-state == zero-delay `solve`
+parity; clock-to-Q goldens (Q at exactly the annotation, NQ sharing
+the instant, downstream ripple one gate delay later), D-arrival race
+offsets (clock-to-Q + path sums) with step trajectory parity
+(`peek` identical across modes), level-latch response delays
+(transparent tracks at the annotation, released holds silent);
+transient 4-state windows from the IEEE 1364 tables (AND(0,X)=0 no
+pulse, AND(1,X)=X visible, TBUF release producing the only Z,
+transient S=R=1 rendering X while settled S=R=1 still refuses on
+the unchanged path); loud refusals (event-cap breach on a
+reconvergent annotated XOR tree, u64 time-axis overflow, both
+kInternal with no partial trace); CLI representation (`solve` block
+grammar, empty window, annotated scaling, `step` per-edge `timing
+(edge k)` blocks with `--cycles 2` separators and n=0 no-op, `truth`
+`settle`/`settle_ps` columns with `wrote N rows` unchanged,
+flag-off byte-identity, annotation blindness, session-vs-direct
+spec-entry parity, never-persists save/load round-trip, misspelled
+flag exit 2, wheel refusal exit 1 with state untouched); and the two
+example workspaces replaying their header traces exactly
+(`glitch_chain.yaml`, `race_window.yaml`).
+
+**Purpose**: pins the timing observation discipline (transport,
+integer picoseconds, pinned total order, loud budget) and the
+zero-delta default (fast path untouched, `bench_logic` unchanged).
+
+**Guards against**: inertial filtering of narrow pulses, same-instant
+ordering drift, settled-value drift from zero-delay, default-path
+delay reads, sticky timing state, and silent trace truncation.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_timing
+./build/test_logic_timing
+```
+
+**Prerequisites**: standard build only.
+
+**Boundaries**: completion vectors (`--with-delays` on the three
+verbs) and the size-27 registry pin live in `test_cli_args`; the
+example workspaces live in `examples/logic/` with expected traces in
+their headers.
+
 ## test_logic_seq_kinds
 
 **What it checks**: sequential kind vocabulary: append-only ordinals

@@ -11,6 +11,7 @@
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
+#include "wengine/logic/timing.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <array>
@@ -108,17 +109,23 @@ wengine::core::Status apply_async_and_report(wengine::logic::Netlist &nl, std::o
 
 // Truth streaming over the bit-parallel word evaluator (bit-exact vs solve).
 core::Status write_truth_csv(wengine::logic::Netlist &nl, std::uint64_t rows,
-                             const std::vector<wengine::logic::PinRef> &in_pins,
-                             const std::vector<wengine::logic::PinRef> &out_pins, std::ostream &os);
+                              const std::vector<wengine::logic::PinRef> &in_pins,
+                              const std::vector<wengine::logic::PinRef> &out_pins, std::ostream &os,
+                              const std::uint64_t *settle_ps = nullptr);
 
 // Pretty terminal table over the same bit-parallel evaluator (same rows,
 // same row convention as write_truth_csv; bit-exact vs solve). Column
 // widths derive from the pin names; bits are centered. When rows < total
 // (a --limit truncation) a loud footer names the shown/total counts.
 // --csv files stay raw CSV via write_truth_csv; the terminal never is.
+// Both accept an optional per-row settle column (014 `--with-delays`):
+// `settle` (pretty) / trailing `settle_ps` (CSV) carrying each row's
+// drain time in whole picoseconds. Null (default) keeps the
+// zero-delay output byte-identical.
 core::Status write_truth_pretty(wengine::logic::Netlist &nl, std::uint64_t rows, std::uint64_t total_rows,
-                                const std::vector<wengine::logic::PinRef> &in_pins,
-                                const std::vector<wengine::logic::PinRef> &out_pins, std::ostream &os);
+                                 const std::vector<wengine::logic::PinRef> &in_pins,
+                                 const std::vector<wengine::logic::PinRef> &out_pins, std::ostream &os,
+                                 const std::uint64_t *settle_ps = nullptr);
 
 // Canonical YAML workspace (byte-identical save/load round-trip). The
 // saver captures live pool Q as the file's per-element inits (006: save
@@ -132,6 +139,27 @@ void save_yaml(std::ostream &os, const wengine::logic::Netlist &nl);
 // inputs only, zeros included so counting is visibly live); silent when
 // no input is marked (mark-free output stays byte-identical).
 void report_contention(const wengine::logic::Netlist &nl, const wengine::logic::SolveDiag &diag, std::ostream &out);
+
+// Timing mode (014): the one flag spelling shared by the solve/step/
+// truth verbs, and the one trace printer behind all three windows.
+// Grammar (contracts/cli-verbs.md, research D8):
+//   timing: unit 1ps, <K> annotated
+//     t=<T>ps <PIN>: <old>-><new>
+//     ...
+//   settled in <D>ps
+// Pins reuse the module display spellings (AND2.Y, DFF1.Q, DFF1.NQ,
+// --from spellings for block-input nets); values spell 0|1|X|Z.
+// Events arrive in pinned order (time, then slot order). The settled
+// tail is printed by the unchanged verb paths, never here.
+inline constexpr std::string_view kWithDelaysFlag = "--with-delays";
+[[nodiscard]] char timing_value_char(wengine::logic::LogicValue v) noexcept;
+// Print one window (contracts/cli-verbs.md, research D8): `timing:
+// unit 1ps, <K> annotated` (or `timing (<edge>): ...` when edge is
+// non-empty — the step verb's per-edge blocks), then `t=<T>ps
+// <PIN>: <old>-><new>` lines in pinned order, then `settled in
+// <D>ps`.
+void print_timing_trace(const wengine::logic::Netlist &nl, const wengine::logic::TimingTrace &trace, std::ostream &out,
+                        std::string_view edge = {});
 
 // Complete a `--from` value: bare pin prefix -> pin names; exact pin (or
 // pin + bit prefix) -> valued PIN=0|1 forms.

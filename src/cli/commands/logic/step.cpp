@@ -11,6 +11,7 @@
 #include <optional>
 #include <ostream>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -62,6 +63,7 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     return core::kExitOk;
   }
   std::optional<std::string_view> cycles_text = args.take_option({"--cycles"});
+  const bool with_delays = args.take_flag({support::kWithDelaysFlag});
   std::vector<std::string_view> positional;
   while (auto p = args.next_positional()) {
     positional.push_back(*p);
@@ -202,6 +204,7 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     old_q[s] = st.q[s];
   }
   std::vector<LogicValue> outputs(out_pins.size(), LogicValue::kLow);
+  std::string timing_section;
   if (n == 0) {
     // No-op report: cycle counts plus current flop state, no stepping.
     for (std::size_t di : stepped_domains) {
@@ -221,12 +224,60 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     return core::kExitOk;
   }
   for (std::uint64_t e = 0; e < n; ++e) {
-    const core::Status step_st = wengine::logic::seq_step_filtered(
-        nl, st, std::span<const LogicValue>(inputs.data(), inputs.size()),
+    // (014) Timing windows observe what each edge caused: snapshot
+    // pre-edge Qs, run the unchanged edge, then run one wheel per
+    // edge over the committed post-edge state starting from the
+    // pre-edge baseline (flop forces land at their clock-to-Q, NQ
+    // shares the instant; level latches recompute mid-window at
+    // their response delay). Windows print after the cycle line, so
+    // a wheel refusal still leaves all output untouched.
+    std::vector<LogicValue> pre_q;
+    if (with_delays) {
+      pre_q.assign(wengine::logic::kMaxGates, LogicValue::kLow);
+      for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
+        if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+          continue;
+        }
+        pre_q[s] = st.q[s];
+      }
+    }
+    const core::Status step_st = wengine::logic::seq_step_filtered(nl, st, std::span<const LogicValue>(inputs.data(), inputs.size()),
         std::span<LogicValue>(outputs.data(), outputs.size()), members, n_members, &support::solve_diag());
     if (!step_st.ok()) {
       support::report_contention(nl, support::solve_diag(), out);
       return cli::runtime_error(out, "step failed");
+    }
+    if (with_delays) {
+      wengine::logic::TimingScratch scratch{};
+      for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
+        if (nl.gates[s].live && wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+          scratch.cur[s] = pre_q[s];
+        }
+      }
+      if (!wengine::logic::timing_settle_initial(nl, std::span<const LogicValue>(inputs.data(), inputs.size()), scratch, wengine::logic::EdgeFilter::kCombOnly).ok()) {
+        return cli::runtime_error(out, "step failed");
+      }
+      std::vector<wengine::logic::TimingSeed> seeds;
+      for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
+        if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind) || !is_stepped(s)) {
+          continue;
+        }
+        if (pre_q[s] == st.q[s]) {
+          continue;
+        }
+        seeds.push_back(wengine::logic::TimingSeed{.slot = s,
+                                                   .is_flop = true,
+                                                   .fire_ps = wengine::logic::timing_gate_delay(nl, s),
+                                                   .new_value = st.q[s]});
+      }
+      wengine::logic::TimingTrace trace;
+      if (!wengine::logic::run_timing_window(nl, seeds, trace, scratch, true).ok()) {
+        return cli::runtime_error(out, std::string("step: timing window refused (event budget ") + std::to_string(wengine::logic::kMaxTimingEvents) + " exceeded or picosecond time overflow)");
+      }
+      // Contract cli-verbs: one `timing (edge k): ...` block per edge.
+      std::ostringstream edge_out;
+      support::print_timing_trace(nl, trace, edge_out, std::string("edge ") + std::to_string(e + 1));
+      timing_section += edge_out.str();
     }
   }
   // Commit cycle counters only on success (failure leaves state untouched).
@@ -234,6 +285,7 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     support::cycle_counts()[domains[di].name] += n;
     out << domains[di].name << ": cycle " << support::cycle_counts()[domains[di].name] << " (" << n << " edges)\n";
   }
+  out << timing_section;
   for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
     if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind) || !is_stepped(s)) {
       continue;
@@ -261,7 +313,7 @@ void LogicStepSpec::complete(std::span<const std::string_view> prior_args, std::
     return; // numeric value: nothing to complete
   }
   if (support::starts_with(partial, "--")) {
-    constexpr std::string_view kOpts[] = {"--cycles", "--cycles=", "--help", "-h"};
+    constexpr std::string_view kOpts[] = {"--cycles", "--cycles=", "--with-delays", "--help", "-h"};
     support::push_matches(partial, kOpts, out);
     return;
   }
