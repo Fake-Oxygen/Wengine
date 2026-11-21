@@ -31,6 +31,7 @@
  */
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/block_interface.hpp"
 #include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/tie_set.hpp"
 #include "wengine/logic/topo.hpp"
@@ -455,15 +456,18 @@ inline void timing_resolve_input(const Netlist &nl, std::uint16_t slot, std::uin
 /**
  * @brief Settle `scratch` to a window's pre-state (adapters call this first).
  *
- * Dangling nets take `block_inputs` (interface order, leaders only —
- * the same order `solve()` consumes; X/Z inputs fail loudly like
- * `fill_resolved`), tied members fan out from their leader, and one
- * topo-order pass evaluates combinational gates with the 4-state
- * tables. Sequential slots keep whatever the adapter preloaded into
- * `scratch.cur` (kLow for solve/truth windows mirroring `eval_gate`'s
- * fallback, post-edge Q for step windows). On clean 0/1 nets the
- * pass reproduces the zero-delay gate outputs exactly — wheel
- * end-state parity with `solve()` is asserted by test.
+ * Dangling prelude rides the single BlockInterface seam: `fill_resolved`
+ * takes `block_inputs` (interface order, leaders only — the same order
+ * `solve()` consumes; X/Z inputs fail loudly), terminates pulled
+ * dangling inputs at their idle level, ties ignored pins to kLow, and
+ * fans tied members out from their leader. One topo-order pass then
+ * evaluates combinational gates with the 4-state tables. Sequential
+ * slots keep whatever the adapter preloaded into `scratch.cur` (kLow
+ * for solve/truth windows mirroring `eval_gate`'s fallback, post-edge
+ * Q for step windows). On clean 0/1 nets the pass reproduces the
+ * zero-delay gate outputs exactly — wheel end-state parity with
+ * `solve()` is asserted by test, by construction rather than
+ * hand-sync (the wheel holds no twin prelude).
  *
  * The topology filter must match the unchanged path the adapter
  * rides: `kAll` for solve/truth windows (like `solve`), `kCombOnly`
@@ -472,6 +476,11 @@ inline void timing_resolve_input(const Netlist &nl, std::uint16_t slot, std::uin
  *
  * Validates the topology first (combinational cycles fail loudly);
  * the wheel itself never re-validates mid-window.
+ *
+ * Fast-path guarantee (research D10): `eval.hpp` and `seq_step.hpp`
+ * gain zero code — the shared prelude lives in `block_interface.hpp`
+ * and this adapter merely calls it, so the settled path's branches
+ * and bytes are unchanged (flag-off byte-identity goldens pin this).
  *
  * @param[out] nl Netlist to settle (topology recompiled when dirty).
  * @param[in] block_inputs Block input values in interface order.
@@ -484,51 +493,12 @@ inline void timing_resolve_input(const Netlist &nl, std::uint16_t slot, std::uin
   if (!st.ok()) {
     return st;
   }
-  for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
-    scratch.blk[i] = LogicValue::kLow;
-  }
-  std::size_t cursor = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
-      if (!detail::is_block_input(nl, s, i)) {
-        continue;
-      }
-      if (cursor >= block_inputs.size()) {
-        return core::Status::failure(core::StatusCode::kInvalidArgument);
-      }
-      const LogicValue v = block_inputs[cursor++];
-      if (v != LogicValue::kLow && v != LogicValue::kHigh) {
-        return core::Status::failure(core::StatusCode::kInvalidArgument);
-      }
-      scratch.blk[flat] = v;
-    }
-  }
-  if (cursor != block_inputs.size()) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
-      const std::size_t leader = tie_leader_flat(nl, flat);
-      if (leader != flat) {
-        scratch.blk[flat] = scratch.blk[leader];
-      }
-    }
+  // Single dangling-idle prelude (BlockInterface seam): zero, consume
+  // leaders, terminate pulls/ignores, fan out ties. The wheel holds no
+  // twin — parity with `solve()` holds by construction.
+  st = fill_resolved(nl, block_inputs, scratch.blk.data());
+  if (!st.ok()) {
+    return st;
   }
   LogicValue ins[kMaxInputs];
   for (std::uint16_t oi = 0; oi < nl.topo_size; ++oi) {

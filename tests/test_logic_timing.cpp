@@ -1092,6 +1092,137 @@ void test_race_window_example_replay() {
   assert(run_line("logic reset", text) == 0);
 }
 
+// Dangling-idle prelude parity (the twin-deletion pin): the settled
+// wheel rides the single BlockInterface seam — `timing_settle_initial`
+// blk output is element-identical to `fill_resolved` over a net
+// exercising every dangling kind (block input, tied pair, ignored,
+// pull-up, pull-down, wired). Pulls/ties/ignores are disjoint by
+// construction, so each needs its own gate here.
+void test_settle_prelude_parity_with_fill_resolved() {
+  logic::Netlist nl;
+  const std::uint16_t a = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
+  const std::uint16_t b = logic::add_gate(nl, logic::GateKind::kOr, 2).value;
+  const std::uint16_t c = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+  const std::uint16_t d = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+  const std::uint16_t e = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
+  assert(logic::tie_pins(nl, logic::PinRef{.slot = a, .is_output = false, .input = 1},
+                         logic::PinRef{.slot = b, .is_output = false, .input = 0})
+             .ok());
+  assert(logic::ignore_pin(nl, logic::PinRef{.slot = b, .is_output = false, .input = 1}).ok());
+  assert(logic::set_pull(nl, c, 0, 1).ok()); // up -> idle High
+  assert(logic::set_pull(nl, d, 0, 2).ok()); // down -> idle Low
+  assert(logic::wire_pins(nl, logic::PinRef{.slot = a, .is_output = true},
+                          logic::PinRef{.slot = e, .is_output = false, .input = 0})
+             .ok());
+  // Interface order in slot order: A.1 (ord 0), A.2/B.1 tie leader
+  // (ord 1). Pulled/ignored/wired pins consume no column.
+  assert(logic::block_input_count(nl) == 2);
+  const std::vector<LogicValue> inputs{H, L};
+  LogicValue resolved[logic::kMaxGates * logic::kMaxInputs];
+  assert(logic::fill_resolved(nl, inputs, resolved).ok());
+  // Spot the idle rule before the elementwise comparison.
+  assert(resolved[logic::tie_flat(a, 0)] == H);
+  assert(resolved[logic::tie_flat(a, 1)] == L);
+  assert(resolved[logic::tie_flat(b, 0)] == L); // tied member fans out
+  assert(resolved[logic::tie_flat(b, 1)] == L); // ignored ties off
+  assert(resolved[logic::tie_flat(c, 0)] == H); // pull-up terminates
+  assert(resolved[logic::tie_flat(d, 0)] == L); // pull-down terminates
+  logic::TimingScratch scratch{};
+  for (auto &v : scratch.cur) {
+    v = L;
+  }
+  assert(logic::timing_settle_initial(nl, inputs, scratch, logic::EdgeFilter::kAll).ok());
+  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+    assert(scratch.blk[f] == resolved[f]);
+  }
+  // Settled outputs agree with the zero-delay solve on the same
+  // assignment (AND(H,L)=0, OR(L,L)=0, NOT(1)=0, NOT(0)=1, BUF(0)=0).
+  assert(scratch.cur[a] == L && scratch.cur[b] == L && scratch.cur[c] == L && scratch.cur[d] == H &&
+         scratch.cur[e] == L);
+  std::vector<LogicValue> ref_out(logic::block_output_count(nl), L);
+  assert(logic::solve(nl, inputs, ref_out, nullptr).ok());
+  assert(ref_out.size() == 4); // B.Y, C.Y, D.Y, E.Y (A.Y is wired)
+  const std::vector<LogicValue> want{L, L, H, L};
+  for (std::size_t k = 0; k < want.size(); ++k) {
+    assert(ref_out[k] == want[k]);
+  }
+}
+
+// Pull-up timing golden (the defect class the twin shipped):
+// a pulled-up dangling input terminates at High in the settle, so the
+// wheel end-state matches `solve()` — previously the wheel read Low
+// (NOT(0)=1 vs the correct NOT(1)=0). Hand-derived, never readback.
+void test_settle_pull_up_golden() {
+  // Terminated NOT: no block inputs, empty window drains 0.
+  {
+    logic::Netlist nl;
+    const std::uint16_t n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+    assert(logic::set_pull(nl, n, 0, 1).ok());
+    assert(logic::block_input_count(nl) == 0);
+    const std::vector<LogicValue> empty;
+    std::vector<LogicValue> ref_out(1, L);
+    assert(logic::solve(nl, empty, ref_out, nullptr).ok());
+    assert(ref_out[0] == L); // NOT(1)=0
+    logic::TimingScratch scratch{};
+    for (auto &v : scratch.cur) {
+      v = L;
+    }
+    assert(logic::timing_settle_initial(nl, empty, scratch, logic::EdgeFilter::kAll).ok());
+    assert(scratch.blk[logic::tie_flat(n, 0)] == H);
+    assert(scratch.cur[n] == L);
+    assert(scratch.cur[n] == ref_out[0]); // wheel/solve parity
+    const std::vector<logic::TimingSeed> none;
+    logic::TimingTrace trace;
+    assert(logic::run_timing_window(nl, none, trace, scratch, false).ok());
+    assert(trace.n_events == 0 && trace.drain_ps == 0);
+  }
+  // Pull-down mirrors: NOT(0)=1.
+  {
+    logic::Netlist nl;
+    const std::uint16_t n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+    assert(logic::set_pull(nl, n, 0, 2).ok());
+    const std::vector<LogicValue> empty;
+    logic::TimingScratch scratch{};
+    for (auto &v : scratch.cur) {
+      v = L;
+    }
+    assert(logic::timing_settle_initial(nl, empty, scratch, logic::EdgeFilter::kAll).ok());
+    assert(scratch.blk[logic::tie_flat(n, 0)] == L);
+    assert(scratch.cur[n] == H); // NOT(0)=1
+  }
+  // Driven golden: AND(pull-up, block input). Pre (in=0): AND(1,0)=0;
+  // seed in 0->1 at t=0, AND.Y 0->1 at t=1 (unit delay), drain 1.
+  {
+    logic::Netlist nl;
+    const std::uint16_t g = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
+    assert(logic::set_pull(nl, g, 0, 1).ok());
+    assert(logic::block_input_count(nl) == 1);
+    const std::vector<LogicValue> zero{L};
+    const std::vector<LogicValue> one{H};
+    std::vector<LogicValue> ref0(1, L), ref1(1, L);
+    assert(logic::solve(nl, zero, ref0, nullptr).ok());
+    assert(logic::solve(nl, one, ref1, nullptr).ok());
+    assert(ref0[0] == L && ref1[0] == H);
+    logic::TimingScratch scratch{};
+    for (auto &v : scratch.cur) {
+      v = L;
+    }
+    assert(logic::timing_settle_initial(nl, zero, scratch, logic::EdgeFilter::kAll).ok());
+    assert(scratch.cur[g] == L);
+    const std::vector<logic::TimingSeed> seeds{
+        logic::TimingSeed{.slot = g, .input = 1, .is_flop = false, .fire_ps = 0, .new_value = H},
+    };
+    logic::TimingTrace trace;
+    assert(logic::run_timing_window(nl, seeds, trace, scratch, false).ok());
+    const ExpectedEvent want[] = {
+        {0, 0, 1, true, false, L, H},  // t=0 AND1.2: 0->1 (seed)
+        {1, 0, 0, false, false, L, H}, // t=1 AND1.Y: 0->1 (unit delay)
+    };
+    check_trace(trace, want, 2, 1, 0);
+    assert(scratch.cur[g] == ref1[0]); // end-state parity with solve
+  }
+}
+
 } // namespace
 
 int main() {
@@ -1147,6 +1278,10 @@ int main() {
   fprintf(stderr, "contention: OK\n");
   test_race_window_example_replay();
   fprintf(stderr, "race_replay: OK\n");
+  test_settle_prelude_parity_with_fill_resolved();
+  fprintf(stderr, "prelude_parity: OK\n");
+  test_settle_pull_up_golden();
+  fprintf(stderr, "pullup: OK\n");
   std::cout << "test_logic_timing: OK\n";
   return 0;
 }
