@@ -64,6 +64,29 @@ void check_table(wengine::core::Result<double> (*parse)(std::string_view)) {
   assert(bare.ok() && bare.value == 2.5); // bare number stays SI
 }
 
+// Exact time factors live on the rows (single source of truth): one unit
+// == ps_mult * 10^ps_exp10 picoseconds exactly. Pins the TimeScale rows
+// the exact-time parser reads (cli/time_ps.hpp) — same table the double
+// forwarder above reads, never a second copy.
+void test_time_exact_factors() {
+  using T = scales_for<Time>;
+  static_assert(T::value.size() == 8);
+  assert(T::value[0].ps_per_unit() == 1000000000000ULL);    // s
+  assert(T::value[1].ps_per_unit() == 1000000000000ULL);    // sec
+  assert(T::value[2].ps_per_unit() == 1000000000ULL);       // ms
+  assert(T::value[3].ps_per_unit() == 1000000ULL);          // us
+  assert(T::value[4].ps_per_unit() == 1000ULL);             // ns
+  assert(T::value[5].ps_per_unit() == 60000000000000ULL);   // min
+  assert(T::value[6].ps_per_unit() == 3600000000000000ULL); // h
+  assert(T::value[7].ps_per_unit() == 1ULL);                // ps
+  // The (mult, exp10) split the integer parser consumes (mult 5-free,
+  // so the sub-picosecond proof holds).
+  assert(T::value[5].ps_mult == 6 && T::value[5].ps_exp10 == 13);
+  assert(T::value[6].ps_mult == 36 && T::value[6].ps_exp10 == 14);
+  assert(T::value[0].ps_mult == 1 && T::value[0].ps_exp10 == 12);
+  assert(T::value[7].ps_mult == 1 && T::value[7].ps_exp10 == 0);
+}
+
 void test_scales_single_source() {
   // Spot-check table contents live in units (sizes pin the moved tables).
   static_assert(scales_for<ElectricPotential>::value.size() == 4);
@@ -92,6 +115,7 @@ int main() {
   test_value_comparisons();
   test_value_printing();
   test_scales_single_source();
+  test_time_exact_factors();
 
   const glm::dvec2 a{3.0, 4.0};
   assert(glm::dot(a, a) == 25.0);

@@ -2,6 +2,7 @@
 
 #include "wengine/cli/logic_registry.hpp"
 #include "wengine/cli/status.hpp"
+#include "wengine/cli/time_ps.hpp"
 #include "wengine/core/status.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/pins.hpp"

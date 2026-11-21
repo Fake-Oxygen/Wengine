@@ -17,15 +17,18 @@
 //
 // Previously these tables lived in cli/args.hpp next to the parsing
 // machinery while units/ only had literals — the same knowledge
-// (e.g. "kV" x 1e3) in two places, able to drift. Now the DATA lives here
-// (owned by units/, next to Dimension/Value/literals) and cli/args.hpp
+// (e.g. "kV" x 1e3) in two places, able to drift. Now the DATA lives
+// here (owned by units/, next to Dimension/Value/literals) and cli/args.hpp
 // keeps only the generic parsing machinery, reading these tables.
 // New unit: add the literal in units.hpp AND one entry here; nothing else
-// needs to change for CLI parsing to accept it.
+// needs to change for CLI parsing to accept it. Time rows additionally
+// carry their exact integer picosecond factor (TimeScale), so exact-time
+// consumers never re-derive it by double comparison.
 
 #include "wengine/units/units.hpp"
 
 #include <array>
+#include <cstdint>
 #include <string_view>
 
 namespace wengine::units {
@@ -170,25 +173,111 @@ struct scales_for<Frequency> {
 };
 
 /**
+ * @brief One Time row: owned spelling + SI scale + exact picosecond factor.
+ *
+ * Extends the SuffixScale contract (suffix/scale, read by the generic
+ * double parser) with the exact integer pair (ps_mult, ps_exp10) such
+ * that one unit == ps_mult * 10^ps_exp10 picoseconds exactly. ps_mult
+ * is coprime to 5 — load-bearing for the sub-picosecond proof in
+ * exact-time consumers (cli/time_ps.hpp): a stripped nonzero fraction
+ * against a remaining denominator of 10^d with d >= 3 can never clear
+ * without a factor of 5 from the multiplier.
+ *
+ * The constructor requires all four members: a new Time row that omits
+ * the factor fails to compile (no side table to forget). The
+ * static_assert below pins the parser's preconditions (nonzero 5-free
+ * multiplier, covered exponent, fitting product).
+ */
+struct TimeScale {
+  /** @brief Suffix text accepted after the number (e.g. "ms", "min"). */
+  std::string_view suffix;
+  /** @brief Scale factor; parsed number * scale yields seconds (SI base). */
+  double scale;
+  /** @brief Exact integer multiplier of the picosecond value (5-free). */
+  std::uint64_t ps_mult;
+  /** @brief Decimal exponent of the picosecond value (10^ps_exp10). */
+  int ps_exp10;
+  /**
+   * @brief Build one Time row (all four members required).
+   * @param[in] s Suffix spelling.
+   * @param[in] k SI scale (seconds per unit).
+   * @param[in] m Exact picosecond multiplier (nonzero, coprime to 5).
+   * @param[in] e Exact picosecond decimal exponent.
+   */
+  constexpr TimeScale(std::string_view s, double k, std::uint64_t m, int e) noexcept
+      : suffix(s), scale(k), ps_mult(m), ps_exp10(e) {}
+  /**
+   * @brief Exact whole picoseconds per unit (fits u64 — pinned below).
+   * @return ps_mult * 10^ps_exp10.
+   */
+  [[nodiscard]] constexpr std::uint64_t ps_per_unit() const noexcept {
+    std::uint64_t v = ps_mult;
+    for (int i = 0; i < ps_exp10; ++i) {
+      v *= 10;
+    }
+    return v;
+  }
+};
+
+namespace time_detail {
+/**
+ * @brief Constexpr 10^e for the exactness static_assert below.
+ * @param[in] e Non-negative exponent (rows pin e <= 19).
+ * @return 10 to the power e.
+ */
+[[nodiscard]] constexpr std::uint64_t pow10_u64(int e) noexcept {
+  std::uint64_t v = 1;
+  for (int i = 0; i < e; ++i) {
+    v *= 10;
+  }
+  return v;
+}
+} // namespace time_detail
+
+/**
  * @brief Accepted spellings for Time (practical unit second;
  *        "min"/"h" are the composite minute/hour spellings).
  */
 template <>
 struct scales_for<Time> {
   /**
-   * @brief Suffix table; parsed number * scale yields seconds (SI base).
+   * @brief Suffix table; parsed number * scale yields seconds (SI base),
+   *        while ps_mult/ps_exp10 give the exact picosecond factor per
+   *        row (read by cli/time_ps.hpp — no double classification there).
    */
-  static constexpr std::array<SuffixScale, 8> value{{
-      {"s", 1.0},
-      {"sec", 1.0},
-      {"ms", 1e-3},
-      {"us", 1e-6},
-      {"ns", 1e-9},
-      {"min", 60.0},
-      {"h", 3600.0},
-      {"ps", 1e-12},
+  static constexpr std::array<TimeScale, 8> value{{
+      {"s", 1.0, 1, 12},    // 10^12 ps
+      {"sec", 1.0, 1, 12},  // 10^12 ps
+      {"ms", 1e-3, 1, 9},   // 10^9 ps
+      {"us", 1e-6, 1, 6},   // 10^6 ps
+      {"ns", 1e-9, 1, 3},   // 10^3 ps
+      {"min", 60.0, 6, 13}, // 6x10^13 ps
+      {"h", 3600.0, 36, 14},// 36x10^14 ps
+      {"ps", 1e-12, 1, 0},   // 1 ps
   }};
 };
+
+// Compile-time pin on the exactness contract exact-time consumers rely
+// on: every row carries a nonzero 5-free multiplier with an exponent the
+// parser's power table covers, and the reconstructed picosecond value
+// fits the u64 field. A degenerate future row fails here, loudly.
+static_assert([]() constexpr noexcept {
+  for (const auto &r : scales_for<Time>::value) {
+    if (r.ps_mult == 0 || r.ps_mult % 5 == 0) {
+      return false;
+    }
+    // exp10 <= 17: the parser's fraction accumulator holds fewer than
+    // 10^(exp10+2) <= 10^19 digits worth of value (fits u64); the
+    // power table itself covers 0..19.
+    if (r.ps_exp10 < 0 || r.ps_exp10 > 17) {
+      return false;
+    }
+    if (r.ps_mult > 0xFFFFFFFFFFFFFFFFULL / time_detail::pow10_u64(r.ps_exp10)) {
+      return false;
+    }
+  }
+  return true;
+}());
 
 /**
  * @brief Accepted spellings for MeterConstant (Count per Energy).

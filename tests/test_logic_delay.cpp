@@ -23,6 +23,7 @@
 #include "wengine/cli/args.hpp"
 #include "wengine/cli/logic_registry.hpp"
 #include "wengine/cli/shell.hpp"
+#include "wengine/cli/time_ps.hpp"
 #include "wengine/tui/exec.hpp"
 
 #include <cassert>
