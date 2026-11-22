@@ -212,8 +212,12 @@ struct WirePins {
   }
   dst.drivers[pins.to.input] = pins.from.slot;
   // Adjacency (016): direct table write; the end-of-load rebuild in
-  // validate_topology stays as the bulk-path backstop.
-  (void)adjacency::adj_insert_edge(tmp, pins.from.slot, pins.to.slot, pins.to.input, 0);
+  // validate_topology stays as the bulk-path backstop. Pool-sized edge
+  // capacity makes this infallible by construction — false is loud.
+  if (!adjacency::adj_insert_edge(tmp, pins.from.slot, pins.to.slot, pins.to.input, 0)) {
+    err = "line " + std::to_string(w.line) + ": adjacency edge pool exhausted '" + w.to + "'";
+    return false;
+  }
   if (pins.from.negated) {
     ++tmp.slots[pins.from.slot].nq_fanout;
     tmp.driver_inv[tie_flat(pins.to.slot, pins.to.input)] = 1;

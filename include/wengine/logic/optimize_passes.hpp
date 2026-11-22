@@ -44,6 +44,7 @@
 #include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/types.hpp"
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -219,7 +220,8 @@ inline bool dce_pass(Netlist &nl, const bool *is_root, std::span<bool> keep, std
   bool changed = false;
   for (Slot s = 0; s < slot_count(nl); ++s) {
     if (nl.slots[s].live && !keep[s]) {
-      (void)remove_gate(nl, s, tie_survivors);
+      const core::Status st = remove_gate(nl, s, tie_survivors);
+      assert(st.ok());
       changed = true;
     }
   }
@@ -263,15 +265,18 @@ inline void rewire_users(Netlist &nl, Slot from_slot, Slot target) noexcept {
     const std::uint8_t i = nl.succ_input[e];
     Gate &user = nl.slots[u];
     if (user.drivers[i] != from_slot) {
-      (void)adjacency::adj_unlink_edge(nl, from_slot, u, i, 0); // phantom: drop, never hang
+      const bool phantom = adjacency::adj_unlink_edge(nl, from_slot, u, i, 0); // phantom: drop, never hang
+      assert(phantom);
       continue;
     }
     user.drivers[i] = target;
     // Adjacency (016): the edge moves drivers. Unlink-then-insert
     // reuses the freed slot.
-    (void)adjacency::adj_unlink_edge(nl, from_slot, u, i, 0);
+    const bool moved = adjacency::adj_unlink_edge(nl, from_slot, u, i, 0);
+    assert(moved);
     if (target != kNoDriver) {
-      (void)adjacency::adj_insert_edge(nl, target, u, i, 0);
+      const bool linked = adjacency::adj_insert_edge(nl, target, u, i, 0);
+      assert(linked);
     }
     // Feeder counters (016): the edge left/joined a marked input.
     const std::size_t flat = tie_flat(u, i);
@@ -361,7 +366,8 @@ inline bool bypass_pass(Netlist &nl, const bool *feeds_seq, std::span<std::size_
       continue;
     }
     rewire_users(nl, s, target);
-    (void)remove_gate(nl, s, tie_survivors);
+    const core::Status st = remove_gate(nl, s, tie_survivors);
+    assert(st.ok());
     changed = true;
   }
   if (changed) {
@@ -438,7 +444,8 @@ inline bool drop_inputs(Netlist &nl, Slot s, Constness *label, const Constness *
   // re-insert the kept row after (tables are truth at each call).
   // Feeder counters ride along (marked sinks skip the pass, so the
   // pair is a no-op there — kept for unconditional correctness).
-  adjacency::adj_detach_sink(nl, s);
+  const bool detached = adjacency::adj_detach_sink(nl, s);
+  assert(detached);
   detail::feeds_release_sink(nl, s);
   for (std::uint8_t i = 0; i < n; ++i) {
     g.drivers[i] = kept_drv[i];
@@ -454,7 +461,8 @@ inline bool drop_inputs(Netlist &nl, Slot s, Constness *label, const Constness *
   }
   g.ignored_mask = mask;
   g.input_count = n;
-  adjacency::adj_insert_sink(nl, s);
+  const bool inserted = adjacency::adj_insert_sink(nl, s);
+  assert(inserted);
   detail::feeds_acquire_sink(nl, s);
   // Rebuild ties for kept pins (indices may have shifted) via the TieSet
   // seam — index-shift re-election lives in tie_set.hpp, not here.
@@ -601,7 +609,8 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root, std::span<Constnes
       if (!canonical) {
         detach_slot_ties(nl, s, tie_survivors);
         // Adjacency (016): every driver below clears — detach first.
-        adjacency::adj_detach_sink(nl, s);
+        const bool detached_c0 = adjacency::adj_detach_sink(nl, s);
+        assert(detached_c0);
         if (g.kind != GateKind::kAnd) {
           retag(nl, s, GateKind::kAnd);
         }
@@ -621,7 +630,8 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root, std::span<Constnes
       if (!canonical) {
         detach_slot_ties(nl, s, tie_survivors);
         // Adjacency (016): every driver below clears — detach first.
-        adjacency::adj_detach_sink(nl, s);
+        const bool detached_c1 = adjacency::adj_detach_sink(nl, s);
+        assert(detached_c1);
         if (g.kind != GateKind::kNand) {
           retag(nl, s, GateKind::kNand);
         }
@@ -697,15 +707,18 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq, std::span<std::size
         continue; // defensive: never rewire a gate into itself
       }
       rewire_users(nl, s, t);
-      (void)remove_gate(nl, s, tie_survivors);
+      const core::Status fused = remove_gate(nl, s, tie_survivors);
+      assert(fused.ok());
       changed = true;
     } else if (hk == GateKind::kBuf) {
       // Adjacency (016): single edge move (h->s,0 becomes t->s,0).
       const Slot t = nl.slots[h].drivers[0];
-      (void)adjacency::adj_unlink_edge(nl, h, s, 0, 0);
+      const bool unlinked = adjacency::adj_unlink_edge(nl, h, s, 0, 0);
+      assert(unlinked);
       g.drivers[0] = t;
       if (t != kNoDriver) {
-        (void)adjacency::adj_insert_edge(nl, t, s, 0, 0);
+        const bool linked = adjacency::adj_insert_edge(nl, t, s, 0, 0);
+        assert(linked);
       }
       changed = true;
     } else {
@@ -741,13 +754,15 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq, std::span<std::size
       const Gate &src = nl.slots[h];
       // Adjacency (016): full row copy — detach this sink's edges, copy,
       // re-insert (extras cannot be present: marked sinks skip above).
-      adjacency::adj_detach_sink(nl, s);
+      const bool row_detached = adjacency::adj_detach_sink(nl, s);
+      assert(row_detached);
       g.input_count = src.input_count;
       g.ignored_mask = src.ignored_mask;
       for (std::size_t i = 0; i < kMaxInputs; ++i) {
         g.drivers[i] = src.drivers[i];
       }
-      adjacency::adj_insert_sink(nl, s);
+      const bool row_inserted = adjacency::adj_insert_sink(nl, s);
+      assert(row_inserted);
       // Preserve input-input ties: each dangling dest pin joins its src
       // counterpart's class (internal + outside ties follow; the src gate
       // goes away via later DCE, leaving the fused pins tied).
@@ -763,7 +778,8 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq, std::span<std::size
         }
         PinRef dst_pin{.slot = s, .is_output = false, .input = i};
         PinRef src_pin{.slot = h, .is_output = false, .input = i};
-        (void)tie_pins(nl, dst_pin, src_pin);
+        const core::Status tied = tie_pins(nl, dst_pin, src_pin);
+        assert(tied.ok());
       }
       retag(nl, s, nk);
       changed = true;

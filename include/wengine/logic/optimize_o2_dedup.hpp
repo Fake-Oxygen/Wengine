@@ -45,6 +45,7 @@
 #include "wengine/logic/optimize_skip.hpp"
 #include "wengine/logic/types.hpp"
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -197,7 +198,8 @@ inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge, 
           }
         }
         rewire_users(nl, t, s);
-        (void)remove_gate(nl, t, tie_survivors);
+        const core::Status st = remove_gate(nl, t, tie_survivors);
+        assert(st.ok());
         // Selective rehash: the index is exact again before the next pair.
         for (std::size_t k = 0; k < affected.size(); ++k) {
           idx.refresh(nl, affected[k], u, merge);
@@ -322,7 +324,8 @@ inline bool double_inv_universal_pass(Netlist &nl, GateKind u, const bool *feeds
       continue;
     }
     rewire_users(nl, s, e);
-    (void)remove_gate(nl, s, tie_survivors);
+    const core::Status dst = remove_gate(nl, s, tie_survivors);
+    assert(dst.ok());
     changed = true;
   }
   if (changed) {

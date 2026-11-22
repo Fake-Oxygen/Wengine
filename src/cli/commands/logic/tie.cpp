@@ -72,8 +72,7 @@ int LogicTieSpec::run(ArgCursor &args, std::ostream &out) {
   // as do level latches. An illegal SR tie (S=R=1 through the class)
   // fails here: the tie is reverted so the refused net changes no state.
   if (!support::apply_async_and_report(nl, out).ok()) {
-    wengine::logic::restore_ties(nl, tie_before);
-    wengine::logic::tie_chains_rebuild(nl); // bulk restore: reindex members
+    wengine::logic::restore_ties(nl, tie_before); // atomic: star + chains restore together
     return cli::usage_error(out, "tie: S=1,R=1 is illegal (SR latch holds state, tie reverted)", kUsage);
   }
   return core::kExitOk;

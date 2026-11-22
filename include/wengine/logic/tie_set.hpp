@@ -59,17 +59,22 @@ using TieSnapshot = std::vector<Slot>;
   return nl.tie_rep;
 }
 
+inline void tie_chains_rebuild(Netlist &nl);
+
 /**
  * @brief Restore a whole-table snapshot taken by snapshot_ties.
  *
+ * Atomic: installs the star table and rebuilds the member chains
+ * internally, so readers never observe a star/chains split-brain.
+ * (No noexcept: the chain rebuild may allocate on first growth;
+ * steady-state callers find everything sized.)
+ *
  * @param[out] nl Netlist receiving the snapshot.
  * @param[in] snap Snapshot to install.
- * @note Bulk writer: callers must rebuild the member index afterwards
- *       (tie_chains_rebuild) — the star table alone no longer
- *       describes class membership for readers.
  */
-inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept {
+inline void restore_ties(Netlist &nl, const TieSnapshot &snap) {
   nl.tie_rep = snap;
+  tie_chains_rebuild(nl);
 }
 
 /**

@@ -244,10 +244,8 @@ struct OptimizeScratch {
 
   detail::collect_barrier_roots(nl, scr.roots.data());
 
-  // (016, US6): the fixpoint passes never create sequential gates (only
-  // retags to combinational kinds), so one scan per invocation
-  // suffices; a stale true on a now-sequential-free net selects the
-  // combinational filter, which coincides with kAll there.
+  // Initial filter hint; run_fixpoint recomputes per iteration from the
+  // live net, so no hoisted invariant can silently pick the wrong filter.
   const bool seq_net = has_sequential_gates(nl);
 
   const bool want_fuse = (opts.level == OptLevel::kO1) || (opts.level == OptLevel::kO2);

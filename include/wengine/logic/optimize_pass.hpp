@@ -35,6 +35,7 @@
 #include "wengine/logic/optimize_o2_dedup.hpp"
 #include "wengine/logic/optimize_passes.hpp"
 #include "wengine/logic/optimize_types.hpp"
+#include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/topo.hpp"
 
 #include <cstddef>
@@ -193,7 +194,6 @@ inline bool pass_double_inv(Netlist &nl, PassCtx &ctx) noexcept {
  */
 [[nodiscard]] inline BuildError run_fixpoint(Netlist &nl, const Pass *passes, std::size_t npass,
                                              PassCtx &ctx) {
-  const EdgeFilter f = ctx.seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll;
   constexpr std::size_t kMaxItersBase = 16;
   bool feeds_stale = true;
   std::size_t iter = 0;
@@ -202,6 +202,11 @@ inline bool pass_double_inv(Netlist &nl, PassCtx &ctx) noexcept {
       return BuildError::kIter;
     }
     ++iter;
+    // Recompute per iteration: passes only retag to combinational kinds,
+    // but a hoisted bool would silently pick the wrong filter if that ever
+    // changes. One O(N) scan per iteration is negligible next to a rebuild.
+    const EdgeFilter f = has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll;
+    ctx.seq_net = (f == EdgeFilter::kCombOnly);
     if (!ensure_topo(nl, f).ok()) {
       return BuildError::kTopo;
     }

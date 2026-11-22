@@ -35,9 +35,11 @@
  * vocabulary stays here beside the pool.
  */
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string_view>
 #include <vector>
 
@@ -644,61 +646,17 @@ namespace detail {
 // reserves the pool size), so noexcept holders never allocate.
 
 /**
- * @brief Sift heap element i up toward the root (min-heap order).
- *
- * @param[out] nl Netlist holding the heap.
- * @param[in] i Element index to sift.
- */
-inline void heap_sift_up(Netlist &nl, std::size_t i) noexcept {
-  while (i > 0) {
-    const std::size_t p = (i - 1u) / 2u;
-    if (nl.free_heap[p] <= nl.free_heap[i]) {
-      break;
-    }
-    const Slot t = nl.free_heap[p];
-    nl.free_heap[p] = nl.free_heap[i];
-    nl.free_heap[i] = t;
-    i = p;
-  }
-}
-
-/**
- * @brief Sift heap element i down toward the leaves (min-heap order).
- *
- * @param[out] nl Netlist holding the heap.
- * @param[in] i Element index to sift.
- */
-inline void heap_sift_down(Netlist &nl, std::size_t i) noexcept {
-  const std::size_t n = nl.free_heap.size();
-  while (true) {
-    const std::size_t l = 2u * i + 1u;
-    if (l >= n) {
-      break;
-    }
-    std::size_t m = l;
-    const std::size_t r = l + 1u;
-    if (r < n && nl.free_heap[r] < nl.free_heap[l]) {
-      m = r;
-    }
-    if (nl.free_heap[i] <= nl.free_heap[m]) {
-      break;
-    }
-    const Slot t = nl.free_heap[m];
-    nl.free_heap[m] = nl.free_heap[i];
-    nl.free_heap[i] = t;
-    i = m;
-  }
-}
-
-/**
  * @brief Push one freed slot onto the heap (capacity pre-reserved).
+ *
+ * Canonical <algorithm> heap with std::greater (min-heap): no bespoke
+ * sift — ordering stays with the standard library.
  *
  * @param[out] nl Netlist holding the heap.
  * @param[in] s Dead slot index.
  */
 inline void heap_push_free(Netlist &nl, Slot s) noexcept {
   nl.free_heap.push_back(s);
-  heap_sift_up(nl, nl.free_heap.size() - 1u);
+  std::push_heap(nl.free_heap.begin(), nl.free_heap.end(), std::greater<Slot>());
 }
 
 /**
@@ -711,12 +669,9 @@ inline void heap_push_free(Netlist &nl, Slot s) noexcept {
   if (nl.free_heap.empty()) {
     return kNoDriver;
   }
-  const Slot top = nl.free_heap[0];
-  nl.free_heap[0] = nl.free_heap.back();
+  std::pop_heap(nl.free_heap.begin(), nl.free_heap.end(), std::greater<Slot>());
+  const Slot top = nl.free_heap.back();
   nl.free_heap.pop_back();
-  if (!nl.free_heap.empty()) {
-    heap_sift_down(nl, 0);
-  }
   return top;
 }
 
@@ -736,9 +691,7 @@ inline void free_heap_rebuild(Netlist &nl) noexcept {
       nl.free_heap.push_back(s);
     }
   }
-  for (std::size_t i = nl.free_heap.size() / 2u; i-- > 0;) {
-    detail::heap_sift_down(nl, i);
-  }
+  std::make_heap(nl.free_heap.begin(), nl.free_heap.end(), std::greater<Slot>());
 }
 
 /**
@@ -820,9 +773,7 @@ inline void free_heap_rebuild(Netlist &nl) noexcept {
     for (std::size_t s = old_size; s < cap; ++s) {
       nl.free_heap.push_back(static_cast<Slot>(s));
     }
-    for (std::size_t i = nl.free_heap.size() / 2u; i-- > 0;) {
-      detail::heap_sift_down(nl, i);
-    }
+    std::make_heap(nl.free_heap.begin(), nl.free_heap.end(), std::greater<Slot>());
   }
   return true;
 }

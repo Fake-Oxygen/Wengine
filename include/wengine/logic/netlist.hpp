@@ -49,7 +49,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <span>
 #include <string_view>
 
 namespace wengine::logic {
@@ -274,24 +273,6 @@ namespace wengine::logic {
   const std::size_t n = slot_count(nl);
   ensure_workspace(nl, n);
   return remove_gate(nl, slot, std::span<std::size_t>(nl.ws_survivors.data(), n * kMaxInputs));
-}
-
-/**
- * @brief Remove a gate by display name (e.g. "AND1").
- *
- * Stays alias-monomorphic (text path): the scale harness and tests
- * remove by slot directly.
- *
- * @param[out] nl Netlist holding the gate.
- * @param[in] name Display name resolved via resolve_gate.
- * @return kOk on success; kInvalidArgument when the name does not resolve to a live gate.
- */
-[[nodiscard]] inline core::Status remove_gate_by_name(Netlist &nl, std::string_view name) noexcept {
-  auto gate = resolve_gate(nl, name);
-  if (!gate.ok()) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  return remove_gate(nl, gate.value);
 }
 
 // Shared slot vocabulary (is_shared_input, shared_extra_count,
@@ -898,30 +879,6 @@ namespace detail {
 }
 
 /**
- * @brief Parse two pin spellings and wire output to input.
- *
- * Stays alias-monomorphic (text path): the scale harness and tests
- * wire by slot directly.
- *
- * @param[out] nl Netlist receiving the wire.
- * @param[in] from_text Output pin spelling (e.g. "AND2.Y").
- * @param[in] to_text Input pin spelling (e.g. "NOR1.1").
- * @return kOk on success; kInvalidArgument for unparsable pins or any
- *         wire_pins refusal.
- */
-[[nodiscard]] inline core::Status wire_text(Netlist &nl, std::string_view from_text, std::string_view to_text) noexcept {
-  auto from = parse_pin(nl, from_text);
-  if (!from.ok()) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  auto to = parse_pin(nl, to_text);
-  if (!to.ok()) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  return wire_pins(nl, from.value, to.value);
-}
-
-/**
  * @brief Ignore a pin: exclude it from the derived block interface.
  *
  * Idempotent: marking twice still succeeds. Ignoring a tied input
@@ -1034,46 +991,10 @@ inline void reset_netlist(Netlist &nl) noexcept {
   pool_store::note_edge_event(nl);
 }
 
-/**
- * @brief Parse two input-pin spellings and tie them (text adapter over
- *        the TieSet seam).
- *
- * Stays alias-monomorphic (text path).
- *
- * @param[out] nl Netlist receiving the tie.
- * @param[in] a_text First pin spelling.
- * @param[in] b_text Second pin spelling.
- * @return kOk on success; kInvalidArgument for unparsable pins or any
- *         tie_pins refusal.
- */
-[[nodiscard]] inline core::Status tie_text(Netlist &nl, std::string_view a_text, std::string_view b_text) noexcept {
-  auto a = parse_pin(nl, a_text);
-  if (!a.ok()) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  auto b = parse_pin(nl, b_text);
-  if (!b.ok()) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  return tie_pins(nl, a.value, b.value);
-}
-
-/**
- * @brief Parse one input-pin spelling and untie it.
- *
- * Stays alias-monomorphic (text path).
- *
- * @param[out] nl Netlist receiving the untie.
- * @param[in] text Pin spelling.
- * @return kOk on success; kInvalidArgument for unparsable pins or any
- *         untie_pin refusal.
- */
-[[nodiscard]] inline core::Status untie_text(Netlist &nl, std::string_view text) noexcept {
-  auto p = parse_pin(nl, text);
-  if (!p.ok()) {
-    return core::Status::failure(core::StatusCode::kInvalidArgument);
-  }
-  return untie_pin(nl, p.value);
-}
-
 } // namespace wengine::logic
+
+// Text adapters (F1 split): display-name / pin-spelling entry points live
+// in netlist_text.hpp. Included here for backward compatibility so every
+// existing `#include netlist.hpp` keeps working; new code may include
+// either header directly.
+#include "wengine/logic/netlist_text.hpp"

@@ -58,6 +58,7 @@
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -308,7 +309,8 @@ struct PoolNeeds {
     } else {
       PinRef dst{.slot = w.fresh, .is_output = false, .input = w.input};
       PinRef src{.slot = tie_first_fresh[leader], .is_output = false, .input = tie_first_input[leader]};
-      (void)tie_pins(out, dst, src);
+      const core::Status tied = tie_pins(out, dst, src);
+      assert(tied.ok());
     }
   }
   return BuildError::kNone;

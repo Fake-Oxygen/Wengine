@@ -41,6 +41,7 @@
 #include "wengine/logic/optimize_barrier.hpp"
 #include "wengine/logic/types.hpp"
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -264,7 +265,8 @@ inline bool exact_simplify_pass(Netlist &nl, std::span<LogicValue> resolved,
       if (!canonical) {
         detach_slot_ties(nl, s, tie_members);
         // Adjacency (016): every driver below clears — detach first.
-        adjacency::adj_detach_sink(nl, s);
+        const bool detached_c0 = adjacency::adj_detach_sink(nl, s);
+        assert(detached_c0);
         if (g.kind != GateKind::kAnd) {
           retag(nl, s, GateKind::kAnd);
         }
@@ -282,7 +284,8 @@ inline bool exact_simplify_pass(Netlist &nl, std::span<LogicValue> resolved,
       if (!canonical) {
         detach_slot_ties(nl, s, tie_members);
         // Adjacency (016): every driver below clears — detach first.
-        adjacency::adj_detach_sink(nl, s);
+        const bool detached_c1 = adjacency::adj_detach_sink(nl, s);
+        assert(detached_c1);
         if (g.kind != GateKind::kNand) {
           retag(nl, s, GateKind::kNand);
         }

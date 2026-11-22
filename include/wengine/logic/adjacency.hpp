@@ -119,24 +119,31 @@ namespace adjacency {
  *
  * @param[out] nl Netlist whose chains drop the sink's edges.
  * @param[in] sink Sink slot being rewritten.
+ * @return True when every table edge unlinked; false on any miss.
  */
-inline void adj_detach_sink(Netlist &nl, Slot sink) noexcept {
+[[nodiscard]] inline bool adj_detach_sink(Netlist &nl, Slot sink) noexcept {
   if (sink >= slot_count(nl)) {
-    return;
+    return true;
   }
+  bool ok = true;
   const Gate &g = nl.slots[sink];
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     const Slot drv = g.drivers[i];
     if (drv != kNoDriver) {
-      (void)adj_unlink_edge(nl, drv, sink, i, 0);
+      if (!adj_unlink_edge(nl, drv, sink, i, 0)) {
+        ok = false;
+      }
     }
   }
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     const std::size_t flat = tie_flat(sink, i);
     for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t) {
-      (void)adj_unlink_edge(nl, edrv, sink, i, 1);
+      if (!adj_unlink_edge(nl, edrv, sink, i, 1)) {
+        ok = false;
+      }
     });
   }
+  return ok;
 }
 
 /**
@@ -145,25 +152,54 @@ inline void adj_detach_sink(Netlist &nl, Slot sink) noexcept {
  *        ran before).
  *
  * @param[out] nl Netlist whose chains gain the sink's edges.
- * @param[in] sink Sink slot just rewritten.
+ * @param[in] sink Sink just rewritten.
+ * @return True when every table edge inserted; false on any refusal.
  */
-inline void adj_insert_sink(Netlist &nl, Slot sink) noexcept {
+[[nodiscard]] inline bool adj_insert_sink(Netlist &nl, Slot sink) noexcept {
   if (sink >= slot_count(nl)) {
-    return;
+    return true;
   }
+  bool ok = true;
   const Gate &g = nl.slots[sink];
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     const Slot drv = g.drivers[i];
     if (drv != kNoDriver) {
-      (void)adj_insert_edge(nl, drv, sink, i, 0);
+      if (!adj_insert_edge(nl, drv, sink, i, 0)) {
+        ok = false;
+      }
     }
   }
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     const std::size_t flat = tie_flat(sink, i);
     for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t) {
-      (void)adj_insert_edge(nl, edrv, sink, i, 1);
+      if (!adj_insert_edge(nl, edrv, sink, i, 1)) {
+        ok = false;
+      }
     });
   }
+  return ok;
+}
+
+/**
+ * @brief Atomic detach/mutate/re-insert for one sink (the paired path).
+ *
+ * Detaches the sink's chain edges, runs the table edit, then re-inserts
+ * from the edited tables. Returns false when any edge half fails, so a
+ * half-applied chain state is loud at the call site instead of silent
+ * behind two void calls.
+ *
+ * @tparam F Table-edit callable invoked as edit() between the halves.
+ * @param[out] nl Netlist holding chains + tables.
+ * @param[in] sink Sink slot being rewritten.
+ * @param[in] edit Table mutation running between detach and insert.
+ * @return True when both halves maintained every edge.
+ */
+template <typename F>
+inline bool adj_rewire_sink(Netlist &nl, Slot sink, F &&edit) noexcept(noexcept(edit())) {
+  const bool detached = adj_detach_sink(nl, sink);
+  edit();
+  const bool inserted = adj_insert_sink(nl, sink);
+  return detached && inserted;
 }
 
 /**
