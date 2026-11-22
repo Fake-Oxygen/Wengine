@@ -22,9 +22,11 @@
 #include "wengine/core/status.hpp"
 #include "wengine/logic/types.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 namespace wengine::logic {
 
@@ -99,6 +101,20 @@ namespace detail {
   out = v;
   return true;
 }
+/**
+ * @brief Parsed gate identity: kind ordinal + 1-based counter.
+ *
+ * Single accept-set owner for every gate-name lookup (LOGIC bulk-load
+ * split): both the linear scan and the indexed bulk adapter parse through
+ * parse_gate_id below, so their accept sets agree by construction, not
+ * by comment.
+ */
+struct ParsedGateId {
+  /** @brief Kind ordinal (kind_ordinal value, 0..8 + 16..20). */
+  std::uint8_t ordinal = 0;
+  /** @brief 1-based per-kind counter (>= 1). */
+  std::uint32_t counter = 0;
+};
 } // namespace detail
 
 /**
@@ -281,6 +297,42 @@ inline constexpr KindInfo kKinds[] = {
 
 static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows inconsistent");
 
+namespace detail {
+/**
+ * @brief Parse `<KIND><counter>` (case-insensitive kind, 1-based decimal).
+ *
+ * Iterates kKinds in table order, first valid (prefix + counter >= 1)
+ * wins — the exact loop the old resolve_gate / resolve_gate_indexed
+ * duplicates shared by comment. Empty text fails (caller maps to
+ * "bad gate name: empty"); no valid kind/counter fails ("bad gate
+ * name" at the call site).
+ *
+ * @param[in] name Gate display text (e.g. "AND12").
+ * @param[out] out Ordinal + counter on success.
+ * @return True on a well-formed kind + counter, false otherwise.
+ */
+[[nodiscard]] constexpr bool parse_gate_id(std::string_view name, ParsedGateId &out) noexcept {
+  if (name.empty()) {
+    return false;
+  }
+  for (const KindInfo &e : kKinds) {
+    const std::string_view kind_name = e.name;
+    if (!starts_with_ci(name, kind_name)) {
+      continue;
+    }
+    const std::string_view num = name.substr(kind_name.size());
+    std::uint32_t counter = 0;
+    if (!parse_decimal(num, 0xFFFFFFFFu, counter) || counter == 0) {
+      continue; // not this kind (or bad number): keep trying other kinds
+    }
+    out.ordinal = kind_ordinal(e.kind);
+    out.counter = counter;
+    return true;
+  }
+  return false;
+}
+} // namespace detail
+
 /**
  * @brief True iff fan-in n is allowed for kind k (table mask lookup).
  *
@@ -365,36 +417,168 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
   if (name.empty()) {
     return core::Result<Slot>::failure("bad gate name: empty");
   }
-  for (const KindInfo &e : kKinds) {
-    const std::uint8_t o = kind_ordinal(e.kind);
-    const std::string_view kind_name = e.name;
-    if (!detail::starts_with_ci(name, kind_name)) {
-      continue;
+  detail::ParsedGateId id{};
+  if (!detail::parse_gate_id(name, id)) {
+    return core::Result<Slot>::failure("bad gate name");
+  }
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
+    if (g.live && kind_ordinal(g.kind) == id.ordinal && g.counter == id.counter) {
+      return core::Result<Slot>::success(s);
     }
-    const std::string_view num = name.substr(kind_name.size());
-    std::uint32_t counter = 0;
-    if (!detail::parse_decimal(num, 0xFFFFFFFFu, counter) || counter == 0) {
-      continue; // not this kind (or bad number): keep trying other kinds
+  }
+  return core::Result<Slot>::failure("unknown gate");
+}
+
+// --- PinResolution module (bulk-load split) ---------------------------------
+//
+// Two adapters over the one parse_gate_id accept set: LinearScan for
+// single-pin interactive verbs (O(N) scan, trivial cost) and IndexedBulk
+// for bulk replay (O(1) per pin after one O(N) build). Both expose
+// `resolve(name)` + `operator()` with the exact resolve_gate error
+// vocabulary, so parse_pin_with below takes either without duplication.
+// resolve() stays allocation-free/noexcept on both; only IndexedBulk::build
+// (cold bulk path) allocates.
+
+/**
+ * @brief Single-pin gate lookup over the live slot scan.
+ *
+ * Thin adapter around the slot-order scan (deterministic, first match
+ * wins). Interactive verbs use this directly; bulk replay prefers
+ * IndexedBulk.
+ */
+struct LinearScanResolver {
+  /** @brief Netlist searched (non-owning; must outlive use). */
+  const Netlist *nl = nullptr;
+
+  /**
+   * @brief Bind to the netlist searched.
+   * @param[in] n Netlist holding the gates.
+   */
+  explicit LinearScanResolver(const Netlist &n) noexcept : nl(&n) {}
+
+  /**
+   * @brief Resolve a gate display name to its slot.
+   * @param[in] name Case-insensitive kind prefix plus 1-based counter.
+   * @return Slot on success; "bad gate name: empty" / "bad gate name" /
+   *         "unknown gate" otherwise (resolve_gate vocabulary).
+   */
+  [[nodiscard]] core::Result<Slot> resolve(std::string_view name) const noexcept {
+    if (nl == nullptr) {
+      return core::Result<Slot>::failure("unknown gate");
+    }
+    return resolve_gate(*nl, name);
+  }
+
+  /**
+   * @brief Callable form for parse_pin_with (same as resolve).
+   * @param[in] name Gate display text.
+   * @return Slot on success; lookup error otherwise.
+   */
+  [[nodiscard]] core::Result<Slot> operator()(std::string_view name) const noexcept {
+    return resolve(name);
+  }
+};
+
+/**
+ * @brief Bulk gate lookup over dense per-kind counter->slot vectors.
+ *
+ * Counters are per-kind monotonic and dense in bulk loads (never reused,
+ * file order == slot order), so a vector indexed by counter replaces the
+ * old (ordinal, counter) hash: O(1) lookup, one O(N) build, no hashing.
+ * Gaps (sparse counters) read kNoDriver -> "unknown gate", never a
+ * mis-resolve.
+ */
+struct IndexedBulkResolver {
+  /** @brief Per-ordinal counter->slot; index == counter, [0] unused (kNoDriver). */
+  std::array<std::vector<Slot>, 21> slot_by_counter{};
+
+  /**
+   * @brief Drop every table entry (fresh state).
+   */
+  void clear() {
+    for (auto &t : slot_by_counter) {
+      t.clear();
+    }
+  }
+
+  /**
+   * @brief Build the index over one netlist (cold bulk path; allocates).
+   *
+   * Sizes each table to next_counter[ord] (max observed counter + 1),
+   * fills kNoDriver, then records every live slot. Duplicate
+   * (ordinal, counter) pairs must be refused before building (the
+   * loader's duplicate gate-id check); last write would win otherwise.
+   *
+   * @param[in] nl Netlist whose live slots index.
+   */
+  void build(const Netlist &nl) {
+    clear();
+    for (std::size_t o = 0; o < slot_by_counter.size(); ++o) {
+      const std::uint32_t need = (o < nl.next_counter.size()) ? nl.next_counter[o] : 1u;
+      slot_by_counter[o].assign(static_cast<std::size_t>(need), kNoDriver);
     }
     for (Slot s = 0; s < slot_count(nl); ++s) {
       const Gate &g = nl.slots[s];
-      if (g.live && kind_ordinal(g.kind) == o && g.counter == counter) {
-        return core::Result<Slot>::success(s);
+      if (!g.live) {
+        continue;
       }
+      const std::size_t o = static_cast<std::size_t>(kind_ordinal(g.kind));
+      if (o >= slot_by_counter.size()) {
+        continue; // defensive: unknown ordinal never indexes
+      }
+      if (static_cast<std::size_t>(g.counter) >= slot_by_counter[o].size()) {
+        slot_by_counter[o].resize(static_cast<std::size_t>(g.counter) + 1u, kNoDriver);
+      }
+      slot_by_counter[o][g.counter] = s;
     }
-    return core::Result<Slot>::failure("unknown gate");
   }
-  return core::Result<Slot>::failure("bad gate name");
-}
+
+  /**
+   * @brief Resolve a gate display name to its slot (allocation-free).
+   * @param[in] name Case-insensitive kind prefix plus 1-based counter.
+   * @return Slot on success; "bad gate name: empty" / "bad gate name" /
+   *         "unknown gate" otherwise (resolve_gate vocabulary).
+   */
+  [[nodiscard]] core::Result<Slot> resolve(std::string_view name) const noexcept {
+    if (name.empty()) {
+      return core::Result<Slot>::failure("bad gate name: empty");
+    }
+    detail::ParsedGateId id{};
+    if (!detail::parse_gate_id(name, id)) {
+      return core::Result<Slot>::failure("bad gate name");
+    }
+    if (static_cast<std::size_t>(id.ordinal) >= slot_by_counter.size()) {
+      return core::Result<Slot>::failure("unknown gate");
+    }
+    const std::vector<Slot> &t = slot_by_counter[static_cast<std::size_t>(id.ordinal)];
+    if (static_cast<std::size_t>(id.counter) >= t.size()) {
+      return core::Result<Slot>::failure("unknown gate");
+    }
+    const Slot s = t[static_cast<std::size_t>(id.counter)];
+    if (s == kNoDriver) {
+      return core::Result<Slot>::failure("unknown gate");
+    }
+    return core::Result<Slot>::success(s);
+  }
+
+  /**
+   * @brief Callable form for parse_pin_with (same as resolve).
+   * @param[in] name Gate display text.
+   * @return Slot on success; lookup error otherwise.
+   */
+  [[nodiscard]] core::Result<Slot> operator()(std::string_view name) const noexcept {
+    return resolve(name);
+  }
+};
 
 /**
  * @brief Parse `<NAME>.Y` (output) or `<NAME>.<1..k>` (1-based input).
  *
- * Bulk-load seam: the gate-name lookup is a caller-supplied callable
- * returning `core::Result<Slot>` with the exact `resolve_gate` error
- * vocabulary ("unknown gate" for well-formed-but-absent names, anything
- * else for malformed names), so the YAML workspace loader can substitute
- * its O(1) gate index while interactive verbs keep the linear scan.
+ * Bulk-load seam: the gate-name lookup is a PinResolution adapter
+ * (LinearScanResolver for interactive verbs, IndexedBulkResolver for bulk
+ * replay) with the exact `resolve_gate` error vocabulary ("unknown gate"
+ * for well-formed-but-absent names, anything else for malformed names).
  * Suffix parsing (named sequential pins, Q/NQ, Y, numerics) stays here —
  * the one table-owned spelling, never duplicated at call sites.
  *
@@ -504,7 +688,7 @@ template <typename GateLookup>
  *         ("input index out of range").
  */
 [[nodiscard]] inline core::Result<PinRef> parse_pin(const Netlist &nl, std::string_view text) noexcept {
-  return parse_pin_with(nl, text, [&](std::string_view name) noexcept { return resolve_gate(nl, name); });
+  return parse_pin_with(nl, text, LinearScanResolver(nl));
 }
 
 } // namespace wengine::logic

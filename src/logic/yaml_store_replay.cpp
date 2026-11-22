@@ -17,6 +17,7 @@
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -62,8 +63,7 @@ void fill_gate_slots(const Collected &in, Netlist &tmp) {
 
 } // namespace
 
-[[nodiscard]] bool replay_gates(const Collected &in, const YAML::Node &sec, Netlist &tmp, const GateIndex &idx, std::string &err) {
-  (void)idx; // slots do not exist yet: nothing to index.
+[[nodiscard]] bool replay_gates(const Collected &in, const YAML::Node &sec, Netlist &tmp, std::string &err) {
   const std::vector<GateRow> &gate_rows = in.gates;
   // Dynamic pool: grow to cover every file row before slot-indexed
   // replay. The file-size gate in load_impl already capped the row
@@ -73,17 +73,35 @@ void fill_gate_slots(const Collected &in, Netlist &tmp) {
     err = at_line(sec, "too many gates (max " + std::to_string(kMaxGates) + ")");
     return false;
   }
-  // Duplicate gate ids: hash set on (kind-ordinal, counter), O(N).
-  // The old pairwise scan was O(N^2) — the 100k-gate load wall.
-  std::unordered_set<std::uint64_t> seen;
-  seen.reserve(gate_rows.size() * 2 + 1);
+  // Duplicate gate ids: dense per-kind counter scan, O(N). Counters are
+  // per-kind monotonic and dense in bulk loads, so a vector indexed by
+  // counter replaces the old (ordinal, counter) hash set — same refusal,
+  // no hashing. Sparse file counters still work (gaps stay unseen).
+  std::array<std::uint32_t, 21> max_seen{};
+  for (const GateRow &g : gate_rows) {
+    const std::size_t o = static_cast<std::size_t>(kind_ordinal(g.kind));
+    if (o < max_seen.size() && max_seen[o] < g.counter) {
+      max_seen[o] = g.counter;
+    }
+  }
+  std::array<std::vector<char>, 21> seen;
+  for (std::size_t o = 0; o < seen.size(); ++o) {
+    if (max_seen[o] != 0) {
+      seen[o].assign(static_cast<std::size_t>(max_seen[o]) + 1u, 0);
+    }
+  }
   for (std::size_t i = 0; i < gate_rows.size(); ++i) {
     const GateRow &g = gate_rows[i];
-    const std::uint64_t key = gate_index_key(kind_ordinal(g.kind), g.counter);
-    if (!seen.insert(key).second) {
+    const std::size_t o = static_cast<std::size_t>(kind_ordinal(g.kind));
+    if (o >= seen.size() || static_cast<std::size_t>(g.counter) >= seen[o].size()) {
       err = "line " + std::to_string(line_of(sec[i])) + ": duplicate gate id '" + g.id + "'";
       return false;
     }
+    if (seen[o][g.counter] != 0) {
+      err = "line " + std::to_string(line_of(sec[i])) + ": duplicate gate id '" + g.id + "'";
+      return false;
+    }
+    seen[o][g.counter] = 1;
   }
   fill_gate_slots(in, tmp);
   return true;
@@ -95,10 +113,12 @@ void fill_gate_slots(const Collected &in, Netlist &tmp) {
 // Mark validation mirrors the engine seam exactly: live inputs,
 // untied destinations (ties do not exist yet at this point, so the
 // loader's tie-time check below guards the other direction).
-[[nodiscard]] bool replay_shared(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, const GateIndex &idx, std::string &err) {
+[[nodiscard]] bool replay_shared(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, std::string &err) {
+  IndexedBulkResolver idx;
+  idx.build(tmp);
   for (const SharedRow &sr : in.shared) {
     const std::string at = "line " + std::to_string(sr.line) + ": ";
-    const auto pin = parse_pin_indexed(tmp, idx, sr.net);
+    const auto pin = parse_pin_with(tmp, sr.net, idx);
     if (!pin.ok() || pin.value.is_output) {
       err = at + "bad shared net '" + sr.net + "'";
       return false;
@@ -118,17 +138,18 @@ void fill_gate_slots(const Collected &in, Netlist &tmp) {
 namespace {
 
 // One resolved wire row: pin validation + occupancy + NQ rules, edge
-// append excluded. Shared by the fast bulk loop and the slow cycle
-// diagnostic so their accept sets stay identical (same diagnostics,
-// same order).
+// append excluded. Single shared predicate for the fast bulk loop and
+// the slow cycle diagnostic, so their accept sets agree by construction
+// (same function, same diagnostics, same order).
 struct WirePins {
   PinRef from{};
   PinRef to{};
 };
 
-[[nodiscard]] bool resolve_wire_row(const Netlist &tmp, const GateIndex &idx, const WireRow &w, WirePins &pins, std::string &err) {
+[[nodiscard]] bool validate_wire_row(const Netlist &tmp, const IndexedBulkResolver &idx, const WireRow &w, WirePins &pins,
+                                     std::string &err) {
   const std::string at = "line " + std::to_string(w.line) + ": ";
-  const auto from = parse_pin_indexed(tmp, idx, w.from);
+  const auto from = parse_pin_with(tmp, w.from, idx);
   if (!from.ok()) {
     if (from.error == std::string_view("unknown gate")) {
       err = at + "unknown gate in wire source '" + w.from + "'";
@@ -137,7 +158,7 @@ struct WirePins {
     }
     return false;
   }
-  const auto to = parse_pin_indexed(tmp, idx, w.to);
+  const auto to = parse_pin_with(tmp, w.to, idx);
   if (!to.ok()) {
     if (to.error == std::string_view("unknown gate")) {
       err = at + "unknown gate in wire destination '" + w.to + "'";
@@ -202,11 +223,51 @@ struct WirePins {
   return true;
 }
 
+// Q-boundary probe shared by the slow diagnostic: an edge into a
+// sequential-gate input can never close a combinational cycle (same rule
+// as logic::wire), so file order never affects acceptance. The
+// whole-graph validator stays authoritative; this names the first closing
+// wire on the failure path only.
+[[nodiscard]] bool closes_comb_cycle(Netlist &nl, const WirePins &pins) {
+  return !is_sequential_kind(nl.slots[pins.to.slot].kind) &&
+         topo::reaches(nl, pins.to.slot, pins.from.slot, EdgeFilter::kCombOnly);
+}
+
+// Single merged wire loop: validate + append every row, optionally
+// probing each edge for the first combinational-cycle closer. The fast
+// bulk path runs with probe=false (whole-graph check stays
+// authoritative); the slow diagnostic re-runs the same rows on a scratch
+// net with probe=true. One loop, one predicate — no fast/slow
+// duplication.
+[[nodiscard]] bool replay_wire_rows(Netlist &nl, const IndexedBulkResolver &idx, const Collected &in, bool probe_cycle,
+                                   std::string &err, bool generic_row_errors) {
+  for (const WireRow &w : in.wires) {
+    WirePins pins{};
+    if (!validate_wire_row(nl, idx, w, pins, err)) {
+      if (generic_row_errors) {
+        err = "workspace topology error"; // unreachable: rows resolved above
+      }
+      return false;
+    }
+    if (!append_wire_edge(nl, w, pins, err)) {
+      if (generic_row_errors) {
+        err = "workspace topology error"; // unreachable: caps passed above
+      }
+      return false;
+    }
+    if (probe_cycle && closes_comb_cycle(nl, pins)) {
+      err = "line " + std::to_string(w.line) + ": wire closes a combinational cycle '" + w.from + "' -> '" + w.to + "'";
+      return false;
+    }
+  }
+  return true;
+}
+
 // Slow cycle diagnostic (failure path only): replays the rows onto a
-// scratch net with the old per-wire cycle probe to name the first
-// closing wire. The fast bulk loop below skips that probe — its O(N)
-// seen-zeroing per wire dominates large loads — while the single
-// whole-graph check stays authoritative.
+// scratch net with the per-wire cycle probe to name the first closing
+// wire. The fast bulk path skips that probe — its O(N) seen-zeroing per
+// wire dominates large loads — while the single whole-graph check stays
+// authoritative.
 [[nodiscard]] bool locate_cycle_wire(const Collected &in, std::string &err) {
   Netlist scratch{};
   if (!ensure_slots(scratch, in.gates.size())) {
@@ -214,32 +275,19 @@ struct WirePins {
     return false;
   }
   fill_gate_slots(in, scratch);
-  GateIndex sidx;
-  build_gate_index(scratch, sidx);
   std::string dummy;
-  if (!replay_shared(in, YAML::Node{}, scratch, sidx, dummy)) {
+  if (!replay_shared(in, YAML::Node{}, scratch, dummy)) {
     err = std::move(dummy); // unreachable: shared replay passed above
     return false;
   }
-  for (const WireRow &w : in.wires) {
-    WirePins pins{};
-    if (!resolve_wire_row(scratch, sidx, w, pins, dummy)) {
-      err = "workspace topology error"; // unreachable: rows resolved above
-      return false;
+  IndexedBulkResolver sidx;
+  sidx.build(scratch);
+  if (!replay_wire_rows(scratch, sidx, in, true, dummy, true)) {
+    err = std::move(dummy);
+    if (err.rfind("line ", 0) != 0) {
+      err = "workspace topology error";
     }
-    if (!append_wire_edge(scratch, w, pins, dummy)) {
-      err = "workspace topology error"; // unreachable: caps passed above
-      return false;
-    }
-    // Q-boundary (same rule as logic::wire): an edge into a
-    // sequential-gate input can never close a combinational cycle, so
-    // file order never affects acceptance. The whole-graph validator
-    // at the end stays authoritative.
-    if (!is_sequential_kind(scratch.slots[pins.to.slot].kind) &&
-        topo::reaches(scratch, pins.to.slot, pins.from.slot, EdgeFilter::kCombOnly)) {
-      err = "line " + std::to_string(w.line) + ": wire closes a combinational cycle '" + w.from + "' -> '" + w.to + "'";
-      return false;
-    }
+    return false;
   }
   err = "workspace topology error";
   return false;
@@ -247,21 +295,17 @@ struct WirePins {
 
 } // namespace
 
-[[nodiscard]] bool replay_wires(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, const GateIndex &idx, std::string &err) {
+[[nodiscard]] bool replay_wires(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, std::string &err) {
   // Fast bulk loop: pin/occupancy/NQ validation + edge append, no
   // per-wire cycle probe. The probe's whole-pool seen-zeroing per wire
   // is O(N*W) — the second half of the 100k-gate load wall. Cycles are
   // caught once below by the whole-graph check (same authority as
   // validate_topology); only that failure pays for the slow
   // line-numbered diagnostic above.
-  for (const WireRow &w : in.wires) {
-    WirePins pins{};
-    if (!resolve_wire_row(tmp, idx, w, pins, err)) {
-      return false;
-    }
-    if (!append_wire_edge(tmp, w, pins, err)) {
-      return false;
-    }
+  IndexedBulkResolver idx;
+  idx.build(tmp);
+  if (!replay_wire_rows(tmp, idx, in, false, err, false)) {
+    return false;
   }
   adjacency::adjacency_rebuild(tmp);
   const bool acyclic = has_sequential_gates(tmp) ? topo::query(tmp, EdgeFilter::kCombOnly).ok()
@@ -272,10 +316,12 @@ struct WirePins {
   return locate_cycle_wire(in, err);
 }
 
-[[nodiscard]] bool replay_ties(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, const GateIndex &idx, std::string &err) {
+[[nodiscard]] bool replay_ties(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, std::string &err) {
+  IndexedBulkResolver idx;
+  idx.build(tmp);
   for (const TieRow &t : in.ties) {
     const std::string at = "line " + std::to_string(t.line) + ": ";
-    const auto a = parse_pin_indexed(tmp, idx, t.a);
+    const auto a = parse_pin_with(tmp, t.a, idx);
     if (!a.ok()) {
       if (a.error == std::string_view("unknown gate")) {
         err = at + "unknown gate in tie pin '" + t.a + "'";
@@ -284,7 +330,7 @@ struct WirePins {
       }
       return false;
     }
-    const auto b = parse_pin_indexed(tmp, idx, t.b);
+    const auto b = parse_pin_with(tmp, t.b, idx);
     if (!b.ok()) {
       if (b.error == std::string_view("unknown gate")) {
         err = at + "unknown gate in tie pin '" + t.b + "'";
@@ -331,10 +377,12 @@ struct WirePins {
 // the pull diagnostic, mirroring the interactive verbs) and after
 // wires (pulled destinations wire normally). Replay order is file
 // order; row validation replays the engine seams exactly.
-[[nodiscard]] bool replay_pulls(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, const GateIndex &idx, std::string &err) {
+[[nodiscard]] bool replay_pulls(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, std::string &err) {
+  IndexedBulkResolver idx;
+  idx.build(tmp);
   for (const PullRow &pr : in.pulls) {
     const std::string at = "line " + std::to_string(pr.line) + ": ";
-    const auto pin = parse_pin_indexed(tmp, idx, pr.net);
+    const auto pin = parse_pin_with(tmp, pr.net, idx);
     if (!pin.ok()) {
       err = at + "bad pull net '" + pr.net + "'";
       return false;
