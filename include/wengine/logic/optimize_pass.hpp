@@ -48,7 +48,9 @@ namespace wengine::logic::detail {
  * The orchestrator fills this once from its caller-owned scratch;
  * adapters read only their own slices. Pool-sized spans are validated
  * by the caller (OptimizeScratch::validate / post_cleanup entry
- * checks) before the driver runs.
+ * checks) before the driver runs. Topology rides the CompiledOrder
+ * seam (compile/query own their workspace internally), so no pass
+ * carries Kahn scratch.
  */
 struct PassCtx {
   /** @brief Per-slot sequential-user bits (recomputed by the driver when stale). */
@@ -73,8 +75,6 @@ struct PassCtx {
   std::span<Slot> bhead;
   /** @brief Dedup chain links (n, post-cleanup). */
   std::span<Slot> bnext;
-  /** @brief Kahn scratch bundle. */
-  topo::TopoScratch topo;
   /** @brief True selects the kCombOnly filter (sequential nets). */
   bool seq_net = false;
   /** @brief False skips the De Morgan fusion sweep (O0). */
@@ -92,7 +92,7 @@ struct PassCtx {
  * @param[in,out] ctx Scratch + policy (see PassCtx).
  * @return True when the net changed (topology now dirty).
  */
-using PassRun = bool (*)(Netlist &, PassCtx &) noexcept;
+using PassRun = bool (*)(Netlist &, PassCtx &);
 
 /**
  * @brief One fixpoint table entry: a pass plus its freshness needs.
@@ -134,8 +134,8 @@ inline bool pass_const_fold(Netlist &nl, PassCtx &ctx) noexcept {
 }
 
 /** @brief Exact truth-table simplification adapter (self-rebuilding). */
-inline bool pass_exact(Netlist &nl, PassCtx &ctx) noexcept {
-  return exact_simplify_pass(nl, ctx.resolved, ctx.gate_out, ctx.topo, ctx.ties);
+inline bool pass_exact(Netlist &nl, PassCtx &ctx) {
+  return exact_simplify_pass(nl, ctx.resolved, ctx.gate_out, ctx.ties);
 }
 
 /** @brief Dead-gate elimination adapter. */
@@ -165,14 +165,13 @@ inline bool pass_double_inv(Netlist &nl, PassCtx &ctx) noexcept {
  *
  * @param[out] nl Netlist receiving topo_order/level/dirty.
  * @param[in] f Edge set to compile (kCombOnly for sequential nets).
- * @param[in] ts Caller-owned Kahn scratch.
  * @return kOk on success; kInvalidArgument on topology defects.
  */
-[[nodiscard]] inline core::Status ensure_topo(Netlist &nl, EdgeFilter f, const topo::TopoScratch &ts) noexcept {
+[[nodiscard]] inline core::Status ensure_topo(Netlist &nl, EdgeFilter f) {
   if (!nl.dirty && !nl.topo_order.empty()) {
     return core::Status::success();
   }
-  return topo::rebuild(nl, f, ts);
+  return topo::compile(nl, f);
 }
 
 /**
@@ -193,7 +192,7 @@ inline bool pass_double_inv(Netlist &nl, PassCtx &ctx) noexcept {
  *         iteration-bound exhaustion.
  */
 [[nodiscard]] inline BuildError run_fixpoint(Netlist &nl, const Pass *passes, std::size_t npass,
-                                             PassCtx &ctx) noexcept {
+                                             PassCtx &ctx) {
   const EdgeFilter f = ctx.seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll;
   constexpr std::size_t kMaxItersBase = 16;
   bool feeds_stale = true;
@@ -203,13 +202,13 @@ inline bool pass_double_inv(Netlist &nl, PassCtx &ctx) noexcept {
       return BuildError::kIter;
     }
     ++iter;
-    if (!ensure_topo(nl, f, ctx.topo).ok()) {
+    if (!ensure_topo(nl, f).ok()) {
       return BuildError::kTopo;
     }
     bool changed = false;
     for (std::size_t p = 0; p < npass; ++p) {
       if (passes[p].needs_topo && nl.dirty) {
-        if (!ensure_topo(nl, f, ctx.topo).ok()) {
+        if (!ensure_topo(nl, f).ok()) {
           return BuildError::kTopo;
         }
       }

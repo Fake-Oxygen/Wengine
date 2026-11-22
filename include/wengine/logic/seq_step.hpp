@@ -42,8 +42,8 @@
  * committing.
  *
  * solve()/eval_block_word() stay combinational-only: do not call them on
- * nets with sequential gates — topo::rebuild(kAll) sees ALL edges and
- * fails loudly on flop feedback loops by design; use topo::validate
+ * nets with sequential gates — topo::compile(kAll) sees ALL edges and
+ * fails loudly on flop feedback loops by design; use topo::query
  * with EdgeFilter::kCombOnly plus seq_step() instead.
  *
  * Dependency rules (docs/logic.md section 4): header-only,
@@ -58,8 +58,9 @@
  * Capacity (015): the pool is dynamic (see types.hpp) — every scan and
  * init here is bounded by `slot_count(nl)`, never by the loud
  * `kMaxGates` cap. The stepper entries are plain (non-template)
- * functions over `Netlist`/`SeqState` with caller-owned scratch (the
- * `SeqScratch` bundle plus the `topo::TopoScratch` bundle); the
+ * functions over `Netlist`/`SeqState` with caller-owned step scratch
+ * (the `SeqScratch` bundle); topology rides the CompiledOrder seam
+ * (compile/query/comb_order own their workspace internally). The
  * fewer-param wrappers below keep today's signatures over any pool by
  * growing the pool workspace (`ensure_workspace` plus the `ws_*`
  * spans) instead of fixed stack arrays. Caller-owned order buffers
@@ -125,23 +126,23 @@ namespace detail {
  * Used by the stepper snapshot and the async-apply path alike so wired
  * RST/SET resolve identically.
  *
- * @param[in] nl Netlist to evaluate.
+ * @param[in] nl Netlist to evaluate (combinational order derived
+ *             through the CompiledOrder seam).
  * @param[in] st Clocked state providing OLD Qs.
  * @param[in] resolved Pre-resolved dangling values from fill_resolved.
  * @param[out] gate_out Per-slot settled outputs (caller-owned).
- * @param[out] comb_order Combinational order from compile_comb_order
+ * @param[out] comb_order Combinational order from topo::comb_order
  *             (caller-owned, pool-sized).
  * @param[out] n_comb Number of combinational slots emitted.
  * @param[in] diag Optional contention channel (nullptr = no counting).
- * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success; kInvalidArgument on combinational cycles,
  *         dangling drivers, X/Z inputs, or undersized scratch.
  */
-[[nodiscard]] inline core::Status eval_comb_phase1(const Netlist &nl, const SeqState &st,
+[[nodiscard]] inline core::Status eval_comb_phase1(Netlist &nl, const SeqState &st,
                                                    const LogicValue *resolved, LogicValue *gate_out,
                                                    Slot *comb_order, std::size_t &n_comb,
-                                                   SolveDiag *diag, const topo::TopoScratch &ts) noexcept {
-  if (!topo::compile_comb_order(nl, comb_order, n_comb, ts.indeg, ts.queue)) {
+                                                   SolveDiag *diag) {
+  if (!topo::comb_order(nl, comb_order, n_comb)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   for (std::size_t s = 0; s < slot_count(nl); ++s) {
@@ -314,7 +315,6 @@ namespace detail {
  * @param[in] n_members Member count (ignored when members is nullptr).
  * @param[in] diag Optional contention channel (nullptr = no counting).
  * @param[in] ss Caller-owned step scratch (see SeqScratch).
- * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success; kInvalidArgument on topology errors
  *         (combinational cycle under kCombOnly), size mismatches, X/Z
  *         inputs or state, S=R=1 nets (state untouched), or undersized
@@ -324,13 +324,12 @@ namespace detail {
                                                      std::span<const LogicValue> block_inputs,
                                                      std::span<LogicValue> block_outputs,
                                                      const Slot *members, std::size_t n_members,
-                                                     SolveDiag *diag, const SeqScratch &ss,
-                                                     const topo::TopoScratch &ts) noexcept {
+                                                     SolveDiag *diag, const SeqScratch &ss) {
   if (!ss.validate(slot_count(nl)).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   init_seq_state(st, nl);
-  if (!topo::validate(nl, EdgeFilter::kCombOnly, ts).ok()) {
+  if (!topo::query(nl, EdgeFilter::kCombOnly).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t n_in = block_input_count(nl);
@@ -353,7 +352,7 @@ namespace detail {
   }
 
   std::size_t n_comb = 0;
-  if (!detail::eval_comb_phase1(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.comb_order.data(), n_comb, diag, ts).ok()) {
+  if (!detail::eval_comb_phase1(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.comb_order.data(), n_comb, diag).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
 
@@ -514,7 +513,7 @@ namespace detail {
 /**
  * @brief Single rising edge over a flop subset.
  *
- * Workspace-backed convenience entry: grows the pool's step/Kahn
+ * Workspace-backed convenience entry: grows the pool's step
  * scratch to the pool size, then runs the core above. (No noexcept:
  * workspace growth may allocate.)
  *
@@ -543,9 +542,7 @@ namespace detail {
                       std::span<LogicValue>(nl.ws_gate_out.data(), n), std::span<LogicValue>(nl.ws_next_q.data(), n),
                       std::span<LogicValue>(nl.ws_forced_q.data(), n),
                       std::span<std::uint8_t>(nl.ws_force.data(), n)};
-  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
-                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
-  return seq_step_filtered(nl, st, block_inputs, block_outputs, members, n_members, diag, ss, ts);
+  return seq_step_filtered(nl, st, block_inputs, block_outputs, members, n_members, diag, ss);
 }
 
 /**
@@ -559,22 +556,20 @@ namespace detail {
  * @param[out] block_outputs End-of-step values in interface order.
  * @param[in] diag Optional contention channel (nullptr = no counting).
  * @param[in] ss Caller-owned step scratch (see SeqScratch).
- * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success; kInvalidArgument on any seq_step_filtered
  *         failure (state untouched).
  */
 [[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st,
                                            std::span<const LogicValue> block_inputs,
                                            std::span<LogicValue> block_outputs, SolveDiag *diag,
-                                           const SeqScratch &ss,
-                                           const topo::TopoScratch &ts) noexcept {
-  return seq_step_filtered(nl, st, block_inputs, block_outputs, nullptr, 0, diag, ss, ts);
+                                           const SeqScratch &ss) {
+  return seq_step_filtered(nl, st, block_inputs, block_outputs, nullptr, 0, diag, ss);
 }
 
 /**
  * @brief Single rising edge over the whole netlist (global clock).
  *
- * Workspace-backed convenience entry: grows the pool's step/Kahn
+ * Workspace-backed convenience entry: grows the pool's step
  * scratch to the pool size, then runs the core above. (No noexcept:
  * workspace growth may allocate.)
  *
@@ -597,9 +592,7 @@ namespace detail {
                       std::span<LogicValue>(nl.ws_gate_out.data(), n), std::span<LogicValue>(nl.ws_next_q.data(), n),
                       std::span<LogicValue>(nl.ws_forced_q.data(), n),
                       std::span<std::uint8_t>(nl.ws_force.data(), n)};
-  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
-                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
-  return seq_step(nl, st, block_inputs, block_outputs, diag, ss, ts);
+  return seq_step(nl, st, block_inputs, block_outputs, diag, ss);
 }
 
 /**
@@ -618,13 +611,12 @@ namespace detail {
  * @param[out] st Pool receiving forced Qs.
  * @param[in] block_inputs Input values in interface order.
  * @param[in] ss Caller-owned step scratch (see SeqScratch).
- * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success (including no-op nets); kInvalidArgument on
  *         topology errors, size mismatches, X/Z controls (state
  *         untouched), or undersized scratch.
  */
 [[nodiscard]] inline core::Status apply_async_controls(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
-                                                        const SeqScratch &ss, const topo::TopoScratch &ts) noexcept {
+                                                        const SeqScratch &ss) {
   if (!ss.validate(slot_count(nl)).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
@@ -635,7 +627,7 @@ namespace detail {
     // authoring on combinational netlists. Callers validate topology on
     // their own path; only SeqState forcing lives here.
   }
-  if (!topo::validate(nl, EdgeFilter::kCombOnly, ts).ok()) {
+  if (!topo::query(nl, EdgeFilter::kCombOnly).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t n_in = block_input_count(nl);
@@ -651,7 +643,7 @@ namespace detail {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   std::size_t n_comb = 0;
-  if (!detail::eval_comb_phase1(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.comb_order.data(), n_comb, nullptr, ts).ok()) {
+  if (!detail::eval_comb_phase1(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.comb_order.data(), n_comb, nullptr).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   for (std::size_t s = 0; s < slot_count(nl); ++s) {
@@ -687,7 +679,7 @@ namespace detail {
 /**
  * @brief Immediate async-apply for full-control DFFs.
  *
- * Workspace-backed convenience entry: grows the pool's step/Kahn
+ * Workspace-backed convenience entry: grows the pool's step
  * scratch to the pool size, then runs the core above. (No noexcept:
  * workspace growth may allocate.)
  *
@@ -706,9 +698,7 @@ namespace detail {
                       std::span<LogicValue>(nl.ws_gate_out.data(), n), std::span<LogicValue>(nl.ws_next_q.data(), n),
                       std::span<LogicValue>(nl.ws_forced_q.data(), n),
                       std::span<std::uint8_t>(nl.ws_force.data(), n)};
-  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
-                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
-  return apply_async_controls(nl, st, block_inputs, ss, ts);
+  return apply_async_controls(nl, st, block_inputs, ss);
 }
 
 /**
@@ -729,15 +719,13 @@ namespace detail {
  * @param[out] st Pool receiving settled latch Qs.
  * @param[in] block_inputs Input values in interface order.
  * @param[in] ss Caller-owned step scratch (see SeqScratch).
- * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success (including no-op nets); kInvalidArgument on
  *         topology errors, size mismatches, X/Z inputs, S=R=1 nets
  *         (state untouched), or undersized scratch.
  */
 [[nodiscard]] inline core::Status apply_level_latches(Netlist &nl, SeqState &st,
                                                        std::span<const LogicValue> block_inputs,
-                                                       const SeqScratch &ss,
-                                                       const topo::TopoScratch &ts) noexcept {
+                                                       const SeqScratch &ss) {
   if (!ss.validate(slot_count(nl)).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
@@ -746,7 +734,7 @@ namespace detail {
     return core::Status::success(); // (011) Vacuous settle: no latches to
     // settle (same rationale as apply_async_controls above).
   }
-  if (!topo::validate(nl, EdgeFilter::kCombOnly, ts).ok()) {
+  if (!topo::query(nl, EdgeFilter::kCombOnly).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t n_in = block_input_count(nl);
@@ -762,7 +750,7 @@ namespace detail {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   std::size_t n_comb = 0;
-  if (!detail::eval_comb_phase1(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.comb_order.data(), n_comb, nullptr, ts).ok()) {
+  if (!detail::eval_comb_phase1(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.comb_order.data(), n_comb, nullptr).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   return detail::apply_level_resolve(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.next_q);
@@ -771,7 +759,7 @@ namespace detail {
 /**
  * @brief Immediate level-settle for DLATCH/SRLATCH.
  *
- * Workspace-backed convenience entry: grows the pool's step/Kahn
+ * Workspace-backed convenience entry: grows the pool's step
  * scratch to the pool size, then runs the core above. (No noexcept:
  * workspace growth may allocate.)
  *
@@ -790,9 +778,7 @@ namespace detail {
                       std::span<LogicValue>(nl.ws_gate_out.data(), n), std::span<LogicValue>(nl.ws_next_q.data(), n),
                       std::span<LogicValue>(nl.ws_forced_q.data(), n),
                       std::span<std::uint8_t>(nl.ws_force.data(), n)};
-  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
-                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
-  return apply_level_latches(nl, st, block_inputs, ss, ts);
+  return apply_level_latches(nl, st, block_inputs, ss);
 }
 
 /**

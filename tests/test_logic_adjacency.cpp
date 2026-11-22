@@ -649,7 +649,7 @@ void test_optimize_invariants() {
     assert(r.ok());
     Netlist opt = r.value;
     assert(opt.live_count <= src.live_count); // O0/O1 never grow
-    assert(logic::topo::validate(opt, logic::EdgeFilter::kCombOnly).ok());
+    assert(logic::topo::query(opt, logic::EdgeFilter::kCombOnly).ok());
     assert(logic::block_input_count(opt) == n_in); // interface stable
     assert(logic::block_output_count(opt) == n_out);
     // Counters stay unique per kind.
@@ -711,7 +711,7 @@ void test_dedup_sweep_state() {
     assert(ref_nl == live_nl);   // identical netlist per sweep
     ++sweeps;
   }
-  assert(logic::topo::validate(live_nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(live_nl, logic::EdgeFilter::kCombOnly).ok());
 }
 
 void test_optimizer_barriers() {
@@ -748,22 +748,19 @@ void test_optimizer_barriers() {
 void test_loud_refusals() {
   Netlist nl = make_layered(3, 3);
   const Netlist before = nl;
-  // Undersized Kahn scratch refuses before touching the netlist.
+  // Undersized Kahn scratch refuses before touching the netlist: the
+  // single scratch-taking core (detail::kahn_core) is the internal seam
+  // the refusal tests pin — compile/query/comb_order own their scratch.
   {
     std::vector<Slot> tiny(1, 0);
     std::vector<std::uint8_t> tiny_b(1, 0);
-    const logic::topo::TopoScratch ts{std::span<Slot>(tiny.data(), tiny.size()),
-                                      std::span<Slot>(tiny.data(), tiny.size()),
-                                      std::span<std::uint8_t>(tiny_b.data(), tiny_b.size()),
-                                      std::span<Slot>(tiny.data(), tiny.size())};
-    assert(!logic::topo::rebuild(nl, logic::EdgeFilter::kAll, ts).ok());
-    assert(!logic::topo::validate(nl, logic::EdgeFilter::kAll, ts).ok());
-    assert(nl == before);
-    std::uint8_t indeg1[1] = {0};
-    Slot queue1[1] = {logic::kNoDriver};
     std::size_t n_out = 0;
-    assert(!logic::topo::compile_comb_order(nl, queue1, n_out, std::span<std::uint8_t>(indeg1, 1),
-                                            std::span<Slot>(queue1, 1)));
+    assert(!logic::topo::detail::kahn_core(nl, logic::EdgeFilter::kAll, tiny.data(), tiny.data(), n_out,
+                                           std::span<std::uint8_t>(tiny_b.data(), tiny_b.size()),
+                                           std::span<Slot>(tiny.data(), tiny.size()), false));
+    assert(!logic::topo::detail::kahn_core(nl, logic::EdgeFilter::kCombOnly, tiny.data(), nullptr, n_out,
+                                           std::span<std::uint8_t>(tiny_b.data(), tiny_b.size()),
+                                           std::span<Slot>(tiny.data(), tiny.size()), true));
     assert(nl == before);
   }
   // Undersized reachability scratch answers false, never partial.
@@ -791,9 +788,7 @@ void test_loud_refusals() {
 // --- US1: topology compile parity (T008) ------------------------------------
 
 // Full Kahn drain driven by a caller-supplied drain function, recording
-
-// Full Kahn drain driven by a caller-supplied drain function, recording
-// the push sequence. Seed/indeg setup mirrors kahn_pure exactly; only
+// the push sequence. Seed/indeg setup mirrors kahn_core exactly; only
 // the per-pop successor discovery varies (reference scan vs chains).
 template <typename DrainFn>
 std::vector<Slot> drain_sequence(const Netlist &nl, logic::EdgeFilter f, DrainFn drain) {
@@ -806,7 +801,9 @@ std::vector<Slot> drain_sequence(const Netlist &nl, logic::EdgeFilter f, DrainFn
     if (!g.live || (comb && logic::is_sequential_kind(g.kind))) {
       continue;
     }
-    indeg[s] = logic::topo::detail::gate_indeg(nl, g, s, comb);
+    const auto r = logic::topo::detail::gate_indeg(nl, s, comb);
+    assert(r.ok());
+    indeg[s] = r.value;
   }
   std::size_t tail = 0;
   for (Slot s = 0; s < static_cast<Slot>(n); ++s) {
@@ -856,8 +853,8 @@ void test_compile_determinism() {
       Netlist b = src;
       // Flop feedback fails kAll by design — determinism means both runs
       // agree (verdicts and, on success, orders/levels).
-      const bool oka = logic::topo::rebuild(a, f).ok();
-      const bool okb = logic::topo::rebuild(b, f).ok();
+      const bool oka = logic::topo::compile(a, f).ok();
+      const bool okb = logic::topo::compile(b, f).ok();
       assert(oka == okb);
       if (oka) {
         assert(a.topo_order == b.topo_order);
@@ -897,7 +894,7 @@ void test_compile_verdicts() {
   // Flop feedback validates under the combinational filter.
   {
     Netlist nl = make_seq();
-    assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+    assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   }
   // Hand-built dangling driver refuses loudly under kCombOnly.
   {
@@ -906,7 +903,7 @@ void test_compile_verdicts() {
     const Slot y = add_ok(nl, GateKind::kNand, 2);
     wire_ok(nl, x, y, 0);
     nl.slots[x].live = false; // defect injection: driver dies without release
-    assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+    assert(!logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   }
 }
 
@@ -921,7 +918,7 @@ void test_kahn_golden() {
   wire_ok(nl, a, c, 0);
   wire_ok(nl, b, d, 0);
   wire_ok(nl, c, d, 1);
-  assert(logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
+  assert(logic::topo::compile(nl, logic::EdgeFilter::kAll).ok());
   assert(nl.topo_order.size() == 4);
   assert(nl.topo_order[0] == a);
   assert(nl.topo_order[1] == b);
@@ -979,7 +976,7 @@ void check_queries_agree(const Netlist &nl) {
   for (const auto f : {logic::EdgeFilter::kAll, logic::EdgeFilter::kCombOnly}) {
     Netlist a = nl;
     Netlist b = nl;
-    assert(logic::topo::validate(a, f).ok() == logic::topo::validate(b, f).ok());
+    assert(logic::topo::query(a, f).ok() == logic::topo::query(b, f).ok());
   }
   // Content invariants hold.
   assert(adj_matches_tables(nl));

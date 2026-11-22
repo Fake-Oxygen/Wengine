@@ -31,8 +31,9 @@
  * Internal cross-calls are bare (deduction over Netlist, never explicit
  * capacity arguments).
  *
- * Dependency rules: header-only, allocation-free, exception-free
- * (finish_o2 reports BuildError; the caller maps it to messages once).
+ * Dependency rules: header-only, exception-free (topology compiles
+ * through the CompiledOrder seam, which grows workspace amortized;
+ * finish_o2 reports BuildError; the caller maps it to messages once).
  * Depends on netlist.hpp,
  * optimize_barrier.hpp, optimize_exact.hpp, the O2
  * dedup/emit/min headers, optimize_passes.hpp, optimize_types.hpp,
@@ -373,7 +374,6 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
  * @param[in] stack Caller-owned DFS stack (`slot_count(out)` slots).
  * @param[in] tie_survivors Caller-owned scratch (`slot_count(out) * kMaxInputs`
  *            flats) for remove_gate's tie-detach sweep.
- * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kNone on success; kTopo/kIter on topology or bound failures.
  */
 [[nodiscard]] inline BuildError post_cleanup(Netlist &out, const Netlist &nl, const bool *reach,
@@ -381,8 +381,7 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
                                              std::span<bool> post_roots, std::span<bool> post_feeds,
                                              std::span<bool> keep, std::span<Slot> stack,
                                              std::span<std::size_t> tie_survivors,
-                                             std::span<std::uint64_t> buckets, std::span<Slot> bhead, std::span<Slot> bnext,
-                                             const topo::TopoScratch &ts) noexcept {
+                                             std::span<std::uint64_t> buckets, std::span<Slot> bhead, std::span<Slot> bnext) {
   if (post_roots.size() < slot_count(out) || post_feeds.size() < slot_count(out) || buckets.size() < slot_count(out) ||
       bhead.size() < slot_count(out) || bnext.size() < slot_count(out)) {
     return BuildError::kTopo;
@@ -416,7 +415,6 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
   ctx.bucket = buckets;
   ctx.bhead = bhead;
   ctx.bnext = bnext;
-  ctx.topo = ts;
   ctx.seq_net = has_sequential_gates(out);
   ctx.universe = u;
   ctx.merge_tied = has_sequential_gates(nl);
@@ -445,7 +443,6 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
  * @param[in] resolved Caller-owned eval scratch (`slot_count(src_nl) * kMaxInputs`
  *            values).
  * @param[in] gate_out Caller-owned eval scratch (`slot_count(src_nl)` outputs).
- * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kNone with the winning netlist in `out` (copied from the
  *         minimized buffer when it wins — nothing is returned by value,
  *         which would put a pool-sized object on the caller stack at
@@ -455,10 +452,9 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
 [[nodiscard]] inline BuildError finish_o2(Netlist &out, Netlist &src_nl,
                                           OptTarget target, Netlist &min_buf,
                                           std::span<LogicValue> resolved,
-                                          std::span<LogicValue> gate_out,
-                                          const topo::TopoScratch &ts) noexcept {
+                                          std::span<LogicValue> gate_out) {
   {
-    if (try_minimized_o2(src_nl, target, min_buf, resolved, gate_out, ts)) {
+    if (try_minimized_o2(src_nl, target, min_buf, resolved, gate_out)) {
       const Slot g_struct = out.live_count;
       const Slot g_min = min_buf.live_count;
       const std::size_t in_struct = block_input_count(out);
@@ -472,7 +468,7 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
   recount_fanout(out);
   out.dirty = true;
   out.topo_order.clear();
-  if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, ts).ok()) {
+  if (!topo::compile(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll).ok()) {
     return BuildError::kTopo;
   }
   return BuildError::kNone;

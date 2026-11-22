@@ -87,22 +87,23 @@ inline void retag(Netlist &nl, Slot slot, GateKind kind) noexcept;
  * @param[out] nl Netlist to simplify.
  * @param[in] resolved Caller-owned eval scratch (`slot_count(nl) * kMaxInputs`
  *            values) for the truth-table solve calls.
- * @param[in] gate_out Caller-owned eval scratch (pool-size outputs) for
+ * @param[in] gate_out Caller-owned eval scratch (pool-sized outputs) for
  *            the truth-table solve calls.
- * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @param[in] tie_members Caller-owned scratch (`slot_count(nl) * kMaxInputs`
  *            flats) for dead-class dissolution.
  * @return True when the net changed; false when limits, hidden
  *         outputs, or sequential gates skip the pass, nothing was
  *         constant/dead, or scratch is undersized.
  * @note Opaque barrier: sequential nets are skipped entirely (block
- *       truth tables are history-dependent). Hidden outputs skip the
- *       pass (conservative: dead-for-visible may be live-for-hidden).
+ *       truth tables are undefined for stateful nets (outputs depend on
+ *       history, and solve() reads flop outputs as kLow), so the exact
+ *       pass skips sequential nets entirely. Structural passes still
+ *       simplify the combinational glue around the barriers.
  */
 
 inline bool exact_simplify_pass(Netlist &nl, std::span<LogicValue> resolved,
-                                 std::span<LogicValue> gate_out, const topo::TopoScratch &ts,
-                                 std::span<std::size_t> tie_members) noexcept {
+                                 std::span<LogicValue> gate_out,
+                                 std::span<std::size_t> tie_members) {
   const std::size_t n = block_input_count(nl);
   const std::size_t m = block_output_count(nl);
   if (n == 0 || n > 10 || m == 0 || m > 16) {
@@ -152,7 +153,7 @@ inline bool exact_simplify_pass(Netlist &nl, std::span<LogicValue> resolved,
   for (std::size_t o = 0; o < m; ++o) {
     out_slots[o] = out_buf[o].slot;
   }
-  if (!topo::rebuild(nl, EdgeFilter::kAll, ts).ok()) {
+  if (!topo::compile(nl, EdgeFilter::kAll).ok()) {
     return false;
   }
   const std::size_t rows = static_cast<std::size_t>(1ULL << n);
@@ -168,7 +169,7 @@ inline bool exact_simplify_pass(Netlist &nl, std::span<LogicValue> resolved,
     for (std::size_t o = 0; o < m; ++o) {
       out_vals[o] = LogicValue::kLow;
     }
-    if (!solve(nl, std::span<const LogicValue>(in_vals, n), std::span<LogicValue>(out_vals, m), nullptr, resolved, gate_out, ts).ok()) {
+    if (!solve(nl, std::span<const LogicValue>(in_vals, n), std::span<LogicValue>(out_vals, m), nullptr, resolved, gate_out).ok()) {
       return false;
     }
     for (std::size_t o = 0; o < m; ++o) {

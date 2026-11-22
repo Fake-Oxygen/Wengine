@@ -420,18 +420,17 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
  * @param[in] resolved Caller-owned eval scratch (`slot_count(src) * kMaxInputs`
  *            values).
  * @param[in] gate_out Caller-owned eval scratch (pool-sized outputs).
- * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return True with out_min on success; false on any limit/budget/
  *         equivalence failure (caller falls back to structural, which is
- *         optimal for XOR-like parity). Deterministic,
- *         allocation-free, noexcept.
+ *         optimal for XOR-like parity). Deterministic.
+ *         (No noexcept: topology compiles through the CompiledOrder seam,
+ *         which grows workspace amortized.)
  * @note Opaque barrier: sequential nets and hidden outputs refuse loudly
  *       to the structural path.
  */
 
 inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min,
-                              std::span<LogicValue> resolved, std::span<LogicValue> gate_out,
-                              const topo::TopoScratch &ts) noexcept {
+                              std::span<LogicValue> resolved, std::span<LogicValue> gate_out) {
   const std::size_t n = block_input_count(src);
   const std::size_t m = block_output_count(src);
   if (n == 0 || n > 8 || m == 0 || m > 8) {
@@ -458,7 +457,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min,
   if (in_n != n || out_n != m) {
     return false;
   }
-  if (!topo::rebuild(src, EdgeFilter::kAll, ts).ok()) {
+  if (!topo::compile(src, EdgeFilter::kAll).ok()) {
     return false;
   }
   const std::size_t rows = static_cast<std::size_t>(1ULL << n);
@@ -473,7 +472,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min,
     for (std::size_t o = 0; o < m; ++o) {
       out_vals[o] = LogicValue::kLow;
     }
-    if (!solve(src, std::span<const LogicValue>(in_vals, n), std::span<LogicValue>(out_vals, m), nullptr, resolved, gate_out, ts).ok()) {
+    if (!solve(src, std::span<const LogicValue>(in_vals, n), std::span<LogicValue>(out_vals, m), nullptr, resolved, gate_out).ok()) {
       return false;
     }
     for (std::size_t o = 0; o < m; ++o) {
@@ -584,7 +583,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min,
   recount_fanout(built);
   built.dirty = true;
   built.topo_order.clear();
-  if (!topo::rebuild(built, EdgeFilter::kAll, ts).ok()) {
+  if (!topo::compile(built, EdgeFilter::kAll).ok()) {
     return false;
   }
   // Interface + proj mapping (minimized inputs -> original inputs).
@@ -647,7 +646,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min,
     for (std::size_t o = 0; o < m; ++o) {
       min_out_vals[o] = LogicValue::kLow;
     }
-    if (!solve(built, std::span<const LogicValue>(min_in_vals, min_in_n), std::span<LogicValue>(min_out_vals, m), nullptr, resolved, gate_out, ts).ok()) {
+    if (!solve(built, std::span<const LogicValue>(min_in_vals, min_in_n), std::span<LogicValue>(min_out_vals, m), nullptr, resolved, gate_out).ok()) {
       return false;
     }
     for (std::size_t o = 0; o < m; ++o) {

@@ -45,12 +45,12 @@ void place_seq(Netlist &nl, logic::Slot slot, GateKind kind, std::uint32_t count
 
 void test_validate_empty_and_comb_acyclic() {
   Netlist nl;
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(!logic::has_sequential_gates(nl));
   const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
   const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   assert(logic::wire(nl, a, n, 0).ok());
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(!logic::has_sequential_gates(nl));
 }
 
@@ -63,7 +63,7 @@ void test_validate_rejects_comb_cycles() {
   nl.slots[n].drivers[0] = a;
   logic::adjacency::adjacency_rebuild(nl); // hand-poked cycle: sync chains
   nl.dirty = true;
-  assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(!logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
 
   // Self-loop likewise fails.
   Netlist self;
@@ -71,7 +71,7 @@ void test_validate_rejects_comb_cycles() {
   self.slots[s].drivers[0] = s;
   logic::adjacency::adjacency_rebuild(self); // hand-poked self-loop: sync chains
   self.dirty = true;
-  assert(!logic::topo::validate(self, logic::EdgeFilter::kCombOnly).ok());
+  assert(!logic::topo::query(self, logic::EdgeFilter::kCombOnly).ok());
 }
 
 void test_flop_feedback_loop() {
@@ -83,7 +83,7 @@ void test_flop_feedback_loop() {
   assert(logic::wire(nl, a, 0, 0).ok()); // AND.Y -> DFF.D
   assert(logic::wire(nl, 0, a, 0).ok()); // DFF.Y -> AND.0 (closes the loop)
   assert(logic::has_sequential_gates(nl));
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   // The all-edges predicate still flags it — the Q-boundary is what allows it.
   assert(logic::topo::reaches(nl, a, 0, logic::EdgeFilter::kAll));
   assert(!logic::topo::reaches(nl, a, 0, logic::EdgeFilter::kCombOnly));
@@ -96,7 +96,7 @@ void test_clk_and_dlatch_variants() {
   const logic::Slot c = logic::add_gate(clk, GateKind::kBuf, 1).value;
   assert(logic::wire(clk, c, 0, 1).ok()); // BUF.Y -> DFF.CLK
   assert(logic::wire(clk, 0, c, 0).ok()); // DFF.Y -> BUF.0
-  assert(logic::topo::validate(clk, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(clk, logic::EdgeFilter::kCombOnly).ok());
 
   // DLATCH enable + D feedback through one comb gate.
   Netlist latch;
@@ -104,7 +104,7 @@ void test_clk_and_dlatch_variants() {
   const logic::Slot o = logic::add_gate(latch, GateKind::kOr, 2).value;
   assert(logic::wire(latch, o, 2, 0).ok()); // OR.Y -> DLATCH.D
   assert(logic::wire(latch, 2, o, 0).ok()); // DLATCH.Y -> OR.0
-  assert(logic::topo::validate(latch, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(latch, logic::EdgeFilter::kCombOnly).ok());
 }
 
 void test_flop_feedback_reverse_order() {
@@ -135,7 +135,7 @@ void test_flop_feedback_reverse_order() {
   assert(logic::wire_pins(nl, nq, i1).ok()); // T1.NQ -> OR.2
   assert(logic::wire(nl, o, 0, 0).ok());     // OR.Y -> T1.T (feedback last)
   assert(logic::has_sequential_gates(nl));
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
 }
 
 void test_comb_cycle_still_rejected_with_flop_present() {
@@ -150,7 +150,7 @@ void test_comb_cycle_still_rejected_with_flop_present() {
   nl.slots[a].drivers[1] = n;
   logic::adjacency::adjacency_rebuild(nl); // hand-poked cycle: sync chains
   nl.dirty = true;
-  assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(!logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
 }
 
 void test_wire_unchanged_for_comb() {
@@ -163,7 +163,7 @@ void test_wire_unchanged_for_comb() {
   assert(logic::wire(nl, a, n, 0).ok());
   assert(!logic::wire(nl, n, a, 0).ok()); // would close AND->NOT->AND
   assert(!logic::has_sequential_gates(nl));
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
 }
 
 void test_has_sequential_gates_tracks_lifetime() {

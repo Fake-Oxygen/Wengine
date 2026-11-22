@@ -350,7 +350,7 @@ inline void timing_resolve_input(const Netlist &nl, Slot slot, std::uint8_t inpu
  * (No noexcept: pool workspace and scratch growth may allocate.)
  */
 [[nodiscard]] inline core::Status timing_settle_initial(Netlist &nl, std::span<const LogicValue> block_inputs, TimingScratch &scratch, EdgeFilter filter) {
-  core::Status st = topo::rebuild(nl, filter);
+  core::Status st = topo::compile(nl, filter);
   if (!st.ok()) {
     return st;
   }

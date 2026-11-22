@@ -407,7 +407,7 @@ bool run_point(std::uint64_t motif, std::size_t n, std::uint64_t words, std::uin
   double rebuild_s = 0.0;
   {
     const double t = time_s([&] {
-      if (!topo::rebuild(nl, EdgeFilter::kAll).ok()) {
+      if (!topo::compile(nl, EdgeFilter::kAll).ok()) {
         why = "rebuild refused";
       }
     });

@@ -57,7 +57,7 @@ Netlist make_counter() {
   assert(logic::wire(nl, q1, x, 1).ok()); // Q1 -> XOR.2
   ignore_input(nl, q0, 1);
   ignore_input(nl, q1, 1);
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 0);
   assert(logic::block_output_count(nl) == 0);
   return nl;
@@ -69,7 +69,7 @@ Netlist make_tdivider() {
   Netlist nl;
   const logic::Slot t = logic::add_gate(nl, GateKind::kT).value;
   ignore_input(nl, t, 1); // CLK ignored (edge is the call)
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 1);
   assert(logic::block_output_count(nl) == 1);
   return nl;
@@ -83,7 +83,7 @@ Netlist make_tdiv4() {
   assert(logic::wire(nl, t0, t1, 0).ok()); // Q0 -> T1.T (flop D first)
   ignore_input(nl, t0, 1);
   ignore_input(nl, t1, 1);
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 1);  // T0.T (SER)
   assert(logic::block_output_count(nl) == 1); // Q1 (Q0 is wired)
   return nl;
@@ -93,7 +93,7 @@ Netlist make_tdiv4() {
 Netlist make_latch() {
   Netlist nl;
   const logic::Slot l = logic::add_gate(nl, GateKind::kDlatch).value;
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 2);
   assert(logic::block_output_count(nl) == 1);
   (void)l;
@@ -387,7 +387,7 @@ Netlist make_two_domain() {
   assert(logic::wire(nl, t1, b, 0).ok()); // Q1 -> BUF.1 (flop D first: sole wire)
   ignore_input(nl, t0, 1);
   ignore_input(nl, t1, 1);
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 2);
   assert(logic::block_output_count(nl) == 2);
   return nl;
@@ -525,7 +525,7 @@ void test_derived_domain_selection_with_inits() {
   assert(logic::wire(nl, 3, 1, 0).ok());                     // NOT1.Y -> DFF1.D
   assert(logic::wire(nl, 2, 4, 0).ok());                     // DFF2.Q -> NOT2.1
   assert(logic::wire(nl, 4, 2, 0).ok());                     // NOT2.Y -> DFF2.D
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   const std::vector<logic::ClockDomain> domains = logic::derive_clock_domains(nl);
   assert(domains.size() == 2);
   std::vector<logic::Slot> members;
@@ -707,7 +707,7 @@ Netlist make_midrun_illegal() {
   const logic::Slot sr = logic::add_gate(nl, GateKind::kSrlatch, 2).value;
   assert(logic::wire(nl, t, sr, 0).ok()); // Q0 -> SR.S
   ignore_input(nl, t, 1);                 // T CLK ignored (edge is the call)
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 2);  // T.T, SR.R
   assert(logic::block_output_count(nl) == 1); // SR.Q (Q0 is wired)
   return nl;
@@ -759,7 +759,7 @@ Netlist make_full_dff() {
   Netlist nl;
   const logic::Slot d = logic::add_gate(nl, GateKind::kDff, 5).value;
   ignore_input(nl, d, 1); // CLK ignored (edge is the call)
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 4);  // D, RST, SET, EN
   assert(logic::block_output_count(nl) == 1); // Q
   return nl;

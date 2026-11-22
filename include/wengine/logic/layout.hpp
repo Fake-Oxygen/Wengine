@@ -14,7 +14,7 @@
  * are Manhattan doglegs through the mid column between the boxes:
  * (x0,y0) -> (xm,y0) -> (xm,y1) -> (x1,y1).
  *
- * Precondition: the caller compiles the topology first (topo::rebuild;
+ * Precondition: the caller compiles the topology first (topo::compile;
  * draw/export verbs do). On a topology error the result is an empty
  * schematic (levels = 0); the verbs report the error themselves before
  * calling here.
@@ -413,7 +413,7 @@ struct Lanes {
     sc.height = 2 * kLayoutMargin;
     return sc;
   }
-  if (!topo::rebuild(nl, EdgeFilter::kAll).ok()) {
+  if (!topo::compile(nl, EdgeFilter::kAll).ok()) {
     return sc; // levels = 0, empty: the verb already reported the error
   }
   int max_level = 0;

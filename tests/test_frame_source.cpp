@@ -270,7 +270,7 @@ void test_logic_csv_exactness() {
     clk.is_output = false;
     clk.input = 1;
     assert(wengine::logic::ignore_pin(nl, clk).ok());
-    assert(wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok());
+    assert(wengine::logic::topo::query(nl, wengine::logic::EdgeFilter::kCombOnly).ok());
     wengine::core::Runner runner{{.dt = 0.01, .emit_every = 2}};
     wengine::solvers::SequentialSolver solver;
     runner.add_solver(solver);

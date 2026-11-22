@@ -264,8 +264,8 @@ struct WirePins {
     }
   }
   adjacency::adjacency_rebuild(tmp);
-  const bool acyclic = has_sequential_gates(tmp) ? topo::validate(tmp, EdgeFilter::kCombOnly).ok()
-                                                 : topo::rebuild(tmp, EdgeFilter::kAll).ok();
+  const bool acyclic = has_sequential_gates(tmp) ? topo::query(tmp, EdgeFilter::kCombOnly).ok()
+                                                 : topo::compile(tmp, EdgeFilter::kAll).ok();
   if (acyclic) {
     return true;
   }
@@ -373,11 +373,11 @@ struct WirePins {
   // Flop-aware cycle check (mirrors the wire verb): combinational loops
   // always fail; feedback through sequential gates validates sequentially.
   if (has_sequential_gates(tmp)) {
-    if (!topo::validate(tmp, EdgeFilter::kCombOnly).ok()) {
+    if (!topo::query(tmp, EdgeFilter::kCombOnly).ok()) {
       err = "workspace topology error";
       return false;
     }
-  } else if (!topo::rebuild(tmp, EdgeFilter::kAll).ok()) {
+  } else if (!topo::compile(tmp, EdgeFilter::kAll).ok()) {
     err = "workspace topology error";
     return false;
   }

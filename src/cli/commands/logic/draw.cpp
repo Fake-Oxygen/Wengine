@@ -32,7 +32,7 @@ int LogicDrawSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::usage_error(out, "draw --out needs a .bmp path", kUsage);
   }
   Netlist &nl = workspace();
-  if (!wengine::logic::topo::rebuild(nl, wengine::logic::EdgeFilter::kAll).ok()) {
+  if (!wengine::logic::topo::compile(nl, wengine::logic::EdgeFilter::kAll).ok()) {
     return cli::runtime_error(out, "draw: topology error");
   }
   const Schematic sc = wengine::logic::layout_schematic(nl);

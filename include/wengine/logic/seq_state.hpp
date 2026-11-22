@@ -294,13 +294,13 @@ inline void reset_seq_state(SeqState &st) noexcept {
   return false;
 }
 
-// Cycle validation lives in topo.hpp (`topo::validate` with
+// Cycle validation lives in topo.hpp (`topo::query` with
 // EdgeFilter::kCombOnly): driver edges into sequential-gate inputs
 // (DFF.D/CLK, DLATCH.D/EN, JK.J/K/CLK, T.T/CLK, SRLATCH.S/R) are excluded
 // from the cycle edge set — flop Q outputs break loops, so feedback
 // through flops (counters, shift registers) validates while pure
-// combinational cycles still fail loudly. `topo::rebuild(kAll)` still
+// combinational cycles still fail loudly. `topo::compile(kAll)` still
 // sees ALL edges, so solve() on sequential loops keeps failing loudly;
-// loaders/steppers call `topo::validate` instead.
+// loaders/steppers call `topo::query` instead.
 
 } // namespace wengine::logic

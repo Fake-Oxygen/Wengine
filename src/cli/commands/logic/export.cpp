@@ -78,7 +78,7 @@ int LogicExportSpec::run(ArgCursor &args, std::ostream &out) {
   out << "truth: " << rows << " rows -> '" << *truth_path << "'\n";
   out << "schema: " << nl.live_count << " gates " << support::wire_count(nl) << " wires -> '" << *schema_path << "'\n";
   if (bmp_path) {
-    if (!wengine::logic::topo::rebuild(nl, wengine::logic::EdgeFilter::kAll).ok()) {
+    if (!wengine::logic::topo::compile(nl, wengine::logic::EdgeFilter::kAll).ok()) {
       return cli::runtime_error(out, "export: topology error");
     }
     const Schematic sc = wengine::logic::layout_schematic(nl);

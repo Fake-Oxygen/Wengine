@@ -240,7 +240,7 @@ class ConfiguredRun {
       if (!cfg.seq.set) {
         return fail("logic run requires a sequential section (set)");
       }
-      if (!logic::topo::validate(cfg.seq.netlist, logic::EdgeFilter::kCombOnly).ok()) {
+      if (!logic::topo::query(cfg.seq.netlist, logic::EdgeFilter::kCombOnly).ok()) {
         return fail("invalid sequential net (combinational cycle or bad topology)");
       }
       if (cfg.seq.stimulus.size() != logic::block_input_count(cfg.seq.netlist)) {

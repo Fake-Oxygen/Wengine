@@ -1485,7 +1485,7 @@ void test_logic_verbs() {
     // Byte-pinned BMP: 'BM' magic + dimensions == 2x layout canvas
     // (raster scale lives in the edge TU; layout stays 1x units).
     wengine::logic::Netlist &ws = logic::workspace();
-    assert(wengine::logic::topo::rebuild(ws, wengine::logic::EdgeFilter::kAll).ok());
+    assert(wengine::logic::topo::compile(ws, wengine::logic::EdgeFilter::kAll).ok());
     const wengine::logic::Schematic sc = wengine::logic::layout_schematic(ws);
     assert(s.find("(" + std::to_string(sc.width * 2) + "x" + std::to_string(sc.height * 2) + ")") !=
            std::string::npos);
@@ -1523,7 +1523,7 @@ void test_logic_verbs() {
     assert(rc == 0);
     assert(s.find("drew 3 gates") != std::string::npos);
     wengine::logic::Netlist &ws = logic::workspace();
-    assert(wengine::logic::topo::rebuild(ws, wengine::logic::EdgeFilter::kAll).ok());
+    assert(wengine::logic::topo::compile(ws, wengine::logic::EdgeFilter::kAll).ok());
     const wengine::logic::Schematic sc = wengine::logic::layout_schematic(ws);
     assert(s.find("(" + std::to_string(sc.width * 2) + "x" + std::to_string(sc.height * 2) + ")") !=
            std::string::npos);
@@ -1611,7 +1611,7 @@ void test_logic_verbs() {
     assert(rc == 0);
     assert(s.find("drew 3 gates") != std::string::npos);
     wengine::logic::Netlist &ws = logic::workspace();
-    assert(wengine::logic::topo::rebuild(ws, wengine::logic::EdgeFilter::kAll).ok());
+    assert(wengine::logic::topo::compile(ws, wengine::logic::EdgeFilter::kAll).ok());
     const wengine::logic::Schematic sc = wengine::logic::layout_schematic(ws);
     std::ifstream f(bmp, std::ios::binary);
     assert(!!f);

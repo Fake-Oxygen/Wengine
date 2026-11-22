@@ -109,7 +109,7 @@ int main(int argc, char **argv) {
       }
     }
   }
-  if (!setup_ok || !wengine::logic::topo::rebuild(nl, wengine::logic::EdgeFilter::kAll).ok()) {
+  if (!setup_ok || !wengine::logic::topo::compile(nl, wengine::logic::EdgeFilter::kAll).ok()) {
     std::cout << "bench_logic: setup failed\n";
     return 1;
   }
@@ -264,7 +264,7 @@ int main(int argc, char **argv) {
     const std::size_t n_in = block_input_count(snl);
     const std::size_t n_out = block_output_count(snl);
     if (!shared_ok || n_in != kBuses || n_out == 0 ||
-        !wengine::logic::topo::rebuild(snl, wengine::logic::EdgeFilter::kAll).ok()) {
+        !wengine::logic::topo::compile(snl, wengine::logic::EdgeFilter::kAll).ok()) {
       std::cout << "bench_logic_shared: setup failed\n";
       return 1;
     }
@@ -327,7 +327,7 @@ int main(int argc, char **argv) {
     auto r0 = std::chrono::high_resolution_clock::now();
     for (std::uint64_t it = 0; it < kRebuildIters; ++it) {
       snl.dirty = true;
-      if (!wengine::logic::topo::rebuild(snl, wengine::logic::EdgeFilter::kAll).ok()) {
+      if (!wengine::logic::topo::compile(snl, wengine::logic::EdgeFilter::kAll).ok()) {
         std::cout << "bench_logic_shared_rebuild: run failed\n";
         return 1;
       }

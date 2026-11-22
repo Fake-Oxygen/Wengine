@@ -210,7 +210,7 @@ void test_scale_parity() {
   constexpr std::size_t kInputs = 6;
   build_layered_bulk(*nl, n, kInputs);
   assert(nl->live_count == static_cast<std::uint32_t>(n));
-  assert(topo::rebuild(*nl, EdgeFilter::kAll).ok());
+  assert(topo::compile(*nl, EdgeFilter::kAll).ok());
   check_scalar_word_parity(*nl);
 }
 
@@ -246,7 +246,7 @@ void test_prefix_slice() {
     assert(remove_gate(*nl, static_cast<Slot>(i)).ok());
   }
   assert(nl->live_count == static_cast<std::uint32_t>(kPrefix));
-  assert(topo::rebuild(*nl, EdgeFilter::kAll).ok());
+  assert(topo::compile(*nl, EdgeFilter::kAll).ok());
   // Pool-identical to the standalone build (counters, ties, topo
   // caches included — growth provably changed nothing).
   for (std::size_t s = 0; s < kPrefix; ++s) {

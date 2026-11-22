@@ -79,7 +79,7 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
   // edges only, then revert: wire_pins() below stays the single mutation
   // path (its internal topo::reaches agrees with the validator — both are
   // exact single-edge cycle tests). Polarity/fanout are untouched by the
-  // probe (topo::validate reads drivers only), so plain revert is exact.
+  // probe (topo::query reads drivers only), so plain revert is exact.
     if (shared_append) {
       // Shared probe: tentative extra-append through the same wire_pins
       // seam, validated, then exactly reverted (named-edge removal
@@ -88,7 +88,7 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
       if (!probe.ok()) {
         return cli::usage_error(out, "invalid wire", kUsage);
       }
-      const bool acyclic = wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok();
+      const bool acyclic = wengine::logic::topo::query(nl, wengine::logic::EdgeFilter::kCombOnly).ok();
       (void)wengine::logic::unwire_driver(nl, from.value.slot, to.value.slot, to.value.input);
       if (!acyclic) {
         return cli::usage_error(out, "wire would close a combinational cycle", kUsage);
@@ -101,7 +101,7 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
       // Adjacency (016): the tentative edge must be visible to the
       // chain-reading validator below, then exactly reverted.
       (void)wengine::logic::adjacency::adj_insert_edge(nl, from.value.slot, to.value.slot, to.value.input, 0);
-      const bool acyclic = wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok();
+      const bool acyclic = wengine::logic::topo::query(nl, wengine::logic::EdgeFilter::kCombOnly).ok();
       (void)wengine::logic::adjacency::adj_unlink_edge(nl, from.value.slot, to.value.slot, to.value.input, 0);
       dst_gate.drivers[to.value.input] = wengine::logic::kNoDriver;
       --src_gate.output_fanout;

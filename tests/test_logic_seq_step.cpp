@@ -77,7 +77,7 @@ void test_counter_2bit() {
   assert(logic::wire(nl, 1, x, 1).ok()); // Q1 -> XOR.2
   ignore_input(nl, 0, 1); // DFF1.CLK ignored (edge assumed)
   ignore_input(nl, 1, 1); // DFF2.CLK ignored
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 0);
   // No Q outputs dangle (both feed logic) and NQ is ignored by default:
   // the counter exposes no block outputs until `use`d or wired.
@@ -149,7 +149,7 @@ void test_swap_proves_snapshot_isolation() {
   assert(logic::wire(nl, 0, 1, 0).ok()); // Q0 -> DFF1.D
   ignore_input(nl, 0, 1);
   ignore_input(nl, 1, 1);
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   SeqState st;
   logic::init_seq_state(st, nl);
   st.q[0] = LogicValue::kHigh;
@@ -243,7 +243,7 @@ void test_sr_level_table_and_refusal() {
   auto pr = logic::parse_pin(nl, "SRLATCH3.R");
   assert(pr.ok());
   assert(logic::tie_pins(nl, ps.value, pr.value).ok());
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   // Slot order: SR1.S, SR1.R, BUF1.0, SR3 leader (SR3.R shares it).
   assert(logic::block_input_count(nl) == 4);
   SeqState st;
@@ -337,7 +337,7 @@ void test_mixed_edge_level_share_stepper() {
   ignore_input(nl, 0, 1); // DFF1.CLK ignored (edge assumed)
   ignore_input(nl, 3, 2); // JK1.CLK ignored (edge assumed)
   ignore_input(nl, 4, 1); // T1.CLK ignored (edge assumed)
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   // Slot order block inputs: DFF.D, DLATCH.D, DLATCH.EN, SR.S, SR.R,
   // JK.J, JK.K, T.T.
   assert(logic::block_input_count(nl) == 8);
@@ -444,7 +444,7 @@ void test_t_excitation_table() {
   const logic::Slot s = logic::add_gate(nl, GateKind::kT, 2).value;
   ignore_input(nl, s, 1);
   assert(logic::block_input_count(nl) == 1); // T
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
@@ -493,7 +493,7 @@ void test_jk_excitation_table() {
   const logic::Slot s = logic::add_gate(nl, GateKind::kJk, 3).value;
   ignore_input(nl, s, 2);
   assert(logic::block_input_count(nl) == 2); // J, K
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
@@ -552,7 +552,7 @@ void test_jk_sync_counter_2bit() {
   assert(logic::wire(nl, lo, hi, 1).ok()); // Q0 -> JK2.K
   ignore_input(nl, lo, 2);
   ignore_input(nl, hi, 2);
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   // Dangling block inputs in slot order: JK1.J, JK1.K.
   assert(logic::block_input_count(nl) == 2);
   SeqState st;
@@ -585,7 +585,7 @@ void test_mixed_kinds_share_one_edge() {
   ignore_input(nl, j, 2);
   ignore_input(nl, t, 1);
   assert(logic::block_input_count(nl) == 4); // D, J, K, T
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
@@ -620,7 +620,7 @@ void test_subset_stepping_holds_non_members() {
   ignore_input(nl, d, 1);
   ignore_input(nl, j, 2);
   ignore_input(nl, t, 1);
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
@@ -655,7 +655,7 @@ void test_comb_cycle_still_rejected() {
   logic::adjacency::adjacency_rebuild(nl); // sync chains
   nl.dirty = true;
   SeqState st;
-  assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(!logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(!logic::seq_step(nl, st, std::span<const LogicValue>{}).ok());
 }
 

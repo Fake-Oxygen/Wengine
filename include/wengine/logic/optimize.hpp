@@ -110,12 +110,13 @@ namespace wengine::logic {
  *        scratch table): work/fresh/min out-buffers replacing the old
  *        by-value Netlist locals, pending wires, constness labels,
  *        root/feed/reachability flags, DCE keep/stack, emit map, tie
- *        scratch, eval scratch, and the nested Kahn bundle. Sized by
+ *        scratch, and eval scratch (topology rides the CompiledOrder
+ *        seam, which owns its workspace internally). Sized by
  *        the pool (see ensure_workspace); validated loudly before any
  *        work.
  *
  * Sequential sharing: the phases run one after another, so labels,
- * keep, stack, tie scratch, and the eval/Kahn scratch are reused across
+ * keep, stack, tie scratch, and the eval scratch are reused across
  * phases (never live at once for two purposes).
  *
  */
@@ -146,13 +147,11 @@ struct OptimizeScratch {
   std::span<LogicValue> resolved;
   /** @brief Per-slot settled outputs (n entries). */
   std::span<LogicValue> gate_out;
-  /** @brief Nested Kahn scratch bundle. */
-  topo::TopoScratch topo;
   /**
    * @brief Loud size validation before any work (engine-seam D3 rule).
    *
    * Covers the O0/O1 fixpoint scratch (work net, labels, roots, feeds,
-   * keep, DFS stack, tie scratch, eval scratch, Kahn bundle). The O2
+   * keep, DFS stack, tie scratch, eval scratch). The O2
    * fresh-build scratch (fresh/min out-buffers, pending wires, emit
    * map, reach flags, wiring maps) is validated separately by
    * validate_o2(), so O0/O1 runs never pay for scratch they cannot
@@ -169,7 +168,7 @@ struct OptimizeScratch {
         tie_scratch.size() < n * kMaxInputs || resolved.size() < n * kMaxInputs || gate_out.size() < n) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
-    return topo.validate(n);
+    return core::Status::success();
   }
   /**
    * @brief Loud size validation for the O2 fresh-build scratch.
@@ -262,7 +261,6 @@ struct OptimizeScratch {
   pctx.ties = scr.tie_scratch;
   pctx.keep = scr.keep;
   pctx.stack = scr.stack;
-  pctx.topo = scr.topo;
   pctx.seq_net = seq_net;
   pctx.want_fuse = want_fuse;
   static constexpr detail::Pass kFixpoint[] = {
@@ -278,7 +276,7 @@ struct OptimizeScratch {
   }
 
   if (opts.level != OptLevel::kO2) {
-    if (!detail::ensure_topo(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+    if (!detail::ensure_topo(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll).ok()) {
       return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     out = nl;
@@ -363,12 +361,8 @@ struct OptimizeScratch {
     auto pbhead = std::make_unique<Slot[]>(m);
     auto pbnext = std::make_unique<Slot[]>(m);
     ensure_workspace(fresh, m);
-    const topo::TopoScratch fts{std::span<Slot>(fresh.ws_order.data(), m),
-                                std::span<Slot>(fresh.ws_levels.data(), m),
-                                std::span<std::uint8_t>(fresh.ws_indeg.data(), m),
-                                std::span<Slot>(fresh.ws_queue.data(), m)};
     const detail::BuildError perr = detail::post_cleanup(fresh, nl, scr.reach.data(), scr.emit_map.data(), opts.target, std::span<bool>(proots.get(), m),
-        std::span<bool>(pfeeds.get(), m), std::span<bool>(pkeep.get(), m), std::span<Slot>(pstack.data(), m), std::span<std::size_t>(ptie.data(), ptie.size()), std::span<std::uint64_t>(pbuckets.get(), m), std::span<Slot>(pbhead.get(), m), std::span<Slot>(pbnext.get(), m), fts);
+        std::span<bool>(pfeeds.get(), m), std::span<bool>(pkeep.get(), m), std::span<Slot>(pstack.data(), m), std::span<std::size_t>(ptie.data(), ptie.size()), std::span<std::uint64_t>(pbuckets.get(), m), std::span<Slot>(pbhead.get(), m), std::span<Slot>(pbnext.get(), m));
     if (perr != detail::BuildError::kNone) {
       return core::Result<Netlist *>::failure(detail::build_error_message(perr), core::StatusCode::kInternal);
     }
@@ -378,12 +372,8 @@ struct OptimizeScratch {
     std::vector<LogicValue> mresolved(m * kMaxInputs);
     std::vector<LogicValue> mgate_out(m);
     ensure_workspace(fresh, m);
-    const topo::TopoScratch mts{std::span<Slot>(fresh.ws_order.data(), m),
-                                std::span<Slot>(fresh.ws_levels.data(), m),
-                                std::span<std::uint8_t>(fresh.ws_indeg.data(), m),
-                                std::span<Slot>(fresh.ws_queue.data(), m)};
     const detail::BuildError ferr = detail::finish_o2(fresh, nl, opts.target, *scr.min_buf, std::span<LogicValue>(mresolved.data(), mresolved.size()),
-                                                      std::span<LogicValue>(mgate_out.data(), mgate_out.size()), mts);
+                                                      std::span<LogicValue>(mgate_out.data(), mgate_out.size()));
     if (ferr != detail::BuildError::kNone) {
       return core::Result<Netlist *>::failure(detail::build_error_message(ferr), core::StatusCode::kInternal);
     }
@@ -432,10 +422,6 @@ struct OptimizeScratch {
   std::vector<std::size_t> tie_scratch(nflat);
   std::vector<LogicValue> resolved(nflat);
   std::vector<LogicValue> gate_out(n);
-  std::vector<Slot> order(n);
-  std::vector<Slot> levels(n);
-  std::vector<std::uint8_t> indeg(n);
-  std::vector<Slot> queue(n);
   OptimizeScratch scr{&work, &fresh, &min_buf,
                       std::span<detail::Constness>(labels.data(), n),
                       std::span<bool>(roots.get(), n),
@@ -446,8 +432,7 @@ struct OptimizeScratch {
                       std::span<Slot>(emit_map.data(), n),
                       std::span<std::size_t>(tie_scratch.data(), nflat),
                       std::span<LogicValue>(resolved.data(), nflat),
-                      std::span<LogicValue>(gate_out.data(), n),
-                      topo::TopoScratch{std::span<Slot>(order.data(), n), std::span<Slot>(levels.data(), n), std::span<std::uint8_t>(indeg.data(), n), std::span<Slot>(queue.data(), n)}};
+                      std::span<LogicValue>(gate_out.data(), n)};
   Netlist opt_out{};
   auto r = optimize(in, opts, scr, opt_out);
   if (!r.ok()) {

@@ -572,7 +572,7 @@ void test_solve_nand_chain() {
   assert(logic::block_input_count(nl) == 2);
   assert(logic::block_output_count(nl) == 1); // AND1 has fanout, only NOT1.Y
   // Levels: AND1 = 0, NOT1 = 1; order lists driver first.
-  assert(logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
+  assert(logic::topo::compile(nl, logic::EdgeFilter::kAll).ok());
   assert(!nl.dirty && nl.topo_order.size() == 2);
   assert(nl.topo_order[0] == 0 && nl.topo_order[1] == 1);
   assert(nl.topo_level[0] == 0 && nl.topo_level[1] == 1);
@@ -805,7 +805,7 @@ void test_noexcept_pins() {
   std::vector<std::uint64_t> scratch(logic::slot_count(nl), 0);
   assert(logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), scratch.size()),
                                                 std::span<std::uint64_t>()).ok());
-  assert(logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
+  assert(logic::topo::compile(nl, logic::EdgeFilter::kAll).ok());
 }
 
 // Full bit-parallel == scalar sweep for one netlist: every truth row is
@@ -1888,7 +1888,7 @@ void test_barrier_o0_unobserved_flop() {
   Netlist nl;
   barrier_place_seq(nl, 0, GateKind::kDff, 1);
   barrier_ignore(nl, 0, 1); // CLK ignored (edge assumed); D = block input
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   logic::OptimizeOptions o0;
   auto r = logic::optimize(nl, o0);
   assert(r.ok());
@@ -1955,7 +1955,7 @@ void test_barrier_o0_identical_flops() {
   assert(logic::wire(nl, b, 1, 0).ok()); // BUF.Y -> DFF2.D
   barrier_ignore(nl, 0, 1);              // CLKs ignored
   barrier_ignore(nl, 1, 1);
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 1);  // EXT
   assert(logic::block_output_count(nl) == 2); // DFF1.Q DFF2.Q
   const std::vector<LogicValue> stim = {kL, kH, kL, kH, kH, kL, kL, kH, kL, kH};
@@ -1991,7 +1991,7 @@ void test_barrier_o0_wired_constant_flop() {
   barrier_ignore(nl, 0, 0); // AND.1 ignored: ties low
   barrier_ignore(nl, 0, 1); // AND.2 ignored: ties low (AND reads 0,0)
   barrier_ignore(nl, 1, 1); // CLK ignored
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 0);
   assert(logic::block_output_count(nl) == 1); // DFF1.Q
   for (int level = 0; level <= 2; ++level) {
@@ -2040,7 +2040,7 @@ void test_barrier_o0_report_counts() {
   barrier_ignore(nl, 0, 1);                // CLKs ignored
   barrier_ignore(nl, 1, 1);
   barrier_ignore(nl, 7, 1); // DLATCH1.EN ignored: frozen
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(nl.live_count == 8);
   logic::OptimizeOptions o0;
   auto r = logic::optimize(nl, o0);
@@ -2142,7 +2142,7 @@ void test_barrier_o2_toggle_converges() {
   assert(logic::add_gate(nl, GateKind::kAnd, 2).ok()); // AND1 @0 (a, b dangle)
   barrier_place_seq(nl, 1, GateKind::kDff, 1);         // DFF1 @1 (D dangles)
   barrier_ignore(nl, 1, 1);                           // CLK ignored
-  assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+  assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   std::uint16_t gates[6] = {};
   std::size_t nins[6] = {};
   for (int t = 0; t < 6; ++t) {
@@ -2249,16 +2249,16 @@ void test_topo_module_parity() {
     assert(logic::wire(base, o, n, 0).ok());
     Netlist via_all = base;
     Netlist via_comb = base;
-    assert(logic::topo::rebuild(via_all, logic::EdgeFilter::kAll).ok());
-    assert(logic::topo::rebuild(via_comb, logic::EdgeFilter::kCombOnly).ok());
+    assert(logic::topo::compile(via_all, logic::EdgeFilter::kAll).ok());
+    assert(logic::topo::compile(via_comb, logic::EdgeFilter::kCombOnly).ok());
     assert(orders_equal(via_all, via_comb));
-    assert(logic::topo::validate(base, logic::EdgeFilter::kAll).ok());
-    assert(logic::topo::validate(base, logic::EdgeFilter::kCombOnly).ok());
+    assert(logic::topo::query(base, logic::EdgeFilter::kAll).ok());
+    assert(logic::topo::query(base, logic::EdgeFilter::kCombOnly).ok());
     // Stepper order matches the rebuild comb tail (no seq gates to skip).
     {
       std::vector<logic::Slot> order(logic::slot_count(base));
       std::size_t n_out = 0;
-      assert(logic::topo::compile_comb_order(base, order.data(), n_out));
+      assert(logic::topo::comb_order(base, order.data(), n_out));
       assert(n_out == via_all.topo_order.size());
       for (std::size_t i = 0; i < n_out; ++i) {
         assert(order[i] == via_all.topo_order[i]);
@@ -2279,11 +2279,11 @@ void test_topo_module_parity() {
     nl.slots[n].drivers[0] = a;
     logic::adjacency::adjacency_rebuild(nl); // hand-poked cycle: sync chains
     nl.dirty = true;
-    assert(!logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
+    assert(!logic::topo::compile(nl, logic::EdgeFilter::kAll).ok());
     nl.dirty = true;
-    assert(!logic::topo::rebuild(nl, logic::EdgeFilter::kCombOnly).ok());
-    assert(!logic::topo::validate(nl, logic::EdgeFilter::kAll).ok());
-    assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
+    assert(!logic::topo::compile(nl, logic::EdgeFilter::kCombOnly).ok());
+    assert(!logic::topo::query(nl, logic::EdgeFilter::kAll).ok());
+    assert(!logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
   }
   // Legal flop feedback: kAll sees the loop, kCombOnly + validator accept.
   {
@@ -2294,19 +2294,19 @@ void test_topo_module_parity() {
     assert(logic::wire(nl, 0, a, 0).ok()); // DFF.Q -> AND.0 (closes the loop)
     assert(logic::topo::reaches(nl, a, 0, logic::EdgeFilter::kAll));
     assert(!logic::topo::reaches(nl, a, 0, logic::EdgeFilter::kCombOnly));
-    assert(logic::topo::rebuild(nl, logic::EdgeFilter::kCombOnly).ok());
-    assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
-    assert(!logic::topo::validate(nl, logic::EdgeFilter::kAll).ok());
+    assert(logic::topo::compile(nl, logic::EdgeFilter::kCombOnly).ok());
+    assert(logic::topo::query(nl, logic::EdgeFilter::kCombOnly).ok());
+    assert(!logic::topo::query(nl, logic::EdgeFilter::kAll).ok());
     // Stepper order: seq root skipped, comb tail emitted (the AND gate).
     {
       std::vector<logic::Slot> order(logic::slot_count(nl));
       std::size_t n_out = 0;
-      assert(logic::topo::compile_comb_order(nl, order.data(), n_out));
+      assert(logic::topo::comb_order(nl, order.data(), n_out));
       assert(n_out == 1);
       assert(order[0] == a);
     }
     nl.dirty = true;
-    assert(!logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
+    assert(!logic::topo::compile(nl, logic::EdgeFilter::kAll).ok());
   }
 }
 

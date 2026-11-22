@@ -189,15 +189,12 @@ void test_scalar_word_agreement() {
   }
 
   // Word: single 64-row slice covers all 8 rows; lane b holds row b.
+  // The word entry owns its input map and Kahn scratch (CompiledOrder
+  // seam) — gate words and block outputs stay caller-owned.
   const std::size_t n = logic::slot_count(nl);
-  logic::ensure_workspace(nl, n);
   std::vector<std::uint64_t> scratch(n, 0), words(1, 0);
-  const logic::topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
-                                    std::span<std::uint8_t>(nl.ws_indeg.data(), n),
-                                    std::span<Slot>(nl.ws_queue.data(), n)};
   assert(logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), n),
-                                std::span<std::uint64_t>(words.data(), 1),
-                                std::span<Slot>(nl.ws_in_pos.data(), n * logic::kMaxInputs), ts)
+                                std::span<std::uint64_t>(words.data(), 1))
              .ok());
   for (std::uint32_t r = 0; r < 8; ++r) {
     const bool bit = (((words[0] >> r) & 1ULL) != 0ULL);
@@ -231,16 +228,11 @@ void test_word_refusal_parity() {
 
   // Word safety net refuses even if an entry guard were missed.
   const std::size_t n = logic::slot_count(nl);
-  logic::ensure_workspace(nl, n);
   std::vector<std::uint64_t> scratch(n, 0);
   const std::size_t n_out = logic::block_output_count(nl);
   std::vector<std::uint64_t> words(n_out, 0);
-  const logic::topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
-                                    std::span<std::uint8_t>(nl.ws_indeg.data(), n),
-                                    std::span<Slot>(nl.ws_queue.data(), n)};
   assert(!logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), n),
-                                 std::span<std::uint64_t>(words.data(), n_out),
-                                 std::span<Slot>(nl.ws_in_pos.data(), n * logic::kMaxInputs), ts)
+                                 std::span<std::uint64_t>(words.data(), n_out))
               .ok());
 
   // Shared multi-attachment blocks the word path at the entries.
