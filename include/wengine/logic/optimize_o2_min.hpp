@@ -10,19 +10,24 @@
  * structural De Morgan translation; the caller picks the smaller
  * (gates, then inputs).
  *
- * What it preserves: the truth table exactly (verified under pin
- * replication/permutation before acceptance). Cost class: QM prime
- * search plus greedy cover — bounded to n<=8, m<=8 with fixed arrays;
- * returns false on any limit/budget/equivalence failure and the caller
- * falls back to structural (which is optimal for XOR-like parity).
+ * What it preserves: the truth table exactly, verified under pin
+ * replication/permutation. Cost class: QM prime search plus greedy
+ * cover per output — bounded by the n/m caps, with loud false-return
+ * fallback to the structural De Morgan translation (which is optimal
+ * for XOR-like parity).
+ *
+ * Capacity (dynamic pool): the builder works over Netlist (MiniDang
+ * beside it); the truth-table bounds (n<=8, m<=8) and every QM/day
+ * scratch stay capacity-free and fixed. The equivalence re-solve takes
+ * the caller's eval + Kahn scratch. Internal cross-calls are bare (no
+ * capacity parameter).
  *
  * Dependency rules: header-only, allocation-free, exception-free;
- * deterministic (slot order, j-ascending lits, greedy cover order).
- * Depends on eval.hpp, netlist.hpp, optimize_types.hpp,
- * optimize_barrier.hpp, optimize_exact.hpp, the O2 dedup/emit headers,
- * optimize_passes.hpp, and types.hpp. Logic is a standalone domain:
- * this header must never depend on CLI types. Consumers:
- * optimize_o2_build.hpp finish_o2 and the test_logic* suite.
+ * noexcept throughout; deterministic (slot order, j-ascending
+ * literals, greedy cover order). Lives in the
+ * wengine::logic::detail seam — internal to the optimizer family.
+ * Never depends on CLI types. Consumers: optimize_o2_build.hpp
+ * (finish_o2 picking) and the logic optimizer tests.
  */
 
 #pragma once
@@ -71,6 +76,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <span>
 
 namespace wengine::logic {
 
@@ -79,10 +85,11 @@ namespace detail {
 /**
  * @brief One dangling pin of the minimized build awaiting global tying
  *        (one block input per original variable).
+ *
  */
-struct MiniDang {
+ struct MiniDang {
   /** @brief Fresh gate slot holding the dangling pin. */
-  std::uint16_t fresh = kNoDriver;
+  Slot fresh = kNoDriver;
   /** @brief 0-based input index on the fresh gate. */
   std::uint8_t input = 0;
   /** @brief Original variable index (block-input ordinal in src). */
@@ -90,7 +97,13 @@ struct MiniDang {
 };
 
 /**
+ * @brief Production minimized-build dangling pin.
+ */
+
+/**
  * @brief Append one dangling pin to the global-tying list.
+ *
+ * Capacity-free: the list itself is bounded by the n<=8/m<=8 caps.
  *
  * @param[out] list Dangling-pin buffer.
  * @param[out] n Pin count (in/out).
@@ -100,8 +113,8 @@ struct MiniDang {
  * @param[in] orig_j Original variable index.
  * @return True on success; false when the buffer is full.
  */
-inline bool mini_add_dang(MiniDang *list, std::size_t *n, std::size_t cap,
-                          std::uint16_t fresh, std::uint8_t input, std::uint8_t orig_j) noexcept {
+
+inline bool mini_add_dang(MiniDang *list, std::size_t *n, std::size_t cap, Slot fresh, std::uint8_t input, std::uint8_t orig_j) noexcept {
   if (*n >= cap) {
     return false;
   }
@@ -135,11 +148,12 @@ inline bool mini_add_dang(MiniDang *list, std::size_t *n, std::size_t cap,
  * @param[in] dang_cap Dangling-pin capacity.
  * @return True on success; false on budget/tie failure.
  */
+
 inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
-                            const QmCube *covers, const std::size_t *ncover,
-                            const bool *is_const, const std::uint8_t *const_val,
-                            OptTarget target, MiniDang *dangs, std::size_t *ndangs,
-                            std::size_t dang_cap) noexcept {
+                             const QmCube *covers, const std::size_t *ncover,
+                             const bool *is_const, const std::uint8_t *const_val,
+                             OptTarget target, MiniDang *dangs, std::size_t *ndangs,
+                             std::size_t dang_cap) noexcept {
   const GateKind u = universal_kind(target);
   // Shared C1 for constant-0 sinks (dedicated C0 per sink). U(0,0)=1 and
   // U(C1,C1)=0 hold in both vocabularies, so the pool is target-neutral.
@@ -150,13 +164,13 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
       break;
     }
   }
-  std::uint16_t pool_c1 = kNoDriver;
+  Slot pool_c1 = kNoDriver;
   if (need_c1) {
     auto r = add_gate(out, u, 2);
     if (!r.ok()) {
       return false;
     }
-    out.gates[r.value].ignored_mask = 0x03u;
+    out.slots[r.value].ignored_mask = 0x03u;
     pool_c1 = r.value;
   }
   // Shared inverters for negative lits (width>1) and single-positive q's.
@@ -204,7 +218,7 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
     // Single-product single-negative outputs need a dedicated output
     // inverter (not shared, to keep outputs distinct); no shared needed.
   }
-  std::uint16_t inv_slot[8];
+  Slot inv_slot[8];
   for (std::uint8_t j = 0; j < 8; ++j) {
     inv_slot[j] = kNoDriver;
   }
@@ -233,7 +247,7 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
         if (!r.ok()) {
           return false;
         }
-        out.gates[r.value].ignored_mask = 0x03u;
+        out.slots[r.value].ignored_mask = 0x03u;
       } else {
         if (pool_c1 == kNoDriver) {
           return false;
@@ -242,8 +256,8 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
         if (!r.ok()) {
           return false;
         }
-        out.gates[r.value].drivers[0] = pool_c1;
-        out.gates[r.value].drivers[1] = pool_c1;
+        out.slots[r.value].drivers[0] = pool_c1;
+        out.slots[r.value].drivers[1] = pool_c1;
       }
       continue;
     }
@@ -272,8 +286,8 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
           if (!r.ok()) {
             return false;
           }
-          out.gates[r.value].drivers[0] = inv_slot[jk];
-          out.gates[r.value].drivers[1] = inv_slot[jk];
+          out.slots[r.value].drivers[0] = inv_slot[jk];
+          out.slots[r.value].drivers[1] = inv_slot[jk];
         } else {
           // f=~x_j: dedicated output inverter.
           auto r = add_gate(out, u, 2);
@@ -307,7 +321,7 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
             if (inv_slot[j] == kNoDriver) {
               return false;
             }
-            out.gates[rp.value].drivers[idx] = inv_slot[j];
+            out.slots[rp.value].drivers[idx] = inv_slot[j];
           }
           ++idx;
         }
@@ -315,13 +329,13 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
         if (!ro.ok()) {
           return false;
         }
-        out.gates[ro.value].drivers[0] = rp.value;
-        out.gates[ro.value].drivers[1] = rp.value;
+        out.slots[ro.value].drivers[0] = rp.value;
+        out.slots[ro.value].drivers[1] = rp.value;
       }
       continue;
     }
     // Multi-product: product gates + final NAND.
-    std::uint16_t q_slot[8];
+    Slot q_slot[8];
     bool q_wired[8] = {};
     std::uint8_t q_dang_j[8] = {};
     for (std::size_t k = 0; k < p; ++k) {
@@ -365,7 +379,7 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
             if (inv_slot[j] == kNoDriver) {
               return false;
             }
-            out.gates[rp.value].drivers[idx] = inv_slot[j];
+            out.slots[rp.value].drivers[idx] = inv_slot[j];
           }
           ++idx;
         }
@@ -379,7 +393,7 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
     }
     for (std::size_t k = 0; k < p; ++k) {
       if (q_wired[k]) {
-        out.gates[rf.value].drivers[k] = q_slot[k];
+        out.slots[rf.value].drivers[k] = q_slot[k];
       } else {
         if (!mini_add_dang(dangs, ndangs, dang_cap, rf.value, static_cast<std::uint8_t>(k), q_dang_j[k])) {
           return false;
@@ -396,11 +410,16 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
  *
  * Builds a minimized two-level network (SOP for NAND, POS for NOR) with
  * shared inverters and globally tied inputs, verifies equivalence under
- * pin replication/permutation, and leaves the result in out_min.
+ * pin permutation, and leaves the result in out_min.
  *
  * @param[out] src Source netlist (recompiled for enumeration).
  * @param[in] target Conversion target.
- * @param[out] out_min Minimized netlist on success.
+ * @param[out] out_min Minimized netlist on success (caller-owned
+ *             out-buffer; contents undefined on failure).
+ * @param[in] resolved Caller-owned eval scratch (`slot_count(src) * kMaxInputs`
+ *            values).
+ * @param[in] gate_out Caller-owned eval scratch (pool-sized outputs).
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return True with out_min on success; false on any limit/budget/
  *         equivalence failure (caller falls back to structural, which is
  *         optimal for XOR-like parity). Deterministic,
@@ -408,20 +427,23 @@ inline bool build_two_level(Netlist &out, std::uint8_t n, std::uint8_t m,
  * @note Opaque barrier: sequential nets and hidden outputs refuse loudly
  *       to the structural path.
  */
-inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) noexcept {
+
+inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min,
+                              std::span<LogicValue> resolved, std::span<LogicValue> gate_out,
+                              const topo::TopoScratch &ts) noexcept {
   const std::size_t n = block_input_count(src);
   const std::size_t m = block_output_count(src);
   if (n == 0 || n > 8 || m == 0 || m > 8) {
     return false;
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!src.gates[s].live) {
+  for (Slot s = 0; s < slot_count(src); ++s) {
+    if (!src.slots[s].live) {
       continue;
     }
-    if (src.gates[s].ignore_output) {
+    if (src.slots[s].ignore_output) {
       return false; // preserve hidden logic via structural path
     }
-    if (is_frozen_kind(src.gates[s].kind)) {
+    if (is_frozen_kind(src.slots[s].kind)) {
       return false; // O2 refuses sequential loudly; let structural fail
     }
   }
@@ -435,7 +457,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
   if (in_n != n || out_n != m) {
     return false;
   }
-  if (!topo::rebuild(src, EdgeFilter::kAll).ok()) {
+  if (!topo::rebuild(src, EdgeFilter::kAll, ts).ok()) {
     return false;
   }
   const std::size_t rows = static_cast<std::size_t>(1ULL << n);
@@ -450,7 +472,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
     for (std::size_t o = 0; o < m; ++o) {
       out_vals[o] = LogicValue::kLow;
     }
-    if (!solve(src, std::span<const LogicValue>(in_vals, n), std::span<LogicValue>(out_vals, m)).ok()) {
+    if (!solve(src, std::span<const LogicValue>(in_vals, n), std::span<LogicValue>(out_vals, m), nullptr, resolved, gate_out, ts).ok()) {
       return false;
     }
     for (std::size_t o = 0; o < m; ++o) {
@@ -512,11 +534,10 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
       covers[o * 8 + k] = cover[k];
     }
   }
-  Netlist built{};
+  Netlist &built = out_min;
   MiniDang dangs[1024];
   std::size_t ndangs = 0;
-  bool built_ok = build_two_level(built, static_cast<std::uint8_t>(n), static_cast<std::uint8_t>(m), covers,
-                                      ncover, is_const, const_val, target, dangs, &ndangs, 1024);
+  bool built_ok = build_two_level(built, static_cast<std::uint8_t>(n), static_cast<std::uint8_t>(m), covers, ncover, is_const, const_val, target, dangs, &ndangs, 1024);
   if (!built_ok) {
     return false;
   }
@@ -535,10 +556,10 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
       // Skip if no longer dangling (wired since? dang list only has
       // dangling at creation, but later tying doesn't wire, so still
       // dangling; defensive check).
-      if (cur.slot >= kMaxGates || !built.gates[cur.slot].live) {
+      if (cur.slot >= slot_count(built) || !built.slots[cur.slot].live) {
         return false;
       }
-      const Gate &g = built.gates[cur.slot];
+      const Gate &g = built.slots[cur.slot];
       if (cur.input >= g.input_count || g.drivers[cur.input] != kNoDriver) {
         continue;
       }
@@ -557,8 +578,8 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
   }
   recount_fanout(built);
   built.dirty = true;
-  built.topo_size = 0;
-  if (!topo::rebuild(built, EdgeFilter::kAll).ok()) {
+  built.topo_order.clear();
+  if (!topo::rebuild(built, EdgeFilter::kAll, ts).ok()) {
     return false;
   }
   // Interface + proj mapping (minimized inputs -> original inputs).
@@ -621,9 +642,7 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
     for (std::size_t o = 0; o < m; ++o) {
       min_out_vals[o] = LogicValue::kLow;
     }
-    if (!solve(built, std::span<const LogicValue>(min_in_vals, min_in_n),
-               std::span<LogicValue>(min_out_vals, m))
-             .ok()) {
+    if (!solve(built, std::span<const LogicValue>(min_in_vals, min_in_n), std::span<LogicValue>(min_out_vals, m), nullptr, resolved, gate_out, ts).ok()) {
       return false;
     }
     for (std::size_t o = 0; o < m; ++o) {
@@ -632,7 +651,6 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min) n
       }
     }
   }
-  out_min = built;
   return true;
 }
 

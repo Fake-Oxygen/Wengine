@@ -16,7 +16,6 @@
 
 #include <yaml-cpp/yaml.h>
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -169,6 +168,6 @@ extern const SectionSpec kSections[6];
 [[nodiscard]] bool validate_topology(Netlist &tmp, std::string &err);
 // Per-slot power-on values + pinned-clock set-equality against the
 // derived domains.
-[[nodiscard]] bool apply_inits_and_validate_clocks(const Collected &in, const Netlist &tmp, std::array<LogicValue, kMaxGates> &inits, std::string &err);
+[[nodiscard]] bool apply_inits_and_validate_clocks(const Collected &in, const Netlist &tmp, std::vector<LogicValue> &inits, std::string &err);
 
 } // namespace wengine::logic::yaml::detail

@@ -19,10 +19,11 @@ namespace {
 
 // add_gate still refuses sequential kinds (SEQ1 staging), so tests place
 // them by hand — same white-box pokes as test_logic_seq_state.
-void place_seq(Netlist &nl, std::uint16_t slot, GateKind kind, std::uint32_t counter) {
+void place_seq(Netlist &nl, logic::Slot slot, GateKind kind, std::uint32_t counter) {
   assert(slot < logic::kMaxGates);
+  assert(logic::ensure_slots(nl, static_cast<std::size_t>(slot) + 1));
   assert(logic::is_sequential_kind(kind));
-  logic::Gate &g = nl.gates[slot];
+  logic::Gate &g = nl.slots[slot];
   assert(!g.live);
   g.live = true;
   g.kind = kind;
@@ -37,15 +38,15 @@ void place_seq(Netlist &nl, std::uint16_t slot, GateKind kind, std::uint32_t cou
   }
   ++nl.live_count;
   nl.dirty = true;
-  nl.topo_size = 0;
+  nl.topo_order.clear();
 }
 
 void test_validate_empty_and_comb_acyclic() {
   Netlist nl;
   assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(!logic::has_sequential_gates(nl));
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   assert(logic::wire(nl, a, n, 0).ok());
   assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(!logic::has_sequential_gates(nl));
@@ -54,17 +55,17 @@ void test_validate_empty_and_comb_acyclic() {
 void test_validate_rejects_comb_cycles() {
   // Hand-poked cycle (wire() rightly refuses to build it): AND <-> NOT.
   Netlist nl;
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
-  nl.gates[a].drivers[0] = n;
-  nl.gates[n].drivers[0] = a;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  nl.slots[a].drivers[0] = n;
+  nl.slots[n].drivers[0] = a;
   nl.dirty = true;
   assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
 
   // Self-loop likewise fails.
   Netlist self;
-  const std::uint16_t s = logic::add_gate(self, GateKind::kAnd, 2).value;
-  self.gates[s].drivers[0] = s;
+  const logic::Slot s = logic::add_gate(self, GateKind::kAnd, 2).value;
+  self.slots[s].drivers[0] = s;
   self.dirty = true;
   assert(!logic::topo::validate(self, logic::EdgeFilter::kCombOnly).ok());
 }
@@ -74,7 +75,7 @@ void test_flop_feedback_loop() {
   // entirely through the public wire() API.
   Netlist nl;
   place_seq(nl, 0, GateKind::kDff, 1); // DFF1
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
   assert(logic::wire(nl, a, 0, 0).ok()); // AND.Y -> DFF.D
   assert(logic::wire(nl, 0, a, 0).ok()); // DFF.Y -> AND.0 (closes the loop)
   assert(logic::has_sequential_gates(nl));
@@ -88,7 +89,7 @@ void test_clk_and_dlatch_variants() {
   // Clock input driven by comb + Q feedback: same boundary, other pin.
   Netlist clk;
   place_seq(clk, 0, GateKind::kDff, 1);
-  const std::uint16_t c = logic::add_gate(clk, GateKind::kBuf, 1).value;
+  const logic::Slot c = logic::add_gate(clk, GateKind::kBuf, 1).value;
   assert(logic::wire(clk, c, 0, 1).ok()); // BUF.Y -> DFF.CLK
   assert(logic::wire(clk, 0, c, 0).ok()); // DFF.Y -> BUF.0
   assert(logic::topo::validate(clk, logic::EdgeFilter::kCombOnly).ok());
@@ -96,7 +97,7 @@ void test_clk_and_dlatch_variants() {
   // DLATCH enable + D feedback through one comb gate.
   Netlist latch;
   place_seq(latch, 2, GateKind::kDlatch, 1);
-  const std::uint16_t o = logic::add_gate(latch, GateKind::kOr, 2).value;
+  const logic::Slot o = logic::add_gate(latch, GateKind::kOr, 2).value;
   assert(logic::wire(latch, o, 2, 0).ok()); // OR.Y -> DLATCH.D
   assert(logic::wire(latch, 2, o, 0).ok()); // DLATCH.Y -> OR.0
   assert(logic::topo::validate(latch, logic::EdgeFilter::kCombOnly).ok());
@@ -110,7 +111,7 @@ void test_flop_feedback_reverse_order() {
   // order, not build order).
   Netlist nl;
   place_seq(nl, 0, GateKind::kT, 1); // T1
-  const std::uint16_t o = logic::add_gate(nl, GateKind::kOr, 2).value;
+  const logic::Slot o = logic::add_gate(nl, GateKind::kOr, 2).value;
   logic::PinRef q{};
   q.slot = 0;
   q.is_output = true;
@@ -137,12 +138,12 @@ void test_comb_cycle_still_rejected_with_flop_present() {
   // A live-but-uninvolved flop must not shield a real combinational cycle.
   Netlist nl;
   place_seq(nl, 0, GateKind::kDff, 1);
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   assert(logic::wire(nl, a, n, 0).ok());
   assert(!logic::wire(nl, n, a, 0).ok()); // NOT.Y -> AND.0: comb cycle, loud
   // Hand-built comb cycle beside a flop fails whole-graph validation too.
-  nl.gates[a].drivers[1] = n;
+  nl.slots[a].drivers[1] = n;
   nl.dirty = true;
   assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
 }
@@ -151,8 +152,8 @@ void test_wire_unchanged_for_comb() {
   // Pure-combinational discipline is byte-identical behavior: self-loops
   // and two-gate loops rejected, DAG wires accepted (old reaches path).
   Netlist nl;
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   assert(!logic::wire(nl, a, a, 0).ok()); // self-loop
   assert(logic::wire(nl, a, n, 0).ok());
   assert(!logic::wire(nl, n, a, 0).ok()); // would close AND->NOT->AND

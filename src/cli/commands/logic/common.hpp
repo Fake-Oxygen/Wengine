@@ -50,8 +50,8 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 
 // Display names (per-kind counters, never reused): "AND1", "AND1.Y", "AND1.2".
 // Sequential gates show named pins: "DFF1.D", "DFF1.CLK", "DFF1.Q", "DFF1.NQ".
-[[nodiscard]] std::string gate_name(const wengine::logic::Netlist &nl, std::uint16_t slot);
-[[nodiscard]] std::string pin_text(const wengine::logic::Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input, bool negated = false);
+[[nodiscard]] std::string gate_name(const wengine::logic::Netlist &nl, wengine::logic::Slot slot);
+[[nodiscard]] std::string pin_text(const wengine::logic::Netlist &nl, wengine::logic::Slot slot, bool is_output, std::uint8_t input, bool negated = false);
 
 void collect_gate_names(const wengine::logic::Netlist &nl, std::string_view partial, std::vector<std::string> &out);
 // Slot order; per gate the output pins first (Q then NQ on sequential gates),
@@ -85,7 +85,7 @@ void reset_seq_session_state();
 // Level latches (DLATCH/SRLATCH) belong to no clock domain.
 struct ClockDomain {
   std::string name;
-  std::vector<std::uint16_t> members;
+  std::vector<wengine::logic::Slot> members;
 };
 std::vector<ClockDomain> clock_domains(const wengine::logic::Netlist &nl);
 
@@ -179,8 +179,7 @@ inline constexpr std::string_view kWithDelaysFlag = "--with-delays";
 // non-empty — the step verb's per-edge blocks), then `t=<T>ps
 // <PIN>: <old>-><new>` lines in pinned order, then `settled in
 // <D>ps`.
-void print_timing_trace(const wengine::logic::Netlist &nl, const wengine::logic::TimingTrace &trace, std::ostream &out,
-                        std::string_view edge = {});
+void print_timing_trace(const wengine::logic::Netlist &nl, const wengine::logic::TimingTrace &trace, std::ostream &out, std::string_view edge = {});
 
 // Complete a `--from` value: bare pin prefix -> pin names; exact pin (or
 // pin + bit prefix) -> valued PIN=0|1 forms.
@@ -194,9 +193,7 @@ namespace yaml {
 // clocks/topology agreement, unknown keys are errors. Builds into `out` (slot order ==
 // file order) plus per-slot power-on values into `inits`; both untouched
 // on failure.
-bool load_text(const std::string &text, wengine::logic::Netlist &out,
-               std::array<wengine::logic::LogicValue, wengine::logic::kMaxGates> &inits,
-               std::string &err);
+bool load_text(const std::string &text, wengine::logic::Netlist &out, std::vector<wengine::logic::LogicValue> &inits, std::string &err);
 
 } // namespace yaml
 

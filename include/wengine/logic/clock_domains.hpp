@@ -39,7 +39,7 @@ struct ClockDomain {
   /** @brief Domain name: source-pin spelling, or bare "clk" for dangling clocks. */
   std::string name;
   /** @brief Member flop slots, in slot order. */
-  std::vector<std::uint16_t> members;
+  std::vector<Slot> members;
 };
 
 /**
@@ -56,8 +56,8 @@ struct ClockDomain {
  */
 [[nodiscard]] inline std::vector<ClockDomain> derive_clock_domains(const Netlist &nl) {
   std::vector<ClockDomain> domains;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -65,14 +65,14 @@ struct ClockDomain {
       continue; // level latches belong to no clock domain
     }
     std::string name = "clk";
-    const std::uint16_t drv = (g.input_count > 1) ? g.drivers[1] : kNoDriver;
-    if (drv != kNoDriver && drv < kMaxGates && nl.gates[drv].live) {
+    const Slot drv = (g.input_count > 1) ? g.drivers[1] : kNoDriver;
+    if (drv != kNoDriver && drv < slot_count(nl) && nl.slots[drv].live) {
       const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + 1;
       const bool neg = nl.driver_inv[flat] != 0;
-      name = gate_kind_name(nl.gates[drv].kind);
-      name += std::to_string(nl.gates[drv].counter);
+      name = gate_kind_name(nl.slots[drv].kind);
+      name += std::to_string(nl.slots[drv].counter);
       name += '.';
-      if (is_sequential_kind(nl.gates[drv].kind)) {
+      if (is_sequential_kind(nl.slots[drv].kind)) {
         name += neg ? "NQ" : "Q";
       } else {
         name += 'Y';

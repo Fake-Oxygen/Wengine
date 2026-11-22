@@ -44,8 +44,8 @@ int LogicTieSpec::run(ArgCursor &args, std::ostream &out) {
   if (a.value.slot == b.value.slot && a.value.input == b.value.input) {
     return cli::usage_error(out, "tie needs two distinct pins", kUsage);
   }
-  const auto &ga = nl.gates[a.value.slot];
-  const auto &gb = nl.gates[b.value.slot];
+  const auto &ga = nl.slots[a.value.slot];
+  const auto &gb = nl.slots[b.value.slot];
   if (ga.drivers[a.value.input] != wengine::logic::kNoDriver ||
       gb.drivers[b.value.input] != wengine::logic::kNoDriver) {
     return cli::usage_error(out, "tie needs dangling pins (unwire first)", kUsage);

@@ -15,7 +15,7 @@
  * vocabulary (every gate stays the universal kind U), and the block
  * output count (sinks are never merged, so outputs stay positional).
  * Cost class: quadratic pairwise compare over live universal gates
- * per call, bounded by kMaxGates with fixed stack arrays — no
+ * per call, bounded by slot_count(nl) with fixed stack arrays — no
  * allocation, deterministic slot order throughout.
  *
  * Merge contract (optimize_barrier.hpp DedupKey/MergeTied): dangling
@@ -45,6 +45,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace wengine::logic {
 
@@ -75,14 +76,15 @@ namespace detail {
  *                  merges same-tie-class dangling pins.
  * @param[in] feeds_seq Precomputed feeds-sequential bits (nullptr when
  *                     the net has no sequential gates).
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for remove_gate's tie-detach sweep.
  * @return True when any merge happened (caller re-runs to fixpoint).
  */
-inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge,
-                                      const bool *feeds_seq) noexcept {
+inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge, const bool *feeds_seq, std::span<std::size_t> tie_survivors) noexcept {
   recount_fanout(nl);
   bool changed = false;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    Gate &a = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    Gate &a = nl.slots[s];
     if (!a.live || a.kind != u || a.output_fanout == 0) {
       continue; // sinks preserved (output count stable)
     }
@@ -112,8 +114,8 @@ inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge,
       }
       a_sorted[j] = key;
     }
-    for (std::uint16_t t = static_cast<std::uint16_t>(s + 1); t < kMaxGates; ++t) {
-      Gate &b = nl.gates[t];
+    for (Slot t = static_cast<Slot>(s + 1); t < slot_count(nl); ++t) {
+      Gate &b = nl.slots[t];
       if (!b.live || b.kind != u || b.output_fanout == 0) {
         continue;
       }
@@ -163,14 +165,14 @@ inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge,
         continue;
       }
       rewire_users(nl, t, s);
-      (void)remove_gate(nl, t);
+      (void)remove_gate(nl, t, tie_survivors);
       changed = true;
     }
   }
   if (changed) {
     recount_fanout(nl);
     nl.dirty = true;
-    nl.topo_size = 0;
+    nl.topo_order.clear();
   }
   return changed;
 }
@@ -188,10 +190,12 @@ inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge,
  * @param[in] u Universal target kind (kNand or kNor).
  * @param[in] feeds_seq Precomputed feeds-sequential bits (nullptr when
  *                     the net has no sequential gates).
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for remove_gate's tie-detach sweep.
  * @return True when any merge happened (caller re-runs to fixpoint).
  */
-inline bool dedup_universal_pass(Netlist &nl, GateKind u, const bool *feeds_seq = nullptr) noexcept {
-  return dedup_universal_pass_impl(nl, u, MergeTied::kStrict, feeds_seq);
+inline bool dedup_universal_pass(Netlist &nl, GateKind u, const bool *feeds_seq, std::span<std::size_t> tie_survivors) noexcept {
+  return dedup_universal_pass_impl(nl, u, MergeTied::kStrict, feeds_seq, tie_survivors);
 }
 
 /**
@@ -206,10 +210,12 @@ inline bool dedup_universal_pass(Netlist &nl, GateKind u, const bool *feeds_seq 
  * @param[in] u Universal target kind (kNand or kNor).
  * @param[in] feeds_seq Precomputed feeds-sequential bits (nullptr when
  *                     the net has no sequential gates).
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for remove_gate's tie-detach sweep.
  * @return True when any merge happened (caller re-runs to fixpoint).
  */
-inline bool dedup_universal_tied_pass(Netlist &nl, GateKind u, const bool *feeds_seq = nullptr) noexcept {
-  return dedup_universal_pass_impl(nl, u, MergeTied::kMergeTied, feeds_seq);
+inline bool dedup_universal_tied_pass(Netlist &nl, GateKind u, const bool *feeds_seq, std::span<std::size_t> tie_survivors) noexcept {
+  return dedup_universal_pass_impl(nl, u, MergeTied::kMergeTied, feeds_seq, tie_survivors);
 }
 
 /**
@@ -224,30 +230,32 @@ inline bool dedup_universal_tied_pass(Netlist &nl, GateKind u, const bool *feeds
  * @param[in] u Universal target kind (kNand or kNor).
  * @param[in] feeds_seq Precomputed feeds-sequential bits (nullptr when
  *                     the net has no sequential gates).
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for remove_gate's tie-detach sweep.
  * @return True when any cancellation happened (caller re-runs to
  *         fixpoint; the orphaned D vanishes via DCE).
  */
-inline bool double_inv_universal_pass(Netlist &nl, GateKind u, const bool *feeds_seq = nullptr) noexcept {
+inline bool double_inv_universal_pass(Netlist &nl, GateKind u, const bool *feeds_seq, std::span<std::size_t> tie_survivors) noexcept {
   recount_fanout(nl);
   bool changed = false;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    Gate &g = nl.slots[s];
     if (!g.live || g.kind != u || g.output_fanout == 0 || g.input_count != 2) {
       continue;
     }
-    const std::uint16_t d = g.drivers[0];
-    if (d == kNoDriver || g.drivers[1] != d || d == s || d >= kMaxGates) {
+    const Slot d = g.drivers[0];
+    if (d == kNoDriver || g.drivers[1] != d || d == s || d >= slot_count(nl)) {
       continue;
     }
-    const Gate &dg = nl.gates[d];
+    const Gate &dg = nl.slots[d];
     if (!dg.live || dg.kind != u || dg.input_count != 2) {
       continue;
     }
-    const std::uint16_t e = dg.drivers[0];
-    if (e == kNoDriver || dg.drivers[1] != e || e == s || e == d || e >= kMaxGates) {
+    const Slot e = dg.drivers[0];
+    if (e == kNoDriver || dg.drivers[1] != e || e == s || e == d || e >= slot_count(nl)) {
       continue;
     }
-    if (!nl.gates[e].live) {
+    if (!nl.slots[e].live) {
       continue;
     }
     // G == E: rewire users, remove G (D becomes orphan if it only drove G;
@@ -261,13 +269,13 @@ inline bool double_inv_universal_pass(Netlist &nl, GateKind u, const bool *feeds
       continue;
     }
     rewire_users(nl, s, e);
-    (void)remove_gate(nl, s);
+    (void)remove_gate(nl, s, tie_survivors);
     changed = true;
   }
   if (changed) {
     recount_fanout(nl);
     nl.dirty = true;
-    nl.topo_size = 0;
+    nl.topo_order.clear();
   }
   return changed;
 }

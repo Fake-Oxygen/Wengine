@@ -111,9 +111,9 @@ void halo_circle(SDL_Renderer *ren, int cx, int cy, int r) noexcept {
   gfx::fill_circle(ren, cx, cy, r - 2);
 }
 
-[[nodiscard]] std::string gate_label(const wengine::logic::Netlist &nl, std::uint16_t slot) {
-  std::string s(wengine::logic::gate_kind_name(nl.gates[slot].kind));
-  s += std::to_string(nl.gates[slot].counter);
+[[nodiscard]] std::string gate_label(const wengine::logic::Netlist &nl, wengine::logic::Slot slot) {
+  std::string s(wengine::logic::gate_kind_name(nl.slots[slot].kind));
+  s += std::to_string(nl.slots[slot].counter);
   return s;
 }
 
@@ -376,7 +376,7 @@ void draw_scene(SDL_Renderer *ren, const wengine::logic::Netlist &nl,
 
   // Bodies (input leads included: they land on the symbol border).
   for (const auto &p : sc.gates) {
-    draw_gate_body(ren, nl.gates[p.slot], p.x, p.y, kLayoutBoxW, kLayoutBoxH);
+    draw_gate_body(ren, nl.slots[p.slot], p.x, p.y, kLayoutBoxW, kLayoutBoxH);
   }
 
   // Fanout junction dots: one driver fanning to several inputs branches
@@ -387,7 +387,7 @@ void draw_scene(SDL_Renderer *ren, const wengine::logic::Netlist &nl,
   (void)SDL_SetRenderDrawColor(ren, 20, 20, 20, 255);
   for (const auto &p : sc.gates) {
     const wengine::logic::Placed box{p.slot, p.level, p.x, p.y};
-    const wengine::logic::SeqSym sym = wengine::logic::seq_symbol(box, nl.gates[p.slot]);
+    const wengine::logic::SeqSym sym = wengine::logic::seq_symbol(box, nl.slots[p.slot]);
     if (sym.q_dot) {
       gfx::fill_circle(ren, sym.q.x, sym.q.y, 4);
     }

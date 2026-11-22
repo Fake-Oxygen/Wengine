@@ -42,13 +42,12 @@ int LogicLoadSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::runtime_error(out, std::string("cannot read file '") + std::string(*path) + "'");
   }
   Netlist tmp{};
-  std::array<wengine::logic::LogicValue, wengine::logic::kMaxGates> inits{};
-  inits.fill(wengine::logic::LogicValue::kLow);
+  std::vector<wengine::logic::LogicValue> inits{};
   std::string err;
   if (!support::yaml::load_text(text, tmp, inits, err)) {
     return cli::runtime_error(out, std::string("cannot load '") + std::string(*path) + "': " + err);
   }
-  const std::uint16_t gates = tmp.live_count;
+  const std::uint32_t gates = tmp.live_count;
   const std::size_t wires = support::wire_count(tmp);
   // Swap first, then probe the live controls: an illegal SR net (S=R=1)
   // in the file restores the backup so the refused load keeps the
@@ -60,9 +59,9 @@ int LogicLoadSpec::run(ArgCursor &args, std::ostream &out) {
   workspace() = tmp;
   wengine::logic::reset_seq_state(support::seq_state());
   wengine::logic::init_seq_state(support::seq_state(), workspace());
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
+  for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(workspace()); ++s) {
     if (support::seq_state().valid[s] != 0 &&
-        wengine::logic::is_sequential_kind(workspace().gates[s].kind)) {
+        wengine::logic::is_sequential_kind(workspace().slots[s].kind)) {
       support::seq_state().q[s] = inits[s];
     }
   }

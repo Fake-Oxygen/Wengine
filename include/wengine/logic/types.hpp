@@ -2,11 +2,10 @@
 
 /**
  * @file
- * Logic-gate netlist vocabulary (scaffold — LOGIC-2 fills in eval):
- * gate kinds, net values, pin references, and the fixed-capacity
- * Netlist pool that every other logic header builds on. This header
- * is the data-model root of the logic pipeline (netlist parse ->
- * state -> eval -> layout/topo -> optimize).
+ * Logic-gate netlist vocabulary: gate kinds, net values, pin references,
+ * and the growable Netlist pool that every other logic header builds on.
+ * This header is the data-model root of the logic pipeline (netlist parse
+ * -> state -> eval -> layout/topo -> optimize).
  *
  * Design (docs/logic.md §4): combinational block of gates with variable
  * fan-in (2..8, NOT/BUF exactly 1, TBUF exactly 2). Identity is per-kind monotonic
@@ -15,9 +14,19 @@
  * `<NAME>.<1..k>` (input). Single-driver inputs, unlimited fan-out,
  * cycles rejected (combinational v1 only).
  *
+ * Storage (dynamic pool): the pool grows geometrically on demand
+ * (lowest-free-slot order, so allocation order is identical to the old
+ * fixed pool for identical op sequences), and every scan/init is bounded
+ * by the current pool size — never by the max cap. A five-gate net costs
+ * kilobytes, not hundreds of megabytes. Growth past kMaxGates fails
+ * loudly ("netlist full"), never silently. Slot ids are 32-bit; the
+ * pool, scratch, and counters live on the heap (Netlist is a small
+ * handle: copy/move are deep but proportional to live size).
+ *
  * Dependency rules: header-only, standard-library-only (STATUS-free
  * vocabulary; fallible ops use core::Status/Result at the eval/io
- * layer, never here). No iostream. Logic is a standalone domain: this
+ * layer, never here — growth reports plain bool, callers map past-cap
+ * refusal to Status). No iostream. Logic is a standalone domain: this
  * header (and every logic header below it) must never depend on CLI
  * types. Consumers: pins/netlist/topo/tie_set/shared_net/block_interface
  * and the rest of the logic pipeline, the CLI `logic` verbs, and the
@@ -30,6 +39,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 namespace wengine::logic {
 
@@ -213,14 +223,40 @@ static_assert(static_cast<int>(LogicValue::kHighZ) == 2 && static_cast<int>(Logi
 
 /** @brief Maximum gate fan-in (8): the allowed per-kind range is 1..8. */
 inline constexpr std::size_t kMaxInputs = 8;
-/** @brief Gate slot cap (1024); overflow is loud, never silent. */
-inline constexpr std::size_t kMaxGates = 1024; // slot cap, loud on overflow
+/**
+ * @brief Loud maximum slot cap (1048576): growth past this fails loudly,
+ *        never silently. Pool storage and every scan/init are bounded by
+ *        the current pool size — the cap only bounds how far the pool may
+ *        grow, never how much idle storage a small net carries.
+ */
+inline constexpr std::size_t kMaxGates = 1048576; // loud max slot cap
+/**
+ * @brief Pool growth seed: a fresh Netlist holds this many slots; growth
+ *        doubles from here. Small nets stay kilobytes.
+ */
+inline constexpr std::size_t kInitialSlots = 64;
 /**
  * @brief Extra-driver cap per shared input (011): a shared net holds the
  *        primary driver plus up to kMaxSharedExtra extras — 4 attachments
  *        total per input. Overflow is loud, never silently truncated.
  */
 inline constexpr std::size_t kMaxSharedExtra = 3;
+
+/**
+ * @brief Gate slot index width: 32 bits, the only width. The pool grows
+ *        to kMaxGates slots, so one width covers every net — no
+ *        instantiation duality, no width-conditional code.
+ */
+using Slot = std::uint32_t;
+
+/**
+ * @brief Sentinel driver slot for an unwired input; also borrowed as
+ *        the not-a-block-input marker by the interface seam
+ *        (block_interface.hpp).
+ */
+inline constexpr Slot kNoDriver = 0xFFFFFFFFu;
+
+static_assert(kNoDriver == 0xFFFFFFFFu, "kNoDriver keeps the all-ones sentinel");
 
 /**
  * @brief Display name for a gate kind (e.g. "AND", "DFF").
@@ -275,34 +311,35 @@ inline constexpr std::size_t kMaxSharedExtra = 3;
  */
 struct PinRef {
   /** @brief Gate slot index the pin belongs to. */
-  std::uint16_t slot = 0;
+  Slot slot = 0;
   /** @brief True for an output pin (Y / Q / NQ), false for an input. */
   bool is_output = false;
   /** @brief 0-based input index, valid iff not is_output. */
   std::uint8_t input = 0; // 0-based, valid iff !is_output
   /** @brief NQ source/output marker, valid iff is_output (sequential gates). */
-  bool negated = false;   // valid iff is_output: NQ source/output on sequential gates
+  bool negated = false; // valid iff is_output: NQ source/output on sequential gates
+
+  /**
+   * @brief Value equality (whole-pin compare, defaulted).
+   *
+   * @return True when every field compares equal.
+   */
+  bool operator==(const PinRef &) const noexcept = default;
 };
 
 /**
- * @brief Sentinel driver slot for an unwired input (0xFFFF); also
- *        borrowed as the not-a-block-input marker by the interface
- *        seam (block_interface.hpp).
- */
-inline constexpr std::uint16_t kNoDriver = 0xFFFF;
-
-/**
- * @brief One gate slot in the fixed-capacity pool.
+ * @brief One gate slot in the growable pool.
  *
- * `live` false => free-list entry. `counter` is the per-kind monotonic
- * id (display: AND<counter>); `input_count` the configured fan-in;
- * `ignored_mask` bitmask (bit i => input i+1 excluded from the derived
- * block interface) plus `ignore_output` for dangling outputs;
- * `drivers` holds the source slot index per input, kNoDriver when
- * unwired.
+ * `live` false => free entry (recycled by the lowest-free-slot rule).
+ * `counter` is the per-kind monotonic id (display: AND<counter>);
+ * `input_count` the configured fan-in; `ignored_mask` bitmask (bit i
+ * => input i+1 excluded from the derived block interface) plus
+ * `ignore_output` for dangling outputs; `drivers` holds the source
+ * slot index per input, kNoDriver when unwired (set explicitly by
+ * add_gate; a fresh slot reads zero until then).
  */
 struct Gate {
-  /** @brief Slot occupancy: false marks a free-list entry. */
+  /** @brief Slot occupancy: false marks a free entry. */
   bool live = false;
   /** @brief Gate kind (combinational function or sequential element). */
   GateKind kind = GateKind::kAnd;
@@ -323,18 +360,18 @@ struct Gate {
                                 // (sequential only; `use` re-exposes, wiring
                                 // bypasses — NQ shows only on explicit use)
   /** @brief Derived Q fanout (wired sinks), for list/iface. */
-  std::uint16_t output_fanout = 0; // derived Q fanout, for list/iface
+  Slot output_fanout = 0; // derived Q fanout, for list/iface
   /** @brief Derived NQ fanout, sequential gates only. */
-  std::uint16_t nq_fanout = 0;     // derived NQ fanout, sequential gates only
+  Slot nq_fanout = 0;     // derived NQ fanout, sequential gates only
   /**
    * @brief V2 timing hook (docs/logic.md §12): stored now, honored
    *        later; v1 eval is zero-delay regardless of value.
    */
   std::uint64_t propagation_delay_ps = 0; // V2 timing hook (§12): stored
-                                          // now, honored later; v1 eval is
-                                          // zero-delay regardless of value
+                                            // now, honored later; v1 eval is
+                                            // zero-delay regardless of value
   /** @brief Source slot index per input; kNoDriver when unwired. */
-  std::array<std::uint16_t, kMaxInputs> drivers{};
+  std::array<Slot, kMaxInputs> drivers{};
 
   /**
    * @brief Value equality (whole-slot compare, defaulted).
@@ -345,24 +382,34 @@ struct Gate {
 };
 
 /**
- * @brief Fixed-capacity SoA-ish pool: slots recycle, counters don't.
- *        Mutation marks `dirty` (topology must be recompiled before
- *        eval).
+ * @brief Growable gate pool: slots recycle, counters don't.
+ *
+ * Backing arrays grow geometrically from kInitialSlots on demand and
+ * are bounded by kMaxGates (loud refusal past it). Every scan and init
+ * in the pipeline is bounded by the current pool size
+ * (`slots.size()`), never by the cap — a small net costs small memory
+ * and small per-op scans. Allocation order is lowest-free-slot (scan
+ * in slot order, append past the end), identical to the old fixed pool
+ * for identical op sequences, so deterministic behavior is preserved.
+ * Mutation marks `dirty` (topology must be recompiled before eval).
  *
  * Tied inputs (LOGIC-14): input-input shorts as first-class nets. Only
- * dangling (unwired, non-ignored) input pins may be tied. Equivalence
+ * dangling (unwired, non-ignored) inputs may be tied. Equivalence
  * classes are stored as a star: `tie_rep[flat] == 0` means singleton
  * (untied); otherwise it holds `leader_flat + 1` where leader_flat is
  * the class canonical rep (lowest slot/input wins, slot-order
  * enumeration). Zero-initialization is the all-singleton state by
- * construction, so `Netlist{}` starts untied and `reset_netlist` clears
- * to zero. Interface derivation counts one block input per class
- * (leaders only); scalar and bit-parallel eval feed/share one value per
- * class.
+ * construction; vectors value-init to zero on growth.
+ *
+ * Workspace scratch (`ws_*`): caller-invisible transient working
+ * storage owned by the pool so no call site sizes scratch. Grown on
+ * demand by the seams that need it, never serialized, excluded from
+ * equality. Hot paths still perform no allocation once sized (growth
+ * happens only in mutation/rebuild entry points, amortized).
  */
 struct Netlist {
-  /** @brief Gate slots; a dead slot is a free-list entry. */
-  std::array<Gate, kMaxGates> gates{};
+  /** @brief Gate slots; a dead slot is a free entry. */
+  std::vector<Gate> slots{};
   /**
    * @brief Per-kind monotonic counters (never reused), indexed by
    *        kind_ordinal: 0..8 combinational (8 is TBUF), 16 DFF,
@@ -374,14 +421,14 @@ struct Netlist {
    *        sink input reads the NEGATED source value (wire from a flop
    *        NQ output). Zero is the all-non-inverted state by
    *        construction; slot-level wire() always clears, wire_pins()
-   *        sets it for NQ sources, unwire()/remove clear it.
+   *        sets it for NQ sources, unwire()/remove clear.
    */
-  std::array<std::uint8_t, kMaxGates * kMaxInputs> driver_inv{};
+  std::vector<std::uint8_t> driver_inv{};
   /**
-   * @brief Tie-class star (see struct doc): tie_rep[flat] == 0 is a
+   * @brief Tie-class star (see struct doc): `tie_rep[flat] == 0` means
    *        singleton; otherwise leader_flat + 1.
    */
-  std::array<std::uint16_t, kMaxGates * kMaxInputs> tie_rep{};
+  std::vector<Slot> tie_rep{};
   /**
    * @brief Shared-net mark + extra count per input (011): owned by the
    *        SharedNet seam (shared_net.hpp) — only that header may
@@ -390,9 +437,9 @@ struct Netlist {
    *        shared mark, bits1..2 hold the extra-attachment count 0..3.
    *        Indexed by tie_flat(slot, input). Marks are persistent
    *        topology state; counts are diagnostic session state beside
-   *        this pool (SolveDiag), never stored here.
+   *        this pool (SolveDiag, never stored here).
    */
-  std::array<std::uint8_t, kMaxGates * kMaxInputs> shared_meta{};
+  std::vector<std::uint8_t> shared_meta{};
   /**
    * @brief Extra source slots per shared input (011): owned by the
    *        SharedNet seam. Dense entries 0..count-1 at
@@ -400,14 +447,14 @@ struct Netlist {
    *        Gate::drivers (kNoDriver semantics preserved); extras never
    *        dangle behind a kNoDriver primary.
    */
-  std::array<std::uint16_t, kMaxGates * kMaxInputs * kMaxSharedExtra> extra_drivers{};
+  std::vector<Slot> extra_drivers{};
   /**
    * @brief Per-extra NQ polarity (011): owned by the SharedNet seam.
    *        extra_inv at the same index as extra_drivers; nonzero inverts
    *        that attachment's value before the resolve_net fold (Q+NQ
    *        self-contention resolves to X).
    */
-  std::array<std::uint8_t, kMaxGates * kMaxInputs * kMaxSharedExtra> extra_inv{};
+  std::vector<std::uint8_t> extra_inv{};
   /**
    * @brief Per-input pull setting (012): 0 = none (the all-none default,
    *        today's behavior), 1 = pull-up, 2 = pull-down. Indexed by
@@ -415,49 +462,253 @@ struct Netlist {
    *        An all-floating net maps through the pull to its idle level
    *        (up → kHigh, down → kLow, none → kHighZ); driven nets are
    *        inert under every setting. Zero-initialization is the
-   *        all-none state by construction, so Netlist{} starts
-   *        pull-free. Pulls are persistent topology state (set beside
-   *        the pool) and die with their slot (remove_gate clears,
-   *        reset_netlist zeroes); tied/ignored inputs never carry one
-   *        (loud disjointness on both seams).
+   *        all-none state by construction; pulls die with their slot
+   *        (remove_gate clears, reset clears).
    */
-  std::array<std::uint8_t, kMaxGates * kMaxInputs> pull_cfg{};
+  std::vector<std::uint8_t> pull_cfg{};
   /** @brief Number of live gate slots. */
-  std::uint16_t live_count = 0;
+  std::uint32_t live_count = 0;
   /** @brief Set by every mutation; cleared by a successful topology rebuild. */
   bool dirty = true;
   /** @brief Compiled evaluation order (slot indices; Kahn output). */
-  std::array<std::uint16_t, kMaxGates> topo_order{};
+  std::vector<Slot> topo_order{};
   /** @brief Per-slot level in the compiled order (0 for sources and sequential roots). */
-  std::array<std::uint16_t, kMaxGates> topo_level{};
-  /** @brief Number of valid entries in topo_order. */
-  std::uint16_t topo_size = 0;
+  std::vector<Slot> topo_level{};
+  /** @brief Kahn indegree workspace (pool-sized). */
+  std::vector<std::uint8_t> ws_indeg{};
+  /** @brief Kahn queue workspace (pool-sized). */
+  std::vector<Slot> ws_queue{};
+  /** @brief Kahn emission-order workspace (pool-sized). */
+  std::vector<Slot> ws_order{};
+  /** @brief Kahn level workspace (pool-sized). */
+  std::vector<Slot> ws_levels{};
+  /** @brief Resolved-value workspace (`size * kMaxInputs` entries). */
+  std::vector<LogicValue> ws_resolved{};
+  /** @brief Per-slot output workspace (pool-sized). */
+  std::vector<LogicValue> ws_gate_out{};
+  /** @brief Block-input position workspace (`size * kMaxInputs` entries). */
+  std::vector<Slot> ws_in_pos{};
+  /** @brief Word-eval gate-word workspace (pool-sized). */
+  std::vector<std::uint64_t> ws_words{};
+  /** @brief Stepper next-Q workspace (pool-sized). */
+  std::vector<LogicValue> ws_next_q{};
+  /** @brief Stepper async-forced-Q workspace (pool-sized). */
+  std::vector<LogicValue> ws_forced_q{};
+  /** @brief Stepper async-force flag workspace (pool-sized). */
+  std::vector<std::uint8_t> ws_force{};
+  /** @brief Stepper combinational-order workspace (pool-sized). */
+  std::vector<Slot> ws_comb_order{};
+  /** @brief Tie-detach survivor workspace (`size * kMaxInputs` entries). */
+  std::vector<std::size_t> ws_survivors{};
+  /** @brief Reachability DFS visited-flag workspace (pool-sized). */
+  std::vector<std::uint8_t> ws_seen{};
+  /** @brief Reachability DFS stack workspace (pool-sized). */
+  std::vector<Slot> ws_stack{};
 
   /**
-   * @brief Value equality (whole-pool compare, defaulted).
+   * @brief Value equality over pool semantics (workspace excluded).
    *
-   * @return True when every pool field compares equal (gates, counters,
-   *         polarities, ties, topology caches included).
+   * Compares live content, counters, polarities, ties, marks, pulls,
+   * counts, and the compiled topology — everything the checkpoint
+   * persists. Pool vectors may differ in allocated size (a loaded pool
+   * is stride-sized, a live pool is geometrically sized): the common
+   * prefix compares exactly and any longer tail must be inert
+   * (fresh-dead slots, zero arrays). Workspace scratch never
+   * participates.
+   *
+   * @param[in] o Other netlist to compare against.
+   * @return True when every semantic field compares equal.
    */
-  bool operator==(const Netlist &) const noexcept = default;
+  [[nodiscard]] bool operator==(const Netlist &o) const noexcept {
+    if (live_count != o.live_count || next_counter != o.next_counter || dirty != o.dirty ||
+        topo_order != o.topo_order) {
+      return false;
+    }
+    const std::size_t n = slots.size() < o.slots.size() ? slots.size() : o.slots.size();
+    for (std::size_t i = 0; i < n; ++i) {
+      if (!(slots[i] == o.slots[i])) {
+        return false;
+      }
+    }
+    static const Gate kFresh{};
+    for (std::size_t i = n; i < slots.size(); ++i) {
+      if (!(slots[i] == kFresh)) {
+        return false;
+      }
+    }
+    for (std::size_t i = n; i < o.slots.size(); ++i) {
+      if (!(o.slots[i] == kFresh)) {
+        return false;
+      }
+    }
+    if (!prefix_equal_zero_tail(driver_inv, o.driver_inv) || !prefix_equal_zero_tail(tie_rep, o.tie_rep) ||
+        !prefix_equal_zero_tail(shared_meta, o.shared_meta) || !prefix_equal_zero_tail(extra_drivers, o.extra_drivers) ||
+        !prefix_equal_zero_tail(extra_inv, o.extra_inv) || !prefix_equal_zero_tail(pull_cfg, o.pull_cfg) ||
+        !prefix_equal_zero_tail(topo_level, o.topo_level)) {
+      return false;
+    }
+    return true;
+  }
+
+ private:
+  // Common-prefix equality with an all-zero tail on the longer side.
+  template <typename T>
+  [[nodiscard]] static bool prefix_equal_zero_tail(const std::vector<T> &a, const std::vector<T> &b) noexcept {
+    const std::size_t n = a.size() < b.size() ? a.size() : b.size();
+    for (std::size_t i = 0; i < n; ++i) {
+      if (!(a[i] == b[i])) {
+        return false;
+      }
+    }
+    for (std::size_t i = n; i < a.size(); ++i) {
+      if (!(a[i] == T{})) {
+        return false;
+      }
+    }
+    for (std::size_t i = n; i < b.size(); ++i) {
+      if (!(b[i] == T{})) {
+        return false;
+      }
+    }
+    return true;
+  }
 };
+
+/**
+ * @brief Current pool size (allocated slots, live + free).
+ *
+ * Every scan/init in the pipeline is bounded by this — never by
+ * kMaxGates. Memory and per-op cost track the high-water mark.
+ *
+ * @param[in] nl Pool to measure.
+ * @return Allocated slot count (0 for a fresh pool, before growth).
+ */
+[[nodiscard]] inline std::size_t slot_count(const Netlist &nl) noexcept {
+  return nl.slots.size();
+}
+
+/**
+ * @brief Flat pin index: slot * kMaxInputs + input.
+ *
+ * @param[in] slot Gate slot index.
+ * @param[in] input 0-based input index.
+ * @return Flat index into the per-input pool arrays.
+ */
+[[nodiscard]] inline std::size_t tie_flat(Slot slot, std::uint8_t input) noexcept {
+  return static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input);
+}
+
+/**
+ * @brief Grow the pool so slot `need - 1` is addressable.
+ *
+ * Geometric growth (doubling from kInitialSlots); vectors value-init
+ * (zero == the inert state for every pool array). Never shrinks.
+ * Growth past kMaxGates fails loudly (false), never silently.
+ *
+ * @param[out] nl Pool to grow.
+ * @param[in] need Minimum addressable slot count.
+ * @return True when `need` slots are addressable; false when need
+ *         exceeds kMaxGates ("netlist full"). True requires no work
+ *         when already sized (hot paths stay allocation-free).
+ */
+[[nodiscard]] inline bool ensure_slots(Netlist &nl, std::size_t need) {
+  if (need <= nl.slots.size()) {
+    return true;
+  }
+  if (need > kMaxGates) {
+    return false; // loud max cap: the caller maps this to Status
+  }
+  std::size_t cap = nl.slots.size() * 2;
+  if (cap < kInitialSlots) {
+    cap = kInitialSlots;
+  }
+  if (cap < need) {
+    cap = need;
+  }
+  if (cap > kMaxGates) {
+    cap = kMaxGates;
+  }
+  nl.slots.resize(cap);
+  nl.driver_inv.resize(cap * kMaxInputs);
+  nl.tie_rep.resize(cap * kMaxInputs);
+  nl.shared_meta.resize(cap * kMaxInputs);
+  nl.extra_drivers.resize(cap * kMaxInputs * kMaxSharedExtra);
+  nl.extra_inv.resize(cap * kMaxInputs * kMaxSharedExtra);
+  nl.pull_cfg.resize(cap * kMaxInputs);
+  nl.topo_level.resize(cap);
+  return true;
+}
+
+/**
+ * @brief Grow pool workspace scratch for a pool of `n` slots.
+ *
+ * Sizes every ws_* array for `n` addressable slots (resolved-style
+ * arrays take n * kMaxInputs). No-op when already sized; never
+ * shrinks. Workspace growth cannot fail past the pool itself (n is
+ * always pool-bounded at call sites).
+ *
+ * @param[out] nl Pool whose workspace grows.
+ * @param[in] n Addressable slot count the workspace must cover.
+ */
+inline void ensure_workspace(Netlist &nl, std::size_t n) {
+  if (nl.ws_indeg.size() < n) {
+    nl.ws_indeg.resize(n);
+  }
+  if (nl.ws_queue.size() < n) {
+    nl.ws_queue.resize(n);
+  }
+  if (nl.ws_order.size() < n) {
+    nl.ws_order.resize(n);
+  }
+  if (nl.ws_levels.size() < n) {
+    nl.ws_levels.resize(n);
+  }
+  if (nl.ws_gate_out.size() < n) {
+    nl.ws_gate_out.resize(n);
+  }
+  if (nl.ws_words.size() < n) {
+    nl.ws_words.resize(n);
+  }
+  if (nl.ws_next_q.size() < n) {
+    nl.ws_next_q.resize(n);
+  }
+  if (nl.ws_forced_q.size() < n) {
+    nl.ws_forced_q.resize(n);
+  }
+  if (nl.ws_force.size() < n) {
+    nl.ws_force.resize(n);
+  }
+  if (nl.ws_comb_order.size() < n) {
+    nl.ws_comb_order.resize(n);
+  }
+  if (nl.ws_resolved.size() < n * kMaxInputs) {
+    nl.ws_resolved.resize(n * kMaxInputs);
+  }
+  if (nl.ws_in_pos.size() < n * kMaxInputs) {
+    nl.ws_in_pos.resize(n * kMaxInputs);
+  }
+  if (nl.ws_survivors.size() < n * kMaxInputs) {
+    nl.ws_survivors.resize(n * kMaxInputs);
+  }
+  if (nl.ws_seen.size() < n) {
+    nl.ws_seen.resize(n);
+  }
+  if (nl.ws_stack.size() < n) {
+    nl.ws_stack.resize(n);
+  }
+}
 
 /**
  * @brief True when the flat destination input carries a pull (012):
  *        pull_cfg[flat] is 1 (up) or 2 (down). Zero (none) and
  *        out-of-range flats read unpulled.
  *
- * Flat-index form of the pull test (usable beside
- * shared_net::is_shared_flat): pulls and ties/ignores are disjoint per
- * flat — a pulled input is never tied or ignored, enforced loudly on
- * both seams.
- *
  * @param[in] nl Netlist holding the pull table.
  * @param[in] flat Flat pin index (slot * kMaxInputs + input).
  * @return True when the flat position carries a pull-up or pull-down.
  */
 [[nodiscard]] inline bool is_pulled_flat(const Netlist &nl, std::size_t flat) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
+  if (flat >= nl.pull_cfg.size()) {
     return false;
   }
   const std::uint8_t v = nl.pull_cfg[flat];
@@ -473,7 +724,7 @@ struct Netlist {
  * @return The stored pull level (0/1/2); never anything else.
  */
 [[nodiscard]] inline std::uint8_t pull_level_flat(const Netlist &nl, std::size_t flat) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
+  if (flat >= nl.pull_cfg.size()) {
     return 0;
   }
   const std::uint8_t v = nl.pull_cfg[flat];

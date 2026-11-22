@@ -24,10 +24,11 @@ namespace {
 
 // add_gate still refuses sequential kinds (SEQ1 staging), so tests place
 // them by hand — same white-box pokes as test_logic_seq_state/cycles.
-void place_seq(Netlist &nl, std::uint16_t slot, GateKind kind, std::uint32_t counter) {
+void place_seq(Netlist &nl, logic::Slot slot, GateKind kind, std::uint32_t counter) {
   assert(slot < logic::kMaxGates);
+  assert(logic::ensure_slots(nl, static_cast<std::size_t>(slot) + 1));
   assert(logic::is_sequential_kind(kind));
-  logic::Gate &g = nl.gates[slot];
+  logic::Gate &g = nl.slots[slot];
   assert(!g.live);
   g.live = true;
   g.kind = kind;
@@ -42,7 +43,7 @@ void place_seq(Netlist &nl, std::uint16_t slot, GateKind kind, std::uint32_t cou
   }
   ++nl.live_count;
   nl.dirty = true;
-  nl.topo_size = 0;
+  nl.topo_order.clear();
 }
 
 void ignore_input(Netlist &nl, std::uint16_t slot, std::uint8_t input) {
@@ -61,8 +62,8 @@ void test_counter_2bit() {
   Netlist nl;
   place_seq(nl, 0, GateKind::kDff, 1); // DFF1 = Q0 (LSB)
   place_seq(nl, 1, GateKind::kDff, 2); // DFF2 = Q1 (MSB)
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
-  const std::uint16_t x = logic::add_gate(nl, GateKind::kXor, 2).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot x = logic::add_gate(nl, GateKind::kXor, 2).value;
   // Feedback build order is free (Q-boundary): comb->flop edges are
   // invisible to the cycle check either way, so flop D inputs and Q
   // fanout wire in any order — declarative formats list wires in file
@@ -83,6 +84,7 @@ void test_counter_2bit() {
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
+  logic::init_seq_state(st, nl);
   // Expected (Q1,Q0): 00 -> 01 -> 10 -> 11 -> 00, two full cycles bit-exact.
   const LogicValue want[9][2] = {
       {kL, kL}, // power-on 00
@@ -169,6 +171,7 @@ void test_dlatch_level_transparent_frozen() {
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
+  logic::init_seq_state(st, nl);
   assert(st.q[0] == kL); // power-on 0
   // Frozen at power-on (EN=0): D toggles move nothing, with or without
   // an advance.
@@ -227,10 +230,10 @@ void test_sr_level_table_and_refusal() {
   // hold resolve with no advance; S=R=1 is refused loudly with state
   // untouched on every entry path (direct drive, wired comb, tied leader).
   Netlist nl;
-  const std::uint16_t s = logic::add_gate(nl, GateKind::kSrlatch, 2).value; // SR1: direct drive
-  const std::uint16_t w = logic::add_gate(nl, GateKind::kSrlatch, 2).value; // SR2: wired inputs
-  const std::uint16_t b = logic::add_gate(nl, GateKind::kBuf, 1).value;      // BUF1: shared driver
-  const std::uint16_t t = logic::add_gate(nl, GateKind::kSrlatch, 2).value; // SR3: tied inputs
+  const logic::Slot s = logic::add_gate(nl, GateKind::kSrlatch, 2).value; // SR1: direct drive
+  const logic::Slot w = logic::add_gate(nl, GateKind::kSrlatch, 2).value; // SR2: wired inputs
+  const logic::Slot b = logic::add_gate(nl, GateKind::kBuf, 1).value;      // BUF1: shared driver
+  const logic::Slot t = logic::add_gate(nl, GateKind::kSrlatch, 2).value; // SR3: tied inputs
   assert(logic::wire(nl, b, w, 0).ok());                                     // BUF1.Y -> SR2.S
   assert(logic::wire(nl, b, w, 1).ok());                                     // BUF1.Y -> SR2.R
   auto ps = logic::parse_pin(nl, "SRLATCH3.S");
@@ -246,6 +249,7 @@ void test_sr_level_table_and_refusal() {
   const LogicValue kH = LogicValue::kHigh;
   const LogicValue kZ = LogicValue::kHighZ;
   const LogicValue kX = LogicValue::kUnknown;
+  logic::init_seq_state(st, nl);
   assert(st.q[s] == kL && st.q[w] == kL && st.q[t] == kL); // power-on 0
   // Hold from 0 (released S=R=0).
   LogicValue hold[4] = {kL, kL, kL, kL};
@@ -361,7 +365,7 @@ void test_mixed_edge_level_share_stepper() {
   assert(st.q[3] == kH && st.q[4] == kH);
   // Selective domain (DFF member only): DFF steps, JK/T hold, latches
   // re-settle (DLATCH frozen, SR held) regardless of membership.
-  const std::uint16_t members[1] = {0};
+  const logic::Slot members[1] = {0};
   drive[0] = kL; // DFF.D=0
   LogicValue outs[5] = {kL, kL, kL, kL, kL};
   assert(logic::seq_step_filtered(nl, st, std::span<const LogicValue>(drive, 8),
@@ -373,7 +377,7 @@ void test_mixed_edge_level_share_stepper() {
   assert(st.q[3] == kH && st.q[4] == kH); // non-members held
   // NQ polarity: expose NQ as block outputs, drive all-High nets.
   for (std::uint16_t s = 0; s <= 4; ++s) {
-    nl.gates[s].ignore_nq_output = false;
+    nl.slots[s].ignore_nq_output = false;
   }
   LogicValue outs2[10];
   for (std::size_t i = 0; i < 10; ++i) {
@@ -435,13 +439,14 @@ void test_t_excitation_table() {
   // Hand-derived reference (research R3, 003-jk-t-flops): T=0 holds Q,
   // T=1 inverts pre-edge Q. CLK ignored (edge assumed, validated only).
   Netlist nl;
-  const std::uint16_t s = logic::add_gate(nl, GateKind::kT, 2).value;
+  const logic::Slot s = logic::add_gate(nl, GateKind::kT, 2).value;
   ignore_input(nl, s, 1);
   assert(logic::block_input_count(nl) == 1); // T
   assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
+  logic::init_seq_state(st, nl);
   assert(st.q[s] == kL); // power-on 0
   LogicValue t = kH;
   const std::span<const LogicValue> drive(&t, 1);
@@ -483,13 +488,14 @@ void test_jk_excitation_table() {
   // J=0,K=1 reset; J=1,K=0 set; J=1,K=1 toggle from OLD Q. CLK ignored
   // (edge assumed, validated only). Block inputs are J,K in slot order.
   Netlist nl;
-  const std::uint16_t s = logic::add_gate(nl, GateKind::kJk, 3).value;
+  const logic::Slot s = logic::add_gate(nl, GateKind::kJk, 3).value;
   ignore_input(nl, s, 2);
   assert(logic::block_input_count(nl) == 2); // J, K
   assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
   SeqState st;
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;
+  logic::init_seq_state(st, nl);
   assert(st.q[s] == kL); // power-on 0
   LogicValue jk[2] = {kL, kL};
   const std::span<const LogicValue> drive(jk, 2);
@@ -538,8 +544,8 @@ void test_jk_sync_counter_2bit() {
   // wired High is impossible without a driver, so J0/K0 stay dangling
   // and are driven per-edge alongside the step.
   Netlist nl;
-  const std::uint16_t lo = logic::add_gate(nl, GateKind::kJk, 3).value; // JK1
-  const std::uint16_t hi = logic::add_gate(nl, GateKind::kJk, 3).value; // JK2
+  const logic::Slot lo = logic::add_gate(nl, GateKind::kJk, 3).value; // JK1
+  const logic::Slot hi = logic::add_gate(nl, GateKind::kJk, 3).value; // JK2
   assert(logic::wire(nl, lo, hi, 0).ok()); // Q0 -> JK2.J
   assert(logic::wire(nl, lo, hi, 1).ok()); // Q0 -> JK2.K
   ignore_input(nl, lo, 2);
@@ -570,9 +576,9 @@ void test_mixed_kinds_share_one_edge() {
   // step together — each slot follows its own resolver from the same OLD
   // Q vector under one reported edge. Block inputs in slot order.
   Netlist nl;
-  const std::uint16_t d = logic::add_gate(nl, GateKind::kDff, 2).value;
-  const std::uint16_t j = logic::add_gate(nl, GateKind::kJk, 3).value;
-  const std::uint16_t t = logic::add_gate(nl, GateKind::kT, 2).value;
+  const logic::Slot d = logic::add_gate(nl, GateKind::kDff, 2).value;
+  const logic::Slot j = logic::add_gate(nl, GateKind::kJk, 3).value;
+  const logic::Slot t = logic::add_gate(nl, GateKind::kT, 2).value;
   ignore_input(nl, d, 1);
   ignore_input(nl, j, 2);
   ignore_input(nl, t, 1);
@@ -606,9 +612,9 @@ void test_subset_stepping_holds_non_members() {
   // Selective domains cover the new kinds: stepping only the DFF member
   // leaves JK/T Q untouched for that edge.
   Netlist nl;
-  const std::uint16_t d = logic::add_gate(nl, GateKind::kDff, 2).value;
-  const std::uint16_t j = logic::add_gate(nl, GateKind::kJk, 3).value;
-  const std::uint16_t t = logic::add_gate(nl, GateKind::kT, 2).value;
+  const logic::Slot d = logic::add_gate(nl, GateKind::kDff, 2).value;
+  const logic::Slot j = logic::add_gate(nl, GateKind::kJk, 3).value;
+  const logic::Slot t = logic::add_gate(nl, GateKind::kT, 2).value;
   ignore_input(nl, d, 1);
   ignore_input(nl, j, 2);
   ignore_input(nl, t, 1);
@@ -621,7 +627,7 @@ void test_subset_stepping_holds_non_members() {
   assert(logic::seq_step(nl, st, std::span<const LogicValue>(all, 4)).ok());
   assert(st.q[j] == kH && st.q[t] == kH);
   // Member-only edge: D captures 0 while JK/T would toggle — they hold.
-  const std::uint16_t members[1] = {d};
+  const logic::Slot members[1] = {d};
   LogicValue sub[4] = {kL, kH, kH, kH};
   const std::size_t n_out = logic::block_output_count(nl);
   LogicValue outs[8] = {kL, kL, kL, kL, kL, kL, kL, kL};
@@ -640,10 +646,10 @@ void test_comb_cycle_still_rejected() {
   place_seq(nl, 0, GateKind::kDff, 1);
   ignore_input(nl, 0, 0); // D ignored so the flop is self-contained
   ignore_input(nl, 0, 1);
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   assert(logic::wire(nl, a, n, 0).ok());
-  nl.gates[a].drivers[1] = n; // hand-poked comb cycle (wire() refuses it)
+  nl.slots[a].drivers[1] = n; // hand-poked comb cycle (wire() refuses it)
   nl.dirty = true;
   SeqState st;
   assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
@@ -654,8 +660,8 @@ void test_combinational_solve_unchanged() {
   // SEQ4 adds no eval path for combinational nets: NAND via AND+NOT still
   // solves bit-exactly with no SeqState involvement.
   Netlist nl;
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   assert(logic::wire(nl, a, n, 0).ok());
   const LogicValue kL = LogicValue::kLow;
   const LogicValue kH = LogicValue::kHigh;

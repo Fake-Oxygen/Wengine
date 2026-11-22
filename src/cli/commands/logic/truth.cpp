@@ -85,13 +85,14 @@ int LogicTruthSpec::run(ArgCursor &args, std::ostream &out) {
   if (with_delays) {
     settle.assign(rows, 0);
     wengine::logic::TimingScratch scratch{};
-    for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-      if (nl.gates[s].live && wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+    wengine::logic::ensure_timing_scratch(scratch, wengine::logic::slot_count(nl));
+    for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+      if (nl.slots[s].live && wengine::logic::is_sequential_kind(nl.slots[s].kind)) {
         scratch.cur[s] = wengine::logic::LogicValue::kLow;
       }
     }
     // Topology-invariant sink maps: build once, drain per row (no
-    // per-row rebuild over the 1024x8 flats).
+    // per-row rebuild over the pool-sized flats).
     wengine::logic::timing_build_sink_maps(nl, scratch);
     std::vector<wengine::logic::LogicValue> vals(nin, wengine::logic::LogicValue::kLow);
     const std::vector<wengine::logic::LogicValue> zero(nin, wengine::logic::LogicValue::kLow);

@@ -15,6 +15,10 @@
  * per-extra NQ polarity at the same index in extra_inv. The primary
  * attachment stays in Gate::drivers (kNoDriver semantics preserved).
  *
+ * Dynamic pool: every bound below is the pool's current size
+ * (slot_count), never the kMaxGates loud cap — scans and inits cost
+ * what the pool holds.
+ *
  * Mirrors the TieSet discipline (tie_set.hpp): a widened kMaxSharedExtra
  * is a one-file change here (plus the fixed array bounds in types.hpp).
  *
@@ -60,7 +64,7 @@ static_assert(kMaxSharedExtra <= 3, "extra count must fit bits1..2");
  * @return True when the flat position carries the shared mark.
  */
 [[nodiscard]] inline bool is_shared_flat(const Netlist &nl, std::size_t flat) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
+  if (flat >= slot_count(nl) * kMaxInputs) {
     return false;
   }
   return (nl.shared_meta[flat] & shared_detail::kMarkBit) != 0;
@@ -75,7 +79,7 @@ static_assert(kMaxSharedExtra <= 3, "extra count must fit bits1..2");
  * @return Extra count (0 when unmarked or out of range).
  */
 [[nodiscard]] inline std::uint8_t shared_extra_flat(const Netlist &nl, std::size_t flat) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
+  if (flat >= slot_count(nl) * kMaxInputs) {
     return 0;
   }
   return static_cast<std::uint8_t>((nl.shared_meta[flat] >> shared_detail::kCountShift) & shared_detail::kCountMask);
@@ -93,8 +97,8 @@ static_assert(kMaxSharedExtra <= 3, "extra count must fit bits1..2");
  * @param[in] input 0-based sink input index.
  * @return True when the input carries the shared mark.
  */
-[[nodiscard]] inline bool is_shared_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || input >= kMaxInputs) {
+[[nodiscard]] inline bool is_shared_input(const Netlist &nl, Slot slot, std::uint8_t input) noexcept {
+  if (slot >= slot_count(nl) || input >= kMaxInputs) {
     return false;
   }
   return is_shared_flat(nl, static_cast<std::size_t>(slot) * kMaxInputs + input);
@@ -109,8 +113,8 @@ static_assert(kMaxSharedExtra <= 3, "extra count must fit bits1..2");
  * @param[in] input 0-based sink input index.
  * @return Extra count (0 when unmarked or out of range).
  */
-[[nodiscard]] inline std::uint8_t shared_extra_count(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || input >= kMaxInputs) {
+[[nodiscard]] inline std::uint8_t shared_extra_count(const Netlist &nl, Slot slot, std::uint8_t input) noexcept {
+  if (slot >= slot_count(nl) || input >= kMaxInputs) {
     return 0;
   }
   return shared_extra_flat(nl, static_cast<std::size_t>(slot) * kMaxInputs + input);
@@ -126,11 +130,11 @@ static_assert(kMaxSharedExtra <= 3, "extra count must fit bits1..2");
  * @param[in] input 0-based sink input index.
  * @return Attachment count (0 when unwired/out of range).
  */
-[[nodiscard]] inline std::uint8_t shared_attachment_count(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || input >= kMaxInputs || !nl.gates[slot].live) {
+[[nodiscard]] inline std::uint8_t shared_attachment_count(const Netlist &nl, Slot slot, std::uint8_t input) noexcept {
+  if (slot >= slot_count(nl) || input >= kMaxInputs || !nl.slots[slot].live) {
     return 0;
   }
-  const std::uint8_t primary = (input < nl.gates[slot].input_count && nl.gates[slot].drivers[input] != kNoDriver) ? 1 : 0;
+  const std::uint8_t primary = (input < nl.slots[slot].input_count && nl.slots[slot].drivers[input] != kNoDriver) ? 1 : 0;
   return static_cast<std::uint8_t>(primary + shared_extra_count(nl, slot, input));
 }
 
@@ -142,8 +146,8 @@ static_assert(kMaxSharedExtra <= 3, "extra count must fit bits1..2");
  * @param[in] j Extra index (must be < shared_extra_flat).
  * @return Stored driver slot, or kNoDriver when flat/j is out of range.
  */
-[[nodiscard]] inline std::uint16_t shared_extra_driver(const Netlist &nl, std::size_t flat, std::uint8_t j) noexcept {
-  if (flat >= kMaxGates * kMaxInputs || j >= shared_extra_flat(nl, flat)) {
+[[nodiscard]] inline Slot shared_extra_driver(const Netlist &nl, std::size_t flat, std::uint8_t j) noexcept {
+  if (flat >= slot_count(nl) * kMaxInputs || j >= shared_extra_flat(nl, flat)) {
     return kNoDriver;
   }
   return nl.extra_drivers[flat * kMaxSharedExtra + j];
@@ -159,7 +163,7 @@ static_assert(kMaxSharedExtra <= 3, "extra count must fit bits1..2");
  * @return Stored polarity (0 when flat/j is out of range).
  */
 [[nodiscard]] inline std::uint8_t shared_extra_inv(const Netlist &nl, std::size_t flat, std::uint8_t j) noexcept {
-  if (flat >= kMaxGates * kMaxInputs || j >= shared_extra_flat(nl, flat)) {
+  if (flat >= slot_count(nl) * kMaxInputs || j >= shared_extra_flat(nl, flat)) {
     return 0;
   }
   return nl.extra_inv[flat * kMaxSharedExtra + j];
@@ -173,11 +177,13 @@ static_assert(kMaxSharedExtra <= 3, "extra count must fit bits1..2");
  * span assembly, the optimizer scans, list, and YAML save — stride and
  * count math live here, nowhere else.
  *
+ * @tparam Fn Callable invoked as fn(j, driver, inv).
  * @param[in] nl Netlist holding the extra tables.
  * @param[in] flat Flat pin index.
  * @param[in] fn Callable invoked as fn(j, driver, inv).
  */
-template <typename Fn> inline void for_each_extra(const Netlist &nl, std::size_t flat, Fn &&fn) noexcept {
+template <typename Fn>
+inline void for_each_extra(const Netlist &nl, std::size_t flat, Fn &&fn) noexcept {
   const std::uint8_t n = shared_extra_flat(nl, flat);
   for (std::uint8_t j = 0; j < n; ++j) {
     fn(j, nl.extra_drivers[flat * kMaxSharedExtra + j], nl.extra_inv[flat * kMaxSharedExtra + j]);
@@ -192,7 +198,7 @@ template <typename Fn> inline void for_each_extra(const Netlist &nl, std::size_t
  * @param[in] cur Driver slot to look for.
  * @return True when some extra j holds cur.
  */
-[[nodiscard]] inline bool shared_uses_driver_flat(const Netlist &nl, std::size_t flat, std::uint16_t cur) noexcept {
+[[nodiscard]] inline bool shared_uses_driver_flat(const Netlist &nl, std::size_t flat, Slot cur) noexcept {
   const std::uint8_t n = shared_extra_flat(nl, flat);
   for (std::uint8_t j = 0; j < n; ++j) {
     if (nl.extra_drivers[flat * kMaxSharedExtra + j] == cur) {
@@ -213,7 +219,7 @@ template <typename Fn> inline void for_each_extra(const Netlist &nl, std::size_t
  * @param[in] flat Flat pin index.
  */
 inline void shared_set_mark(Netlist &nl, std::size_t flat) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
+  if (flat >= slot_count(nl) * kMaxInputs) {
     return;
   }
   nl.shared_meta[flat] = static_cast<std::uint8_t>(nl.shared_meta[flat] | shared_detail::kMarkBit);
@@ -229,7 +235,7 @@ inline void shared_set_mark(Netlist &nl, std::size_t flat) noexcept {
  * @param[in] inv Polarity to store (nonzero = inverted).
  */
 inline void shared_set_extra_inv(Netlist &nl, std::size_t flat, std::uint8_t j, std::uint8_t inv) noexcept {
-  if (flat >= kMaxGates * kMaxInputs || j >= shared_extra_flat(nl, flat)) {
+  if (flat >= slot_count(nl) * kMaxInputs || j >= shared_extra_flat(nl, flat)) {
     return;
   }
   nl.extra_inv[flat * kMaxSharedExtra + j] = inv;
@@ -246,12 +252,12 @@ inline void shared_set_extra_inv(Netlist &nl, std::size_t flat, std::uint8_t j, 
  * @param[out] nl Netlist receiving the attachment.
  * @param[in] flat Flat pin index.
  * @param[in] driver Driver slot to store.
- * @param[in] inv Per-attachment NQ polarity.
+ * @param[in] inv Per-attachment NQ polarity (1 = inverted).
  * @return kOk on append; kInvalidArgument past the cap or on an
  *         out-of-range flat.
  */
-[[nodiscard]] inline core::Status shared_push_extra(Netlist &nl, std::size_t flat, std::uint16_t driver, std::uint8_t inv) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
+[[nodiscard]] inline core::Status shared_push_extra(Netlist &nl, std::size_t flat, Slot driver, std::uint8_t inv) noexcept {
+  if (flat >= slot_count(nl) * kMaxInputs) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::uint8_t count = static_cast<std::uint8_t>((nl.shared_meta[flat] >> shared_detail::kCountShift) & shared_detail::kCountMask);
@@ -279,7 +285,7 @@ inline void shared_set_extra_inv(Netlist &nl, std::size_t flat, std::uint8_t j, 
  */
 inline bool shared_erase_at(Netlist &nl, std::size_t flat, std::uint8_t j) noexcept {
   const std::uint8_t count = shared_extra_flat(nl, flat);
-  if (flat >= kMaxGates * kMaxInputs || j >= count || count == 0) {
+  if (flat >= slot_count(nl) * kMaxInputs || j >= count || count == 0) {
     return false;
   }
   for (std::uint8_t k = j; k < static_cast<std::uint8_t>(count - 1u); ++k) {
@@ -302,7 +308,7 @@ inline bool shared_erase_at(Netlist &nl, std::size_t flat, std::uint8_t j) noexc
  * @param[in] driver Driver slot to release.
  * @return True when an entry was removed; false when not attached.
  */
-inline bool shared_erase_driver(Netlist &nl, std::size_t flat, std::uint16_t driver) noexcept {
+inline bool shared_erase_driver(Netlist &nl, std::size_t flat, Slot driver) noexcept {
   const std::uint8_t count = shared_extra_flat(nl, flat);
   for (std::uint8_t j = 0; j < count; ++j) {
     if (nl.extra_drivers[flat * kMaxSharedExtra + j] == driver) {
@@ -324,9 +330,9 @@ inline bool shared_erase_driver(Netlist &nl, std::size_t flat, std::uint16_t dri
  * @param[out] inv_out Front polarity.
  * @return True on pop; false when count is 0 or flat is out of range.
  */
-inline bool shared_pop_front(Netlist &nl, std::size_t flat, std::uint16_t &driver_out, std::uint8_t &inv_out) noexcept {
+inline bool shared_pop_front(Netlist &nl, std::size_t flat, Slot &driver_out, std::uint8_t &inv_out) noexcept {
   const std::uint8_t count = shared_extra_flat(nl, flat);
-  if (flat >= kMaxGates * kMaxInputs || count == 0) {
+  if (flat >= slot_count(nl) * kMaxInputs || count == 0) {
     return false;
   }
   driver_out = nl.extra_drivers[flat * kMaxSharedExtra + 0];
@@ -354,7 +360,7 @@ inline bool shared_pop_front(Netlist &nl, std::size_t flat, std::uint16_t &drive
  * @param[in] flat Flat pin index.
  */
 inline void shared_clear_extras(Netlist &nl, std::size_t flat) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
+  if (flat >= slot_count(nl) * kMaxInputs) {
     return;
   }
   const std::uint8_t count = shared_extra_flat(nl, flat);
@@ -372,10 +378,10 @@ inline void shared_clear_extras(Netlist &nl, std::size_t flat) noexcept {
  * @param[out] nl Netlist whose shared state is cleared.
  */
 inline void shared_clear_all(Netlist &nl) noexcept {
-  for (std::size_t f = 0; f < kMaxGates * kMaxInputs; ++f) {
+  for (std::size_t f = 0; f < slot_count(nl) * kMaxInputs; ++f) {
     nl.shared_meta[f] = 0;
   }
-  for (std::size_t e = 0; e < kMaxGates * kMaxInputs * kMaxSharedExtra; ++e) {
+  for (std::size_t e = 0; e < slot_count(nl) * kMaxInputs * kMaxSharedExtra; ++e) {
     nl.extra_drivers[e] = 0;
     nl.extra_inv[e] = 0;
   }
@@ -389,7 +395,7 @@ inline void shared_clear_all(Netlist &nl) noexcept {
  * @param[in] flat Flat pin index.
  */
 inline void shared_clear_flat(Netlist &nl, std::size_t flat) noexcept {
-  if (flat >= kMaxGates * kMaxInputs) {
+  if (flat >= slot_count(nl) * kMaxInputs) {
     return;
   }
   const std::uint8_t count = shared_extra_flat(nl, flat);
@@ -409,17 +415,7 @@ inline void shared_clear_flat(Netlist &nl, std::size_t flat) noexcept {
  * @return True when every shared entry agrees.
  */
 [[nodiscard]] inline bool shared_equal(const Netlist &a, const Netlist &b) noexcept {
-  for (std::size_t f = 0; f < kMaxGates * kMaxInputs; ++f) {
-    if (a.shared_meta[f] != b.shared_meta[f]) {
-      return false;
-    }
-  }
-  for (std::size_t e = 0; e < kMaxGates * kMaxInputs * kMaxSharedExtra; ++e) {
-    if (a.extra_drivers[e] != b.extra_drivers[e] || a.extra_inv[e] != b.extra_inv[e]) {
-      return false;
-    }
-  }
-  return true;
+  return a.shared_meta == b.shared_meta && a.extra_drivers == b.extra_drivers && a.extra_inv == b.extra_inv;
 }
 
 } // namespace wengine::logic

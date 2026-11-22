@@ -24,7 +24,7 @@ int LogicResetSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::unexpected_error(out, *args.first_remaining(), kUsage);
   }
   Netlist &nl = workspace();
-  const std::uint16_t cleared = nl.live_count;
+  const std::uint32_t cleared = nl.live_count;
   wengine::logic::reset_netlist(nl);
   support::reset_seq_session_state();
   out << "reset: cleared " << cleared << " gates\n";

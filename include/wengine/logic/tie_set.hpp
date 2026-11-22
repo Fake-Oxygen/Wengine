@@ -14,6 +14,12 @@
  * (block_interface.hpp); scalar and bit-parallel eval feed/share one
  * value per class.
  *
+ * Capacity (015): dynamic pool; every bound below is slot_count(nl),
+ * never kMaxGates (the loud max cap only bounds growth via ensure_slots).
+ * Scratch-taking cores (untie_pin, detach_slot_ties, reindex_kept_ties,
+ * ignore_tie_class) take caller-owned survivor/member spans sized
+ * slot_count(nl) * kMaxInputs.
+ *
  * Dependency rules (docs/logic.md section 4): header-only,
  * allocation-free, exception-free; depends only on types.hpp plus
  * shared_net.hpp (mark/tie disjointness) plus core/status (never
@@ -28,18 +34,20 @@
 #include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/types.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <vector>
 
 namespace wengine::logic {
 
 /**
  * @brief Whole-table tie snapshot: tie_pins can merge two classes, so
  *        a pin-level untie cannot revert a merge — callers snapshot and
- *        restore wholesale instead.
+ *        restore wholesale instead. Dynamic pool: vector<Slot> sized
+ *        slot_count(nl) * kMaxInputs.
  */
-using TieSnapshot = std::array<std::uint16_t, kMaxGates * kMaxInputs>;
+using TieSnapshot = std::vector<Slot>;
 
 /**
  * @brief Copy the whole tie table for a later wholesale restore.
@@ -47,7 +55,9 @@ using TieSnapshot = std::array<std::uint16_t, kMaxGates * kMaxInputs>;
  * @param[in] nl Netlist to snapshot.
  * @return Copy of nl.tie_rep.
  */
-[[nodiscard]] inline TieSnapshot snapshot_ties(const Netlist &nl) noexcept { return nl.tie_rep; }
+[[nodiscard]] inline TieSnapshot snapshot_ties(const Netlist &nl) noexcept {
+  return nl.tie_rep;
+}
 
 /**
  * @brief Restore a whole-table snapshot taken by snapshot_ties.
@@ -55,7 +65,9 @@ using TieSnapshot = std::array<std::uint16_t, kMaxGates * kMaxInputs>;
  * @param[out] nl Netlist receiving the snapshot.
  * @param[in] snap Snapshot to install.
  */
-inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie_rep = snap; }
+inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept {
+  nl.tie_rep = snap;
+}
 
 /**
  * @brief Structural equality of two tie tables (save/load round-trip).
@@ -65,23 +77,7 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie
  * @return True when every tie_rep entry agrees.
  */
 [[nodiscard]] inline bool ties_equal(const Netlist &a, const Netlist &b) noexcept {
-  for (std::size_t f = 0; f < kMaxGates * kMaxInputs; ++f) {
-    if (a.tie_rep[f] != b.tie_rep[f]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/**
- * @brief Flat tie-table index for (slot, input): slot * kMaxInputs + input.
- *
- * @param[in] slot Gate slot.
- * @param[in] input 0-based input index.
- * @return Flat index into Netlist::tie_rep.
- */
-[[nodiscard]] constexpr std::size_t tie_flat(std::uint16_t slot, std::uint8_t input) noexcept {
-  return static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input);
+  return a.tie_rep == b.tie_rep;
 }
 
 /**
@@ -93,7 +89,7 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie
  * @return Leader flat of flat's class.
  */
 [[nodiscard]] inline std::size_t tie_leader_flat(const Netlist &nl, std::size_t flat) noexcept {
-  const std::uint16_t rep = nl.tie_rep[flat];
+  const Slot rep = nl.tie_rep[flat];
   if (rep == 0) {
     return flat;
   }
@@ -108,8 +104,8 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie
  * @param[in] input 0-based input index.
  * @return True when tied; false for singletons and out-of-range pins.
  */
-[[nodiscard]] inline bool is_tied(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || input >= kMaxInputs) {
+[[nodiscard]] inline bool is_tied(const Netlist &nl, Slot slot, std::uint8_t input) noexcept {
+  if (slot >= slot_count(nl) || input >= kMaxInputs) {
     return false;
   }
   return nl.tie_rep[tie_flat(slot, input)] != 0;
@@ -123,7 +119,7 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie
  * @param[in] input 0-based input index.
  * @return True when the pin leaders itself (singletons included).
  */
-[[nodiscard]] inline bool is_tie_leader(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+[[nodiscard]] inline bool is_tie_leader(const Netlist &nl, Slot slot, std::uint8_t input) noexcept {
   const std::size_t flat = tie_flat(slot, input);
   return tie_leader_flat(nl, flat) == flat;
 }
@@ -140,8 +136,8 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept { nl.tie
  */
 [[nodiscard]] inline std::size_t tie_class_members(const Netlist &nl, std::size_t leader, std::size_t *out, std::size_t cap) noexcept {
   std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -183,7 +179,7 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
       }
     }
     for (std::size_t k = 0; k < n_surv; ++k) {
-      nl.tie_rep[survivors[k]] = static_cast<std::uint16_t>(leader + 1u);
+      nl.tie_rep[survivors[k]] = static_cast<Slot>(leader + 1u);
     }
   } else if (n_surv == 1) {
     nl.tie_rep[survivors[0]] = 0;
@@ -200,12 +196,12 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
  * @param[in] input 0-based input index.
  * @return Member count of the pin's class.
  */
-[[nodiscard]] inline std::size_t tie_group_size(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+[[nodiscard]] inline std::size_t tie_group_size(const Netlist &nl, Slot slot, std::uint8_t input) noexcept {
   const std::size_t flat = tie_flat(slot, input);
   const std::size_t leader = tie_leader_flat(nl, flat);
   std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -236,11 +232,11 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
   if (a.is_output || b.is_output) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (a.slot >= kMaxGates || b.slot >= kMaxGates) {
+  if (a.slot >= slot_count(nl) || b.slot >= slot_count(nl)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  const Gate &ga = nl.gates[a.slot];
-  const Gate &gb = nl.gates[b.slot];
+  const Gate &ga = nl.slots[a.slot];
+  const Gate &gb = nl.slots[b.slot];
   if (!ga.live || !gb.live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
@@ -271,8 +267,8 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
   }
   const std::size_t new_leader = (la < lb) ? la : lb;
   // Re-star every member of both classes around the new leader.
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -280,7 +276,7 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
       const std::size_t f = tie_flat(s, i);
       const std::size_t l = tie_leader_flat(nl, f);
       if (l == la || l == lb) {
-        nl.tie_rep[f] = static_cast<std::uint16_t>(new_leader + 1u);
+        nl.tie_rep[f] = static_cast<Slot>(new_leader + 1u);
       }
     }
   }
@@ -296,18 +292,20 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
  *
  * @param[out] nl Netlist receiving the untie.
  * @param[in] pin Input pin to remove from its class.
+ * @param[in] survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs` flats)
+ *            collecting surviving members.
  * @return kOk on success; kInvalidArgument for output pins,
- *         dead/out-of-range pins, wired or ignored pins, or pins that
- *         are not tied.
+ *         dead/out-of-range pins, wired or ignored pins, pins that
+ *         are not tied, or an undersized scratch buffer.
  */
-[[nodiscard]] inline core::Status untie_pin(Netlist &nl, PinRef pin) noexcept {
+[[nodiscard]] inline core::Status untie_pin(Netlist &nl, PinRef pin, std::span<std::size_t> survivors) noexcept {
   if (pin.is_output) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (pin.slot >= kMaxGates || !nl.gates[pin.slot].live) {
+  if (pin.slot >= slot_count(nl) || !nl.slots[pin.slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  const Gate &g = nl.gates[pin.slot];
+  const Gate &g = nl.slots[pin.slot];
   if (pin.input >= g.input_count) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
@@ -321,11 +319,13 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
   if (nl.tie_rep[flat] == 0) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // not tied
   }
+  if (survivors.size() < slot_count(nl) * kMaxInputs) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument); // scratch too small
+  }
   const std::size_t leader = tie_leader_flat(nl, flat);
-  std::size_t survivors[kMaxGates * kMaxInputs];
   std::size_t n_surv = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &o = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &o = nl.slots[s];
     if (!o.live) {
       continue;
     }
@@ -340,8 +340,27 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
     }
   }
   nl.tie_rep[flat] = 0;
-  detail::tie_reelect(nl, survivors, n_surv);
+  detail::tie_reelect(nl, survivors.data(), n_surv);
   return core::Status::success();
+}
+
+/**
+ * @brief Untie one input pin from its class.
+ *
+ * Workspace-backed entry: grows the survivor scratch to the pool size,
+ * then runs the core above. (No noexcept: workspace growth may
+ * allocate.)
+ *
+ * @param[out] nl Netlist receiving the untie.
+ * @param[in] pin Input pin to remove from its class.
+ * @return kOk on success; kInvalidArgument for output pins,
+ *         dead/out-of-range pins, wired or ignored pins, or pins that
+ *         are not tied.
+ */
+[[nodiscard]] inline core::Status untie_pin(Netlist &nl, PinRef pin) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  return untie_pin(nl, pin, std::span<std::size_t>(nl.ws_survivors.data(), n * kMaxInputs));
 }
 
 /**
@@ -351,12 +370,14 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
  *
  * @param[out] nl Netlist receiving the detach.
  * @param[in] s Slot to detach.
+ * @param[in] survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs` flats)
+ *            collecting surviving members.
  */
-inline void detach_slot_ties(Netlist &nl, std::uint16_t s) noexcept {
-  if (s >= kMaxGates || !nl.gates[s].live) {
+inline void detach_slot_ties(Netlist &nl, Slot s, std::span<std::size_t> survivors) noexcept {
+  if (s >= slot_count(nl) || !nl.slots[s].live || survivors.size() < slot_count(nl) * kMaxInputs) {
     return;
   }
-  const std::uint8_t n = nl.gates[s].input_count;
+  const std::uint8_t n = nl.slots[s].input_count;
   // Group-wise: one rebuild per distinct original leader.
   std::size_t leaders[kMaxInputs];
   std::size_t n_leaders = 0;
@@ -384,13 +405,12 @@ inline void detach_slot_ties(Netlist &nl, std::uint16_t s) noexcept {
   }
   for (std::size_t li = 0; li < n_leaders; ++li) {
     const std::size_t l = leaders[li];
-    std::size_t survivors[kMaxGates * kMaxInputs];
     std::size_t n_surv = 0;
-    for (std::uint16_t t = 0; t < kMaxGates; ++t) {
+    for (Slot t = 0; t < slot_count(nl); ++t) {
       if (t == s) {
         continue;
       }
-      const Gate &o = nl.gates[t];
+      const Gate &o = nl.slots[t];
       if (!o.live) {
         continue;
       }
@@ -408,7 +428,7 @@ inline void detach_slot_ties(Netlist &nl, std::uint16_t s) noexcept {
     for (std::size_t k = 0; k < n_surv; ++k) {
       nl.tie_rep[survivors[k]] = 0;
     }
-    detail::tie_reelect(nl, survivors, n_surv);
+    detail::tie_reelect(nl, survivors.data(), n_surv);
   }
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     nl.tie_rep[tie_flat(s, static_cast<std::uint8_t>(i))] = 0;
@@ -430,8 +450,13 @@ inline void detach_slot_ties(Netlist &nl, std::uint16_t s) noexcept {
  * @param[in] orig_leader Original leader flat per kept pin.
  * @param[in] orig_tied Whether each kept pin was tied.
  * @param[in] n Kept pin count (the new input_count).
+ * @param[in] survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs` flats).
  */
-inline void reindex_kept_ties(Netlist &nl, std::uint16_t s, const std::size_t *orig_leader, const bool *orig_tied, std::uint8_t n) noexcept {
+inline void reindex_kept_ties(Netlist &nl, Slot s, const std::size_t *orig_leader, const bool *orig_tied,
+                               std::uint8_t n, std::span<std::size_t> survivors) noexcept {
+  if (s >= slot_count(nl) || survivors.size() < slot_count(nl) * kMaxInputs) {
+    return;
+  }
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     nl.tie_rep[tie_flat(s, static_cast<std::uint8_t>(i))] = 0;
   }
@@ -451,18 +476,17 @@ inline void reindex_kept_ties(Netlist &nl, std::uint16_t s, const std::size_t *o
     if (done) {
       continue;
     }
-    std::size_t survivors[kMaxGates * kMaxInputs];
     std::size_t n_surv = 0;
     for (std::uint8_t j = 0; j < n; ++j) {
       if (orig_tied[j] && orig_leader[j] == orig) {
         survivors[n_surv++] = tie_flat(s, j);
       }
     }
-    for (std::uint16_t t = 0; t < kMaxGates; ++t) {
+    for (Slot t = 0; t < slot_count(nl); ++t) {
       if (t == s) {
         continue;
       }
-      const Gate &o = nl.gates[t];
+      const Gate &o = nl.slots[t];
       if (!o.live) {
         continue;
       }
@@ -473,7 +497,7 @@ inline void reindex_kept_ties(Netlist &nl, std::uint16_t s, const std::size_t *o
         }
       }
     }
-    detail::tie_reelect(nl, survivors, n_surv);
+    detail::tie_reelect(nl, survivors.data(), n_surv);
   }
 }
 
@@ -487,19 +511,22 @@ inline void reindex_kept_ties(Netlist &nl, std::uint16_t s, const std::size_t *o
  *
  * @param[out] nl Netlist receiving the dissolve.
  * @param[in] leader Class leader flat to dissolve.
+ * @param[in] members Caller-owned scratch (`slot_count(nl) * kMaxInputs` flats).
  */
-inline void ignore_tie_class(Netlist &nl, std::size_t leader) noexcept {
-  std::size_t members[kMaxGates * kMaxInputs];
-  const std::size_t n = tie_class_members(nl, leader, members, kMaxGates * kMaxInputs);
+inline void ignore_tie_class(Netlist &nl, std::size_t leader, std::span<std::size_t> members) noexcept {
+  if (members.size() < slot_count(nl) * kMaxInputs) {
+    return;
+  }
+  const std::size_t n = tie_class_members(nl, leader, members.data(), members.size());
   for (std::size_t k = 0; k < n; ++k) {
-    const auto slot = static_cast<std::uint16_t>(members[k] / kMaxInputs);
+    const auto slot = static_cast<Slot>(members[k] / kMaxInputs);
     const auto input = static_cast<std::uint8_t>(members[k] % kMaxInputs);
-    if (slot >= kMaxGates || !nl.gates[slot].live || input >= nl.gates[slot].input_count) {
+    if (slot >= slot_count(nl) || !nl.slots[slot].live || input >= nl.slots[slot].input_count) {
       continue;
     }
     nl.tie_rep[members[k]] = 0;
-    nl.gates[slot].ignored_mask =
-        static_cast<std::uint8_t>(nl.gates[slot].ignored_mask | static_cast<std::uint8_t>(1u << input));
+    nl.slots[slot].ignored_mask =
+        static_cast<std::uint8_t>(nl.slots[slot].ignored_mask | static_cast<std::uint8_t>(1u << input));
   }
 }
 
@@ -511,8 +538,8 @@ inline void ignore_tie_class(Netlist &nl, std::size_t leader) noexcept {
  * @param[in] flat Flat pin index from tie_flat.
  * @return tie_rep[flat], or 0 when flat is out of range.
  */
-[[nodiscard]] inline std::uint16_t tie_rep_entry(const Netlist &nl, std::size_t flat) noexcept {
-  return (flat < kMaxGates * kMaxInputs) ? nl.tie_rep[flat] : 0;
+[[nodiscard]] inline Slot tie_rep_entry(const Netlist &nl, std::size_t flat) noexcept {
+  return (flat < slot_count(nl) * kMaxInputs) ? nl.tie_rep[flat] : 0;
 }
 
 /**
@@ -523,8 +550,8 @@ inline void ignore_tie_class(Netlist &nl, std::size_t leader) noexcept {
  * @param[in] flat Flat pin index from tie_flat.
  * @param[in] rep Raw star value to store.
  */
-inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, std::uint16_t rep) noexcept {
-  if (flat < kMaxGates * kMaxInputs) {
+inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, Slot rep) noexcept {
+  if (flat < slot_count(nl) * kMaxInputs) {
     nl.tie_rep[flat] = rep;
   }
 }
@@ -540,14 +567,14 @@ inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, std::uint16_t rep) 
  * @return True when every tie entry is consistent.
  */
 [[nodiscard]] inline bool validate_ties(const Netlist &nl) noexcept {
-  for (std::uint16_t slot = 0; slot < kMaxGates; ++slot) {
-    const Gate &g = nl.gates[slot];
+  for (Slot slot = 0; slot < slot_count(nl); ++slot) {
+    const Gate &g = nl.slots[slot];
     if (!g.live) {
       continue;
     }
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
       const std::size_t flat = tie_flat(slot, i);
-      const std::uint16_t rep = nl.tie_rep[flat];
+      const Slot rep = nl.tie_rep[flat];
       if (rep == 0) {
         continue;
       }
@@ -555,12 +582,12 @@ inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, std::uint16_t rep) 
         return false;
       }
       const std::size_t leader = static_cast<std::size_t>(rep - 1u);
-      if (leader >= kMaxGates * kMaxInputs || nl.tie_rep[leader] != rep) {
+      if (leader >= slot_count(nl) * kMaxInputs || nl.tie_rep[leader] != rep) {
         return false;
       }
-      const auto ls = static_cast<std::uint16_t>(leader / kMaxInputs);
+      const auto ls = static_cast<Slot>(leader / kMaxInputs);
       const auto li = static_cast<std::uint8_t>(leader % kMaxInputs);
-      const Gate &lg = nl.gates[ls];
+      const Gate &lg = nl.slots[ls];
       if (!lg.live || li >= lg.input_count || lg.drivers[li] != kNoDriver ||
           (lg.ignored_mask & static_cast<std::uint8_t>(1u << li)) != 0) {
         return false;
@@ -578,8 +605,8 @@ inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, std::uint16_t rep) 
  */
 [[nodiscard]] inline std::size_t tie_group_count(const Netlist &nl) noexcept {
   std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -611,7 +638,7 @@ inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, std::uint16_t rep) 
  * @param[out] nl Netlist whose ties are cleared.
  */
 inline void reset_all_ties(Netlist &nl) noexcept {
-  for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
+  for (std::size_t i = 0; i < slot_count(nl) * kMaxInputs; ++i) {
     nl.tie_rep[i] = 0;
   }
 }
@@ -625,8 +652,8 @@ inline void reset_all_ties(Netlist &nl) noexcept {
  */
 [[nodiscard]] inline std::size_t tie_pair_count(const Netlist &nl) noexcept {
   std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }

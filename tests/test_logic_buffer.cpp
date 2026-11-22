@@ -63,8 +63,8 @@ void test_tbuf_kind_identity() {
   logic::Netlist nl{};
   const auto t = logic::add_gate(nl, logic::GateKind::kTbuf, 2);
   assert(t.ok());
-  assert(nl.gates[t.value].counter == 1);
-  assert(nl.gates[t.value].input_count == 2);
+  assert(nl.slots[t.value].counter == 1);
+  assert(nl.slots[t.value].input_count == 2);
   assert(nl.next_counter[8] == 2);
   // Display identity TBUF<n>; bad fan-in fails loudly.
   assert(logic::resolve_gate(nl, "TBUF1").value == t.value);
@@ -74,7 +74,7 @@ void test_tbuf_kind_identity() {
   // Per-kind counters are never reused (slots recycle, counters don't).
   assert(logic::remove_gate(nl, t.value).ok());
   const auto t2 = logic::add_gate(nl, logic::GateKind::kTbuf, 2);
-  assert(t2.ok() && nl.gates[t2.value].counter == 2);
+  assert(t2.ok() && nl.slots[t2.value].counter == 2);
   assert(logic::resolve_gate(nl, "TBUF2").value == t2.value);
   assert(!logic::resolve_gate(nl, "TBUF1").ok());
   // Prefix fallthrough (research D1): "T1" never matches TBUF1 — the T
@@ -109,10 +109,10 @@ bool try_solve(logic::Netlist &nl, std::span<const logic::LogicValue> ins,
 
 // AND1 (data src) + AND2 (enable src) + TBUF1 + NOT1 (sink).
 struct BufferedBus {
-  std::uint16_t data = 0;
-  std::uint16_t en = 0;
-  std::uint16_t tbuf = 0;
-  std::uint16_t sink = 0;
+  logic::Slot data = 0;
+  logic::Slot en = 0;
+  logic::Slot tbuf = 0;
+  logic::Slot sink = 0;
 };
 
 BufferedBus make_buffered_bus(logic::Netlist &nl) {
@@ -299,10 +299,8 @@ void test_pull_mapping() {
   const auto a1 = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
   const auto a2 = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
   assert(logic::mark_shared(nl, o, 0).ok());
-  std::array<logic::LogicValue, logic::kMaxGates> gate_out{};
-  gate_out.fill(kL);
-  std::array<logic::LogicValue, logic::kMaxGates * logic::kMaxInputs> resolved{};
-  resolved.fill(kL);
+  std::vector<logic::LogicValue> gate_out(logic::slot_count(nl), kL);
+  std::vector<logic::LogicValue> resolved(logic::slot_count(nl) * logic::kMaxInputs, kL);
   logic::LogicValue out = kL;
   const std::size_t flat = logic::tie_flat(o, 0);
   // Empty span (no drivers at all): unpulled fails loudly (shipped
@@ -349,6 +347,7 @@ void test_pull_mapping() {
       assert(logic::clear_pull(nl, o, 0).ok());
     }
     logic::SolveDiag diag{};
+    diag.per_net.assign(logic::slot_count(nl) * logic::kMaxInputs, 0);
     assert(!logic::resolve_input(nl, o, 0, gate_out.data(), resolved.data(), out, &diag));
     assert(diag.per_net[flat] == 1);
   }
@@ -365,6 +364,7 @@ void test_pull_mapping() {
       assert(logic::clear_pull(nl, o, 0).ok());
     }
     logic::SolveDiag diag{};
+    diag.per_net.assign(logic::slot_count(nl) * logic::kMaxInputs, 0);
     assert(!logic::resolve_input(nl, o, 0, gate_out.data(), resolved.data(), out, &diag));
     assert(diag.per_net[flat] == 0);
   }
@@ -387,10 +387,8 @@ void test_pull_permutation_invariance() {
   assert(logic::mark_shared(rev, ro, 0).ok());
   assert(logic::wire(rev, rb, ro, 0).ok());
   assert(logic::wire(rev, ra, ro, 0).ok());
-  std::array<logic::LogicValue, logic::kMaxGates> gate_out{};
-  gate_out.fill(kL);
-  std::array<logic::LogicValue, logic::kMaxGates * logic::kMaxInputs> resolved{};
-  resolved.fill(kL);
+  std::vector<logic::LogicValue> gate_out(logic::slot_count(rev), kL);
+  std::vector<logic::LogicValue> resolved(logic::slot_count(rev) * logic::kMaxInputs, kL);
   for (std::uint8_t p = 0; p < 3; ++p) {
     if (p > 0) {
       assert(logic::set_pull(fwd, fo, 0, p).ok());
@@ -404,6 +402,8 @@ void test_pull_permutation_invariance() {
         gate_out[rb] = gate_out[fb];
         logic::LogicValue of = kL, orr = kL;
         logic::SolveDiag df{}, dr{};
+        df.per_net.assign(logic::slot_count(fwd) * logic::kMaxInputs, 0);
+        dr.per_net.assign(logic::slot_count(rev) * logic::kMaxInputs, 0);
         const bool okf = logic::resolve_input(fwd, fo, 0, gate_out.data(), resolved.data(), of, &df);
         const bool okr = logic::resolve_input(rev, ro, 0, gate_out.data(), resolved.data(), orr, &dr);
         assert(okf == okr);
@@ -446,7 +446,7 @@ void test_pull_termination() {
   assert(logic::block_input_count(nl) == 1); // only AND1.2
   assert(logic::input_index(nl, a, 0) == logic::kNoDriver);
   assert(logic::input_index(nl, a, 1) != logic::kNoDriver);
-  std::uint16_t slot = 0;
+  logic::Slot slot = 0;
   std::uint8_t input = 0;
   assert(logic::block_input_pin(nl, 0, slot, input));
   assert(slot == a && input == 1);
@@ -539,7 +539,7 @@ void test_pull_lifecycle_storage() {
   assert(logic::remove_gate(nl, n).ok());
   const auto n2 = logic::add_gate(nl, logic::GateKind::kNot, 1);
   assert(n2.ok());
-  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+  for (std::size_t f = 0; f < nl.pull_cfg.size(); ++f) {
     assert(!logic::is_pulled_flat(nl, f));
   }
   // Reset zeroes the array.
@@ -547,7 +547,7 @@ void test_pull_lifecycle_storage() {
   assert(logic::any_pull(nl));
   logic::reset_netlist(nl);
   assert(!logic::any_pull(nl));
-  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+  for (std::size_t f = 0; f < nl.pull_cfg.size(); ++f) {
     assert(nl.pull_cfg[f] == 0);
   }
 }
@@ -599,7 +599,7 @@ bool reference_span(const logic::LogicValue *span, std::size_t n, std::uint8_t p
 // order; returns the sink slot. Drivers are plain AND gates whose
 // gate_out values the test sets directly (resolve_input reads values,
 // never driver kinds — Z carriers are faithful to released buffers).
-std::uint16_t make_span(logic::Netlist &nl, const std::uint16_t *order, std::size_t n, std::uint8_t pull) {
+logic::Slot make_span(logic::Netlist &nl, const logic::Slot *order, std::size_t n, std::uint8_t pull) {
   const auto sink = logic::add_gate(nl, logic::GateKind::kOr, 2).value;
   assert(logic::mark_shared(nl, sink, 0).ok());
   if (pull != 0) {
@@ -639,24 +639,23 @@ void test_gated_span_exhaustive() {
         // arrays by funnel construction (multiset-order-independent).
         for (int flip = 0; flip < 2; ++flip) {
           logic::Netlist nl{};
-          std::array<std::uint16_t, 4> drivers{};
+          std::array<logic::Slot, 4> drivers{};
           for (std::size_t k = 0; k < n; ++k) {
             drivers[k] = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
           }
-          std::array<std::uint16_t, 4> order{};
+          std::array<logic::Slot, 4> order{};
           for (std::size_t k = 0; k < n; ++k) {
             order[k] = drivers[(flip == 0) ? k : (n - 1 - k)];
           }
-          const std::uint16_t sink = make_span(nl, order.data(), n, pull);
-          std::array<logic::LogicValue, logic::kMaxGates> gate_out{};
-          gate_out.fill(kL);
+          const logic::Slot sink = make_span(nl, order.data(), n, pull);
+          std::vector<logic::LogicValue> gate_out(logic::slot_count(nl), kL);
           for (std::size_t k = 0; k < n; ++k) {
             gate_out[order[k]] = span[k];
           }
-          std::array<logic::LogicValue, logic::kMaxGates * logic::kMaxInputs> resolved{};
-          resolved.fill(kL);
+          std::vector<logic::LogicValue> resolved(logic::slot_count(nl) * logic::kMaxInputs, kL);
           logic::LogicValue got = kL;
           logic::SolveDiag diag{};
+          diag.per_net.assign(logic::slot_count(nl) * logic::kMaxInputs, 0);
           const std::size_t flat = logic::tie_flat(sink, 0);
           const bool gok =
               logic::resolve_input(nl, sink, 0, gate_out.data(), resolved.data(), got, &diag);
@@ -691,20 +690,19 @@ void test_gated_span_exhaustive() {
       }
       assert(want_count == (has_l && has_h));
       logic::Netlist nl{};
-      std::array<std::uint16_t, 3> drivers{};
+      std::array<logic::Slot, 3> drivers{};
       for (std::size_t k = 0; k < xc.n; ++k) {
         drivers[k] = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
       }
-      const std::uint16_t sink = make_span(nl, drivers.data(), xc.n, pull);
-      std::array<logic::LogicValue, logic::kMaxGates> gate_out{};
-      gate_out.fill(kL);
+      const logic::Slot sink = make_span(nl, drivers.data(), xc.n, pull);
+      std::vector<logic::LogicValue> gate_out(logic::slot_count(nl), kL);
       for (std::size_t k = 0; k < xc.n; ++k) {
         gate_out[drivers[k]] = xc.span[k];
       }
-      std::array<logic::LogicValue, logic::kMaxGates * logic::kMaxInputs> resolved{};
-      resolved.fill(kL);
+      std::vector<logic::LogicValue> resolved(logic::slot_count(nl) * logic::kMaxInputs, kL);
       logic::LogicValue got = kL;
       logic::SolveDiag diag{};
+      diag.per_net.assign(logic::slot_count(nl) * logic::kMaxInputs, 0);
       assert(!logic::resolve_input(nl, sink, 0, gate_out.data(), resolved.data(), got, &diag));
       assert((diag.per_net[logic::tie_flat(sink, 0)] != 0) == want_count);
     }
@@ -716,10 +714,10 @@ void test_gated_span_exhaustive() {
 // sink with a pull. Released, the Z carrier is transparent beside the
 // agreeing driver; pulled, the parked net idles.
 struct GatedBus {
-  std::uint16_t a = 0;
-  std::uint16_t e = 0;
-  std::uint16_t t = 0;
-  std::uint16_t s = 0;
+  logic::Slot a = 0;
+  logic::Slot e = 0;
+  logic::Slot t = 0;
+  logic::Slot s = 0;
 };
 
 GatedBus make_gated_bus(logic::Netlist &nl) {
@@ -755,7 +753,7 @@ void test_optimizer_preserves_gated_bus() {
     logic::Netlist opt = r.value;
     // The buffer survives every pass: live, still a TBUF, still wired
     // as data+enable; the span and the pull are intact.
-    assert(opt.gates[b.t].live && opt.gates[b.t].kind == logic::GateKind::kTbuf);
+    assert(opt.slots[b.t].live && opt.slots[b.t].kind == logic::GateKind::kTbuf);
     assert(logic::is_shared_input(opt, b.s, 0));
     assert(logic::shared_attachment_count(opt, b.s, 0) == 2);
     assert(logic::is_pulled_flat(nl, logic::tie_flat(b.s, 0)));
@@ -815,8 +813,8 @@ void test_optimizer_skips_pulled_sink() {
       assert(res.ok());
       logic::Netlist opt = res.value;
       // The pulled root is frozen: kind, fan-in, pull, and value intact.
-      assert(opt.gates[r].live && opt.gates[r].kind == logic::GateKind::kAnd);
-      assert(opt.gates[r].input_count == 2);
+      assert(opt.slots[r].live && opt.slots[r].kind == logic::GateKind::kAnd);
+      assert(opt.slots[r].input_count == 2);
       assert(logic::pull_level_flat(opt, logic::tie_flat(r, 1)) == 1);
       assert(logic::block_input_count(opt) == 0);
       std::array<logic::LogicValue, 1> got = {kH};
@@ -849,8 +847,8 @@ void test_optimizer_skips_pulled_sink() {
       assert(res.ok());
       logic::Netlist opt = res.value;
       // The victim gate is frozen: no drop, no retag, pull intact.
-      assert(opt.gates[v].live && opt.gates[v].kind == logic::GateKind::kAnd);
-      assert(opt.gates[v].input_count == 2);
+      assert(opt.slots[v].live && opt.slots[v].kind == logic::GateKind::kAnd);
+      assert(opt.slots[v].input_count == 2);
       assert(logic::pull_level_flat(opt, logic::tie_flat(v, 1)) == 1);
       assert(logic::block_input_count(opt) == 0);
       std::array<logic::LogicValue, 1> got = {kH};
@@ -879,7 +877,7 @@ void test_optimizer_skips_pulled_sink() {
       auto res = logic::optimize(nl, opts);
       assert(res.ok());
       logic::Netlist opt = res.value;
-      assert(opt.gates[b].live && opt.gates[b].kind == logic::GateKind::kBuf);
+      assert(opt.slots[b].live && opt.slots[b].kind == logic::GateKind::kBuf);
       assert(logic::pull_level_flat(opt, logic::tie_flat(b, 0)) == 1);
       assert(logic::block_input_count(opt) == 0);
       std::array<logic::LogicValue, 1> got = {kH};
@@ -894,10 +892,8 @@ void test_optimizer_skips_pulled_sink() {
 }
 
 // All-Low per-slot power-on values (fresh-attach default, save seam).
-std::array<logic::LogicValue, logic::kMaxGates> zero_inits() {
-  std::array<logic::LogicValue, logic::kMaxGates> in{};
-  in.fill(logic::LogicValue::kLow);
-  return in;
+std::vector<logic::LogicValue> zero_inits(const logic::Netlist &nl) {
+  return std::vector<logic::LogicValue>(logic::slot_count(nl), logic::LogicValue::kLow);
 }
 
 // US4 (T024): gated bus with marks, attachments, and pulls round-trips
@@ -908,7 +904,7 @@ void test_yaml_round_trip() {
   // A second, terminated pull on a dangling input persists too.
   assert(logic::set_pull(nl, b.a, 0, 2).ok());
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   // Canonical bytes: tbuf row, shared + pulls rows, canonical order.
   assert(text.find("  - {id: TBUF1, kind: tbuf, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n") !=
          std::string::npos);
@@ -923,13 +919,13 @@ void test_yaml_round_trip() {
   std::string err;
   assert(logic::yaml::load_text(text, ws, err));
   // Kinds, wirings, marks, attachments, and pulls all survive.
-  assert(ws.netlist.gates[b.t].live && ws.netlist.gates[b.t].kind == logic::GateKind::kTbuf);
+  assert(ws.netlist.slots[b.t].live && ws.netlist.slots[b.t].kind == logic::GateKind::kTbuf);
   assert(logic::is_shared_input(ws.netlist, b.s, 0));
   assert(logic::shared_attachment_count(ws.netlist, b.s, 0) == 2);
   assert(logic::pull_level_flat(ws.netlist, logic::tie_flat(b.s, 0)) == 1);
   assert(logic::pull_level_flat(ws.netlist, logic::tie_flat(b.a, 0)) == 2);
   std::string again;
-  logic::yaml::save_text(ws.netlist, zero_inits(), again);
+  logic::yaml::save_text(ws.netlist, zero_inits(ws.netlist), again);
   assert(again == text);
   // Replay outputs identical across the whole input space (the extra
   // terminated pull shrinks the bus to AND1.2 + AND2.1 + AND2.2; the

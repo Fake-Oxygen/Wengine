@@ -59,7 +59,7 @@ inline constexpr int kLayoutMargin = 30;
  */
 struct Placed {
   /** @brief Netlist slot of the placed gate. */
-  std::uint16_t slot = 0;
+  Slot slot = 0;
   /** @brief Level column (== topo_level). */
   int level = 0;
   /** @brief Left edge in layout units. */
@@ -83,9 +83,9 @@ struct WirePt {
  */
 struct WireRoute {
   /** @brief Driver slot (kNoDriver when unwired — never routed). */
-  std::uint16_t from_slot = kNoDriver;
+  Slot from_slot = kNoDriver;
   /** @brief Sink slot. */
-  std::uint16_t to_slot = kNoDriver;
+  Slot to_slot = kNoDriver;
   /** @brief 0-based sink input index. */
   std::uint8_t to_input = 0;
   /** @brief Route points: (x0,y0) -> (xm,y0) -> (xm,y1) -> (x1,y1). */
@@ -254,7 +254,7 @@ inline constexpr int kSeqAnchorDenom = 6;
  * @param[in] input 0-based sink input index.
  * @return True when the sink reads NQ.
  */
-[[nodiscard]] inline bool sink_reads_nq(const Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
+[[nodiscard]] inline bool sink_reads_nq(const Netlist &nl, Slot slot, std::uint8_t input) noexcept {
   const std::size_t flat = static_cast<std::size_t>(slot) * kMaxInputs + static_cast<std::size_t>(input);
   return nl.driver_inv[flat] != 0;
 }
@@ -297,8 +297,8 @@ namespace detail {
  * @param[in] per_level Live-gate count per level (placement cursor).
  */
 inline void place_gates(Netlist &nl, Schematic &sc, std::vector<int> &per_level) {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live) {
       continue;
     }
     const int lvl = nl.topo_level[s];
@@ -346,8 +346,8 @@ inline void canvas_extents(const std::vector<int> &per_level, int levels, int &w
  * @param[in] input 0-based sink input index.
  * @return Source Y in layout units.
  */
-inline int source_y(const Netlist &nl, const Placed &src, std::uint16_t dst_slot, std::uint8_t input) {
-  if (is_sequential_kind(nl.gates[src.slot].kind) && sink_reads_nq(nl, dst_slot, input)) {
+inline int source_y(const Netlist &nl, const Placed &src, Slot dst_slot, std::uint8_t input) {
+  if (is_sequential_kind(nl.slots[src.slot].kind) && sink_reads_nq(nl, dst_slot, input)) {
     return seq_nq_anchor(src).y;
   }
   return seq_q_anchor(src).y;
@@ -417,9 +417,9 @@ struct Lanes {
     return sc; // levels = 0, empty: the verb already reported the error
   }
   int max_level = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && nl.topo_level[s] > max_level) {
-      max_level = nl.topo_level[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (nl.slots[s].live && static_cast<int>(nl.topo_level[s]) > max_level) {
+      max_level = static_cast<int>(nl.topo_level[s]);
     }
   }
   sc.levels = max_level + 1;
@@ -428,13 +428,13 @@ struct Lanes {
   detail::canvas_extents(per_level, sc.levels, sc.width, sc.height);
 
   // Slot -> Placed lookup for anchor math (live slots only).
-  const Placed *by_slot[kMaxGates] = {};
+  std::vector<const Placed *> by_slot(slot_count(nl), nullptr);
   for (const Placed &p : sc.gates) {
     by_slot[p.slot] = &p;
   }
   detail::Lanes lanes;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -443,11 +443,11 @@ struct Lanes {
       continue;
     }
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t drv = g.drivers[i];
+      const Slot drv = g.drivers[i];
       if (drv == kNoDriver) {
         continue;
       }
-      const Placed *src = (drv < kMaxGates) ? by_slot[drv] : nullptr;
+      const Placed *src = (drv < slot_count(nl)) ? by_slot[drv] : nullptr;
       if (src == nullptr) {
         continue;
       }

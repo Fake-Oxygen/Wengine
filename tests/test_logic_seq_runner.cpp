@@ -46,10 +46,10 @@ void ignore_input(Netlist &nl, std::uint16_t slot, std::uint8_t input) {
 //   D0 = NOT Q0, D1 = Q1 XOR Q0. CLKs ignored. No block I/O.
 Netlist make_counter() {
   Netlist nl;
-  const std::uint16_t q0 = logic::add_gate(nl, GateKind::kDff).value;
-  const std::uint16_t q1 = logic::add_gate(nl, GateKind::kDff).value;
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
-  const std::uint16_t x = logic::add_gate(nl, GateKind::kXor, 2).value;
+  const logic::Slot q0 = logic::add_gate(nl, GateKind::kDff).value;
+  const logic::Slot q1 = logic::add_gate(nl, GateKind::kDff).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot x = logic::add_gate(nl, GateKind::kXor, 2).value;
   assert(logic::wire(nl, n, q0, 0).ok()); // NOT.Y -> Q0.D (flop D first)
   assert(logic::wire(nl, q0, n, 0).ok()); // Q0 -> NOT.1
   assert(logic::wire(nl, x, q1, 0).ok()); // XOR.Y -> Q1.D
@@ -67,7 +67,7 @@ Netlist make_counter() {
 // T dangling (1 block input), CLK ignored, Q dangling (1 block output).
 Netlist make_tdivider() {
   Netlist nl;
-  const std::uint16_t t = logic::add_gate(nl, GateKind::kT).value;
+  const logic::Slot t = logic::add_gate(nl, GateKind::kT).value;
   ignore_input(nl, t, 1); // CLK ignored (edge is the call)
   assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 1);
@@ -78,8 +78,8 @@ Netlist make_tdivider() {
 // Cascaded T divider (divide by 4): T0 driven High, Q0 -> T1.T.
 Netlist make_tdiv4() {
   Netlist nl;
-  const std::uint16_t t0 = logic::add_gate(nl, GateKind::kT).value;
-  const std::uint16_t t1 = logic::add_gate(nl, GateKind::kT).value;
+  const logic::Slot t0 = logic::add_gate(nl, GateKind::kT).value;
+  const logic::Slot t1 = logic::add_gate(nl, GateKind::kT).value;
   assert(logic::wire(nl, t0, t1, 0).ok()); // Q0 -> T1.T (flop D first)
   ignore_input(nl, t0, 1);
   ignore_input(nl, t1, 1);
@@ -92,7 +92,7 @@ Netlist make_tdiv4() {
 // Latch-only net: one DLATCH, D + EN dangling (2 block inputs, 1 output).
 Netlist make_latch() {
   Netlist nl;
-  const std::uint16_t l = logic::add_gate(nl, GateKind::kDlatch).value;
+  const logic::Slot l = logic::add_gate(nl, GateKind::kDlatch).value;
   assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 2);
   assert(logic::block_output_count(nl) == 1);
@@ -356,6 +356,7 @@ void test_driver_section_inits_power_on() {
   // Section power-on values seed the pool (006): the T divider driven
   // High toggles from its seeded value, not from all-Low.
   core::RunConfig cfg = make_logic_config(make_tdivider(), {kH}, 1);
+  cfg.seq.init_q.assign(logic::slot_count(cfg.seq.netlist), kL);
   cfg.seq.init_q[0] = kH; // T1 @ slot 0 powers on High
   world::State out;
   assert(solvers::run_headless(cfg, std::span<emit::ISink *>{}, out).ok());
@@ -380,9 +381,9 @@ void test_driver_default_inits_low() {
 // advance T0 while T1 holds and the settled BUF output tracks the held Q.
 Netlist make_two_domain() {
   Netlist nl;
-  const std::uint16_t t0 = logic::add_gate(nl, GateKind::kT).value;
-  const std::uint16_t t1 = logic::add_gate(nl, GateKind::kT).value;
-  const std::uint16_t b = logic::add_gate(nl, GateKind::kBuf, 1).value;
+  const logic::Slot t0 = logic::add_gate(nl, GateKind::kT).value;
+  const logic::Slot t1 = logic::add_gate(nl, GateKind::kT).value;
+  const logic::Slot b = logic::add_gate(nl, GateKind::kBuf, 1).value;
   assert(logic::wire(nl, t1, b, 0).ok()); // Q1 -> BUF.1 (flop D first: sole wire)
   ignore_input(nl, t0, 1);
   ignore_input(nl, t1, 1);
@@ -393,7 +394,7 @@ Netlist make_two_domain() {
 }
 
 core::RunConfig make_select_config(const Netlist &nl, std::vector<LogicValue> stimulus,
-                                   std::vector<std::uint16_t> members, bool step_all,
+                                   std::vector<logic::Slot> members, bool step_all,
                                    std::uint64_t steps) {
   core::RunConfig cfg;
   cfg.loop.dt = 0.01;
@@ -527,7 +528,7 @@ void test_derived_domain_selection_with_inits() {
   assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
   const std::vector<logic::ClockDomain> domains = logic::derive_clock_domains(nl);
   assert(domains.size() == 2);
-  std::vector<std::uint16_t> members;
+  std::vector<logic::Slot> members;
   for (const auto &d : domains) {
     if (d.name == "BUF1.Y") {
       members = d.members;
@@ -535,13 +536,14 @@ void test_derived_domain_selection_with_inits() {
   }
   assert(members.size() == 1 && members[0] == 1);
   core::RunConfig sel = make_select_config(nl, {kL, kL}, members, false, 1);
-  sel.seq.init_q[1] = kL;
+  sel.seq.init_q.assign(logic::slot_count(nl), kL);
   sel.seq.init_q[2] = kH;
   world::State a;
   assert(solvers::run_headless(sel, std::span<emit::ISink *>{}, a).ok());
   assert(a.seq.q[1] == kH); // captured NOT(0)=1
   assert(a.seq.q[2] == kH); // held at seeded 1
   core::RunConfig all = make_select_config(nl, {kL, kL}, {}, true, 1);
+  all.seq.init_q.assign(logic::slot_count(nl), kL);
   all.seq.init_q[1] = kL;
   all.seq.init_q[2] = kH;
   world::State b;
@@ -556,8 +558,8 @@ void test_observation_fill_snapshot_order_recycle() {
   // (removed flop retires its serial, the recycled slot mints a fresh one
   // that never aliases a live serial).
   Netlist nl;
-  const std::uint16_t f0 = logic::add_gate(nl, GateKind::kDff).value;
-  const std::uint16_t f1 = logic::add_gate(nl, GateKind::kDff).value;
+  const logic::Slot f0 = logic::add_gate(nl, GateKind::kDff).value;
+  const logic::Slot f1 = logic::add_gate(nl, GateKind::kDff).value;
   ignore_input(nl, f0, 0);
   ignore_input(nl, f0, 1);
   ignore_input(nl, f1, 0);
@@ -578,7 +580,7 @@ void test_observation_fill_snapshot_order_recycle() {
   assert(logic::remove_gate(s.netlist, f1).ok());
   logic::init_seq_state(s.seq, s.netlist);
   assert(s.seq.live_count == 1 && s.seq.valid[0] != 0 && s.seq.valid[1] == 0);
-  const std::uint16_t f2 = logic::add_gate(s.netlist, GateKind::kDff).value;
+  const logic::Slot f2 = logic::add_gate(s.netlist, GateKind::kDff).value;
   assert(f2 == 1); // lowest free slot recycles
   ignore_input(s.netlist, f2, 0);
   ignore_input(s.netlist, f2, 1);
@@ -701,8 +703,8 @@ void test_observation_midrun_replay() {
 // entries intact, pool untouched at the failing boundary).
 Netlist make_midrun_illegal() {
   Netlist nl;
-  const std::uint16_t t = logic::add_gate(nl, GateKind::kT).value;
-  const std::uint16_t sr = logic::add_gate(nl, GateKind::kSrlatch, 2).value;
+  const logic::Slot t = logic::add_gate(nl, GateKind::kT).value;
+  const logic::Slot sr = logic::add_gate(nl, GateKind::kSrlatch, 2).value;
   assert(logic::wire(nl, t, sr, 0).ok()); // Q0 -> SR.S
   ignore_input(nl, t, 1);                 // T CLK ignored (edge is the call)
   assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
@@ -755,7 +757,7 @@ void test_refusal_xz_stimulus() {
 // Q dangling. RST > SET > EN-hold > D, identical to interactive stepping.
 Netlist make_full_dff() {
   Netlist nl;
-  const std::uint16_t d = logic::add_gate(nl, GateKind::kDff, 5).value;
+  const logic::Slot d = logic::add_gate(nl, GateKind::kDff, 5).value;
   ignore_input(nl, d, 1); // CLK ignored (edge is the call)
   assert(logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
   assert(logic::block_input_count(nl) == 4);  // D, RST, SET, EN

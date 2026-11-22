@@ -51,7 +51,7 @@ int LogicAddSpec::run(ArgCursor &args, std::ostream &out) {
     if (added.error == std::string_view("bad fan-in for kind")) {
       return cli::usage_error(out, "bad fan-in for kind (NOT/BUF take 1, TBUF exactly 2, DLATCH/T/SRLATCH exactly 2, JK exactly 3, DFF 2 or 5, the rest 2..8)", kUsage);
     }
-    return cli::runtime_error(out, "netlist full (max 1024 gates)");
+    return cli::runtime_error(out, "netlist full (max 1048576 gates)");
   }
   out << "added " << support::gate_name(nl, added.value) << " kind=" << wengine::logic::gate_kind_name(kind.value)
       << " inputs=" << static_cast<unsigned>(inputs) << '\n';

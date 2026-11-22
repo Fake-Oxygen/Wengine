@@ -361,9 +361,9 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
  *         text, a bad kind prefix/number ("bad gate name"), or a
  *         well-formed but absent gate ("unknown gate").
  */
-[[nodiscard]] inline core::Result<std::uint16_t> resolve_gate(const Netlist &nl, std::string_view name) noexcept {
+[[nodiscard]] inline core::Result<Slot> resolve_gate(const Netlist &nl, std::string_view name) noexcept {
   if (name.empty()) {
-    return core::Result<std::uint16_t>::failure("bad gate name: empty");
+    return core::Result<Slot>::failure("bad gate name: empty");
   }
   for (const KindInfo &e : kKinds) {
     const std::uint8_t o = kind_ordinal(e.kind);
@@ -376,15 +376,15 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
     if (!detail::parse_decimal(num, 0xFFFFFFFFu, counter) || counter == 0) {
       continue; // not this kind (or bad number): keep trying other kinds
     }
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      const Gate &g = nl.slots[s];
       if (g.live && kind_ordinal(g.kind) == o && g.counter == counter) {
-        return core::Result<std::uint16_t>::success(s);
+        return core::Result<Slot>::success(s);
       }
     }
-    return core::Result<std::uint16_t>::failure("unknown gate");
+    return core::Result<Slot>::failure("unknown gate");
   }
-  return core::Result<std::uint16_t>::failure("bad gate name");
+  return core::Result<Slot>::failure("bad gate name");
 }
 
 /**
@@ -426,8 +426,8 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
     }
     return core::Result<PinRef>::failure("bad pin: bad gate name");
   }
-  const std::uint16_t slot = gate.value;
-  const Gate &g = nl.gates[slot];
+  const Slot slot = gate.value;
+  const Gate &g = nl.slots[slot];
   // Named sequential pins (FR-010): checked before the generic Y/numeric
   // forms; numeric aliases fall through below and keep working.
   if (is_sequential_kind(g.kind)) {

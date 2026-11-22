@@ -679,6 +679,15 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic PRIVATE wengine_core)
     add_test(NAME logic COMMAND test_logic)
 
+    # 015 scale-instantiation pins: alias layout identity static_asserts
+    # plus scalar/word parity, prefix-slice agreement, bit-identical
+    # repeats, and refusal parity at 65,536 gates (env override
+    # WENGINE_LOGIC_SCALE_GATES for manual larger runs). Links
+    # wengine_core alone like test_logic.
+    add_executable(test_logic_scale tests/test_logic_scale.cpp)
+    target_link_libraries(test_logic_scale PRIVATE wengine_core)
+    add_test(NAME logic_scale COMMAND test_logic_scale)
+
     # LOGIC-V2-SEQ1 sequential kind vocabulary (DFF/DLATCH): parsing +
     # fan-in + names only, links wengine_core alone like test_logic.
     add_executable(test_logic_seq_kinds tests/test_logic_seq_kinds.cpp)
@@ -1106,4 +1115,10 @@ if(BUILD_BENCHMARKS)
 
     add_executable(bench_logic benchmarks/bench_logic.cpp)
     target_link_libraries(bench_logic PRIVATE wengine_core)
+
+    # Scale-profiling sweep to >=1M gates (015): growth/wire/compile/solve/
+    # word/shared/step/optimize/dedup/remove/reset attribution. Links
+    # wengine_core only, never the assertion policy.
+    add_executable(bench_logic_scale benchmarks/bench_logic_scale.cpp)
+    target_link_libraries(bench_logic_scale PRIVATE wengine_core)
 endif()

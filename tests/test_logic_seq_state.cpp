@@ -23,10 +23,11 @@ namespace {
 
 // add_gate still refuses sequential kinds (SEQ1 staging), so tests place
 // them by hand — white-box struct pokes, same lifetime fields add_gate sets.
-void place_seq(Netlist &nl, std::uint16_t slot, GateKind kind, std::uint32_t counter) {
+void place_seq(Netlist &nl, logic::Slot slot, GateKind kind, std::uint32_t counter) {
   assert(slot < logic::kMaxGates);
+  assert(logic::ensure_slots(nl, static_cast<std::size_t>(slot) + 1));
   assert(logic::is_sequential_kind(kind));
-  logic::Gate &g = nl.gates[slot];
+  logic::Gate &g = nl.slots[slot];
   assert(!g.live);
   g.live = true;
   g.kind = kind;
@@ -41,10 +42,10 @@ void place_seq(Netlist &nl, std::uint16_t slot, GateKind kind, std::uint32_t cou
   }
   ++nl.live_count;
   nl.dirty = true;
-  nl.topo_size = 0;
+  nl.topo_order.clear();
 }
 
-void kill_gate(Netlist &nl, std::uint16_t slot) {
+void kill_gate(Netlist &nl, logic::Slot slot) {
   assert(logic::remove_gate(nl, slot).ok());
 }
 
@@ -52,7 +53,7 @@ void test_fresh_and_empty_init() {
   SeqState st;
   assert(st.live_count == 0);
   assert(st.next_serial == 0);
-  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
+  for (std::size_t s = 0; s < st.valid.size(); ++s) {
     assert(st.valid[s] == 0);
     assert(st.q[s] == LogicValue::kLow);
     assert(st.serial[s] == 0);
@@ -149,8 +150,8 @@ void test_combinational_solve_unchanged() {
   // The pool's presence changes nothing for combinational eval: NAND via
   // AND+NOT still solves bit-exactly (SEQ2 adds no eval path).
   Netlist nl;
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   assert(logic::wire(nl, a, n, 0).ok());
   SeqState st;
   logic::init_seq_state(st, nl);

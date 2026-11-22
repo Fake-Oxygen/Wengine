@@ -26,7 +26,7 @@
 //     u64 table_off, u64 table_len, u64 lua_off, u64 lua_len
 //   u32 table_store_size, f64 table_times[]..., f64 table_values[]...
 //   u32 lua_blob_size, u8 lua_text[]... (opaque script bytes)
-//   Sequential pool (v6 only, fixed stride over kMaxGates slots):
+//   Sequential pool (v6 only, fixed stride over kCheckpointNetlistStride slots):
 //     per slot: u8 live, u8 kind, u32 counter, u8 input_count,
 //       u8 ignored_mask, u8 ignore_output, u8 ignore_nq_output,
 //       u16 drivers[8], u8 driver_inv[8], u16 tie_rep[8],
@@ -85,6 +85,14 @@ inline constexpr std::uint32_t kStateFormatVersion = 6;
  *        allocations (any stored count above this fails loading).
  */
 inline constexpr std::uint32_t kMaxStateEntries = 1u << 24;
+/**
+ * @brief v6 netlist stride (1024 slots): the checkpoint format stores a
+ *        fixed 1024-slot netlist + sequential pool, exactly as before.
+ *        The in-memory pool is dynamic, but the on-disk layout is
+ *        unchanged — pools past this stride cannot be represented and
+ *        fail saving loudly (never truncated, never a version bump).
+ */
+inline constexpr std::uint32_t kCheckpointNetlistStride = 1024;
 
 namespace detail {
 
@@ -331,8 +339,39 @@ inline bool get_f64_le(std::istream &in, double &v) {
   }
   // Sequential pool (v6): fixed-stride topology + Q + stimulus + members.
   // Derived fanouts/topo recomputed on load, never stored.
-  for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
-    const logic::Gate &g = s.netlist.gates[slot];
+  //
+  // The v6 layout stores exactly kCheckpointNetlistStride slots. Pools
+  // past the stride cannot be represented: loud refusal up front, never
+  // a truncated file (save the netlist via the YAML workspace instead,
+  // which has no stride bound).
+  if (logic::slot_count(s.netlist) > kCheckpointNetlistStride) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  const std::size_t pool_n = logic::slot_count(s.netlist);
+  for (std::uint32_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
+    if (slot >= pool_n) {
+      // Past the pool: fresh-dead encoding (matches a fresh Gate{}:
+      // input_count 2, NQ hidden, everything else zero).
+      detail::put_u8(out, 0);
+      detail::put_u8(out, 0);
+      detail::put_u32_le(out, 0);
+      detail::put_u8(out, 2);
+      detail::put_u8(out, 0);
+      detail::put_u8(out, 0);
+      detail::put_u8(out, 1);
+      for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
+        detail::put_u16_le(out, 0);
+      }
+      for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
+        detail::put_u8(out, 0);
+      }
+      for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
+        detail::put_u16_le(out, 0);
+      }
+      detail::put_u64_le(out, 0);
+      continue;
+    }
+    const logic::Gate &g = s.netlist.slots[slot];
     detail::put_u8(out, g.live ? 1 : 0);
     detail::put_u8(out, static_cast<std::uint8_t>(g.kind));
     detail::put_u32_le(out, g.counter);
@@ -341,34 +380,37 @@ inline bool get_f64_le(std::istream &in, double &v) {
     detail::put_u8(out, g.ignore_output ? 1 : 0);
     detail::put_u8(out, g.ignore_nq_output ? 1 : 0);
     for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
-      detail::put_u16_le(out, g.drivers[k]);
+      detail::put_u16_le(out, static_cast<std::uint16_t>(g.drivers[k]));
     }
     for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
       detail::put_u8(out, s.netlist.driver_inv[static_cast<std::size_t>(slot) * logic::kMaxInputs + k]);
     }
     for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
-      detail::put_u16_le(out, logic::tie_rep_entry(s.netlist, static_cast<std::size_t>(slot) * logic::kMaxInputs + k));
+      detail::put_u16_le(out, static_cast<std::uint16_t>(logic::tie_rep_entry(s.netlist, static_cast<std::size_t>(slot) * logic::kMaxInputs + k)));
     }
     detail::put_u64_le(out, g.propagation_delay_ps);
   }
   for (std::uint32_t c : s.netlist.next_counter) {
     detail::put_u32_le(out, c);
   }
-  detail::put_u16_le(out, s.netlist.live_count);
-  for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
-    detail::put_u8(out, s.seq.valid[slot]);
-    detail::put_u8(out, static_cast<std::uint8_t>(s.seq.q[slot]));
-    detail::put_u64_le(out, s.seq.serial[slot]);
+  detail::put_u16_le(out, static_cast<std::uint16_t>(s.netlist.live_count));
+  for (std::uint32_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
+    const std::uint8_t valid = (slot < s.seq.valid.size()) ? s.seq.valid[slot] : 0;
+    const logic::LogicValue q = (slot < s.seq.q.size()) ? s.seq.q[slot] : logic::LogicValue::kLow;
+    const std::uint64_t serial = (slot < s.seq.serial.size()) ? s.seq.serial[slot] : 0;
+    detail::put_u8(out, valid);
+    detail::put_u8(out, static_cast<std::uint8_t>(q));
+    detail::put_u64_le(out, serial);
   }
   detail::put_u64_le(out, s.seq.next_serial);
-  detail::put_u16_le(out, s.seq.live_count);
+  detail::put_u16_le(out, static_cast<std::uint16_t>(s.seq.live_count));
   detail::put_u32_le(out, static_cast<std::uint32_t>(s.seq_inputs.size()));
   for (logic::LogicValue v : s.seq_inputs) {
     detail::put_u8(out, static_cast<std::uint8_t>(v));
   }
   detail::put_u32_le(out, static_cast<std::uint32_t>(s.seq_members.size()));
-  for (std::uint16_t m : s.seq_members) {
-    detail::put_u16_le(out, m);
+  for (logic::Slot m : s.seq_members) {
+    detail::put_u16_le(out, static_cast<std::uint16_t>(m));
   }
   detail::put_u8(out, s.seq_members.empty() ? 1 : 0);
   detail::put_u32_le(out, static_cast<std::uint32_t>(s.seq_outputs.size()));
@@ -494,8 +536,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
   tmp.signals.running.resize(sig_cap);
   tmp.signals.op_count.resize(sig_cap);
   tmp.signals.serial.resize(sig_cap);
-  tmp.signals.ops.resize(static_cast<std::size_t>(sig_cap) *
-                         signal::SignalParams::kMaxOps);
+  tmp.signals.ops.resize(static_cast<std::size_t>(sig_cap) * signal::SignalParams::kMaxOps);
   tmp.signals.expr_op.resize(static_cast<std::size_t>(sig_cap) * signal::kMaxExprNodes);
   tmp.signals.expr_arg.resize(static_cast<std::size_t>(sig_cap) * signal::kMaxExprNodes);
   tmp.signals.expr_len.resize(sig_cap);
@@ -726,7 +767,11 @@ inline bool get_f64_le(std::istream &in, double &v) {
       return b <= 7 || b == 16 || b == 17 || b == 18 || b == 19 || b == 20;
     };
     tmp.netlist = logic::Netlist{};
-    for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
+    // v6 stride: grow the pool to the fixed layout before filling it.
+    if (!logic::ensure_slots(tmp.netlist, kCheckpointNetlistStride)) {
+      return invalid();
+    }
+    for (std::uint16_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
       std::uint8_t live = 0;
       std::uint8_t kind = 0;
       std::uint32_t counter = 0;
@@ -753,7 +798,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
       if ((ignored_mask >> input_count) != 0) {
         return invalid();
       }
-      logic::Gate &g = tmp.netlist.gates[slot];
+      logic::Gate &g = tmp.netlist.slots[slot];
       g.live = live != 0;
       g.kind = static_cast<logic::GateKind>(kind);
       g.counter = counter;
@@ -764,10 +809,10 @@ inline bool get_f64_le(std::istream &in, double &v) {
       for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
         std::uint16_t d = 0;
         if (!detail::get_u16_le(in, d) ||
-            (d != logic::kNoDriver && d >= logic::kMaxGates)) {
+            (d != 0xFFFFu && d >= kCheckpointNetlistStride)) {
           return invalid();
         }
-        g.drivers[k] = d;
+        g.drivers[k] = (d == 0xFFFFu) ? logic::kNoDriver : static_cast<logic::Slot>(d);
       }
       for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
         std::uint8_t inv = 0;
@@ -779,7 +824,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
       for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
         std::uint16_t rep = 0;
         if (!detail::get_u16_le(in, rep) ||
-            rep > logic::kMaxGates * logic::kMaxInputs) {
+            rep > kCheckpointNetlistStride * logic::kMaxInputs) {
           return invalid();
         }
         logic::set_tie_rep_entry(tmp.netlist, static_cast<std::size_t>(slot) * logic::kMaxInputs + k, rep);
@@ -798,12 +843,12 @@ inline bool get_f64_le(std::istream &in, double &v) {
       tmp.netlist.next_counter[k] = c;
     }
     std::uint16_t nl_live = 0;
-    if (!detail::get_u16_le(in, nl_live) || nl_live > logic::kMaxGates) {
+    if (!detail::get_u16_le(in, nl_live) || nl_live > kCheckpointNetlistStride) {
       return invalid();
     }
     std::uint16_t counted_live = 0;
-    for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
-      if (tmp.netlist.gates[slot].live) {
+    for (std::uint16_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
+      if (tmp.netlist.slots[slot].live) {
         ++counted_live;
       }
     }
@@ -814,20 +859,20 @@ inline bool get_f64_le(std::istream &in, double &v) {
     // Wired drivers must land on live slots; tied pins must be live,
     // unwired, non-ignored with star-consistent reps; NQ polarity only
     // from live sequential sources.
-    for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
-      const logic::Gate &g = tmp.netlist.gates[slot];
+    for (std::uint16_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
+      const logic::Gate &g = tmp.netlist.slots[slot];
       if (!g.live) {
         continue;
       }
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
         const std::size_t flat =
             static_cast<std::size_t>(slot) * logic::kMaxInputs + i;
-        const std::uint16_t drv = g.drivers[i];
-        if (drv != logic::kNoDriver && !tmp.netlist.gates[drv].live) {
+        const logic::Slot drv = g.drivers[i];
+        if (drv != logic::kNoDriver && !tmp.netlist.slots[drv].live) {
           return invalid();
         }
         if (tmp.netlist.driver_inv[flat] != 0) {
-          if (drv == logic::kNoDriver || !logic::is_sequential_kind(tmp.netlist.gates[drv].kind)) {
+          if (drv == logic::kNoDriver || !logic::is_sequential_kind(tmp.netlist.slots[drv].kind)) {
             return invalid();
           }
         }
@@ -839,45 +884,45 @@ inline bool get_f64_le(std::istream &in, double &v) {
       return invalid();
     }
     // Recompute derived data (fanouts, topo), never stored.
-    for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
-      tmp.netlist.gates[slot].output_fanout = 0;
-      tmp.netlist.gates[slot].nq_fanout = 0;
+    for (std::uint16_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
+      tmp.netlist.slots[slot].output_fanout = 0;
+      tmp.netlist.slots[slot].nq_fanout = 0;
     }
-    for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
-      const logic::Gate &g = tmp.netlist.gates[slot];
+    for (std::uint16_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
+      const logic::Gate &g = tmp.netlist.slots[slot];
       if (!g.live) {
         continue;
       }
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        const std::uint16_t d = g.drivers[i];
+        const logic::Slot d = g.drivers[i];
         if (d == logic::kNoDriver) {
           continue;
         }
         const std::size_t flat =
             static_cast<std::size_t>(slot) * logic::kMaxInputs + i;
         if (tmp.netlist.driver_inv[flat] != 0) {
-          ++tmp.netlist.gates[d].nq_fanout;
+          ++tmp.netlist.slots[d].nq_fanout;
         } else {
-          ++tmp.netlist.gates[d].output_fanout;
+          ++tmp.netlist.slots[d].output_fanout;
         }
       }
     }
     tmp.netlist.dirty = true;
-    tmp.netlist.topo_size = 0;
     // Clocked state: valid slots must match live sequential gates exactly.
     tmp.seq = logic::SeqState{};
+    if (!logic::ensure_seq_state(tmp.seq, kCheckpointNetlistStride)) {
+      return invalid();
+    }
     std::uint64_t max_serial = 0;
     bool have_serial = false;
-    for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
+    for (std::uint16_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
       std::uint8_t valid = 0;
       std::uint8_t q = 0;
       std::uint64_t serial = 0;
-      if (!detail::get_u8(in, valid) || valid > 1 || !detail::get_u8(in, q) || q > 1 ||
-          !detail::get_u64_le(in, serial)) {
+      if (!detail::get_u8(in, valid) || valid > 1 || !detail::get_u8(in, q) || q > 1 || !detail::get_u64_le(in, serial)) {
         return invalid();
       }
-      const bool want = tmp.netlist.gates[slot].live &&
-                        logic::is_sequential_kind(tmp.netlist.gates[slot].kind);
+      const bool want = tmp.netlist.slots[slot].live && logic::is_sequential_kind(tmp.netlist.slots[slot].kind);
       if ((valid != 0) != want) {
         return invalid();
       }
@@ -898,12 +943,11 @@ inline bool get_f64_le(std::istream &in, double &v) {
     }
     std::uint64_t next_serial = 0;
     std::uint16_t seq_live = 0;
-    if (!detail::get_u64_le(in, next_serial) || !detail::get_u16_le(in, seq_live) ||
-        seq_live > logic::kMaxGates) {
+    if (!detail::get_u64_le(in, next_serial) || !detail::get_u16_le(in, seq_live) || seq_live > kCheckpointNetlistStride) {
       return invalid();
     }
     std::uint16_t counted_seq = 0;
-    for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
+    for (std::uint16_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
       if (tmp.seq.valid[slot] != 0) {
         ++counted_seq;
       }
@@ -936,26 +980,25 @@ inline bool get_f64_le(std::istream &in, double &v) {
     // Members: live edge-flop (DFF/JK/T) slots, no duplicates; step_all
     // consistent (all iff empty).
     std::uint32_t mem_len = 0;
-    if (!detail::get_u32_le(in, mem_len) || mem_len > logic::kMaxGates) {
+    if (!detail::get_u32_le(in, mem_len) || mem_len > kCheckpointNetlistStride) {
       return invalid();
     }
     tmp.seq_members.clear();
     tmp.seq_members.reserve(mem_len);
     for (std::uint32_t k = 0; k < mem_len; ++k) {
       std::uint16_t m = 0;
-      if (!detail::get_u16_le(in, m) || m >= logic::kMaxGates) {
+      if (!detail::get_u16_le(in, m) || m >= kCheckpointNetlistStride) {
         return invalid();
       }
-      const logic::Gate &g = tmp.netlist.gates[m];
+      const logic::Gate &g = tmp.netlist.slots[m];
       if (!g.live) {
         return invalid();
       }
-      const bool edge_kind = g.kind == logic::GateKind::kDff || g.kind == logic::GateKind::kJk ||
-                             g.kind == logic::GateKind::kT;
+      const bool edge_kind = g.kind == logic::GateKind::kDff || g.kind == logic::GateKind::kJk || g.kind == logic::GateKind::kT;
       if (!edge_kind) {
         return invalid();
       }
-      for (std::uint16_t seen : tmp.seq_members) {
+      for (logic::Slot seen : tmp.seq_members) {
         if (seen == m) {
           return invalid();
         }

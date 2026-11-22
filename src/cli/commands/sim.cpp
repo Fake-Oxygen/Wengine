@@ -180,15 +180,15 @@ void print_live_health(std::uint64_t done_steps,
   return true;
 }
 
-[[nodiscard]] inline std::string seq_gate_name(const logic::Netlist &nl, std::uint16_t slot) {
-  std::string s(logic::gate_kind_name(nl.gates[slot].kind));
-  s += std::to_string(nl.gates[slot].counter);
+[[nodiscard]] inline std::string seq_gate_name(const logic::Netlist &nl, logic::Slot slot) {
+  std::string s(logic::gate_kind_name(nl.slots[slot].kind));
+  s += std::to_string(nl.slots[slot].counter);
   return s;
 }
 
 struct SeqDomain {
   std::string name;
-  std::vector<std::uint16_t> members;
+  std::vector<logic::Slot> members;
 };
 
 [[nodiscard]] inline std::vector<SeqDomain> seq_clock_domains(const logic::Netlist &nl) {
@@ -208,9 +208,9 @@ struct SeqDomain {
 // pin_text vocabulary so completion and --seq-from accept the same spellings
 // the interactive verbs show: DFF D/CLK/RST/SET/EN, DLATCH D/EN, JK J/K/CLK,
 // T T/CLK, SRLATCH S/R, numeric elsewhere).
-[[nodiscard]] inline std::string seq_pin_text(const logic::Netlist &nl, std::uint16_t slot,
+[[nodiscard]] inline std::string seq_pin_text(const logic::Netlist &nl, logic::Slot slot,
                                               std::uint8_t input) {
-  const logic::Gate &g = nl.gates[slot];
+  const logic::Gate &g = nl.slots[slot];
   if (!logic::is_sequential_kind(g.kind)) {
     return seq_gate_name(nl, slot) + '.' + std::to_string(static_cast<unsigned>(input) + 1u);
   }
@@ -235,8 +235,8 @@ struct SeqDomain {
 // Block-interface input pins in interface order (slot order, tie leaders
 // only), like the session collect_block_inputs.
 inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::string> &out) {
-  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-    const logic::Gate &g = nl.gates[s];
+  for (logic::Slot s = 0; s < logic::slot_count(nl); ++s) {
+    const logic::Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -287,7 +287,7 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
   nl = ws.netlist;
   // Domain selection: exactly one form — omitted means all domains.
   const std::vector<SeqDomain> domains = seq_clock_domains(nl);
-  std::vector<std::uint16_t> members;
+  std::vector<logic::Slot> members;
   const bool step_all = !clocks.has_value();
   if (clocks.has_value()) {
     const std::string_view list = *clocks;
@@ -317,8 +317,8 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
         return fail(std::string("unknown clock domain '") + std::string(name) +
                     "' (want " + want + ")");
       }
-      for (std::uint16_t h : hit->members) {
-        for (std::uint16_t m : members) {
+      for (logic::Slot h : hit->members) {
+        for (logic::Slot m : members) {
           if (m == h) {
             return fail(std::string("duplicate clock domain '") + std::string(name) +
                         "' in --seq-clocks");
@@ -347,7 +347,7 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
   std::vector<logic::LogicValue> stimulus;
   stimulus.reserve(n_in);
   for (const logic::PinRef &p : in_pins) {
-    const logic::Gate &g = nl.gates[p.slot];
+    const logic::Gate &g = nl.slots[p.slot];
     if (g.kind == logic::GateKind::kDff && p.input == 4 && !logic::is_tied(nl, p.slot, p.input)) {
       stimulus.push_back(logic::LogicValue::kHigh); // FR-008: unconnected EN asserted
     } else {
@@ -371,8 +371,8 @@ inline void seq_collect_block_inputs(const logic::Netlist &nl, std::vector<std::
     const logic::PinRef &ref = parsed.value;
     bool block_input = false;
     std::size_t index = 0;
-    if (!ref.is_output && ref.slot < logic::kMaxGates) {
-      const logic::Gate &g = nl.gates[ref.slot];
+    if (!ref.is_output && ref.slot < logic::slot_count(nl)) {
+      const logic::Gate &g = nl.slots[ref.slot];
       if (g.live && ref.input < g.input_count && g.drivers[ref.input] == logic::kNoDriver &&
           (g.ignored_mask & static_cast<std::uint8_t>(1u << ref.input)) == 0) {
         const std::size_t flat =
@@ -985,8 +985,8 @@ int SimSpec::run(ArgCursor &args, std::ostream &out) {
   // populate (empty until then, always fits).
   if (is_logic && (shm_name || tcp_endpoint || udp_endpoint)) {
     std::size_t n_flops = 0;
-    for (std::uint16_t slot = 0; slot < logic::kMaxGates; ++slot) {
-      const logic::Gate &g = cfg.seq.netlist.gates[slot];
+    for (logic::Slot slot = 0; slot < logic::slot_count(cfg.seq.netlist); ++slot) {
+      const logic::Gate &g = cfg.seq.netlist.slots[slot];
       if (g.live && logic::is_sequential_kind(g.kind)) {
         ++n_flops;
       }

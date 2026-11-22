@@ -6,10 +6,10 @@
  * pipeline: scalar solve plus bit-parallel word eval over one compiled topology. Topology
  * compiles once per mutation (dirty flag): Kahn's algorithm over slot
  * order yields a deterministic level order with a cycle check included;
- * steady-state solve never re-sorts and never allocates (two fixed
- * stack arrays: resolved dangling inputs plus per-gate outputs;
- * caller-owned spans for block I/O). Bit-parallel word eval runs
- * against the same level order.
+ * steady-state solve never re-sorts and never allocates (caller-owned
+ * spans: resolved dangling inputs plus per-gate outputs plus the Kahn
+ * scratch bundle; caller-owned spans for block I/O). Bit-parallel word
+ * eval runs against the same level order.
  *
  * Gate semantics (v1, zero-delay): AND/OR/NAND/NOR over 2..8 inputs;
  * NOT/BUF exactly 1; TBUF exactly 2 (data + active-high enable:
@@ -18,6 +18,13 @@
  * i.e. even parity). 74-series cascade equivalence holds only for 2
  * inputs. Only kLow/kHigh flow; kHighZ/kUnknown inputs fail loudly
  * (V2 tri-state slot, docs/logic.md section 12).
+ *
+ * Dynamic pool: solve and eval_block_word run over Netlist with
+ * pool-owned workspace scratch (resolved/gate_out values plus the
+ * TopoScratch bundle, word in_pos map); gate_scratch/block_outputs stay
+ * caller-owned with loud arity validation. Every bound is the pool's
+ * current size (slot_count), never kMaxGates. eval_gate stays
+ * capacity-free.
  *
  * Dependency rules (docs/logic.md sections 4, 5): header-only,
  * allocation-free, exception-free; depends on block_interface.hpp,
@@ -40,6 +47,8 @@ namespace wengine::logic {
 
 /**
  * @brief Pure gate function over Low/High inputs.
+ *
+ * Capacity-free: kinds and values never scale.
  *
  * @param[in] kind Gate kind to evaluate.
  * @param[in] inputs Per-input Low/High values (n entries).
@@ -122,37 +131,45 @@ namespace wengine::logic {
  * @param[in] block_inputs Input values in interface order.
  * @param[out] block_outputs Output values in interface order.
  * @param[in] diag Optional contention channel (nullptr = no counting).
+ * @param[in] resolved Caller-owned scratch (pool-size * kMaxInputs values).
+ * @param[in] gate_out Caller-owned scratch (pool-size per-slot outputs).
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success; kInvalidArgument on topology errors
  *         (combinational cycle, dangling driver), size mismatches,
- *         X/Z inputs, or X/Z wired drivers.
+ *         X/Z inputs, X/Z wired drivers, or undersized scratch.
  * @note Determinism: repeated calls with equal inputs are bit-identical
- *       (slot-order level order, slot-order output scan). No heap use
- *       (fixed stack arrays).
+ *       (slot-order level order, slot-order output scan). No heap use.
  */
-[[nodiscard]] inline core::Status solve(Netlist &nl, std::span<const LogicValue> block_inputs, std::span<LogicValue> block_outputs,
-                                       SolveDiag *diag = nullptr) noexcept {
-  core::Status st = topo::rebuild(nl, EdgeFilter::kAll);
+[[nodiscard]] inline core::Status solve(Netlist &nl, std::span<const LogicValue> block_inputs,
+                                        std::span<LogicValue> block_outputs, SolveDiag *diag,
+                                        std::span<LogicValue> resolved, std::span<LogicValue> gate_out,
+                                        const topo::TopoScratch &ts) noexcept {
+  core::Status st = topo::rebuild(nl, EdgeFilter::kAll, ts);
   if (!st.ok()) {
     return st;
+  }
+  if (resolved.size() < slot_count(nl) * kMaxInputs || gate_out.size() < slot_count(nl)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (diag != nullptr && diag->per_net.size() < slot_count(nl) * kMaxInputs) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   // Resolved value per (slot, input); only dangling entries are read.
   // Shared prelude via the BlockInterface seam (leaders consume inputs in
   // slot order, ignored tie to Low, ties fan out, X/Z loud).
-  LogicValue resolved[kMaxGates * kMaxInputs];
   if (!fill_resolved(nl, block_inputs, resolved).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
 
-  LogicValue gate_out[kMaxGates];
-  for (std::size_t s = 0; s < kMaxGates; ++s) {
+  for (std::size_t s = 0; s < slot_count(nl); ++s) {
     gate_out[s] = LogicValue::kLow;
   }
   LogicValue ins[kMaxInputs];
-  for (std::uint16_t oi = 0; oi < nl.topo_size; ++oi) {
-    const std::uint16_t s = nl.topo_order[oi];
-    const Gate &g = nl.gates[s];
+  for (Slot oi = 0; oi < nl.topo_order.size(); ++oi) {
+    const Slot s = nl.topo_order[oi];
+    const Gate &g = nl.slots[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i], diag)) {
+      if (!resolve_input(nl, s, i, gate_out.data(), resolved.data(), ins[i], diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
     }
@@ -160,8 +177,8 @@ namespace wengine::logic {
   }
 
   std::size_t out_cursor = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -185,6 +202,36 @@ namespace wengine::logic {
 }
 
 /**
+ * @brief Scalar single-assignment solve over the compiled level order.
+ *
+ * Workspace-backed entry: grows the pool's eval/Kahn scratch to the
+ * pool size, then runs the core above. (No noexcept: workspace growth
+ * may allocate.)
+ *
+ * @param[out] nl Netlist to solve (topology recompiled when dirty).
+ * @param[in] block_inputs Input values in interface order.
+ * @param[out] block_outputs Output values in interface order.
+ * @param[in] diag Optional contention channel (nullptr = no counting; sized to the pool when present).
+ * @return kOk on success; kInvalidArgument on topology errors
+ *         (combinational cycle, dangling driver), size mismatches,
+ *         X/Z inputs, or X/Z wired drivers.
+ * @note Determinism: repeated calls with equal inputs are bit-identical
+ *       (slot-order level order, slot-order output scan). No heap use
+ *       once sized (amortized growth only).
+ */
+[[nodiscard]] inline core::Status solve(Netlist &nl, std::span<const LogicValue> block_inputs, std::span<LogicValue> block_outputs, SolveDiag *diag = nullptr) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  if (diag != nullptr && diag->per_net.size() < n * kMaxInputs) {
+    diag->per_net.assign(n * kMaxInputs, 0);
+  }
+  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
+                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
+  return solve(nl, block_inputs, block_outputs, diag, std::span<LogicValue>(nl.ws_resolved.data(), n * kMaxInputs),
+               std::span<LogicValue>(nl.ws_gate_out.data(), n), ts);
+}
+
+/**
  * @brief Evaluate one 64-row slice starting at row word_index*64.
  *
  * Bit-parallel truth eval: 64 assignments per uint64_t word over the
@@ -202,37 +249,48 @@ namespace wengine::logic {
  *
  * @param[out] nl Netlist to evaluate (topology recompiled when dirty).
  * @param[in] word_index 64-row slice index to evaluate.
- * @param[out] gate_scratch Caller-owned scratch (>= kMaxGates words).
+ * @param[out] gate_scratch Caller-owned scratch (>= pool-size words).
  * @param[out] block_outputs Caller-owned outputs (exactly
  *             block_output_count(nl) words).
+ * @param[in] in_pos Caller-owned scratch (pool-size * kMaxInputs ordinals):
+ *            dangling-input -> block position map via the
+ *            BlockInterface seam (same leader order scalar `solve`
+ *            consumes; members share the leader's column).
+ *            kNoDriver = wired/ignored.
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success; kInvalidArgument on bad scratch/output
- *         sizes, out-of-range slices (when n_inputs < 31), or topology
- *         errors.
+ *         sizes, out-of-range slices (when n_inputs < 31), topology
+ *         errors, or undersized scratch.
  * @note Steady state allocates nothing and uses no SIMD intrinsics:
  *       scalar words carry the speedup and stay portable; vectorize
  *       only on a measured hot path.
  */
-[[nodiscard]] inline core::Status eval_block_word(Netlist &nl, std::uint64_t word_index, std::span<std::uint64_t> gate_scratch,
-                                                  std::span<std::uint64_t> block_outputs) noexcept {
+[[nodiscard]] inline core::Status eval_block_word(Netlist &nl, std::uint64_t word_index,
+                                                   std::span<std::uint64_t> gate_scratch,
+                                                   std::span<std::uint64_t> block_outputs,
+                                                   std::span<Slot> in_pos,
+                                                   const topo::TopoScratch &ts) noexcept {
   // (011) Word-loop entry points (verbs, bench, exact) check
   // shared_word_blocked() once before looping: the per-word path stays
   // branch-identical to v1 (D11 fast-path claim), and a shared net with
   // >= 2 attachments is refused loudly there, never silently folded
   // into 1-bit lanes. Marked inputs with <= 1 attachment ride the
   // primary word path unchanged.
-  core::Status st = topo::rebuild(nl, EdgeFilter::kAll);
+  core::Status st = topo::rebuild(nl, EdgeFilter::kAll, ts);
   if (!st.ok()) {
     return st;
   }
-  if (gate_scratch.size() < kMaxGates) {
+  if (gate_scratch.size() < slot_count(nl)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (in_pos.size() < slot_count(nl) * kMaxInputs) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   // Dangling-input -> block position map via the BlockInterface seam
   // (same leader order scalar `solve` consumes; members share the leader's
   // column). kNoDriver = wired/ignored. Single pass: one O(G) query per
   // pin would be quadratic per word.
-  std::uint16_t in_pos[kMaxGates * kMaxInputs];
-  build_input_positions(nl, in_pos);
+  build_input_positions(nl, in_pos.data());
   const std::size_t n_inputs = block_input_count(nl);
   std::size_t n_outputs = block_output_count(nl);
   if (block_outputs.size() != n_outputs) {
@@ -244,16 +302,16 @@ namespace wengine::logic {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
   }
-  for (std::uint16_t oi = 0; oi < nl.topo_size; ++oi) {
-    const std::uint16_t s = nl.topo_order[oi];
-    const Gate &g = nl.gates[s];
+  for (Slot oi = 0; oi < nl.topo_order.size(); ++oi) {
+    const Slot s = nl.topo_order[oi];
+    const Gate &g = nl.slots[s];
     std::uint64_t acc = 0;
     switch (g.kind) {
     case GateKind::kAnd:
     case GateKind::kNand:
       acc = ~static_cast<std::uint64_t>(0ULL);
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        const std::uint64_t v = resolve_word(nl, s, i, gate_scratch.data(), in_pos, word_index);
+        const std::uint64_t v = resolve_word(nl, s, i, gate_scratch.data(), in_pos.data(), word_index);
         acc &= v;
       }
       if (g.kind == GateKind::kNand) {
@@ -264,7 +322,7 @@ namespace wengine::logic {
     case GateKind::kNor:
       acc = 0;
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        const std::uint64_t v = resolve_word(nl, s, i, gate_scratch.data(), in_pos, word_index);
+        const std::uint64_t v = resolve_word(nl, s, i, gate_scratch.data(), in_pos.data(), word_index);
         acc |= v;
       }
       if (g.kind == GateKind::kNor) {
@@ -275,7 +333,7 @@ namespace wengine::logic {
     case GateKind::kXnor:
       acc = 0;
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        const std::uint64_t v = resolve_word(nl, s, i, gate_scratch.data(), in_pos, word_index);
+        const std::uint64_t v = resolve_word(nl, s, i, gate_scratch.data(), in_pos.data(), word_index);
         acc ^= v;
       }
       if (g.kind == GateKind::kXnor) {
@@ -283,11 +341,11 @@ namespace wengine::logic {
       }
       break;
     case GateKind::kNot: {
-      acc = ~resolve_word(nl, s, 0, gate_scratch.data(), in_pos, word_index);
+      acc = ~resolve_word(nl, s, 0, gate_scratch.data(), in_pos.data(), word_index);
       break;
     }
     case GateKind::kBuf: {
-      acc = resolve_word(nl, s, 0, gate_scratch.data(), in_pos, word_index);
+      acc = resolve_word(nl, s, 0, gate_scratch.data(), in_pos.data(), word_index);
       break;
     }
     case GateKind::kTbuf:
@@ -309,8 +367,8 @@ namespace wengine::logic {
   }
 
   std::size_t out_cursor = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -329,6 +387,32 @@ namespace wengine::logic {
     }
   }
   return core::Status::success();
+}
+
+/**
+ * @brief Evaluate one 64-row slice starting at row word_index*64.
+ *
+ * Workspace-backed entry: gate_scratch/block_outputs stay caller-owned
+ * (arity validated loudly, preserving the test-pinned contract);
+ * the input-position map and Kahn scratch come from the pool workspace.
+ * (No noexcept: workspace growth may allocate.)
+ *
+ * @param[out] nl Netlist to evaluate (topology recompiled when dirty).
+ * @param[in] word_index 64-row slice index to evaluate.
+ * @param[out] gate_scratch Caller-owned scratch (>= pool-size words).
+ * @param[out] block_outputs Caller-owned outputs (exactly block_output_count(nl) words).
+ * @return kOk on success; kInvalidArgument on bad scratch/output
+ *         sizes, out-of-range slices (when n_inputs < 31), or topology errors.
+ * @note Steady state allocates nothing and uses no SIMD intrinsics:
+ *       scalar words carry the speedup and stay portable; vectorize only on a measured hot path.
+ */
+[[nodiscard]] inline core::Status eval_block_word(Netlist &nl, std::uint64_t word_index, std::span<std::uint64_t> gate_scratch,
+                                                   std::span<std::uint64_t> block_outputs) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
+                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
+  return eval_block_word(nl, word_index, gate_scratch, block_outputs, std::span<Slot>(nl.ws_in_pos.data(), n * kMaxInputs), ts);
 }
 
 } // namespace wengine::logic

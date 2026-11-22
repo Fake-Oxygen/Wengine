@@ -27,14 +27,13 @@ namespace {
 // diagnostic channel starts at zero — the additive-storage no-op.
 void test_fresh_state_unmarked() {
   logic::Netlist nl{};
-  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+  assert(logic::slot_count(nl) == 0); // fresh pools carry no storage at all
+  for (std::size_t f = 0; f < logic::slot_count(nl) * logic::kMaxInputs; ++f) {
     assert(!logic::is_shared_flat(nl, f));
     assert(logic::shared_extra_flat(nl, f) == 0);
   }
   logic::SolveDiag diag{};
-  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
-    assert(diag.per_net[f] == 0);
-  }
+  assert(diag.per_net.empty()); // sized on first solve, zero before use
 }
 
 // US1 (011): unmarked occupied input refuses a second driver loudly with
@@ -182,8 +181,7 @@ void test_contention_counted() {
 // contention history.
 void test_contention_deterministic_and_unsaved() {
   BusRig r = make_bus();
-  std::array<logic::LogicValue, logic::kMaxGates> inits{};
-  inits.fill(logic::LogicValue::kLow);
+  std::vector<logic::LogicValue> inits(logic::slot_count(r.nl), logic::LogicValue::kLow);
   std::string before;
   logic::yaml::save_text(r.nl, inits, before);
   const logic::LogicValue fight[3] = {logic::LogicValue::kLow, logic::LogicValue::kHigh,
@@ -227,7 +225,7 @@ void test_optimizer_freezes_shared() {
     logic::Netlist opt = r.value;
     // The shared-feeding BUF survives every pass (frozen, never
     // bypassed/rewired); marks and attachments intact.
-    assert(opt.gates[b.value].live);
+    assert(opt.slots[b.value].live);
     assert(logic::is_shared_input(opt, o.value, 0));
     assert(logic::shared_attachment_count(opt, o.value, 0) == 2);
     // Observable resolution results never change: all 4 input combos
@@ -342,28 +340,25 @@ void test_shared_span_wide() {
   assert(logic::wire(nl, c.value, o.value, 0).ok());
   assert(logic::wire(nl, d.value, o.value, 0).ok());
   assert(logic::shared_attachment_count(nl, o.value, 0) == 4);
-  logic::LogicValue gate_out[logic::kMaxGates];
-  logic::LogicValue resolved[logic::kMaxGates * logic::kMaxInputs] = {};
-  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
-    gate_out[s] = logic::LogicValue::kLow;
-  }
+  std::vector<logic::LogicValue> gate_out(logic::slot_count(nl), logic::LogicValue::kLow);
+  std::vector<logic::LogicValue> resolved(logic::slot_count(nl) * logic::kMaxInputs, logic::LogicValue::kLow);
   logic::LogicValue out = logic::LogicValue::kLow;
   // {L,L,L,L} -> L; {H,H,H,H} -> H.
-  assert(logic::resolve_input(nl, o.value, 0, gate_out, resolved, out) && out == logic::LogicValue::kLow);
+  assert(logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out) && out == logic::LogicValue::kLow);
   gate_out[a.value] = gate_out[b.value] = gate_out[c.value] = gate_out[d.value] = logic::LogicValue::kHigh;
-  assert(logic::resolve_input(nl, o.value, 0, gate_out, resolved, out) && out == logic::LogicValue::kHigh);
+  assert(logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out) && out == logic::LogicValue::kHigh);
   // Any low+high mix -> X, regardless of position.
   gate_out[c.value] = logic::LogicValue::kLow;
-  assert(!logic::resolve_input(nl, o.value, 0, gate_out, resolved, out));
+  assert(!logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out));
   gate_out[c.value] = logic::LogicValue::kHigh;
   gate_out[d.value] = logic::LogicValue::kLow;
-  assert(!logic::resolve_input(nl, o.value, 0, gate_out, resolved, out));
+  assert(!logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out));
   // Drop to 3 attachments: {H,H,H} -> H; {H,H,L} -> X.
   assert(logic::unwire(nl, o.value, 0).ok()); // promotes b; span {H,H,H}
   gate_out[b.value] = gate_out[c.value] = gate_out[d.value] = logic::LogicValue::kHigh;
-  assert(logic::resolve_input(nl, o.value, 0, gate_out, resolved, out) && out == logic::LogicValue::kHigh);
+  assert(logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out) && out == logic::LogicValue::kHigh);
   gate_out[d.value] = logic::LogicValue::kLow;
-  assert(!logic::resolve_input(nl, o.value, 0, gate_out, resolved, out));
+  assert(!logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out));
   // Counts are order-independent: same value multiset attached in
   // different orders contends identically.
   logic::Netlist fwd{};
@@ -446,13 +441,13 @@ void test_named_edge_removal() {
   // unchanged (primary untouched).
   assert(logic::unwire_driver(nl, src[1], o.value, 0).ok());
   assert(logic::shared_attachment_count(nl, o.value, 0) == 2);
-  assert(nl.gates[o.value].drivers[0] == src[0]);
+  assert(nl.slots[o.value].drivers[0] == src[0]);
   // Removing the primary promotes extra 0 into the primary slot.
   assert(logic::unwire(nl, o.value, 0).ok());
-  assert(nl.gates[o.value].drivers[0] == src[2]);
+  assert(nl.slots[o.value].drivers[0] == src[2]);
   assert(logic::shared_attachment_count(nl, o.value, 0) == 1);
-  assert(nl.gates[src[0]].output_fanout == 0);
-  assert(nl.gates[src[2]].output_fanout == 1);
+  assert(nl.slots[src[0]].output_fanout == 0);
+  assert(nl.slots[src[2]].output_fanout == 1);
 }
 
 // US1 (011): removing a gate releases exactly its attachments wherever
@@ -471,7 +466,7 @@ void test_remove_gate_sweeps_extras() {
   // afterwards leaves a clean marked-empty input.
   assert(logic::remove_gate(nl, a2.value).ok());
   assert(logic::shared_attachment_count(nl, o.value, 0) == 1);
-  assert(nl.gates[o.value].drivers[0] == a1.value);
+  assert(nl.slots[o.value].drivers[0] == a1.value);
   assert(logic::remove_gate(nl, a1.value).ok());
   assert(logic::shared_attachment_count(nl, o.value, 0) == 0);
   assert(logic::is_shared_input(nl, o.value, 0));

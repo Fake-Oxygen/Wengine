@@ -12,10 +12,10 @@
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/types.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace wengine::logic::yaml {
 
@@ -31,16 +31,16 @@ namespace {
   return s;
 }
 
-[[nodiscard]] std::string gate_name(const Netlist &nl, std::uint16_t slot) {
-  std::string s(gate_kind_name(nl.gates[slot].kind));
-  s += std::to_string(nl.gates[slot].counter);
+[[nodiscard]] std::string gate_name(const Netlist &nl, Slot slot) {
+  std::string s(gate_kind_name(nl.slots[slot].kind));
+  s += std::to_string(nl.slots[slot].counter);
   return s;
 }
 
-[[nodiscard]] std::string pin_text(const Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input, bool negated = false) {
+[[nodiscard]] std::string pin_text(const Netlist &nl, Slot slot, bool is_output, std::uint8_t input, bool negated = false) {
   std::string s = gate_name(nl, slot);
   s += '.';
-  const Gate &g = nl.gates[slot];
+  const Gate &g = nl.slots[slot];
   if (is_output && is_sequential_kind(g.kind)) {
     s += negated ? "NQ" : "Q";
   } else if (is_output) {
@@ -74,11 +74,11 @@ namespace {
 template <typename HasFn, typename EmitRowFn>
 void emit_input_rows(std::string &out, const Netlist &nl, const char *header, HasFn has, EmitRowFn emit_row) {
   bool any = false;
-  for (std::uint16_t s = 0; s < kMaxGates && !any; ++s) {
-    if (!nl.gates[s].live) {
+  for (Slot s = 0; s < logic::slot_count(nl) && !any; ++s) {
+    if (!nl.slots[s].live) {
       continue;
     }
-    for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+    for (std::uint8_t i = 0; i < nl.slots[s].input_count; ++i) {
       if (has(nl, s, i)) {
         any = true;
         break;
@@ -89,11 +89,11 @@ void emit_input_rows(std::string &out, const Netlist &nl, const char *header, Ha
     return;
   }
   out += header;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live) {
+  for (Slot s = 0; s < logic::slot_count(nl); ++s) {
+    if (!nl.slots[s].live) {
       continue;
     }
-    for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+    for (std::uint8_t i = 0; i < nl.slots[s].input_count; ++i) {
       if (!has(nl, s, i)) {
         continue;
       }
@@ -104,11 +104,11 @@ void emit_input_rows(std::string &out, const Netlist &nl, const char *header, Ha
 
 } // namespace
 
-void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits, std::string &out) {
+void save_text(const Netlist &nl, const std::vector<LogicValue> &inits, std::string &out) {
   out += "version: 1\n";
   out += "gates:\n";
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < logic::slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -148,13 +148,13 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
     out += "}\n";
   }
   out += "wires:\n";
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < logic::slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t drv = g.drivers[i];
+      const Slot drv = g.drivers[i];
       if (drv == kNoDriver) {
         continue;
       }
@@ -168,7 +168,7 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
       // index order (legal on load iff the input is marked, which the
       // `shared:` section below guarantees).
       const std::size_t flat = tie_flat(s, i);
-      for_each_extra(nl, flat, [&](std::uint8_t, std::uint16_t edrv, std::uint8_t einv) {
+      for_each_extra(nl, flat, [&](std::uint8_t, logic::Slot edrv, std::uint8_t einv) {
         const bool eneg = einv != 0;
         out += "  - {from: ";
         out += pin_text(nl, edrv, true, 0, eneg);
@@ -183,8 +183,8 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
   // means no marks (pre-011 files load byte-identically).
   emit_input_rows(
       out, nl, "shared:\n",
-      [](const Netlist &n, std::uint16_t s, std::uint8_t i) { return is_shared_flat(n, tie_flat(s, i)); },
-      [](std::string &o, const Netlist &n, std::uint16_t s, std::uint8_t i) {
+      [](const Netlist &n, Slot s, std::uint8_t i) { return is_shared_flat(n, tie_flat(s, i)); },
+      [](std::string &o, const Netlist &n, Slot s, std::uint8_t i) {
         o += "  - {net: ";
         o += pin_text(n, s, false, i);
         o += "}\n";
@@ -196,8 +196,8 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
   // never written.
   emit_input_rows(
       out, nl, "pulls:\n",
-      [](const Netlist &n, std::uint16_t s, std::uint8_t i) { return is_pulled_flat(n, tie_flat(s, i)); },
-      [](std::string &o, const Netlist &n, std::uint16_t s, std::uint8_t i) {
+      [](const Netlist &n, Slot s, std::uint8_t i) { return is_pulled_flat(n, tie_flat(s, i)); },
+      [](std::string &o, const Netlist &n, Slot s, std::uint8_t i) {
         const std::uint8_t level = pull_level_flat(n, tie_flat(s, i));
         if (level == 0) {
           return; // has() above guarantees a level; defensive only.
@@ -211,8 +211,8 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
   out += "ties:\n";
   // Canonical: one entry per non-leader tied member (a = leader, b = member),
   // ordered by b in slot order so save/load round-trips byte-identically.
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < logic::slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -231,7 +231,7 @@ void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits
       if (leader == flat) {
         continue;
       }
-      const auto lslot = static_cast<std::uint16_t>(leader / kMaxInputs);
+      const auto lslot = static_cast<Slot>(leader / kMaxInputs);
       const auto linput = static_cast<std::uint8_t>(leader % kMaxInputs);
       out += "  - {a: ";
       out += pin_text(nl, lslot, false, linput);

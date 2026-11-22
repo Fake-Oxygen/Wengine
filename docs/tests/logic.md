@@ -46,7 +46,45 @@ ctest --test-dir build -R "^logic$"
 
 **Boundaries**: sequential kinds, state, stepping, and CLI verbs live in
 the `test_logic_seq_*` binaries; persistence lives in
-`test_logic_yaml`; geometry lives in `test_logic_layout`.
+`test_logic_yaml`; geometry lives in `test_logic_layout`; scale
+instantiation lives in `test_logic_scale`.
+
+## test_logic_scale
+
+**What it checks**: dynamic-pool behavior at scale — geometric growth
+(a 5-gate net costs kilobytes: pool stays at the 64-slot seed),
+lowest-free-slot recycle order, loud past-cap refusal, scalar/word
+bit-exact parity at 65,536 gates, prefix-slice agreement against a
+standalone small net (growth changes size, never semantics),
+bit-identical repeat solves, and loud-overflow / single-driver / cycle
+refusal parity.
+
+**Purpose**: the pool grows on demand instead of pre-allocating a
+capacity, so small nets stay small; the test pins growth geometry,
+allocation order, and cross-discipline parity on the one pool every
+consumer shares.
+
+**Guards against**: fixed-capacity waste (regression on pool size for
+small nets), allocation-order drift (slot identity changes),
+scalar/word divergence at scale, growth changing semantics, and silent
+truncation past the loud cap.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_scale
+./build/test_logic_scale
+WENGINE_LOGIC_SCALE_GATES=262144 ctest --test-dir build -R logic_scale
+```
+
+`WENGINE_LOGIC_SCALE_GATES` selects the parity-net size (default
+65536, up to `kMaxGates` = 1048576; larger nets take proportionally
+longer — the full 1M parity run is kill-list territory, not ctest).
+
+**Prerequisites**: standard build only.
+
+**Boundaries**: million-gate reach and per-stage curves live in
+`bench_logic_scale`; current-scale goldens live in `test_logic`.
 
 ## test_logic_layout
 

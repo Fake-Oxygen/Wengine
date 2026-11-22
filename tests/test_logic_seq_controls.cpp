@@ -54,7 +54,7 @@ void use_input(Netlist &nl, std::uint16_t slot, std::uint8_t input) {
   pin.is_output = false;
   pin.input = input;
   assert(logic::use_pin(nl, pin).ok());
-  assert((nl.gates[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) == 0);
+  assert((nl.slots[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) == 0);
 }
 
 void test_fanin_control() {
@@ -75,19 +75,19 @@ void test_fanin_control() {
   Netlist nl;
   auto bare = logic::add_gate(nl, GateKind::kDff);
   assert(bare.ok());
-  assert(nl.gates[bare.value].input_count == 2);
+  assert(nl.slots[bare.value].input_count == 2);
   auto full = logic::add_gate(nl, GateKind::kDff, 5);
   assert(full.ok());
-  assert(nl.gates[full.value].input_count == 5);
+  assert(nl.slots[full.value].input_count == 5);
   assert(!logic::add_gate(nl, GateKind::kDff, 3).ok());
   assert(!logic::add_gate(nl, GateKind::kDff, 4).ok());
 }
 
 void test_parse_control_pins() {
   Netlist nl;
-  const std::uint16_t f5 = logic::add_gate(nl, GateKind::kDff, 5).value; // DFF1
-  const std::uint16_t f2 = logic::add_gate(nl, GateKind::kDff).value;    // DFF2 (bare)
-  const std::uint16_t l = logic::add_gate(nl, GateKind::kDlatch).value;  // DLATCH1
+  const logic::Slot f5 = logic::add_gate(nl, GateKind::kDff, 5).value; // DFF1
+  const logic::Slot f2 = logic::add_gate(nl, GateKind::kDff).value;    // DFF2 (bare)
+  const logic::Slot l = logic::add_gate(nl, GateKind::kDlatch).value;  // DLATCH1
   // Full-control flop: named + numeric + case-insensitive.
   auto rst = logic::parse_pin(nl, "DFF1.RST");
   assert(rst.ok() && rst.value.slot == f5 && rst.value.input == 2);
@@ -108,7 +108,7 @@ void test_parse_control_pins() {
   assert(!logic::parse_pin(nl, "DFF2.SET").ok());
   assert(!logic::parse_pin(nl, "DFF2.EN").ok());
   assert(!logic::parse_pin(nl, "DFF2.3").ok());
-  assert(nl.gates[f2].input_count == 2); // bare default, controls absent
+  assert(nl.slots[f2].input_count == 2); // bare default, controls absent
   // Re-expose helper coverage: ignore then use a control pin.
   ignore_input(nl, f5, 2);
   use_input(nl, f5, 2);
@@ -173,7 +173,7 @@ void test_truth_table() {
   // [D, RST, SET, EN] in pin order.
   for (const Row &r : kRows) {
     Netlist nl;
-    const std::uint16_t f = logic::add_gate(nl, GateKind::kDff, 5).value;
+    const logic::Slot f = logic::add_gate(nl, GateKind::kDff, 5).value;
     ignore_input(nl, f, 1); // CLK ignored (edge is the call)
     assert(logic::block_input_count(nl) == 4);
     SeqState st;
@@ -189,7 +189,7 @@ void test_truth_table() {
 
 void test_async_apply() {
   Netlist nl;
-  const std::uint16_t f = logic::add_gate(nl, GateKind::kDff, 5).value;
+  const logic::Slot f = logic::add_gate(nl, GateKind::kDff, 5).value;
   ignore_input(nl, f, 1); // CLK ignored
   SeqState st;
   // Reset wins over D with no clock advance.
@@ -224,7 +224,7 @@ void test_async_apply() {
   // Nets without full-control flops: success no-op.
   {
     Netlist bare;
-    const std::uint16_t b = logic::add_gate(bare, GateKind::kDff).value;
+    const logic::Slot b = logic::add_gate(bare, GateKind::kDff).value;
     ignore_input(bare, b, 0);
     ignore_input(bare, b, 1);
     SeqState bst;
@@ -235,7 +235,7 @@ void test_async_apply() {
 
 void test_hold() {
   Netlist nl;
-  const std::uint16_t f = logic::add_gate(nl, GateKind::kDff, 5).value;
+  const logic::Slot f = logic::add_gate(nl, GateKind::kDff, 5).value;
   ignore_input(nl, f, 1); // CLK ignored
   SeqState st;
   logic::init_seq_state(st, nl);
@@ -261,8 +261,8 @@ void test_hold() {
 void test_zero_migration() {
   // Bare 2-input flops behave exactly as before (no EN pin → enabled).
   Netlist nl;
-  const std::uint16_t f = logic::add_gate(nl, GateKind::kDff).value;
-  assert(nl.gates[f].input_count == 2);
+  const logic::Slot f = logic::add_gate(nl, GateKind::kDff).value;
+  assert(nl.slots[f].input_count == 2);
   ignore_input(nl, f, 1);
   assert(logic::block_input_count(nl) == 1);
   SeqState st;
@@ -279,9 +279,9 @@ void test_wired_rst() {
   // through a BUF (feedback hold), so the (Q1=H, Q2=H) state is
   // reachable and the wired RST force H->L is observable with no step.
   Netlist nl;
-  const std::uint16_t drv = logic::add_gate(nl, GateKind::kDff, 5).value; // DFF1 driver
-  const std::uint16_t tgt = logic::add_gate(nl, GateKind::kDff, 5).value; // DFF2 target
-  const std::uint16_t buf = logic::add_gate(nl, GateKind::kBuf, 1).value; // BUF1 hold loop
+  const logic::Slot drv = logic::add_gate(nl, GateKind::kDff, 5).value; // DFF1 driver
+  const logic::Slot tgt = logic::add_gate(nl, GateKind::kDff, 5).value; // DFF2 target
+  const logic::Slot buf = logic::add_gate(nl, GateKind::kBuf, 1).value; // BUF1 hold loop
   ignore_input(nl, drv, 1);
   ignore_input(nl, drv, 2);
   ignore_input(nl, drv, 3);
@@ -432,8 +432,8 @@ void test_cli_reset_beats_hold() {
 void test_yaml_control_roundtrip() {  // Save/load preserves the 5-input shape, ignore mask, and the RST wire;
 // the reloaded net forces identically.
   Netlist nl;
-  const std::uint16_t f = logic::add_gate(nl, GateKind::kDff, 5).value;
-  const std::uint16_t b = logic::add_gate(nl, GateKind::kBuf, 1).value;
+  const logic::Slot f = logic::add_gate(nl, GateKind::kDff, 5).value;
+  const logic::Slot b = logic::add_gate(nl, GateKind::kBuf, 1).value;
   (void)b;
   logic::PinRef clk{};
   clk.slot = f;
@@ -441,8 +441,7 @@ void test_yaml_control_roundtrip() {  // Save/load preserves the 5-input shape, 
   clk.input = 1;
   assert(logic::ignore_pin(nl, clk).ok());
   assert(logic::wire_text(nl, "BUF1.Y", "DFF1.RST").ok());
-  std::array<LogicValue, logic::kMaxGates> inits{};
-  inits.fill(kL);
+  std::vector<LogicValue> inits(logic::slot_count(nl), kL);
   std::string text;
   logic::yaml::save_text(nl, inits, text);
   assert(contains(text, "inputs: 5"));
@@ -452,8 +451,8 @@ void test_yaml_control_roundtrip() {  // Save/load preserves the 5-input shape, 
   std::string err;
   assert(logic::yaml::load_text(text, ws, err));
   Netlist &back = ws.netlist;
-  assert(back.gates[f].input_count == 5);
-  assert(back.gates[f].drivers[2] != logic::kNoDriver);
+  assert(back.slots[f].input_count == 5);
+  assert(back.slots[f].drivers[2] != logic::kNoDriver);
   std::string again;
   logic::yaml::save_text(back, ws.init, again);
   assert(again == text); // byte-identical round-trip

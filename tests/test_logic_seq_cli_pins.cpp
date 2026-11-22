@@ -50,14 +50,17 @@ bool netlists_equal_full(const Netlist &a, const Netlist &b) {
   if (!logic::ties_equal(a, b)) {
     return false;
   }
-  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+  if (a.slots.size() != b.slots.size()) {
+    return false;
+  }
+  for (std::size_t f = 0; f < a.driver_inv.size(); ++f) {
     if (a.driver_inv[f] != b.driver_inv[f]) {
       return false;
     }
   }
-  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-    const logic::Gate &x = a.gates[s];
-    const logic::Gate &y = b.gates[s];
+  for (logic::Slot s = 0; s < a.slots.size(); ++s) {
+    const logic::Gate &x = a.slots[s];
+    const logic::Gate &y = b.slots[s];
     if (x.live != y.live || x.kind != y.kind || x.counter != y.counter ||
         x.input_count != y.input_count || x.ignored_mask != y.ignored_mask ||
         x.ignore_output != y.ignore_output || x.ignore_nq_output != y.ignore_nq_output ||
@@ -76,9 +79,9 @@ bool netlists_equal_full(const Netlist &a, const Netlist &b) {
 
 void test_named_parse() {
   Netlist nl;
-  const std::uint16_t d = logic::add_gate(nl, GateKind::kDff, 2).value;
-  const std::uint16_t l = logic::add_gate(nl, GateKind::kDlatch, 2).value;
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot d = logic::add_gate(nl, GateKind::kDff, 2).value;
+  const logic::Slot l = logic::add_gate(nl, GateKind::kDlatch, 2).value;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
   (void)a;
   // Named forms resolve to the right slots/inputs (case-insensitive).
   auto dd = logic::parse_pin(nl, "DFF1.D");
@@ -115,12 +118,12 @@ void test_named_parse() {
 
 void test_nq_wiring_counts() {
   Netlist nl;
-  const std::uint16_t d = logic::add_gate(nl, GateKind::kDff, 2).value;
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot d = logic::add_gate(nl, GateKind::kDff, 2).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   (void)n;
   // NQ sources wire by name through the text API.
   assert(logic::wire_text(nl, "DFF1.NQ", "NOT1.1").ok());
-  const logic::Gate &g = nl.gates[d];
+  const logic::Gate &g = nl.slots[d];
   assert(g.output_fanout == 0); // Q untouched
   assert(g.nq_fanout == 1);
   assert(nl.driver_inv[static_cast<std::size_t>(1) * logic::kMaxInputs + 0] != 0);
@@ -138,7 +141,7 @@ void test_nq_wiring_counts() {
   assert(logic::block_output_count(nl2) == 2); // Q then NQ
   // Unwire clears the polarity with the wire.
   assert(logic::unwire(nl, 1, 0).ok());
-  assert(nl.gates[d].nq_fanout == 0);
+  assert(nl.slots[d].nq_fanout == 0);
   assert(nl.driver_inv[static_cast<std::size_t>(1) * logic::kMaxInputs + 0] == 0);
   assert(logic::block_output_count(nl) == 2); // DFF.Q + NOT.Y (NQ ignored)
 }
@@ -191,9 +194,9 @@ void test_nq_sink_word() {
   assert(logic::wire_text(nl, "DFF1.NQ", "NOT2.1").ok());
   assert(logic::block_input_count(nl) == 1);   // DFF1.D
   assert(logic::block_output_count(nl) == 2);  // NOT1.Y, NOT2.Y
-  std::uint64_t scratch[logic::kMaxGates] = {};
+  std::vector<std::uint64_t> scratch(logic::slot_count(nl), 0);
   std::uint64_t words[2] = {};
-  assert(logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch, logic::kMaxGates),
+  assert(logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), scratch.size()),
                                 std::span<std::uint64_t>(words, 2))
              .ok());
   // 1 input -> 2 rows, mask 0b11. Q reads Low: NOT1 = ~0 & mask = 0b11,
@@ -218,8 +221,7 @@ void test_yaml_nq_round_trip() {
   assert(logic::block_input_count(nl) == 2);   // BUF1.1, AND1.2
   assert(logic::block_output_count(nl) == 2);  // NOT1.Y, AND1.Y
   std::string text;
-  std::array<LogicValue, logic::kMaxGates> inits{};
-  inits.fill(kL);
+  const std::vector<LogicValue> inits(logic::slot_count(nl), kL);
   logic::yaml::save_text(nl, inits, text);
   assert(contains(text, "to: DFF1.D"));
   assert(contains(text, "from: DFF1.NQ"));
@@ -234,7 +236,7 @@ void test_yaml_nq_round_trip() {
   assert(text == again); // byte-identical round-trip
   // Counters survive the trip: the next DFF is DFF2.
   assert(logic::add_gate(ws.netlist, GateKind::kDff, 2).ok());
-  assert(ws.netlist.gates[4].counter == 2);
+  assert(ws.netlist.slots[4].counter == 2);
 }
 
 } // namespace

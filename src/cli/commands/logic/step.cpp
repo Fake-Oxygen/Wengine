@@ -128,9 +128,9 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
   const std::vector<support::ClockDomain> domains = support::clock_domains(nl);
   // Select members: global (all domains, null member list = exact SEQ4
   // path) or one named domain (case-insensitive).
-  const std::uint16_t *members = nullptr;
+  const wengine::logic::Slot *members = nullptr;
   std::size_t n_members = 0;
-  std::vector<std::uint16_t> selected;
+  std::vector<wengine::logic::Slot> selected;
   std::vector<std::size_t> stepped_domains; // indices into domains
   if (have_domain) {
     bool found = false;
@@ -159,7 +159,7 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
       stepped_domains.push_back(i);
     }
   }
-  auto is_stepped = [&](std::uint16_t s) {
+  auto is_stepped = [&](wengine::logic::Slot s) {
     if (members == nullptr) {
       return true;
     }
@@ -196,9 +196,9 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     return cli::runtime_error(out, "step failed");
   }
   // Old Q for the transition report (stepped flops only).
-  std::vector<LogicValue> old_q(wengine::logic::kMaxGates, LogicValue::kLow);
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-    if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind) || !is_stepped(s)) {
+  std::vector<LogicValue> old_q(wengine::logic::slot_count(nl), LogicValue::kLow);
+  for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+    if (!nl.slots[s].live || !wengine::logic::is_sequential_kind(nl.slots[s].kind) || !is_stepped(s)) {
       continue;
     }
     old_q[s] = st.q[s];
@@ -212,8 +212,8 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
       const std::uint64_t count = (it == support::cycle_counts().end()) ? 0 : it->second;
       out << domains[di].name << ": cycle " << count << " (0 edges, no-op)\n";
     }
-    for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-      if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind) || !is_stepped(s)) {
+    for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+      if (!nl.slots[s].live || !wengine::logic::is_sequential_kind(nl.slots[s].kind) || !is_stepped(s)) {
         continue;
       }
       out << support::pin_text(nl, s, true, 0) << '=' << support::bit_of(st.q[s]) << " NQ="
@@ -224,7 +224,7 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     return core::kExitOk;
   }
   // Topology-invariant sink maps: build once, drain per edge (no
-  // per-edge rebuild over the 1024x8 flats).
+  // per-edge rebuild over the pool-sized flats).
   wengine::logic::TimingScratch delay_scratch{};
   if (with_delays) {
     wengine::logic::timing_build_sink_maps(nl, delay_scratch);
@@ -239,9 +239,9 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     // a wheel refusal still leaves all output untouched.
     std::vector<LogicValue> pre_q;
     if (with_delays) {
-      pre_q.assign(wengine::logic::kMaxGates, LogicValue::kLow);
-      for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-        if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+      pre_q.assign(wengine::logic::slot_count(nl), LogicValue::kLow);
+      for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+        if (!nl.slots[s].live || !wengine::logic::is_sequential_kind(nl.slots[s].kind)) {
           continue;
         }
         pre_q[s] = st.q[s];
@@ -255,8 +255,9 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     }
     if (with_delays) {
       wengine::logic::TimingScratch &scratch = delay_scratch;
-      for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-        if (nl.gates[s].live && wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+      wengine::logic::ensure_timing_scratch(scratch, wengine::logic::slot_count(nl));
+      for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+        if (nl.slots[s].live && wengine::logic::is_sequential_kind(nl.slots[s].kind)) {
           scratch.cur[s] = pre_q[s];
         }
       }
@@ -264,8 +265,8 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
         return cli::runtime_error(out, "step failed");
       }
       std::vector<wengine::logic::TimingSeed> seeds;
-      for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-        if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind) || !is_stepped(s)) {
+      for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+        if (!nl.slots[s].live || !wengine::logic::is_sequential_kind(nl.slots[s].kind) || !is_stepped(s)) {
           continue;
         }
         if (pre_q[s] == st.q[s]) {
@@ -292,8 +293,8 @@ int LogicStepSpec::run(ArgCursor &args, std::ostream &out) {
     out << domains[di].name << ": cycle " << support::cycle_counts()[domains[di].name] << " (" << n << " edges)\n";
   }
   out << timing_section;
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-    if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind) || !is_stepped(s)) {
+  for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+    if (!nl.slots[s].live || !wengine::logic::is_sequential_kind(nl.slots[s].kind) || !is_stepped(s)) {
       continue;
     }
     const LogicValue now = st.q[s];

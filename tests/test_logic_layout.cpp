@@ -414,11 +414,11 @@ void test_seq_legibility() {
     }
   }
   // Per-output fanout accounting behind the dot rule.
-  assert(nl.gates[0].output_fanout == 5); // D + 4x CLK
-  assert(nl.gates[0].nq_fanout == 0);
-  assert(nl.gates[4].nq_fanout == 1);
-  assert(nl.gates[4].output_fanout == 0); // DFF4.Q unwired: no Q dot
-  assert(nl.gates[1].output_fanout == 1); // single consumer: no dot
+  assert(nl.slots[0].output_fanout == 5); // D + 4x CLK
+  assert(nl.slots[0].nq_fanout == 0);
+  assert(nl.slots[4].nq_fanout == 1);
+  assert(nl.slots[4].output_fanout == 0); // DFF4.Q unwired: no Q dot
+  assert(nl.slots[1].output_fanout == 1); // single consumer: no dot
 }
 
 } // namespace

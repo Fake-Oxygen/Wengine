@@ -16,7 +16,14 @@
  * pass retypes, folds, drops, bypasses, fuses, or rewires through a
  * state element or its input pins (feeds_seq guards every rewire).
  * Cost class: linear sweeps over slots/inputs per fixpoint iteration
- * (fixed stack arrays, no allocation).
+ * (caller-owned buffers, no allocation).
+ *
+ * Capacity (dynamic pool): every pass works over Netlist. Passes with
+ * pool-sized scratch take caller-owned spans: dce_pass (keep + DFS
+ * stack), const_fold_pass (labels), and drop_inputs (tie survivors via
+ * reindex_kept_ties). All other locals are capacity-free
+ * (kMaxInputs-sized or bounded by the n<=10/m<=16 exact caps).
+ * Internal cross-calls are bare (no capacity parameter).
  *
  * Dependency rules: header-only, allocation-free, exception-free,
  * noexcept throughout. Lives in the wengine::logic::detail seam —
@@ -37,6 +44,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace wengine::logic {
 
@@ -48,27 +56,27 @@ namespace detail {
  *
  * @param[in,out] nl Netlist whose fanout counters are rebuilt in place.
  */
-inline void recount_fanout(Netlist &nl) noexcept {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    nl.gates[s].output_fanout = 0;
+ inline void recount_fanout(Netlist &nl) noexcept {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    nl.slots[s].output_fanout = 0;
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t d = g.drivers[i];
-      if (d != kNoDriver && d < kMaxGates && nl.gates[d].live) {
-        ++nl.gates[d].output_fanout;
+      const Slot d = g.drivers[i];
+      if (d != kNoDriver && d < slot_count(nl) && nl.slots[d].live) {
+        ++nl.slots[d].output_fanout;
       }
     }
     // 011: every extra edge counts exactly like a primary (same
     // recount semantics the barrier roots rely on).
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, std::uint16_t d, std::uint8_t) {
-        if (d < kMaxGates && nl.gates[d].live) {
-          ++nl.gates[d].output_fanout;
+      for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, Slot d, std::uint8_t) {
+        if (d < slot_count(nl) && nl.slots[d].live) {
+          ++nl.slots[d].output_fanout;
         }
       });
     }
@@ -88,9 +96,9 @@ inline void recount_fanout(Netlist &nl) noexcept {
  * @param[in] slot Slot to retag.
  * @param[in] kind New kind.
  */
-inline void retag(Netlist &nl, std::uint16_t slot, GateKind kind) noexcept {
+ inline void retag(Netlist &nl, Slot slot, GateKind kind) noexcept {
   const std::uint8_t ord = kind_ordinal(kind);
-  Gate &g = nl.gates[slot];
+  Gate &g = nl.slots[slot];
   g.kind = kind;
   g.counter = nl.next_counter[ord]++;
   if (nl.next_counter[ord] == 0) { // u32 wrap: 0 is never assigned
@@ -105,22 +113,22 @@ inline void retag(Netlist &nl, std::uint16_t slot, GateKind kind) noexcept {
  *        Sequential outputs always classify as V (opaque barrier).
  *
  * @param[in] nl Netlist to classify (topology must be compiled).
- * @param[out] label Per-slot Constness labels.
+ * @param[out] label Per-slot Constness labels (caller-owned).
  */
-inline void classify(const Netlist &nl, Constness *label) noexcept {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+ inline void classify(const Netlist &nl, Constness *label) noexcept {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     label[s] = Constness::kV;
   }
-  for (std::uint16_t oi = 0; oi < nl.topo_size; ++oi) {
-    const std::uint16_t s = nl.topo_order[oi];
-    const Gate &g = nl.gates[s];
+  for (Slot oi = 0; oi < nl.topo_order.size(); ++oi) {
+    const Slot s = nl.topo_order[oi];
+    const Gate &g = nl.slots[s];
     bool any_c0 = false;
     bool any_c1 = false;
     bool any_v = false;
     std::uint8_t c1_count = 0;
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
       Constness c = Constness::kV;
-      const std::uint16_t d = g.drivers[i];
+      const Slot d = g.drivers[i];
       if (d != kNoDriver) {
         c = label[d];
       } else if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
@@ -193,15 +201,23 @@ inline void classify(const Netlist &nl, Constness *label) noexcept {
  * @param[out] nl Netlist to prune.
  * @param[in] is_root Per-slot root flags (barrier roots: original sinks
  *            plus every live sequential gate).
+ * @param[in] keep Caller-owned scratch (pool size reachability flags).
+ * @param[in] stack Caller-owned DFS stack (pool size slots; see
+ *            follow_drivers).
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for remove_gate's tie-detach sweep.
  * @return True when any gate was removed.
  */
-inline bool dce_pass(Netlist &nl, const bool *is_root) noexcept {
-  bool keep[kMaxGates] = {};
-  follow_drivers(nl, is_root, keep);
+
+inline bool dce_pass(Netlist &nl, const bool *is_root, std::span<bool> keep, std::span<Slot> stack, std::span<std::size_t> tie_survivors) noexcept {
+  if (keep.size() < slot_count(nl)) {
+    return false;
+  }
+  follow_drivers(nl, is_root, keep.data(), stack);
   bool changed = false;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && !keep[s]) {
-      (void)remove_gate(nl, s);
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (nl.slots[s].live && !keep[s]) {
+      (void)remove_gate(nl, s, tie_survivors);
       changed = true;
     }
   }
@@ -223,9 +239,10 @@ inline bool dce_pass(Netlist &nl, const bool *is_root) noexcept {
  * @param[in] target Replacement driver (kNoDriver exposes a dangling
  *            block input).
  */
-inline void rewire_users(Netlist &nl, std::uint16_t from_slot, std::uint16_t target) noexcept {
-  for (std::uint16_t u = 0; u < kMaxGates; ++u) {
-    Gate &user = nl.gates[u];
+
+inline void rewire_users(Netlist &nl, Slot from_slot, Slot target) noexcept {
+  for (Slot u = 0; u < slot_count(nl); ++u) {
+    Gate &user = nl.slots[u];
     if (!user.live) {
       continue;
     }
@@ -249,12 +266,16 @@ inline void rewire_users(Netlist &nl, std::uint16_t from_slot, std::uint16_t tar
  *
  * @param[in] nl Netlist to scan.
  * @param[in] s Slot to test.
+ * @param[in] feeds Caller-owned scratch (pool size flags).
  * @return True when a live sequential gate is driven by s.
  */
-inline bool has_live_seq_user(const Netlist &nl, std::uint16_t s) noexcept {
-  bool feeds[kMaxGates] = {};
-  compute_feeds_seq(nl, feeds);
-  return s < kMaxGates && feeds[s];
+
+inline bool has_live_seq_user(const Netlist &nl, Slot s, std::span<bool> feeds) noexcept {
+  if (feeds.size() < slot_count(nl)) {
+    return false;
+  }
+  compute_feeds_seq(nl, feeds.data());
+  return s < slot_count(nl) && feeds[s];
 }
 
 /**
@@ -269,13 +290,18 @@ inline bool has_live_seq_user(const Netlist &nl, std::uint16_t s) noexcept {
  *
  * @param[out] nl Netlist to simplify.
  * @param[in] feeds_seq Per-slot sequential-user flags, or nullptr.
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for remove_gate's tie-detach sweep.
  * @return True when any gate was bypassed.
+ * @note Opaque barrier: never rewire a sequential-gate input pin and
+ *       never remove a gate feeding one.
  */
-inline bool bypass_pass(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
+
+inline bool bypass_pass(Netlist &nl, const bool *feeds_seq, std::span<std::size_t> tie_survivors) noexcept {
   recount_fanout(nl);
   bool changed = false;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    Gate &g = nl.slots[s];
     if (!g.live || g.output_fanout == 0) {
       continue;
     }
@@ -290,18 +316,19 @@ inline bool bypass_pass(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
       // output carries the idle mapping, which the raw driver target
       // below would bypass (value + interface change)
     }
-    std::uint16_t target = kNoDriver;
+    Slot target = kNoDriver;
     bool fire = false;
     if (g.kind == GateKind::kBuf) {
       target = g.drivers[0];
       fire = true;
     } else if (g.kind == GateKind::kNot) {
-      const std::uint16_t h = g.drivers[0];
-      if (h != kNoDriver && h != s && nl.gates[h].live && nl.gates[h].kind == GateKind::kNot && !has_pulled_input(nl, h)) {
+      const Slot h = g.drivers[0];
+      if (h != kNoDriver && h != s && nl.slots[h].live && nl.slots[h].kind == GateKind::kNot &&
+          !has_pulled_input(nl, h)) {
         // 012: never rewire through a pulled-input NOT — its resolved
         // output carries the idle mapping, which the raw target below
         // would bypass (value + interface change)
-        target = nl.gates[h].drivers[0];
+        target = nl.slots[h].drivers[0];
         fire = true;
       }
     }
@@ -309,13 +336,13 @@ inline bool bypass_pass(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
       continue;
     }
     rewire_users(nl, s, target);
-    (void)remove_gate(nl, s);
+    (void)remove_gate(nl, s, tie_survivors);
     changed = true;
   }
   if (changed) {
     recount_fanout(nl);
     nl.dirty = true;
-    nl.topo_size = 0;
+    nl.topo_order.clear();
   }
   return changed;
 }
@@ -340,16 +367,20 @@ inline bool bypass_pass(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
  * @param[in] drop_any True drops every constant input.
  * @param[in] drop_c Constant class to drop when drop_any is false.
  * @param[in] flip True flips XOR/XNOR on an odd dropped-C1 count.
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for kept-tie re-election.
  * @return True when inputs were dropped.
  * @note Opaque barrier: sequential gates are never re-typed (returns
  *       false at once).
  */
-inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Constness *ic, bool drop_any, Constness drop_c, bool flip) noexcept {
-  Gate &g = nl.gates[s];
+
+inline bool drop_inputs(Netlist &nl, Slot s, Constness *label, const Constness *ic, bool drop_any,
+                         Constness drop_c, bool flip, std::span<std::size_t> tie_survivors) noexcept {
+  Gate &g = nl.slots[s];
   if (is_frozen_kind(g.kind)) {
     return false; // opaque barrier: sequential gates are never re-typed
   }
-  std::uint16_t kept_drv[kMaxInputs];
+  Slot kept_drv[kMaxInputs];
   std::uint8_t kept_ign[kMaxInputs];
   std::uint8_t kept_orig[kMaxInputs];
   std::uint8_t n = 0;
@@ -394,7 +425,7 @@ inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Co
   g.input_count = n;
   // Rebuild ties for kept pins (indices may have shifted) via the TieSet
   // seam — index-shift re-election lives in tie_set.hpp, not here.
-  reindex_kept_ties(nl, s, orig_leader, orig_tied, n);
+  reindex_kept_ties(nl, s, orig_leader, orig_tied, n, tie_survivors);
   GateKind base = g.kind;
   if (flip && ((c1_dropped % 2u) != 0u)) {
     base = (base == GateKind::kXor) ? GateKind::kXnor : GateKind::kXor;
@@ -433,18 +464,24 @@ inline bool drop_inputs(Netlist &nl, std::uint16_t s, Constness *label, const Co
  * @param[out] nl Netlist to fold.
  * @param[in] is_root Per-slot root flags (constant roots collapse in
  *            place so outputs stay positional).
+ * @param[in] labels Caller-owned scratch (pool size Constness labels).
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for kept-tie re-election.
  * @return True when the net changed.
  * @note Opaque barrier: frozen (sequential) gates are never folded or
  *       dropped; constant roots collapse to canonical AND/NAND form.
  */
-inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
-  Constness label[kMaxGates];
-  classify(nl, label);
+
+inline bool const_fold_pass(Netlist &nl, const bool *is_root, std::span<Constness> labels, std::span<std::size_t> tie_survivors) noexcept {
+  if (labels.size() < slot_count(nl)) {
+    return false;
+  }
+  classify(nl, labels.data());
   recount_fanout(nl);
   bool changed = false;
-  for (std::uint16_t oi = 0; oi < nl.topo_size; ++oi) {
-    const std::uint16_t s = nl.topo_order[oi];
-    Gate &g = nl.gates[s];
+  for (Slot oi = 0; oi < nl.topo_order.size(); ++oi) {
+    const Slot s = nl.topo_order[oi];
+    Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -453,9 +490,9 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
     bool has_c1 = false;
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
       Constness c = Constness::kV;
-      const std::uint16_t d = g.drivers[i];
+      const Slot d = g.drivers[i];
       if (d != kNoDriver) {
-        c = label[d];
+        c = labels[d];
       } else if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
         c = Constness::kC0;
       }
@@ -486,38 +523,38 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
     switch (g.kind) {
     case GateKind::kAnd:
       if (!has_c0) {
-        changed |= drop_inputs(nl, s, label, ic, false, Constness::kC1, false);
+        changed |= drop_inputs(nl, s, labels.data(), ic, false, Constness::kC1, false, tie_survivors);
       }
       break;
     case GateKind::kOr:
       if (!has_c1) {
-        changed |= drop_inputs(nl, s, label, ic, false, Constness::kC0, false);
+        changed |= drop_inputs(nl, s, labels.data(), ic, false, Constness::kC0, false, tie_survivors);
       }
       break;
     case GateKind::kNand:
       if (!has_c0) {
-        changed |= drop_inputs(nl, s, label, ic, false, Constness::kC1, false);
+        changed |= drop_inputs(nl, s, labels.data(), ic, false, Constness::kC1, false, tie_survivors);
       }
       break;
     case GateKind::kNor:
       if (!has_c1) {
-        changed |= drop_inputs(nl, s, label, ic, false, Constness::kC0, false);
+        changed |= drop_inputs(nl, s, labels.data(), ic, false, Constness::kC0, false, tie_survivors);
       }
       break;
     case GateKind::kXor:
     case GateKind::kXnor:
-      changed |= drop_inputs(nl, s, label, ic, true, Constness::kC0, true);
+      changed |= drop_inputs(nl, s, labels.data(), ic, true, Constness::kC0, true, tie_survivors);
       break;
     default:
       break; // label-only; users/DCE/collapse handle the rest
     }
   }
   // Collapse constant roots in place (same slot: outputs stay positional).
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     if (!is_root[s]) {
       continue;
     }
-    Gate &g = nl.gates[s];
+    Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -531,11 +568,10 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
       continue; // 012 sink-side skip: collapsing would destroy the pull
       // mapping or the buffer's load-bearing shape (see const_fold skip)
     }
-    if (label[s] == Constness::kC0) {
-      const bool canonical = g.kind == GateKind::kAnd && g.input_count == 2 && g.ignored_mask == 0x03u &&
-                             g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
+    if (labels[s] == Constness::kC0) {
+      const bool canonical = g.kind == GateKind::kAnd && g.input_count == 2 && g.ignored_mask == 0x03u && g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
       if (!canonical) {
-        detach_slot_ties(nl, s);
+        detach_slot_ties(nl, s, tie_survivors);
         if (g.kind != GateKind::kAnd) {
           retag(nl, s, GateKind::kAnd);
         }
@@ -548,12 +584,12 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
         }
         changed = true;
       }
-    } else if (label[s] == Constness::kC1) {
+    } else if (labels[s] == Constness::kC1) {
       const bool canonical = g.kind == GateKind::kNand && g.input_count == 2 &&
                              g.ignored_mask == 0x03u && g.drivers[0] == kNoDriver &&
                              g.drivers[1] == kNoDriver;
       if (!canonical) {
-        detach_slot_ties(nl, s);
+        detach_slot_ties(nl, s, tie_survivors);
         if (g.kind != GateKind::kNand) {
           retag(nl, s, GateKind::kNand);
         }
@@ -571,7 +607,7 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
   if (changed) {
     recount_fanout(nl);
     nl.dirty = true;
-    nl.topo_size = 0;
+    nl.topo_order.clear();
   }
   return changed;
 }
@@ -587,21 +623,24 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root) noexcept {
  *
  * @param[out] nl Netlist to fuse.
  * @param[in] feeds_seq Per-slot sequential-user flags, or nullptr.
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for remove_gate's tie-detach sweep.
  * @return True when any fusion fired.
  * @note Opaque barrier: never fuses through a state-element driver and
  *       never rewires a sequential-gate input pin. Tie classes of fused
  *       pins follow their source counterparts.
  */
-inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq = nullptr) noexcept {
+
+inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq, std::span<std::size_t> tie_survivors) noexcept {
   recount_fanout(nl);
   bool changed = false;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    Gate &g = nl.slots[s];
     if (!g.live || g.kind != GateKind::kNot) {
       continue;
     }
-    const std::uint16_t h = g.drivers[0];
-    if (h == kNoDriver || h == s || !nl.gates[h].live) {
+    const Slot h = g.drivers[0];
+    if (h == kNoDriver || h == s || !nl.slots[h].live) {
       continue;
     }
     // 011: never fuse through a shared span — driver-side (rewiring s's
@@ -615,11 +654,11 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq = nullptr) noexcept 
     // pulls (the victim gate in test_optimizer_skips_pulled_sink fuses
     // NAND-ward and goes wrong), mirroring the 011 driver/sink pair.
     // (s is always NOT in this sweep, so no buffer-gate check is needed
-    // here; the general fuse above carries the kTbuf freeze.)
+    // here; the general fuse above carries the kTbuf freeze).
     if (has_pulled_input(nl, s) || has_pulled_input(nl, h)) {
       continue;
     }
-    const GateKind hk = nl.gates[h].kind;
+    const GateKind hk = nl.slots[h].kind;
     if (hk == GateKind::kNot) {
       if (g.output_fanout == 0) {
         continue; // output double-negation preserved
@@ -627,15 +666,15 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq = nullptr) noexcept 
       if (feeds_seq != nullptr && feeds_seq[s]) {
         continue; // opaque barrier: never rewire a sequential-gate input pin
       }
-      const std::uint16_t t = nl.gates[h].drivers[0];
+      const Slot t = nl.slots[h].drivers[0];
       if (t == s) {
         continue; // defensive: never rewire a gate into itself
       }
       rewire_users(nl, s, t);
-      (void)remove_gate(nl, s);
+      (void)remove_gate(nl, s, tie_survivors);
       changed = true;
     } else if (hk == GateKind::kBuf) {
-      g.drivers[0] = nl.gates[h].drivers[0];
+      g.drivers[0] = nl.slots[h].drivers[0];
       changed = true;
     } else {
       if (is_frozen_kind(hk)) {
@@ -667,7 +706,7 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq = nullptr) noexcept 
       if (nk == GateKind::kNot) {
         continue;
       }
-      const Gate &src = nl.gates[h];
+      const Gate &src = nl.slots[h];
       g.input_count = src.input_count;
       g.ignored_mask = src.ignored_mask;
       for (std::size_t i = 0; i < kMaxInputs; ++i) {
@@ -697,7 +736,7 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq = nullptr) noexcept 
   if (changed) {
     recount_fanout(nl);
     nl.dirty = true;
-    nl.topo_size = 0;
+    nl.topo_order.clear();
   }
   return changed;
 }

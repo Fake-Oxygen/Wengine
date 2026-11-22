@@ -70,12 +70,12 @@ int LogicSolveSpec::run(ArgCursor &args, std::ostream &out) {
       return cli::usage_error(out, std::string("solve: bad block input pin '") + std::string(pin_text_arg) + "'", kUsage);
     }
     // Tied members resolve to their class leader (one column per class).
-    std::uint16_t eff_slot = pin.value.slot;
+    wengine::logic::Slot eff_slot = pin.value.slot;
     std::uint8_t eff_input = pin.value.input;
     {
       const std::size_t flat = static_cast<std::size_t>(pin.value.slot) * wengine::logic::kMaxInputs + pin.value.input;
       const std::size_t leader = wengine::logic::tie_leader_flat(nl, flat);
-      eff_slot = static_cast<std::uint16_t>(leader / wengine::logic::kMaxInputs);
+      eff_slot = static_cast<wengine::logic::Slot>(leader / wengine::logic::kMaxInputs);
       eff_input = static_cast<std::uint8_t>(leader % wengine::logic::kMaxInputs);
     }
     std::size_t pos = nin;

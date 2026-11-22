@@ -118,21 +118,21 @@ void test_gate_delay_seam() {
   assert(!logic::clear_gate_delay(nl, 500).ok());
   // Clear on a zero field refuses loudly (the clear_pull precedent).
   assert(!logic::clear_gate_delay(nl, and_slot.value).ok());
-  assert(nl.gates[and_slot.value].propagation_delay_ps == 0);
+  assert(nl.slots[and_slot.value].propagation_delay_ps == 0);
   // Write, re-set (last write wins), legal on sequential kinds too.
   assert(logic::set_gate_delay(nl, and_slot.value, 1500).ok());
-  assert(nl.gates[and_slot.value].propagation_delay_ps == 1500);
+  assert(nl.slots[and_slot.value].propagation_delay_ps == 1500);
   assert(logic::set_gate_delay(nl, and_slot.value, 2000).ok());
-  assert(nl.gates[and_slot.value].propagation_delay_ps == 2000);
+  assert(nl.slots[and_slot.value].propagation_delay_ps == 2000);
   assert(logic::set_gate_delay(nl, dff_slot.value, 42).ok());
-  assert(nl.gates[dff_slot.value].propagation_delay_ps == 42);
+  assert(nl.slots[dff_slot.value].propagation_delay_ps == 42);
   // Zero is a legal write equal to clearing.
   assert(logic::set_gate_delay(nl, and_slot.value, 0).ok());
   assert(!logic::clear_gate_delay(nl, and_slot.value).ok());
   // Clear path stores zero.
   assert(logic::set_gate_delay(nl, and_slot.value, 7).ok());
   assert(logic::clear_gate_delay(nl, and_slot.value).ok());
-  assert(nl.gates[and_slot.value].propagation_delay_ps == 0);
+  assert(nl.slots[and_slot.value].propagation_delay_ps == 0);
 }
 
 // US1 (T008): verb lifecycle + display pins — the quickstart Scenario 1
@@ -447,8 +447,8 @@ void test_world_checkpoint_round_trip() {
   std::istringstream in(bytes.str());
   assert(world::load_state(dst, in).ok());
   assert(dst == src);
-  assert(dst.netlist.gates[a.value].propagation_delay_ps == 1500);
-  assert(dst.netlist.gates[n.value].propagation_delay_ps == 250);
+  assert(dst.netlist.slots[a.value].propagation_delay_ps == 1500);
+  assert(dst.netlist.slots[n.value].propagation_delay_ps == 250);
 }
 
 // Run a whole session script on both front ends from identical states;

@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cassert>
+#include <memory>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -63,13 +64,13 @@ void test_counters_and_slots() {
   Netlist nl;
   auto a = logic::add_gate(nl, GateKind::kAnd, 2);
   assert(a.ok() && a.value == 0);
-  assert(nl.gates[0].counter == 1); // AND1
+  assert(nl.slots[0].counter == 1); // AND1
   auto b = logic::add_gate(nl, GateKind::kAnd, 2);
   assert(b.ok() && b.value == 1);
-  assert(nl.gates[1].counter == 2); // AND2
+  assert(nl.slots[1].counter == 2); // AND2
   auto n = logic::add_gate(nl, GateKind::kNot, 1);
   assert(n.ok() && n.value == 2);
-  assert(nl.gates[2].counter == 1); // NOT1 (per-kind)
+  assert(nl.slots[2].counter == 1); // NOT1 (per-kind)
   assert(nl.live_count == 3);
 
   // Remove AND1 (slot 0); slot recycles, counter never reused.
@@ -77,9 +78,9 @@ void test_counters_and_slots() {
   assert(nl.live_count == 2);
   auto o = logic::add_gate(nl, GateKind::kOr, 2);
   assert(o.ok() && o.value == 0); // lowest free slot
-  assert(nl.gates[0].kind == GateKind::kOr && nl.gates[0].counter == 1); // OR1
+  assert(nl.slots[0].kind == GateKind::kOr && nl.slots[0].counter == 1); // OR1
   auto a3 = logic::add_gate(nl, GateKind::kAnd, 2);
-  assert(a3.ok() && nl.gates[a3.value].counter == 3); // AND3, never AND1 again
+  assert(a3.ok() && nl.slots[a3.value].counter == 3); // AND3, never AND1 again
   assert(!logic::remove_gate(nl, 9999).ok());
   assert(!logic::remove_gate(nl, a3.value).ok() == false); // live: ok
   assert(!logic::remove_gate(nl, a3.value).ok()); // now dead: error
@@ -135,16 +136,16 @@ void test_wire_rules() {
   assert(logic::add_gate(nl, GateKind::kBuf, 1).ok()); // BUF1 @2
 
   assert(logic::wire(nl, 0, 1, 0).ok());
-  assert(nl.gates[0].output_fanout == 1);
+  assert(nl.slots[0].output_fanout == 1);
   assert(nl.dirty);
 
   // Occupied destination is loud; first wire intact.
   assert(!logic::wire(nl, 2, 1, 0).ok());
-  assert(nl.gates[1].drivers[0] == 0);
+  assert(nl.slots[1].drivers[0] == 0);
 
   // Unlimited fan-out: same source to a second sink is fine.
   assert(logic::wire(nl, 0, 2, 0).ok());
-  assert(nl.gates[0].output_fanout == 2);
+  assert(nl.slots[0].output_fanout == 2);
 
   // Text-form wiring to an occupied pin fails the same way.
   assert(!logic::wire_text(nl, "BUF1.Y", "NOT1.1").ok());
@@ -153,7 +154,7 @@ void test_wire_rules() {
 
   // Unwire releases fanout; double-unwire is loud.
   assert(logic::unwire(nl, 2, 0).ok());
-  assert(nl.gates[0].output_fanout == 1);
+  assert(nl.slots[0].output_fanout == 1);
   assert(!logic::unwire(nl, 2, 0).ok());
 
   // Output-to-output and input-to-input shapes are loud.
@@ -171,13 +172,13 @@ void test_cycles() {
 
   // Self-loop is a cycle.
   assert(!logic::wire(nl, 0, 0, 0).ok());
-  assert(nl.gates[0].drivers[0] == logic::kNoDriver);
+  assert(nl.slots[0].drivers[0] == logic::kNoDriver);
 
   assert(logic::wire(nl, 0, 1, 0).ok());
   assert(logic::wire(nl, 1, 2, 0).ok());
   // Closing the loop is rejected; netlist untouched.
   assert(!logic::wire(nl, 2, 0, 1).ok());
-  assert(nl.gates[0].drivers[1] == logic::kNoDriver);
+  assert(nl.slots[0].drivers[1] == logic::kNoDriver);
   assert(!logic::wire(nl, 2, 1, 1).ok()); // 1 reaches 2 already
   // Reverse pair is a 2-cycle.
   Netlist nl2;
@@ -192,15 +193,15 @@ void test_remove_detaches() {
   assert(logic::add_gate(nl, GateKind::kAnd, 2).ok()); // @0
   assert(logic::add_gate(nl, GateKind::kNot, 1).ok()); // @1
   assert(logic::wire(nl, 0, 1, 0).ok());
-  assert(nl.gates[0].output_fanout == 1);
+  assert(nl.slots[0].output_fanout == 1);
   // Removing the sink releases the source fanout.
   assert(logic::remove_gate(nl, 1).ok());
-  assert(nl.gates[0].output_fanout == 0);
+  assert(nl.slots[0].output_fanout == 0);
   // Removing the source clears sinks that it drove.
   assert(logic::add_gate(nl, GateKind::kNot, 1).ok()); // NOT2 @1
   assert(logic::wire(nl, 0, 1, 0).ok());
   assert(logic::remove_gate(nl, 0).ok());
-  assert(nl.gates[1].drivers[0] == logic::kNoDriver);
+  assert(nl.slots[1].drivers[0] == logic::kNoDriver);
 }
 
 void test_eval_gate_goldens() {
@@ -449,18 +450,15 @@ void test_shared_span_resolution() {
   assert(logic::mark_shared(nl, o.value, 0).ok());
   assert(logic::wire(nl, n2.value, o.value, 0).ok());
 
-  LogicValue gate_out[logic::kMaxGates];
-  LogicValue resolved[logic::kMaxGates * logic::kMaxInputs] = {};
-  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
-    gate_out[s] = kL;
-  }
+  std::vector<LogicValue> gate_out(logic::slot_count(nl), kL);
+  std::vector<LogicValue> resolved(logic::slot_count(nl) * logic::kMaxInputs, kL);
   LogicValue out = kL;
   // {low, low} → low; {low, low, low} → low; {low, high} → X (loud).
   gate_out[n1.value] = kL;
   gate_out[n2.value] = kL;
-  assert(logic::resolve_input(nl, o.value, 0, gate_out, resolved, out) && out == kL);
+  assert(logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out) && out == kL);
   gate_out[n2.value] = kH;
-  assert(!logic::resolve_input(nl, o.value, 0, gate_out, resolved, out)); // conflict → X, loud
+  assert(!logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out)); // conflict → X, loud
   // Permutation invariance: reversed attachment order resolves identically.
   Netlist rev{};
   const auto r1 = logic::add_gate(rev, GateKind::kNot, 1);
@@ -470,30 +468,24 @@ void test_shared_span_resolution() {
   assert(logic::wire(rev, r2.value, ro.value, 0).ok());
   assert(logic::mark_shared(rev, ro.value, 0).ok());
   assert(logic::wire(rev, r1.value, ro.value, 0).ok());
-  LogicValue rgate_out[logic::kMaxGates];
-  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
-    rgate_out[s] = kL;
-  }
+  std::vector<LogicValue> rgate_out(logic::slot_count(rev), kL);
   rgate_out[r1.value] = kL;
   rgate_out[r2.value] = kH;
   LogicValue rout = kL;
-  assert(!logic::resolve_input(rev, ro.value, 0, rgate_out, resolved, rout));
+  assert(!logic::resolve_input(rev, ro.value, 0, rgate_out.data(), resolved.data(), rout));
   // One driver → its level; zero drivers → high-Z (loud).
   assert(logic::unwire(rev, ro.value, 0).ok()); // removes primary r2, promotes r1
   rgate_out[r1.value] = kH;
-  assert(logic::resolve_input(rev, ro.value, 0, rgate_out, resolved, rout) && rout == kH);
+  assert(logic::resolve_input(rev, ro.value, 0, rgate_out.data(), resolved.data(), rout) && rout == kH);
   assert(logic::unwire(rev, ro.value, 0).ok());
-  assert(!logic::resolve_input(rev, ro.value, 0, rgate_out, resolved, rout)); // empty → Z, loud
+  assert(!logic::resolve_input(rev, ro.value, 0, rgate_out.data(), resolved.data(), rout)); // empty → Z, loud
   // Single-attachment marked == unmarked pre-feature path, bit-identical.
   Netlist plain{};
   const auto p1 = logic::add_gate(plain, GateKind::kNot, 1);
   const auto po = logic::add_gate(plain, GateKind::kOr, 2);
   assert(p1.ok() && po.ok());
   assert(logic::wire(plain, p1.value, po.value, 0).ok());
-  LogicValue pgate_out[logic::kMaxGates];
-  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
-    pgate_out[s] = kL;
-  }
+  std::vector<LogicValue> pgate_out(logic::slot_count(plain), kL);
   pgate_out[p1.value] = kH;
   gate_out[n1.value] = kL;
   gate_out[n2.value] = kL;
@@ -501,8 +493,8 @@ void test_shared_span_resolution() {
   gate_out[n2.value] = kH;
   LogicValue pout = kL;
   LogicValue sout = kL;
-  assert(logic::resolve_input(plain, po.value, 0, pgate_out, resolved, pout) && pout == kH);
-  assert(logic::resolve_input(nl, o.value, 0, gate_out, resolved, sout) && sout == kH);
+  assert(logic::resolve_input(plain, po.value, 0, pgate_out.data(), resolved.data(), pout) && pout == kH);
+  assert(logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), sout) && sout == kH);
   assert(pout == sout);
 }
 
@@ -518,16 +510,13 @@ void test_shared_self_contention() {
   const PinRef nq{d.value, true, 0, true};
   const PinRef dst{o.value, false, 0, false};
   assert(logic::wire_pins(nl, nq, dst).ok());
-  LogicValue gate_out[logic::kMaxGates];
-  LogicValue resolved[logic::kMaxGates * logic::kMaxInputs] = {};
-  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
-    gate_out[s] = kL;
-  }
+  std::vector<LogicValue> gate_out(logic::slot_count(nl), kL);
+  std::vector<LogicValue> resolved(logic::slot_count(nl) * logic::kMaxInputs, kL);
   gate_out[d.value] = kH; // Q=H, NQ=L → span {H, L} → X
   LogicValue out = kL;
-  assert(!logic::resolve_input(nl, o.value, 0, gate_out, resolved, out));
+  assert(!logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out));
   gate_out[d.value] = kL; // Q=L, NQ=H → span {L, H} → X
-  assert(!logic::resolve_input(nl, o.value, 0, gate_out, resolved, out));
+  assert(!logic::resolve_input(nl, o.value, 0, gate_out.data(), resolved.data(), out));
 }
 
 void test_shared_solve_end_to_end() {
@@ -583,7 +572,7 @@ void test_solve_nand_chain() {
   assert(logic::block_output_count(nl) == 1); // AND1 has fanout, only NOT1.Y
   // Levels: AND1 = 0, NOT1 = 1; order lists driver first.
   assert(logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
-  assert(!nl.dirty && nl.topo_size == 2);
+  assert(!nl.dirty && nl.topo_order.size() == 2);
   assert(nl.topo_order[0] == 0 && nl.topo_order[1] == 1);
   assert(nl.topo_level[0] == 0 && nl.topo_level[1] == 1);
 
@@ -784,12 +773,12 @@ void test_reset() {
   logic::reset_netlist(nl);
   assert(nl.live_count == 0);
   assert(nl.dirty);
-  assert(nl.topo_size == 0);
+  assert(nl.topo_order.empty());
   assert(logic::block_input_count(nl) == 0);
   assert(logic::block_output_count(nl) == 0);
   // Counters restart after a full reset (no live ids to collide with).
   auto a = logic::add_gate(nl, GateKind::kAnd, 2);
-  assert(a.ok() && a.value == 0 && nl.gates[0].counter == 1);
+  assert(a.ok() && a.value == 0 && nl.slots[0].counter == 1);
   // Empty solve is a no-op success.
   std::array<LogicValue, 0> no_in{};
   std::array<LogicValue, 0> no_out{};
@@ -805,16 +794,16 @@ void test_noexcept_pins() {
   Netlist nl;
   std::array<LogicValue, 0> no_in{};
   std::array<LogicValue, 0> no_out{};
-  static_assert(noexcept(logic::topo::rebuild(nl, logic::EdgeFilter::kAll)));
-  static_assert(noexcept(logic::solve(nl, std::span<const LogicValue>(no_in.data(), 0),
-                                      std::span<LogicValue>(no_out.data(), 0))));
+  // noexcept pins: only for entry points that never grow workspace.
   static_assert(noexcept(logic::block_input_count(nl)));
   static_assert(noexcept(logic::reset_netlist(nl)));
   static_assert(noexcept(logic::bit_words_for_inputs(0)));
   static_assert(noexcept(logic::input_column_word(0, 0)));
-  std::array<std::uint64_t, logic::kMaxGates> scratch{};
-  static_assert(noexcept(logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), scratch.size()),
-                                                std::span<std::uint64_t>())));
+  // eval_block_word keeps caller-owned gate words (arity validated loudly);
+  // its internal map/scratch rides the pool workspace (may allocate).
+  std::vector<std::uint64_t> scratch(logic::slot_count(nl), 0);
+  assert(logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), scratch.size()),
+                                                std::span<std::uint64_t>()).ok());
   assert(logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
 }
 
@@ -830,7 +819,7 @@ void check_bit_matches_scalar(Netlist &nl) {
   const std::uint64_t rows = static_cast<std::uint64_t>(1ULL << nin);
   const std::size_t need = logic::bit_words_for_inputs(nin);
   assert(need == ((static_cast<std::size_t>(rows) + 63) / 64));
-  std::vector<std::uint64_t> scratch(logic::kMaxGates, 0);
+  std::vector<std::uint64_t> scratch(logic::slot_count(nl), 0);
   std::vector<std::uint64_t> words(nout == 0 ? 1 : nout, 0);
   std::vector<LogicValue> scalar_in(nin, kL);
   std::vector<LogicValue> scalar_out(nout == 0 ? 1 : nout, kL);
@@ -965,7 +954,7 @@ void test_bit_matches_scalar_goldens() {
   // Empty netlist: one (empty) assignment, no outputs.
   {
     Netlist nl;
-    std::vector<std::uint64_t> scratch(logic::kMaxGates, 0);
+    std::vector<std::uint64_t> scratch(logic::slot_count(nl), 0);
     std::span<std::uint64_t> empty_out;
     assert(logic::eval_block_word(nl, 0, std::span<std::uint64_t>(scratch.data(), scratch.size()),
                                   empty_out)
@@ -976,7 +965,7 @@ void test_bit_matches_scalar_goldens() {
 void test_bit_arg_errors() {
   Netlist nl;
   assert(logic::add_gate(nl, GateKind::kAnd, 2).ok());
-  std::vector<std::uint64_t> scratch(logic::kMaxGates, 0);
+  std::vector<std::uint64_t> scratch(logic::slot_count(nl), 0);
   std::vector<std::uint64_t> out(1, 0);
   // Bad scratch / output arity fails loudly.
   {
@@ -1025,9 +1014,12 @@ bool netlists_equal(const Netlist &a, const Netlist &b) {
   if (!logic::ties_equal(a, b)) {
     return false;
   }
-  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-    const logic::Gate &x = a.gates[s];
-    const logic::Gate &y = b.gates[s];
+  if (a.slots.size() != b.slots.size()) {
+    return false;
+  }
+  for (logic::Slot s = 0; s < a.slots.size(); ++s) {
+    const logic::Gate &x = a.slots[s];
+    const logic::Gate &y = b.slots[s];
     if (x.live != y.live || x.kind != y.kind || x.counter != y.counter ||
         x.input_count != y.input_count || x.ignored_mask != y.ignored_mask ||
         x.ignore_output != y.ignore_output || x.output_fanout != y.output_fanout ||
@@ -1044,15 +1036,15 @@ bool netlists_equal(const Netlist &a, const Netlist &b) {
 }
 
 void assert_names_unique(const Netlist &nl) {
-  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-    if (!nl.gates[s].live) {
+  for (logic::Slot s = 0; s < logic::slot_count(nl); ++s) {
+    if (!nl.slots[s].live) {
       continue;
     }
-    for (std::uint16_t t = static_cast<std::uint16_t>(s + 1); t < logic::kMaxGates; ++t) {
-      if (!nl.gates[t].live) {
+    for (logic::Slot t = s + 1; t < logic::slot_count(nl); ++t) {
+      if (!nl.slots[t].live) {
         continue;
       }
-      assert(!(nl.gates[s].kind == nl.gates[t].kind && nl.gates[s].counter == nl.gates[t].counter));
+      assert(!(nl.slots[s].kind == nl.slots[t].kind && nl.slots[s].counter == nl.slots[t].counter));
     }
   }
 }
@@ -1260,8 +1252,8 @@ void test_optimize_o0_identity() {
     assert(r.ok());
     Netlist opt = r.value;
     assert(opt.live_count == 1);
-    assert(opt.gates[0].live && opt.gates[0].kind == GateKind::kBuf);
-    assert(opt.gates[0].input_count == 1);
+    assert(opt.slots[0].live && opt.slots[0].kind == GateKind::kBuf);
+    assert(opt.slots[0].input_count == 1);
     check_equiv(nl, opt);
   }
   // AND2(C1, b) -> out with C1 = NAND(all-tied): AND(x,1) -> x drops the
@@ -1324,19 +1316,19 @@ void test_optimize_o0_keeps_ignored_cone() {
 }
 
 void assert_o1_canonical(const Netlist &nl) {
-  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-    const logic::Gate &g = nl.gates[s];
+  for (logic::Slot s = 0; s < logic::slot_count(nl); ++s) {
+    const logic::Gate &g = nl.slots[s];
     if (!g.live || g.kind != GateKind::kNot) {
       continue;
     }
-    const std::uint16_t d = g.drivers[0];
+    const logic::Slot d = g.drivers[0];
     if (d == logic::kNoDriver) {
       continue;
     }
-    assert(nl.gates[d].live);
+    assert(nl.slots[d].live);
     if (g.output_fanout == 0) {
       // Output NOT: only a preserved double-negation may remain.
-      assert(nl.gates[d].kind == GateKind::kNot);
+      assert(nl.slots[d].kind == GateKind::kNot);
     } else {
       assert(false); // internal NOT must dangle after O1
     }
@@ -1362,9 +1354,9 @@ void test_optimize_o1_demorgan() {
     assert(opt.live_count == 1);
     assert(logic::block_input_count(opt) == 2);
     bool found = false;
-    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-      if (opt.gates[s].live) {
-        assert(opt.gates[s].kind == fused[k]);
+    for (logic::Slot s = 0; s < logic::slot_count(opt); ++s) {
+      if (opt.slots[s].live) {
+        assert(opt.slots[s].kind == fused[k]);
         found = true;
       }
     }
@@ -1387,7 +1379,7 @@ void test_optimize_o1_demorgan() {
     assert(r.ok());
     Netlist opt = r.value;
     assert(opt.live_count == 1);
-    assert(opt.gates[opt.topo_order[0]].kind == GateKind::kAnd);
+    assert(opt.slots[opt.topo_order[0]].kind == GateKind::kAnd);
     check_equiv(nl, opt);
   }
   // Pure output double negation is preserved (interface stability wins):
@@ -1413,9 +1405,9 @@ void test_optimize_o2_nand_family() {
   o2.level = logic::OptLevel::kO2;
   o2.target = logic::OptTarget::kNand;
   auto all_nand = [](const Netlist &nl) {
-    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-      if (nl.gates[s].live) {
-        assert(nl.gates[s].kind == GateKind::kNand);
+    for (logic::Slot s = 0; s < logic::slot_count(nl); ++s) {
+      if (nl.slots[s].live) {
+        assert(nl.slots[s].kind == GateKind::kNand);
       }
     }
   };
@@ -1477,9 +1469,9 @@ void test_optimize_o2_nor_family() {
   o2.level = logic::OptLevel::kO2;
   o2.target = logic::OptTarget::kNor;
   auto all_nor = [](const Netlist &nl) {
-    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-      if (nl.gates[s].live) {
-        assert(nl.gates[s].kind == GateKind::kNor);
+    for (logic::Slot s = 0; s < logic::slot_count(nl); ++s) {
+      if (nl.slots[s].live) {
+        assert(nl.slots[s].kind == GateKind::kNor);
       }
     }
   };
@@ -1582,9 +1574,9 @@ void test_optimize_o2_const_pool() {
   assert(r.ok());
   Netlist opt = r.value;
   assert(opt.live_count == 2);
-  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-    if (opt.gates[s].live) {
-      assert(opt.gates[s].kind == GateKind::kNand);
+  for (logic::Slot s = 0; s < logic::slot_count(opt); ++s) {
+    if (opt.slots[s].live) {
+      assert(opt.slots[s].kind == GateKind::kNand);
     }
   }
   assert(logic::block_input_count(opt) == 0);
@@ -1595,8 +1587,14 @@ void test_optimize_o2_const_pool() {
 }
 
 void test_optimize_o2_overflow() {
-  // 40 XNOR8 (8 dangling inputs each): O2 needs 40*29 = 1160 > 1024 gates
-  // and must fail loudly; O0/O1 never grow and succeed; input untouched.
+  // 40 XNOR8 (8 dangling inputs each): O2 needs 40*29 = 1160 gates.
+  // Under the fixed 1024 pool this exceeded the budget and failed
+  // loudly; the dynamic pool's budget is kMaxGates (1M), so O2 now
+  // succeeds and grows the pool geometrically. O0/O1 never grow and
+  // succeed; the input net is untouched by every level. The loud
+  // past-cap refusal itself is pinned by ensure_slots (see
+  // test_logic_scale's pool-identity pins) — a 1M-gate O2 run is not
+  // suite-practical.
   Netlist nl;
   for (int k = 0; k < 40; ++k) {
     assert(logic::add_gate(nl, GateKind::kXnor, 8).ok());
@@ -1611,10 +1609,10 @@ void test_optimize_o2_overflow() {
   logic::OptimizeOptions o2;
   o2.level = logic::OptLevel::kO2;
   auto r = logic::optimize(nl, o2);
-  assert(!r.ok());
-  assert(r.error.find("budget") != std::string_view::npos);
+  assert(r.ok());
+  assert(r.value.live_count == 40 * 29);
   assert(netlists_equal(nl, snapshot));
-  // Just under the cap fits exactly: 35 XNOR8 -> 35*29 = 1015 gates.
+  // Just under the old cap still fits exactly: 35 XNOR8 -> 35*29 = 1015 gates.
   Netlist small;
   for (int k = 0; k < 35; ++k) {
     assert(logic::add_gate(small, GateKind::kXnor, 8).ok());
@@ -1702,7 +1700,7 @@ void test_optimize_noexcept() {
   static_assert(noexcept(logic::parse_opt_level("O0")));
   static_assert(noexcept(logic::parse_opt_target("nand")));
   logic::OptimizeOptions opts;
-  static_assert(noexcept(logic::optimize(nl, opts)));
+  // optimize() heap-allocates its working nets: not noexcept.
   assert(logic::optimize(nl, opts).ok()); // empty net optimizes to empty
 }
 
@@ -1951,7 +1949,7 @@ void test_barrier_o0_identical_flops() {
   Netlist nl;
   barrier_place_seq(nl, 0, GateKind::kDff, 1); // DFF1: D <- BUF1.Y
   barrier_place_seq(nl, 1, GateKind::kDff, 2); // DFF2: D <- BUF1.Y (identical)
-  const std::uint16_t b = logic::add_gate(nl, GateKind::kBuf, 1).value;
+  const logic::Slot b = logic::add_gate(nl, GateKind::kBuf, 1).value;
   assert(logic::wire(nl, b, 0, 0).ok()); // BUF.Y -> DFF1.D (BUF.1 = EXT)
   assert(logic::wire(nl, b, 1, 0).ok()); // BUF.Y -> DFF2.D
   barrier_ignore(nl, 0, 1);              // CLKs ignored
@@ -1986,7 +1984,7 @@ void test_barrier_o0_wired_constant_flop() {
   // dropped as dead). The constant source itself follows the normal
   // rules (pool-shared at O2, kept as the flop's driver cone at O0/O1).
   Netlist nl;
-  const std::uint16_t c = logic::add_gate(nl, GateKind::kAnd, 2).value;
+  const logic::Slot c = logic::add_gate(nl, GateKind::kAnd, 2).value;
   barrier_place_seq(nl, 1, GateKind::kDff, 1); // DFF1: D <- AND1.Y (const 0)
   assert(logic::wire(nl, c, 1, 0).ok());
   barrier_ignore(nl, 0, 0); // AND.1 ignored: ties low
@@ -2022,11 +2020,11 @@ void test_barrier_o0_report_counts() {
   Netlist nl;
   barrier_place_seq(nl, 0, GateKind::kDff, 1);   // DFF1 = Q0
   barrier_place_seq(nl, 1, GateKind::kDff, 2);   // DFF2 = Q1
-  const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
-  const std::uint16_t x = logic::add_gate(nl, GateKind::kXor, 2).value;
-  const std::uint16_t na = logic::add_gate(nl, GateKind::kNot, 1).value;
-  const std::uint16_t nb = logic::add_gate(nl, GateKind::kNot, 1).value;
-  const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 4).value;
+  const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot x = logic::add_gate(nl, GateKind::kXor, 2).value;
+  const logic::Slot na = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot nb = logic::add_gate(nl, GateKind::kNot, 1).value;
+  const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 4).value;
   barrier_place_seq(nl, 7, GateKind::kDlatch, 1); // DLATCH1
   assert(logic::wire(nl, n, 0, 0).ok());   // NOT.Y -> DFF1.D
   assert(logic::wire(nl, 0, n, 0).ok());   // Q0 -> NOT.1
@@ -2066,7 +2064,7 @@ void test_barrier_o1_not_through_flop() {
   assert_seq_fanout_equal(orig, opt);
   auto n = logic::resolve_gate(opt, "NOT1");
   assert(n.ok());
-  assert(opt.gates[n.value].kind == GateKind::kNot);
+  assert(opt.slots[n.value].kind == GateKind::kNot);
   assert_seq_run_parity(orig, opt, 10,
                         {kL, kL, kH, kL, kL, kH, kH, kH, kL, kL,
                          kH, kL, kL, kH, kH, kH, kL, kL, kH, kL});
@@ -2173,11 +2171,11 @@ void test_o2_reachable() {
     // Closed counter, no block I/O: seq roots carry the whole cluster.
     Netlist nl = barrier_closed_counter();
     assert(nl.live_count == 4);
-    bool reach[logic::kMaxGates] = {};
-    logic::detail::collect_reachable(nl, reach);
+    auto reach = std::make_unique<bool[]>(logic::slot_count(nl));
+    logic::detail::collect_reachable(nl, reach.get());
     std::size_t n_reach = 0;
-    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-      if (nl.gates[s].live) {
+    for (logic::Slot s = 0; s < logic::slot_count(nl); ++s) {
+      if (nl.slots[s].live) {
         assert(reach[s]);
         ++n_reach;
       } else {
@@ -2193,8 +2191,8 @@ void test_o2_reachable() {
     barrier_place_seq(nl, 1, GateKind::kDff, 1);         // DFF1 @1 (D dangles)
     barrier_ignore(nl, 1, 1);                           // CLK ignored
     assert(nl.live_count == 2);
-    bool reach[logic::kMaxGates] = {};
-    logic::detail::collect_reachable(nl, reach);
+    auto reach = std::make_unique<bool[]>(logic::slot_count(nl));
+    logic::detail::collect_reachable(nl, reach.get());
     assert(reach[0]);
     assert(reach[1]);
     assert(!reach[2]);
@@ -2222,8 +2220,8 @@ void test_barrier_o2_full_dff_nq_polarity() {
   assert_seq_shape_equal(fd, optf);
   auto d = logic::resolve_gate(optf, "DFF1");
   assert(d.ok());
-  assert(optf.gates[d.value].input_count == 5);
-  assert(optf.gates[d.value].ignored_mask == 0x1Eu);
+  assert(optf.slots[d.value].input_count == 5);
+  assert(optf.slots[d.value].ignored_mask == 0x1Eu);
   assert_seq_run_parity(fd, optf, 4, {kL, kH, kH, kL});
 }
 } // namespace
@@ -2235,27 +2233,17 @@ void test_topo_module_parity() {
   // order (compile_comb_order) matches the rebuild(kCombOnly) comb tail.
   // Guards the topo Module seam.
   auto orders_equal = [](const Netlist &a, const Netlist &b) {
-    if (a.topo_size != b.topo_size || a.dirty != b.dirty) {
+    if (a.topo_order != b.topo_order || a.dirty != b.dirty) {
       return false;
     }
-    for (std::size_t i = 0; i < a.topo_size; ++i) {
-      if (a.topo_order[i] != b.topo_order[i]) {
-        return false;
-      }
-    }
-    for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-      if (a.topo_level[s] != b.topo_level[s]) {
-        return false;
-      }
-    }
-    return true;
+    return a.topo_level == b.topo_level;
   };
   // Seq-free DAG: kAll == kCombOnly, order-identical; validate agrees.
   {
     Netlist base;
-    const std::uint16_t a = logic::add_gate(base, GateKind::kAnd, 2).value;
-    const std::uint16_t o = logic::add_gate(base, GateKind::kOr, 2).value;
-    const std::uint16_t n = logic::add_gate(base, GateKind::kNot, 1).value;
+    const logic::Slot a = logic::add_gate(base, GateKind::kAnd, 2).value;
+    const logic::Slot o = logic::add_gate(base, GateKind::kOr, 2).value;
+    const logic::Slot n = logic::add_gate(base, GateKind::kNot, 1).value;
     assert(logic::wire(base, a, o, 0).ok());
     assert(logic::wire(base, o, n, 0).ok());
     Netlist via_all = base;
@@ -2267,10 +2255,10 @@ void test_topo_module_parity() {
     assert(logic::topo::validate(base, logic::EdgeFilter::kCombOnly).ok());
     // Stepper order matches the rebuild comb tail (no seq gates to skip).
     {
-      std::uint16_t order[logic::kMaxGates];
+      std::vector<logic::Slot> order(logic::slot_count(base));
       std::size_t n_out = 0;
-      assert(logic::topo::compile_comb_order(base, order, n_out));
-      assert(n_out == via_all.topo_size);
+      assert(logic::topo::compile_comb_order(base, order.data(), n_out));
+      assert(n_out == via_all.topo_order.size());
       for (std::size_t i = 0; i < n_out; ++i) {
         assert(order[i] == via_all.topo_order[i]);
       }
@@ -2284,10 +2272,10 @@ void test_topo_module_parity() {
   // Pure combinational cycle: every entry point fails loudly.
   {
     Netlist nl;
-    const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
-    const std::uint16_t n = logic::add_gate(nl, GateKind::kNot, 1).value;
-    nl.gates[a].drivers[0] = n;
-    nl.gates[n].drivers[0] = a;
+    const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+    const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
+    nl.slots[a].drivers[0] = n;
+    nl.slots[n].drivers[0] = a;
     nl.dirty = true;
     assert(!logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
     nl.dirty = true;
@@ -2299,7 +2287,7 @@ void test_topo_module_parity() {
   {
     Netlist nl;
     barrier_place_seq(nl, 0, GateKind::kDff, 1);
-    const std::uint16_t a = logic::add_gate(nl, GateKind::kAnd, 2).value;
+    const logic::Slot a = logic::add_gate(nl, GateKind::kAnd, 2).value;
     assert(logic::wire(nl, a, 0, 0).ok()); // AND.Y -> DFF.D
     assert(logic::wire(nl, 0, a, 0).ok()); // DFF.Q -> AND.0 (closes the loop)
     assert(logic::topo::reaches(nl, a, 0, logic::EdgeFilter::kAll));
@@ -2309,9 +2297,9 @@ void test_topo_module_parity() {
     assert(!logic::topo::validate(nl, logic::EdgeFilter::kAll).ok());
     // Stepper order: seq root skipped, comb tail emitted (the AND gate).
     {
-      std::uint16_t order[logic::kMaxGates];
+      std::vector<logic::Slot> order(logic::slot_count(nl));
       std::size_t n_out = 0;
-      assert(logic::topo::compile_comb_order(nl, order, n_out));
+      assert(logic::topo::compile_comb_order(nl, order.data(), n_out));
       assert(n_out == 1);
       assert(order[0] == a);
     }

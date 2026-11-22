@@ -19,13 +19,21 @@
  * Opaque barrier: sequential gates ride through every phase verbatim
  * (same kind, pin count, flags, Q/NQ polarity); only the combinational
  * glue converts. Same-source dangling pins duplicated per use are
- * re-tied (one variable per pin) and tied duplicates merge in cleanup,
+ * re-tied (one variable per pin), and tied duplicates merge in cleanup,
  * so repeated NAND/NOR toggles converge instead of multiplying gates
  * and pins.
  *
+ * Dynamic pool (015): every phase works over Netlist with pool-owned
+ * sizing (slot_count bounds every scan, never kMaxGates). wire_pending
+ * takes the tie-first maps as caller-owned scratch; post_cleanup takes
+ * its root/feed scratch plus the DCE keep stack; finish_o2 takes the
+ * minimized-build out-buffer plus the equivalence-check eval scratch.
+ * Internal cross-calls are bare (deduction over Netlist, never explicit
+ * capacity arguments).
+ *
  * Dependency rules: header-only, allocation-free, exception-free
- * (finish_o2 returns Result only for the budget/topology failures the
- * caller already reports loudly). Depends on netlist.hpp,
+ * (finish_o2 reports BuildError; the caller maps it to messages once).
+ * Depends on netlist.hpp,
  * optimize_barrier.hpp, optimize_exact.hpp, the O2
  * dedup/emit/min headers, optimize_passes.hpp, optimize_types.hpp,
  * seq_state.hpp, topo.hpp, and types.hpp. Logic is a standalone domain:
@@ -50,6 +58,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <vector>
 
 namespace wengine::logic {
 
@@ -58,6 +68,8 @@ namespace detail {
 /**
  * @brief Failure modes of the fresh build (mapped to loud messages
  *        once, in optimize(), so every phase stays a plain predicate).
+ *
+ * Capacity-free: failure modes never scale.
  */
 enum class BuildError : std::uint8_t {
   /** @brief No failure. */
@@ -74,6 +86,8 @@ enum class BuildError : std::uint8_t {
 
 /**
  * @brief Which shared constant-pool gates the fresh build needs.
+ *
+ * Capacity-free: pool needs never scale.
  */
 struct PoolNeeds {
   /** @brief True when the shared constant-1 pool gate is needed. */
@@ -94,14 +108,13 @@ struct PoolNeeds {
  * @param[in] clabel Per-slot Constness labels.
  * @return Pool gates the fresh build must materialize.
  */
-[[nodiscard]] inline PoolNeeds size_pool_needs(const Netlist &nl, const bool *reach,
-                                               const Constness *clabel) noexcept {
+[[nodiscard]] inline PoolNeeds size_pool_needs(const Netlist &nl, const bool *reach, const Constness *clabel) noexcept {
   PoolNeeds needs{};
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live || !reach[s]) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live || !reach[s]) {
       continue;
     }
-    const bool is_sink = (nl.gates[s].output_fanout == 0);
+    const bool is_sink = (nl.slots[s].output_fanout == 0);
     const Constness lc = clabel[s];
     if (lc == Constness::kC0 || lc == Constness::kC1) {
       if (is_sink) {
@@ -117,7 +130,7 @@ struct PoolNeeds {
           needs.c1 = true;
         }
       }
-    } else if (nl.gates[s].ignored_mask != 0) {
+    } else if (nl.slots[s].ignored_mask != 0) {
       // Non-constant gates with ignored inputs route through shared C0
       // (which needs C1).
       needs.c1 = true;
@@ -138,8 +151,7 @@ struct PoolNeeds {
  * @param[in] needs Pool gates to materialize.
  * @return kNone on success; kBudget on gate-budget exhaustion.
  */
-[[nodiscard]] inline BuildError emit_pool(Netlist &out, ConvertCtx &ctx, OptTarget target,
-                                          PoolNeeds needs) noexcept {
+[[nodiscard]] inline BuildError emit_pool(Netlist &out, ConvertCtx &ctx, OptTarget target, PoolNeeds needs) noexcept {
   if (!needs.c1) {
     return BuildError::kNone;
   }
@@ -148,7 +160,7 @@ struct PoolNeeds {
   if (!rc1.ok()) {
     return BuildError::kBudget;
   }
-  Gate &c1 = out.gates[rc1.value];
+  Gate &c1 = out.slots[rc1.value];
   c1.ignored_mask = 0x03u; // U(0,0) = 1 in both vocabularies
   ctx.pool_c1 = rc1.value;
   if (needs.c0) {
@@ -156,8 +168,8 @@ struct PoolNeeds {
     if (!rc0.ok()) {
       return BuildError::kBudget;
     }
-    out.gates[rc0.value].drivers[0] = rc1.value;
-    out.gates[rc0.value].drivers[1] = rc1.value;
+    out.slots[rc0.value].drivers[0] = rc1.value;
+    out.slots[rc0.value].drivers[1] = rc1.value;
     ctx.pool_c0 = rc0.value;
   }
   return BuildError::kNone;
@@ -174,20 +186,19 @@ struct PoolNeeds {
  * @param[in] reach Reachable slots to convert.
  * @param[in] clabel Per-slot Constness labels.
  * @param[out] ctx Emission state (fresh net + emit map).
- * @param[out] emit_map Orig slot to network-output fresh slot map.
+ * @param[out] emit_map Orig slot to network-output fresh slot map
+ *             (caller-owned).
  * @param[in] target Conversion target.
  * @return kNone on success; kBudget/kWiring on exhaustion or gaps.
  */
-[[nodiscard]] inline BuildError create_networks(const Netlist &nl, const bool *reach,
-                                                const Constness *clabel, ConvertCtx &ctx,
-                                                std::uint16_t *emit_map,
-                                                OptTarget target) noexcept {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live || !reach[s]) {
+[[nodiscard]] inline BuildError create_networks(const Netlist &nl, const bool *reach, const Constness *clabel, ConvertCtx &ctx,
+                                                 Slot *emit_map, OptTarget target) noexcept {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live || !reach[s]) {
       continue;
     }
-    if (is_frozen_kind(nl.gates[s].kind)) {
-      const std::uint16_t o = emit_seq_verbatim(ctx, nl, s);
+    if (is_frozen_kind(nl.slots[s].kind)) {
+      const Slot o = emit_seq_verbatim(ctx, nl, s);
       if (o == kNoDriver || ctx.failed) {
         return BuildError::kBudget;
       }
@@ -195,7 +206,7 @@ struct PoolNeeds {
       continue;
     }
     const Constness lc = clabel[s];
-    const bool is_sink = (nl.gates[s].output_fanout == 0);
+    const bool is_sink = (nl.slots[s].output_fanout == 0);
     if (lc == Constness::kC0 || lc == Constness::kC1) {
       if (!is_sink) {
         // Internal constant: share the pool, no new gates.
@@ -220,7 +231,7 @@ struct PoolNeeds {
         if (!r.ok()) {
           return BuildError::kBudget;
         }
-        ctx.out->gates[r.value].ignored_mask = 0x03u;
+        ctx.out->slots[r.value].ignored_mask = 0x03u;
         emit_map[s] = r.value;
         continue;
       } else {
@@ -233,13 +244,13 @@ struct PoolNeeds {
         if (!r.ok()) {
           return BuildError::kBudget;
         }
-        ctx.out->gates[r.value].drivers[0] = ctx.pool_c1;
-        ctx.out->gates[r.value].drivers[1] = ctx.pool_c1;
+        ctx.out->slots[r.value].drivers[0] = ctx.pool_c1;
+        ctx.out->slots[r.value].drivers[1] = ctx.pool_c1;
         emit_map[s] = r.value;
         continue;
       }
     }
-    const std::uint16_t o = emit_gate(ctx, nl, s);
+    const Slot o = emit_gate(ctx, nl, s);
     if (o == kNoDriver || ctx.failed) {
       return BuildError::kBudget;
     }
@@ -259,43 +270,49 @@ struct PoolNeeds {
  * @param[out] out Fresh netlist receiving wires and ties.
  * @param[out] ctx Emission state.
  * @param[in] pend Deferred wires from the creation pass.
- * @param[in] npend Pending-wire count.
  * @param[in] emit_map Complete orig-to-fresh driver map.
  * @param[in] structural_tie_duplicates True ties same-source dangling
  *            duplicates (sequential nets only).
+ * @param[in] tie_first_fresh Caller-owned scratch (`slot_count(out) * kMaxInputs`
+ *            slots): first fresh slot per source leader (kNoDriver
+ *            when unseen).
+ * @param[in] tie_first_input Caller-owned scratch (`slot_count(out) * kMaxInputs`
+ *            bytes): first fresh input per source leader.
  * @return kNone on success; kWiring on emit-map gaps or bad indices.
  */
-[[nodiscard]] inline BuildError wire_pending(Netlist &out, ConvertCtx &ctx, const PendingWire *pend,
-                                             std::size_t npend, const std::uint16_t *emit_map,
-                                             bool structural_tie_duplicates) noexcept {
-  std::uint16_t tie_first_fresh[kMaxGates * kMaxInputs];
-  std::uint8_t tie_first_input[kMaxGates * kMaxInputs];
-  for (std::size_t i = 0; i < kMaxGates * kMaxInputs; ++i) {
+[[nodiscard]] inline BuildError wire_pending(Netlist &out, ConvertCtx &ctx, const std::vector<PendingWire> &pend, const Slot *emit_map,
+                                             bool structural_tie_duplicates, std::span<Slot> tie_first_fresh,
+                                             std::span<std::uint8_t> tie_first_input) noexcept {
+  if (tie_first_fresh.size() < slot_count(out) * kMaxInputs ||
+      tie_first_input.size() < slot_count(out) * kMaxInputs) {
+    return BuildError::kWiring;
+  }
+  for (std::size_t i = 0; i < slot_count(out) * kMaxInputs; ++i) {
     tie_first_fresh[i] = kNoDriver;
     tie_first_input[i] = 0;
   }
-  for (std::size_t p = 0; p < npend; ++p) {
+  for (std::size_t p = 0; p < pend.size(); ++p) {
     const PendingWire &w = pend[p];
-    std::uint16_t drv = kNoDriver;
+    Slot drv = kNoDriver;
     if (w.use_pool) {
       drv = ctx.pool_c0;
     } else if (w.orig != kNoDriver) {
-      if (w.orig >= kMaxGates || emit_map[w.orig] == kNoDriver) {
+      if (w.orig >= slot_count(out) || emit_map[w.orig] == kNoDriver) {
         return BuildError::kWiring;
       }
       drv = emit_map[w.orig];
     }
-    if (w.fresh >= kMaxGates || w.input >= kMaxInputs) {
+    if (w.fresh >= slot_count(out) || w.input >= kMaxInputs) {
       return BuildError::kWiring;
     }
     wire_fresh_with_polarity(out, w.fresh, w.input, drv, w.inv);
     if (!structural_tie_duplicates) {
       continue;
     }
-    if (drv != kNoDriver || w.use_pool || w.src_leader >= kMaxGates * kMaxInputs) {
+    if (drv != kNoDriver || w.use_pool || w.src_leader >= slot_count(out) * kMaxInputs) {
       continue; // wired or pool-routed: nothing to tie
     }
-    if (out.gates[w.fresh].drivers[w.input] != kNoDriver) {
+    if (out.slots[w.fresh].drivers[w.input] != kNoDriver) {
       continue; // defensive: only dangling pins participate
     }
     const std::size_t leader = w.src_leader;
@@ -326,28 +343,26 @@ struct PoolNeeds {
  * @param[in] emit_map Orig-to-fresh map.
  * @param[in] target Conversion target (single-gate mirror rule).
  */
-inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach,
-                          const std::uint16_t *emit_map, OptTarget target) noexcept {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live || !reach[s]) {
+inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, const Slot *emit_map, OptTarget target) noexcept {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live || !reach[s]) {
       continue;
     }
     // Only single-gate networks mirror pin positions 1:1; multi-gate
     // networks route ignored originals through the pool (wired, no mark).
-    const Gate &g = nl.gates[s];
-    const std::uint16_t o = emit_map[s];
-    const bool single_gate_network = (g.kind == GateKind::kNand && target == OptTarget::kNand) ||
-        (g.kind == GateKind::kNor && target == OptTarget::kNor);
+    const Gate &g = nl.slots[s];
+    const Slot o = emit_map[s];
+    const bool single_gate_network = (g.kind == GateKind::kNand && target == OptTarget::kNand) || (g.kind == GateKind::kNor && target == OptTarget::kNor);
     if (single_gate_network) {
-      out.gates[o].ignored_mask = g.ignored_mask;
+      out.slots[o].ignored_mask = g.ignored_mask;
     }
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live || !reach[s]) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live || !reach[s]) {
       continue;
     }
-    if (nl.gates[s].ignore_output) {
-      out.gates[emit_map[s]].ignore_output = true;
+    if (nl.slots[s].ignore_output) {
+      out.slots[emit_map[s]].ignore_output = true;
     }
   }
 }
@@ -367,60 +382,71 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach,
  * @param[in] reach Reachable slots.
  * @param[in] emit_map Orig-to-fresh map (root translation).
  * @param[in] target Conversion target (universal kind).
+ * @param[in] post_roots Caller-owned scratch (`slot_count(out)` root flags).
+ * @param[in] post_feeds Caller-owned scratch (`slot_count(out)` feed flags).
+ * @param[in] keep Caller-owned DCE scratch (`slot_count(out)` keep flags).
+ * @param[in] stack Caller-owned DFS stack (`slot_count(out)` slots).
+ * @param[in] tie_survivors Caller-owned scratch (`slot_count(out) * kMaxInputs`
+ *            flats) for remove_gate's tie-detach sweep.
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kNone on success; kTopo/kIter on topology or bound failures.
  */
 [[nodiscard]] inline BuildError post_cleanup(Netlist &out, const Netlist &nl, const bool *reach,
-                                             const std::uint16_t *emit_map,
-                                             OptTarget target) noexcept {
+                                             const Slot *emit_map, OptTarget target,
+                                             std::span<bool> post_roots, std::span<bool> post_feeds,
+                                             std::span<bool> keep, std::span<Slot> stack,
+                                             std::span<std::size_t> tie_survivors,
+                                             const topo::TopoScratch &ts) noexcept {
+  if (post_roots.size() < slot_count(out) || post_feeds.size() < slot_count(out)) {
+    return BuildError::kTopo;
+  }
   const GateKind u = universal_kind(target);
-  bool post_roots[kMaxGates] = {};
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live || !reach[s]) {
+  for (Slot s = 0; s < slot_count(out); ++s) {
+    post_roots[s] = false;
+  }
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live || !reach[s]) {
       continue;
     }
     if (is_barrier_root(nl, s)) {
-      const std::uint16_t o = emit_map[s];
-      if (o != kNoDriver && o < kMaxGates) {
+      const Slot o = emit_map[s];
+      if (o != kNoDriver && o < slot_count(out)) {
         post_roots[o] = true;
       }
     }
   }
   const bool seq_net = has_sequential_gates(nl);
-  bool post_feeds[kMaxGates] = {};
-  constexpr std::size_t kPostIters = 2 * kMaxGates + 16;
-  for (std::size_t it = 0; it < kPostIters; ++it) {
+  constexpr std::size_t kPostItersBase = 16;
+  for (std::size_t it = 0; it < 2 * slot_count(out) + kPostItersBase; ++it) {
     bool pchanged = false;
-    compute_feeds_seq(out, post_feeds);
+    compute_feeds_seq(out, post_feeds.data());
     if (seq_net) {
-      if (dedup_universal_tied_pass(out, u, post_feeds)) {
+      if (dedup_universal_tied_pass(out, u, post_feeds.data(), tie_survivors)) {
         pchanged = true;
       }
-    } else if (dedup_universal_pass(out, u, post_feeds)) {
+    } else if (dedup_universal_pass(out, u, post_feeds.data(), tie_survivors)) {
       pchanged = true;
     }
-    if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll)
-             .ok()) {
+    if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, ts).ok()) {
       return BuildError::kTopo;
     }
-    compute_feeds_seq(out, post_feeds);
-    if (double_inv_universal_pass(out, u, post_feeds)) {
+    compute_feeds_seq(out, post_feeds.data());
+    if (double_inv_universal_pass(out, u, post_feeds.data(), tie_survivors)) {
       pchanged = true;
     }
-    if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll)
-             .ok()) {
+    if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, ts).ok()) {
       return BuildError::kTopo;
     }
-    if (dce_pass(out, post_roots)) {
+    if (dce_pass(out, post_roots.data(), keep, stack, tie_survivors)) {
       pchanged = true;
     }
-    if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll)
-             .ok()) {
+    if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, ts).ok()) {
       return BuildError::kTopo;
     }
     if (!pchanged) {
       break;
     }
-    if (it + 1 >= kPostIters) {
+    if (it + 1 >= 2 * slot_count(out) + kPostItersBase) {
       return BuildError::kIter;
     }
   }
@@ -439,36 +465,49 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach,
  * @param[out] out Structural fresh netlist (returned when it wins).
  * @param[out] src_nl Source netlist (recompiled on the structural path).
  * @param[in] target Conversion target.
- * @return kOk with the winning netlist; kInternal with an "optimize:
- *         ..." message on topology errors.
+ * @param[out] min_buf Caller-owned out-buffer receiving the minimized
+ *             candidate (see try_minimized_o2).
+ * @param[in] resolved Caller-owned eval scratch (`slot_count(src_nl) * kMaxInputs`
+ *            values).
+ * @param[in] gate_out Caller-owned eval scratch (`slot_count(src_nl)` outputs).
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
+ * @return kNone with the winning netlist in `out` (copied from the
+ *         minimized buffer when it wins — nothing is returned by value,
+ *         which would put a pool-sized object on the caller stack at
+ *         scale); kTopo on topology errors (reported loudly once by
+ *         optimize()).
  */
-[[nodiscard]] inline core::Result<Netlist> finish_o2(Netlist &out, Netlist &src_nl,
-                                                     OptTarget target) noexcept {
+[[nodiscard]] inline BuildError finish_o2(Netlist &out, Netlist &src_nl,
+                                          OptTarget target, Netlist &min_buf,
+                                          std::span<LogicValue> resolved,
+                                          std::span<LogicValue> gate_out,
+                                          const topo::TopoScratch &ts) noexcept {
   {
-    Netlist min_out{};
-    if (try_minimized_o2(src_nl, target, min_out)) {
-      const std::uint16_t g_struct = out.live_count;
-      const std::uint16_t g_min = min_out.live_count;
+    if (try_minimized_o2(src_nl, target, min_buf, resolved, gate_out, ts)) {
+      const Slot g_struct = out.live_count;
+      const Slot g_min = min_buf.live_count;
       const std::size_t in_struct = block_input_count(out);
-      const std::size_t in_min = block_input_count(min_out);
+      const std::size_t in_min = block_input_count(min_buf);
       if ((g_min < g_struct) || (g_min == g_struct && in_min < in_struct)) {
-        return core::Result<Netlist>::success(min_out);
+        out = min_buf;
+        return BuildError::kNone;
       }
     }
   }
   recount_fanout(out);
   out.dirty = true;
-  out.topo_size = 0;
-  if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll)
-           .ok()) {
-    return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
+  out.topo_order.clear();
+  if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, ts).ok()) {
+    return BuildError::kTopo;
   }
-  return core::Result<Netlist>::success(out);
+  return BuildError::kNone;
 }
 
 /**
  * @brief Loud message for a fresh-build failure mode (reported once by
  *        optimize()).
+ *
+ * Capacity-free: messages never scale.
  *
  * @param[in] e Build error to name.
  * @return String-literal message (zero-copy, no allocation).

@@ -18,6 +18,13 @@
  * during eval; wired inputs ignore the mark (the wire wins). `use`
  * clears the mark. Both are idempotent.
  *
+ * Dynamic pool: every mutation entry works over Netlist with pool-owned
+ * workspace scratch; growth is geometric with loud refusal past
+ * kMaxGates, and every bound is the pool's current size (slot_count),
+ * never kMaxGates. The text adapters (wire_text/tie_text/untie_text),
+ * remove_gate_by_name, and the pin table paths stay text-bound — the
+ * scale harness builds by slot directly.
+ *
  * Dependency rules (docs/logic.md section 4): depends on
  * block_interface.hpp, pins.hpp, shared_net.hpp, tie_set.hpp, topo.hpp,
  * types.hpp, and core/status. Logic is a standalone domain: this header
@@ -40,6 +47,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <span>
 #include <string_view>
 
 namespace wengine::logic {
@@ -52,8 +60,8 @@ namespace wengine::logic {
 // Forward declarations: remove_gate sweeps shared attachments through the
 // named-edge removal seam defined below (promotion/compaction keep the
 // shared span dense).
-[[nodiscard]] inline core::Status unwire(Netlist &nl, std::uint16_t to_slot, std::uint8_t to_input) noexcept;
-[[nodiscard]] inline core::Status unwire_driver(Netlist &nl, std::uint16_t from_slot, std::uint16_t to_slot, std::uint8_t to_input) noexcept;
+[[nodiscard]] inline core::Status unwire(Netlist &nl, Slot to_slot, std::uint8_t to_input) noexcept;
+[[nodiscard]] inline core::Status unwire_driver(Netlist &nl, Slot from_slot, Slot to_slot, std::uint8_t to_input) noexcept;
 
 /**
  * @brief Add a gate with explicit fan-in; lowest free slot wins
@@ -62,32 +70,41 @@ namespace wengine::logic {
  * @param[out] nl Netlist receiving the gate.
  * @param[in] kind Gate kind to create.
  * @param[in] inputs Fan-in; must satisfy valid_fanin(kind, inputs).
- * @return kOk with the new slot on success; kInvalidArgument for bad fan-in, an unknown kind, or a full netlist ("netlist full").
+ * @return kOk with the new slot on success; kInvalidArgument for bad fan-in, an unknown kind, or growth past kMaxGates ("netlist full").
  */
-[[nodiscard]] inline core::Result<std::uint16_t> add_gate(Netlist &nl, GateKind kind, std::uint8_t inputs) noexcept {
+[[nodiscard]] inline core::Result<Slot> add_gate(Netlist &nl, GateKind kind, std::uint8_t inputs) {
   if (!valid_fanin(kind, inputs)) {
-    return core::Result<std::uint16_t>::failure("bad fan-in for kind");
+    return core::Result<Slot>::failure("bad fan-in for kind");
   }
   const std::uint8_t ord = kind_ordinal(kind);
   if (ord > 8 && !is_sequential_kind(kind)) {
     // No such kind exists today (ordinals are 0..8 + 16..20); the guard
     // stays so future appended kinds fail loudly until wired up.
-    return core::Result<std::uint16_t>::failure("bad gate kind");
+    return core::Result<Slot>::failure("bad gate kind");
   }
   if (nl.next_counter[ord] == 0) {
     nl.next_counter[ord] = 1; // tolerate zero-init (scaffold default)
   }
-  std::uint16_t slot = kNoDriver;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live) {
+  Slot slot = kNoDriver;
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live) {
       slot = s;
       break;
     }
   }
   if (slot == kNoDriver) {
-    return core::Result<std::uint16_t>::failure("netlist full");
+    // Pool full: grow geometrically (amortized); loud refusal past the
+    // max cap, never silent. The appended slot is the old size — every
+    // slot below it was live or recycled, so this is the lowest free
+    // slot by construction, and allocation order matches the old fixed
+    // pool for identical op sequences.
+    const std::size_t old = slot_count(nl);
+    if (!ensure_slots(nl, old + 1)) {
+      return core::Result<Slot>::failure("netlist full");
+    }
+    slot = static_cast<Slot>(old);
   }
-  Gate &g = nl.gates[slot];
+  Gate &g = nl.slots[slot];
   g.live = true;
   g.kind = kind;
   g.counter = nl.next_counter[ord]++;
@@ -107,12 +124,9 @@ namespace wengine::logic {
     // tie_rep entries are already 0 by the remove/reset invariant
     // (detach_slot_ties clears on remove, reset_all_ties on reset).
   }
-  if (nl.live_count < kMaxGates) {
-    ++nl.live_count;
-  }
+  ++nl.live_count;
   nl.dirty = true;
-  nl.topo_size = 0;
-  return core::Result<std::uint16_t>::success(slot);
+  return core::Result<Slot>::success(slot);
 }
 
 /**
@@ -123,7 +137,7 @@ namespace wengine::logic {
  * @return kOk with the new slot on success; kInvalidArgument for a full
  *         netlist ("netlist full").
  */
-[[nodiscard]] inline core::Result<std::uint16_t> add_gate(Netlist &nl, GateKind kind) noexcept {
+[[nodiscard]] inline core::Result<Slot> add_gate(Netlist &nl, GateKind kind) {
   return add_gate(nl, kind, default_fanin(kind));
 }
 
@@ -138,52 +152,57 @@ namespace wengine::logic {
  *
  * @param[out] nl Netlist holding the gate.
  * @param[in] slot Slot to remove.
+ * @param[in] survivors Caller-owned scratch (pool-size * kMaxInputs flats)
+ *            for the tie-detach survivor sweep.
  * @return kOk on success; kInvalidArgument for out-of-range or dead
- *         slots.
+ *         slots, or undersized scratch.
  */
-[[nodiscard]] inline core::Status remove_gate(Netlist &nl, std::uint16_t slot) noexcept {
-  if (slot >= kMaxGates) {
+[[nodiscard]] inline core::Status remove_gate(Netlist &nl, Slot slot, std::span<std::size_t> survivors) noexcept {
+  if (slot >= slot_count(nl)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  Gate &g = nl.gates[slot];
+  Gate &g = nl.slots[slot];
   if (!g.live) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  if (survivors.size() < slot_count(nl) * kMaxInputs) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   // Detach ties first (while input_count is still valid): each tied pin
   // of this gate leaves its class via the TieSet seam; survivors re-elect.
-  detach_slot_ties(nl, slot);
+  detach_slot_ties(nl, slot, survivors);
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
-    const std::uint16_t drv = g.drivers[i];
-    if (drv != kNoDriver && drv < kMaxGates && nl.gates[drv].live) {
+    const Slot drv = g.drivers[i];
+    if (drv != kNoDriver && drv < slot_count(nl) && nl.slots[drv].live) {
       const std::size_t flat = tie_flat(slot, i);
       if (nl.driver_inv[flat] != 0) {
         nl.driver_inv[flat] = 0;
-        if (nl.gates[drv].nq_fanout > 0) {
-          --nl.gates[drv].nq_fanout;
+        if (nl.slots[drv].nq_fanout > 0) {
+          --nl.slots[drv].nq_fanout;
         }
-      } else if (nl.gates[drv].output_fanout > 0) {
-        --nl.gates[drv].output_fanout;
+      } else if (nl.slots[drv].output_fanout > 0) {
+        --nl.slots[drv].output_fanout;
       }
     }
     g.drivers[i] = kNoDriver;
     // Release every extra attachment on this input (polarity-aware) and
     // drop the mark: marks die with their gate's slot.
     const std::size_t flat = tie_flat(slot, i);
-    for_each_extra(nl, flat, [&](std::uint8_t, std::uint16_t edrv, std::uint8_t einv) {
-      if (edrv < kMaxGates && nl.gates[edrv].live) {
+    for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t einv) {
+      if (edrv < slot_count(nl) && nl.slots[edrv].live) {
         if (einv != 0) {
-          if (nl.gates[edrv].nq_fanout > 0) {
-            --nl.gates[edrv].nq_fanout;
+          if (nl.slots[edrv].nq_fanout > 0) {
+            --nl.slots[edrv].nq_fanout;
           }
-        } else if (nl.gates[edrv].output_fanout > 0) {
-          --nl.gates[edrv].output_fanout;
+        } else if (nl.slots[edrv].output_fanout > 0) {
+          --nl.slots[edrv].output_fanout;
         }
       }
     });
     shared_clear_flat(nl, flat);
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    Gate &o = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    Gate &o = nl.slots[s];
     if (!o.live) {
       continue;
     }
@@ -219,17 +238,35 @@ namespace wengine::logic {
     --nl.live_count;
   }
   nl.dirty = true;
-  nl.topo_size = 0;
   return core::Status::success();
+}
+
+/**
+ * @brief Remove a gate.
+ *
+ * Workspace-backed entry: grows the tie-detach survivor scratch to the
+ * pool size, then runs the core above. (No noexcept: workspace growth
+ * may allocate.)
+ *
+ * @param[out] nl Netlist holding the gate.
+ * @param[in] slot Slot to remove.
+ * @return kOk on success; kInvalidArgument for out-of-range or dead slots.
+ */
+[[nodiscard]] inline core::Status remove_gate(Netlist &nl, Slot slot) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  return remove_gate(nl, slot, std::span<std::size_t>(nl.ws_survivors.data(), n * kMaxInputs));
 }
 
 /**
  * @brief Remove a gate by display name (e.g. "AND1").
  *
+ * Stays alias-monomorphic (text path): the scale harness and tests
+ * remove by slot directly.
+ *
  * @param[out] nl Netlist holding the gate.
  * @param[in] name Display name resolved via resolve_gate.
- * @return kOk on success; kInvalidArgument when the name does not
- *         resolve to a live gate.
+ * @return kOk on success; kInvalidArgument when the name does not resolve to a live gate.
  */
 [[nodiscard]] inline core::Status remove_gate_by_name(Netlist &nl, std::string_view name) noexcept {
   auto gate = resolve_gate(nl, name);
@@ -260,22 +297,19 @@ namespace detail {
  * @param[in] inv Per-attachment NQ polarity (1 = inverted).
  * @return kOk on append; kInvalidArgument past the cap.
  */
-[[nodiscard]] inline core::Status append_shared_extra(Netlist &nl, std::uint16_t from_slot,
-                                                      std::uint16_t to_slot, std::uint8_t to_input,
-                                                      std::uint8_t inv) noexcept {
+[[nodiscard]] inline core::Status append_shared_extra(Netlist &nl, Slot from_slot, Slot to_slot, std::uint8_t to_input, std::uint8_t inv) noexcept {
   const std::size_t flat = tie_flat(to_slot, to_input);
   const core::Status st = shared_push_extra(nl, flat, from_slot, inv);
   if (!st.ok()) {
     return st; // cap: loud, never truncated
   }
-  Gate &from = nl.gates[from_slot];
+  Gate &from = nl.slots[from_slot];
   if (inv != 0) {
     ++from.nq_fanout;
   } else {
     ++from.output_fanout;
   }
   nl.dirty = true;
-  nl.topo_size = 0;
   return core::Status::success();
 }
 
@@ -294,11 +328,11 @@ namespace detail {
  * @param[in] input 0-based sink input index.
  * @return kOk on mark; kInvalidArgument for dead/out-of-range pins or tied destinations.
  */
-[[nodiscard]] inline core::Status mark_shared(Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || !nl.gates[slot].live) {
+[[nodiscard]] inline core::Status mark_shared(Netlist &nl, Slot slot, std::uint8_t input) noexcept {
+  if (slot >= slot_count(nl) || !nl.slots[slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (input >= nl.gates[slot].input_count) {
+  if (input >= nl.slots[slot].input_count) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   if (is_tied(nl, slot, input)) {
@@ -321,11 +355,11 @@ namespace detail {
  * @return kOk on unmark; kInvalidArgument for dead/out-of-range pins,
  *         unmarked inputs, or inputs holding >= 2 attachments.
  */
-[[nodiscard]] inline core::Status unshare_input(Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || !nl.gates[slot].live) {
+[[nodiscard]] inline core::Status unshare_input(Netlist &nl, Slot slot, std::uint8_t input) noexcept {
+  if (slot >= slot_count(nl) || !nl.slots[slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (input >= nl.gates[slot].input_count) {
+  if (input >= nl.slots[slot].input_count) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t flat = tie_flat(slot, input);
@@ -358,11 +392,11 @@ namespace detail {
  *         tied or ignored destinations, or levels other than 1/2.
  *         The netlist is untouched on failure.
  */
-[[nodiscard]] inline core::Status set_pull(Netlist &nl, std::uint16_t slot, std::uint8_t input, std::uint8_t level) noexcept {
-  if (slot >= kMaxGates || !nl.gates[slot].live) {
+[[nodiscard]] inline core::Status set_pull(Netlist &nl, Slot slot, std::uint8_t input, std::uint8_t level) noexcept {
+  if (slot >= slot_count(nl) || !nl.slots[slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (input >= nl.gates[slot].input_count) {
+  if (input >= nl.slots[slot].input_count) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   if (level != 1 && level != 2) {
@@ -371,7 +405,7 @@ namespace detail {
   if (is_tied(nl, slot, input)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
   }
-  if ((nl.gates[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
+  if ((nl.slots[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // ignored: use first
   }
   nl.pull_cfg[tie_flat(slot, input)] = level;
@@ -390,11 +424,11 @@ namespace detail {
  * @return kOk on clear; kInvalidArgument for dead/out-of-range pins or
  *         unpulled inputs.
  */
-[[nodiscard]] inline core::Status clear_pull(Netlist &nl, std::uint16_t slot, std::uint8_t input) noexcept {
-  if (slot >= kMaxGates || !nl.gates[slot].live) {
+[[nodiscard]] inline core::Status clear_pull(Netlist &nl, Slot slot, std::uint8_t input) noexcept {
+  if (slot >= slot_count(nl) || !nl.slots[slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (input >= nl.gates[slot].input_count) {
+  if (input >= nl.slots[slot].input_count) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t flat = tie_flat(slot, input);
@@ -421,11 +455,11 @@ namespace detail {
  * @param[in] value_ps Whole picoseconds to store.
  * @return kOk on set; kInvalidArgument for dead/out-of-range slots. The netlist is untouched on failure.
  */
-[[nodiscard]] inline core::Status set_gate_delay(Netlist &nl, std::uint16_t slot, std::uint64_t value_ps) noexcept {
-  if (slot >= kMaxGates || !nl.gates[slot].live) {
+[[nodiscard]] inline core::Status set_gate_delay(Netlist &nl, Slot slot, std::uint64_t value_ps) noexcept {
+  if (slot >= slot_count(nl) || !nl.slots[slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  nl.gates[slot].propagation_delay_ps = value_ps;
+  nl.slots[slot].propagation_delay_ps = value_ps;
   return core::Status::success();
 }
 
@@ -440,14 +474,14 @@ namespace detail {
  * @param[in] slot Gate slot.
  * @return kOk on clear; kInvalidArgument for dead/out-of-range slots or un-annotated (zero-valued) gates.
  */
-[[nodiscard]] inline core::Status clear_gate_delay(Netlist &nl, std::uint16_t slot) noexcept {
-  if (slot >= kMaxGates || !nl.gates[slot].live) {
+[[nodiscard]] inline core::Status clear_gate_delay(Netlist &nl, Slot slot) noexcept {
+  if (slot >= slot_count(nl) || !nl.slots[slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (nl.gates[slot].propagation_delay_ps == 0) {
+  if (nl.slots[slot].propagation_delay_ps == 0) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // no delay set
   }
-  nl.gates[slot].propagation_delay_ps = 0;
+  nl.slots[slot].propagation_delay_ps = 0;
   return core::Status::success();
 }
 
@@ -470,17 +504,23 @@ namespace detail {
  * @param[in] from_slot Driver slot.
  * @param[in] to_slot Sink slot.
  * @param[in] to_input 0-based sink input index.
+ * @param[in] reach_seen Caller-owned scratch (pool-sized visited flags) for
+ *            the incremental cycle check.
+ * @param[in] reach_stack Caller-owned scratch (pool-sized slots) for the
+ *            incremental cycle check.
  * @return kOk on success; kInvalidArgument for dead/out-of-range
  *         slots or inputs, occupied unmarked inputs, tied destinations
- *         (untie first), shared-cap overflow, or cycle-closing wires.
- *         The netlist is untouched on failure. Fan-out is unlimited.
+ *         (untie first), shared-cap overflow, cycle-closing wires, or
+ *         undersized scratch. The netlist is untouched on failure.
+ *         Fan-out is unlimited.
  */
-[[nodiscard]] inline core::Status wire(Netlist &nl, std::uint16_t from_slot, std::uint16_t to_slot, std::uint8_t to_input) noexcept {
-  if (from_slot >= kMaxGates || to_slot >= kMaxGates) {
+[[nodiscard]] inline core::Status wire(Netlist &nl, Slot from_slot, Slot to_slot, std::uint8_t to_input, std::span<std::uint8_t> reach_seen,
+                                       std::span<Slot> reach_stack) noexcept {
+  if (from_slot >= slot_count(nl) || to_slot >= slot_count(nl)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  Gate &from = nl.gates[from_slot];
-  Gate &to = nl.gates[to_slot];
+  Gate &from = nl.slots[from_slot];
+  Gate &to = nl.slots[to_slot];
   if (!from.live || !to.live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
@@ -501,7 +541,7 @@ namespace detail {
   // wiring order. The whole-graph validator stays authoritative for
   // combinational destinations (a live-but-uninvolved flop shields
   // nothing).
-  if (!is_sequential_kind(to.kind) && topo::reaches(nl, to_slot, from_slot, EdgeFilter::kCombOnly)) {
+  if (!is_sequential_kind(to.kind) && topo::reaches(nl, to_slot, from_slot, EdgeFilter::kCombOnly, reach_seen, reach_stack)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // cycle
   }
   if (to.drivers[to_input] != kNoDriver) {
@@ -513,8 +553,29 @@ namespace detail {
   ++from.output_fanout;
   nl.driver_inv[tie_flat(to_slot, to_input)] = 0; // slot-wire is never inverted
   nl.dirty = true;
-  nl.topo_size = 0;
   return core::Status::success();
+}
+
+/**
+ * @brief Single-driver wire, with the shared-net opt-in (011).
+ *
+ * Workspace-backed entry: grows the cycle-check scratch to the pool
+ * size, then runs the core above. (No noexcept: workspace growth may
+ * allocate.)
+ *
+ * @param[out] nl Netlist receiving the wire.
+ * @param[in] from_slot Driver slot.
+ * @param[in] to_slot Sink slot.
+ * @param[in] to_input 0-based sink input index.
+ * @return kOk on success; kInvalidArgument for dead/out-of-range
+ *         slots or inputs, occupied unmarked inputs, tied destinations
+ *         (untie first), shared-cap overflow, or cycle-closing wires.
+ *         The netlist is untouched on failure. Fan-out is unlimited.
+ */
+[[nodiscard]] inline core::Status wire(Netlist &nl, Slot from_slot, Slot to_slot, std::uint8_t to_input) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  return wire(nl, from_slot, to_slot, to_input, std::span<std::uint8_t>(nl.ws_seen.data(), n), std::span<Slot>(nl.ws_stack.data(), n));
 }
 
 /**
@@ -530,40 +591,40 @@ namespace detail {
  * @param[in] to_input 0-based sink input index.
  * @return kOk on success; kInvalidArgument for dead/out-of-range slots or inputs, or an already-unwired input.
  */
-[[nodiscard]] inline core::Status unwire(Netlist &nl, std::uint16_t to_slot, std::uint8_t to_input) noexcept {
-  if (to_slot >= kMaxGates) {
+[[nodiscard]] inline core::Status unwire(Netlist &nl, Slot to_slot, std::uint8_t to_input) noexcept {
+  if (to_slot >= slot_count(nl)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  Gate &to = nl.gates[to_slot];
+  Gate &to = nl.slots[to_slot];
   if (!to.live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   if (to_input >= to.input_count) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  const std::uint16_t drv = to.drivers[to_input];
+  const Slot drv = to.drivers[to_input];
   if (drv == kNoDriver) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   to.drivers[to_input] = kNoDriver;
-  if (drv < kMaxGates && nl.gates[drv].live) {
+  if (drv < slot_count(nl) && nl.slots[drv].live) {
     // Polarity-aware release: NQ edges decrement nq_fanout, Q edges
     // decrement output_fanout.
     const std::size_t flat = tie_flat(to_slot, to_input);
     if (nl.driver_inv[flat] != 0) {
       nl.driver_inv[flat] = 0;
-      if (nl.gates[drv].nq_fanout > 0) {
-        --nl.gates[drv].nq_fanout;
+      if (nl.slots[drv].nq_fanout > 0) {
+        --nl.slots[drv].nq_fanout;
       }
-    } else if (nl.gates[drv].output_fanout > 0) {
-      --nl.gates[drv].output_fanout;
+    } else if (nl.slots[drv].output_fanout > 0) {
+      --nl.slots[drv].output_fanout;
     }
     // Promote extra 0 into the primary slot (pinned order: attachment
     // sequences in different orders converge to identical array
     // states). The promoted edge keeps its counted fanout — the source
     // still drives this input.
     if (shared_extra_flat(nl, flat) > 0) {
-      std::uint16_t promoted = kNoDriver;
+      Slot promoted = kNoDriver;
       std::uint8_t promoted_inv = 0;
       if (shared_pop_front(nl, flat, promoted, promoted_inv)) {
         to.drivers[to_input] = promoted;
@@ -572,7 +633,6 @@ namespace detail {
     }
   }
   nl.dirty = true;
-  nl.topo_size = 0;
   return core::Status::success();
 }
 
@@ -592,12 +652,12 @@ namespace detail {
  * @return kOk on release; kInvalidArgument for dead/out-of-range pins
  *         or an edge that is not attached.
  */
-[[nodiscard]] inline core::Status unwire_driver(Netlist &nl, std::uint16_t from_slot, std::uint16_t to_slot, std::uint8_t to_input) noexcept {
-  if (from_slot >= kMaxGates || to_slot >= kMaxGates) {
+[[nodiscard]] inline core::Status unwire_driver(Netlist &nl, Slot from_slot, Slot to_slot, std::uint8_t to_input) noexcept {
+  if (from_slot >= slot_count(nl) || to_slot >= slot_count(nl)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  Gate &to = nl.gates[to_slot];
-  if (!to.live || !nl.gates[from_slot].live) {
+  Gate &to = nl.slots[to_slot];
+  if (!to.live || !nl.slots[from_slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   if (to_input >= to.input_count) {
@@ -615,16 +675,15 @@ namespace detail {
     // Polarity-aware release of exactly this edge.
     const std::uint8_t einv = shared_extra_inv(nl, flat, j);
     if (einv != 0) {
-      if (nl.gates[from_slot].nq_fanout > 0) {
-        --nl.gates[from_slot].nq_fanout;
+      if (nl.slots[from_slot].nq_fanout > 0) {
+        --nl.slots[from_slot].nq_fanout;
       }
-    } else if (nl.gates[from_slot].output_fanout > 0) {
-      --nl.gates[from_slot].output_fanout;
+    } else if (nl.slots[from_slot].output_fanout > 0) {
+      --nl.slots[from_slot].output_fanout;
     }
     shared_erase_at(nl, flat, j);
     nl.dirty = true;
-    nl.topo_size = 0;
-    return core::Status::success();
+      return core::Status::success();
   }
   return core::Status::failure(core::StatusCode::kInvalidArgument); // edge not attached
 }
@@ -638,32 +697,36 @@ namespace detail {
  * @param[out] nl Netlist receiving the wire.
  * @param[in] from Output pin (NQ sources exist on sequential gates only).
  * @param[in] to Input pin.
+ * @param[in] reach_seen Caller-owned scratch (pool-sized visited flags) for
+ *            the incremental cycle check.
+ * @param[in] reach_stack Caller-owned scratch (pool-sized slots) for the
+ *            incremental cycle check.
  * @return kOk on success; kInvalidArgument for input-as-source pins, dead slots, NQ sources on combinational gates, occupied or
- *         tied destinations, or cycle-closing wires.
+ *         tied destinations, cycle-closing wires, or undersized scratch.
  */
-[[nodiscard]] inline core::Status wire_pins(Netlist &nl, PinRef from, PinRef to) noexcept {
+[[nodiscard]] inline core::Status wire_pins(Netlist &nl, PinRef from, PinRef to, std::span<std::uint8_t> reach_seen, std::span<Slot> reach_stack) noexcept {
   if (!from.is_output || to.is_output) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (from.slot >= kMaxGates || !nl.gates[from.slot].live) {
+  if (from.slot >= slot_count(nl) || !nl.slots[from.slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   // NQ sources exist on sequential gates only (parse_pin gates this, but
   // slot-built refs bypass text — stay loud, never silent).
-  if (from.negated && !is_sequential_kind(nl.gates[from.slot].kind)) {
+  if (from.negated && !is_sequential_kind(nl.slots[from.slot].kind)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   // Shared append detection before the mutation: wire() lands the edge
   // as the last extra on marked occupied inputs (Q fanout, inv 0).
-  const bool shared_append = is_shared_input(nl, to.slot, to.input) && nl.gates[to.slot].drivers[to.input] != kNoDriver;
-  const core::Status st = wire(nl, from.slot, to.slot, to.input);
+  const bool shared_append = is_shared_input(nl, to.slot, to.input) && nl.slots[to.slot].drivers[to.input] != kNoDriver;
+  const core::Status st = wire(nl, from.slot, to.slot, to.input, reach_seen, reach_stack);
   if (!st.ok() || !from.negated) {
     return st;
   }
   if (shared_append) {
     // Move the just-appended extra from the Q fanout to the NQ fanout
     // and mark it inverted (wire() always establishes non-inverted).
-    Gate &src = nl.gates[from.slot];
+    Gate &src = nl.slots[from.slot];
     if (src.output_fanout > 0) {
       --src.output_fanout;
     }
@@ -675,13 +738,32 @@ namespace detail {
   }
   // Move the edge from the Q fanout to the NQ fanout and mark the sink
   // inverted (wire() always establishes the non-inverted state).
-  Gate &src = nl.gates[from.slot];
+  Gate &src = nl.slots[from.slot];
   if (src.output_fanout > 0) {
     --src.output_fanout;
   }
   ++src.nq_fanout;
   nl.driver_inv[tie_flat(to.slot, to.input)] = 1;
   return core::Status::success();
+}
+
+/**
+ * @brief Wire output pin from to input pin to, with NQ polarity.
+ *
+ * Workspace-backed entry: grows the cycle-check scratch to the pool
+ * size, then runs the core above. (No noexcept: workspace growth may
+ * allocate.)
+ *
+ * @param[out] nl Netlist receiving the wire.
+ * @param[in] from Output pin (NQ sources exist on sequential gates only).
+ * @param[in] to Input pin.
+ * @return kOk on success; kInvalidArgument for input-as-source pins, dead slots, NQ sources on combinational gates, occupied or
+ *         tied destinations, or cycle-closing wires.
+ */
+[[nodiscard]] inline core::Status wire_pins(Netlist &nl, PinRef from, PinRef to) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  return wire_pins(nl, from, to, std::span<std::uint8_t>(nl.ws_seen.data(), n), std::span<Slot>(nl.ws_stack.data(), n));
 }
 
 /**
@@ -701,6 +783,9 @@ namespace detail {
 
 /**
  * @brief Parse two pin spellings and wire output to input.
+ *
+ * Stays alias-monomorphic (text path): the scale harness and tests
+ * wire by slot directly.
  *
  * @param[out] nl Netlist receiving the wire.
  * @param[in] from_text Output pin spelling (e.g. "AND2.Y").
@@ -735,10 +820,10 @@ namespace detail {
  *         or tied inputs.
  */
 [[nodiscard]] inline core::Status ignore_pin(Netlist &nl, PinRef pin) noexcept {
-  if (pin.slot >= kMaxGates || !nl.gates[pin.slot].live) {
+  if (pin.slot >= slot_count(nl) || !nl.slots[pin.slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  Gate &g = nl.gates[pin.slot];
+  Gate &g = nl.slots[pin.slot];
   if (pin.is_output) {
     if (pin.negated) {
       g.ignore_nq_output = true;
@@ -770,10 +855,10 @@ namespace detail {
  * @return kOk on success; kInvalidArgument for dead/out-of-range pins.
  */
 [[nodiscard]] inline core::Status use_pin(Netlist &nl, PinRef pin) noexcept {
-  if (pin.slot >= kMaxGates || !nl.gates[pin.slot].live) {
+  if (pin.slot >= slot_count(nl) || !nl.slots[pin.slot].live) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  Gate &g = nl.gates[pin.slot];
+  Gate &g = nl.slots[pin.slot];
   if (pin.is_output) {
     if (pin.negated) {
       g.ignore_nq_output = false;
@@ -796,8 +881,8 @@ namespace detail {
  * @param[out] nl Netlist to reset.
  */
 inline void reset_netlist(Netlist &nl) noexcept {
-  for (std::size_t s = 0; s < kMaxGates; ++s) {
-    Gate &g = nl.gates[s];
+  for (std::size_t s = 0; s < slot_count(nl); ++s) {
+    Gate &g = nl.slots[s];
     g.live = false;
     g.kind = GateKind::kAnd;
     g.counter = 0;
@@ -826,12 +911,13 @@ inline void reset_netlist(Netlist &nl) noexcept {
   }
   nl.live_count = 0;
   nl.dirty = true;
-  nl.topo_size = 0;
 }
 
 /**
  * @brief Parse two input-pin spellings and tie them (text adapter over
  *        the TieSet seam).
+ *
+ * Stays alias-monomorphic (text path).
  *
  * @param[out] nl Netlist receiving the tie.
  * @param[in] a_text First pin spelling.
@@ -853,6 +939,8 @@ inline void reset_netlist(Netlist &nl) noexcept {
 
 /**
  * @brief Parse one input-pin spelling and untie it.
+ *
+ * Stays alias-monomorphic (text path).
  *
  * @param[out] nl Netlist receiving the untie.
  * @param[in] text Pin spelling.

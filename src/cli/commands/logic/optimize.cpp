@@ -11,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace wengine::cli::logic {
@@ -70,9 +71,9 @@ int LogicOptimizeSpec::run(ArgCursor &args, std::ostream &out) {
   // network and its emitter zeroes the field, so an O2 run over an
   // annotated netlist reports the reset below. The scan rides the
   // verb — the engine contract is unchanged.
-  std::uint16_t annotated = 0;
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-    if (nl.gates[s].live && nl.gates[s].propagation_delay_ps != 0) {
+  std::uint32_t annotated = 0;
+  for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+    if (nl.slots[s].live && nl.slots[s].propagation_delay_ps != 0) {
       ++annotated;
     }
   }
@@ -85,12 +86,12 @@ int LogicOptimizeSpec::run(ArgCursor &args, std::ostream &out) {
   support::interface_pins(nl, before_in, before_out);
   const std::string before_in_text = join_pins(nl, before_in, false);
   const std::string before_out_text = join_pins(nl, before_out, true);
-  const std::uint16_t before = nl.live_count;
+  const std::uint32_t before = nl.live_count;
   auto r = wengine::logic::optimize(nl, opts);
   if (!r.ok()) {
     return cli::runtime_error(out, std::string("optimize failed (") + std::string(r.error) + ")");
   }
-  nl = r.value;
+  nl = std::move(r.value);
   std::vector<PinRef> after_in;
   std::vector<PinRef> after_out;
   support::interface_pins(nl, after_in, after_out);

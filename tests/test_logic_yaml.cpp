@@ -35,11 +35,9 @@ bool contains(const std::string &hay, const std::string &needle) {
   return hay.find(needle) != std::string::npos;
 }
 
-// All-Low per-slot power-on values (fresh-attach default).
-std::array<logic::LogicValue, logic::kMaxGates> zero_inits() {
-  std::array<logic::LogicValue, logic::kMaxGates> in{};
-  in.fill(logic::LogicValue::kLow);
-  return in;
+// All-Low per-slot power-on values (fresh-attach default), pool-sized.
+std::vector<logic::LogicValue> zero_inits(const logic::Netlist &nl) {
+  return std::vector<logic::LogicValue>(logic::slot_count(nl), logic::LogicValue::kLow);
 }
 
 // AND1(2) -> NOT1.1, the canonical two-gate workspace.
@@ -63,9 +61,12 @@ bool netlists_equal(const logic::Netlist &a, const logic::Netlist &b) {
   if (!logic::ties_equal(a, b)) {
     return false;
   }
-  for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-    const logic::Gate &x = a.gates[s];
-    const logic::Gate &y = b.gates[s];
+  if (a.slots.size() != b.slots.size()) {
+    return false;
+  }
+  for (logic::Slot s = 0; s < a.slots.size(); ++s) {
+    const logic::Gate &x = a.slots[s];
+    const logic::Gate &y = b.slots[s];
     if (x.live != y.live || x.kind != y.kind || x.counter != y.counter ||
         x.input_count != y.input_count || x.ignored_mask != y.ignored_mask ||
         x.ignore_output != y.ignore_output || x.output_fanout != y.output_fanout ||
@@ -90,7 +91,10 @@ bool netlists_equal(const logic::Netlist &a, const logic::Netlist &b) {
   }
   // 012: pulls participate in test equality — a pass that dropped or
   // moved a pull is a correctness bug.
-  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+  if (a.pull_cfg.size() != b.pull_cfg.size()) {
+    return false;
+  }
+  for (std::size_t f = 0; f < a.pull_cfg.size(); ++f) {
     if (a.pull_cfg[f] != b.pull_cfg[f]) {
       return false;
     }
@@ -102,7 +106,10 @@ bool workspaces_equal(const logic::yaml::Workspace &a, const logic::yaml::Worksp
   if (!netlists_equal(a.netlist, b.netlist)) {
     return false;
   }
-  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
+  if (a.init.size() != b.init.size()) {
+    return false;
+  }
+  for (std::size_t s = 0; s < a.init.size(); ++s) {
     if (a.init[s] != b.init[s]) {
       return false;
     }
@@ -116,7 +123,7 @@ void test_canonical_bytes_v1() {
   // comb rows, canonical save of a user-superset file.
   const logic::Netlist nl = make_pair();
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   const std::string want =
       "version: 1\n"
       "gates:\n"
@@ -134,7 +141,7 @@ void test_canonical_bytes_v1() {
   std::string err;
   assert(logic::yaml::load_text(text, ws, err));
   assert(netlists_equal(nl, ws.netlist));
-  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
+  for (std::size_t s = 0; s < ws.init.size(); ++s) {
     assert(ws.init[s] == kL);
   }
 }
@@ -146,7 +153,7 @@ void test_init_round_trip() {
   logic::Netlist nl;
   assert(logic::add_gate(nl, logic::GateKind::kDff, 2).ok()); // DFF1 @0
   assert(logic::add_gate(nl, logic::GateKind::kJk, 3).ok());  // JK1 @1
-  auto inits = zero_inits();
+  auto inits = zero_inits(nl);
   inits[0] = kH;
   inits[1] = kH;
   std::string text;
@@ -163,7 +170,7 @@ void test_init_round_trip() {
   assert(netlists_equal(nl, ws.netlist));
   assert(ws.init[0] == kH);
   assert(ws.init[1] == kH);
-  for (std::size_t s = 2; s < logic::kMaxGates; ++s) {
+  for (std::size_t s = 2; s < ws.init.size(); ++s) {
     assert(ws.init[s] == kL);
   }
   std::string again;
@@ -189,7 +196,7 @@ void test_missing_init_defaults_low() {
   std::string err;
   assert(logic::yaml::load_text(hand, ws, err));
   assert(ws.netlist.live_count == 1);
-  for (std::size_t s = 0; s < logic::kMaxGates; ++s) {
+  for (std::size_t s = 0; s < ws.init.size(); ++s) {
     assert(ws.init[s] == kL);
   }
   std::string text;
@@ -230,7 +237,7 @@ void test_legacy_refusals() {
   // Both retired generations plus foreign versions are refused loudly,
   // naming the found version; the bundle is untouched on failure.
   logic::yaml::Workspace sentinel;
-  sentinel.init.fill(kH); // poison: any commit would show
+  sentinel.init.assign(8, kH); // poison: any commit would show (size arbitrary)
   const logic::yaml::Workspace before = sentinel;
   {
     // Legacy v1 shape: `version: 1` without the new required sections.
@@ -274,7 +281,7 @@ void test_legacy_refusals() {
 void test_empty_round_trip() {
   logic::Netlist nl;
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(text == "version: 1\ngates:\nwires:\nties:\nclocks:\nmeta:\n  tool: wengine-logic\n");
   logic::yaml::Workspace ws;
   std::string err;
@@ -302,10 +309,10 @@ void test_round_trip_ignore_fanin_delay() {
   assert(logic::ignore_pin(nl, p.value).ok());
   assert(logic::wire(nl, 0, 1, 0).ok());
   assert(logic::wire(nl, 0, 2, 0).ok()); // fan-out of 2
-  nl.gates[0].propagation_delay_ps = 1500;
-  nl.gates[2].propagation_delay_ps = 250;
+  nl.slots[0].propagation_delay_ps = 1500;
+  nl.slots[2].propagation_delay_ps = 250;
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "{id: AND1, kind: and, inputs: 8, ignore: [2, 8], ignore_output: false, delay_ps: 1500}"));
   assert(contains(text, "{id: NOT1, kind: not, inputs: 1, ignore: [], ignore_output: true, delay_ps: 250}"));
   assert(contains(text, "{from: AND1.Y, to: OR1.1}"));
@@ -325,7 +332,7 @@ void test_yaml_superset_tolerance() {
   // Must load to the same netlist and re-save to canonical bytes.
   const logic::Netlist want = make_pair();
   std::string canonical;
-  logic::yaml::save_text(want, zero_inits(), canonical);
+  logic::yaml::save_text(want, zero_inits(want), canonical);
   const std::string edited =
       "# a user comment up top\n"
       "version: 1  # trailing comment\n"
@@ -374,7 +381,7 @@ void test_two_domain_clocks_round_trip() {
   assert(logic::add_gate(nl, logic::GateKind::kDff, 2).ok()); // DFF1 @1
   assert(logic::add_gate(nl, logic::GateKind::kDff, 2).ok()); // DFF2 @2
   assert(logic::wire(nl, 0, 1, 1).ok());                      // BUF1.Y -> DFF1.CLK
-  auto inits = zero_inits();
+  auto inits = zero_inits(nl);
   inits[1] = kH;
   std::string text;
   logic::yaml::save_text(nl, inits, text);
@@ -399,7 +406,7 @@ void test_tie_round_trip() {
   assert(logic::tie_text(nl, "NAND1.1", "NAND1.2").ok());
   assert(logic::block_input_count(nl) == 1);
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "version: 1\n"));
   assert(contains(text, "{a: NAND1.1, b: NAND1.2}"));
   logic::yaml::Workspace back;
@@ -433,7 +440,7 @@ void test_t_round_trip() {
   assert(logic::ignore_pin(nl, p.value).ok());
   assert(logic::wire(nl, 0, 1, 0).ok()); // T1.Q -> T2.T
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "{id: T1, kind: t, inputs: 2, ignore: [2]"));
   assert(contains(text, "{id: T2, kind: t, inputs: 2, ignore: []"));
   assert(contains(text, "{from: T1.Q, to: T2.T}"));
@@ -463,7 +470,7 @@ void test_jk_round_trip() {
   assert(logic::wire(nl, 0, 1, 0).ok()); // JK1.Q -> JK2.J
   assert(logic::wire(nl, 0, 1, 1).ok()); // JK1.Q -> JK2.K
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "{id: JK1, kind: jk, inputs: 3, ignore: [3]"));
   assert(contains(text, "{id: JK2, kind: jk, inputs: 3, ignore: [3]"));
   assert(contains(text, "{from: JK1.Q, to: JK2.J}"));
@@ -490,7 +497,7 @@ void test_dlatch_round_trip() {
   assert(logic::ignore_pin(nl, p.value).ok());
   assert(logic::wire(nl, 1, 0, 0).ok()); // BUF1.Y -> DLATCH1.D
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "{id: DLATCH1, kind: dlatch, inputs: 2, ignore: [2]"));
   assert(contains(text, "{from: BUF1.Y, to: DLATCH1.D}"));
 
@@ -518,7 +525,7 @@ void test_sr_round_trip() {
   assert(logic::ignore_pin(nl, p.value).ok());
   assert(logic::wire(nl, 0, 1, 0).ok()); // SRLATCH1.Q -> SRLATCH2.S
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "{id: SRLATCH1, kind: srlatch, inputs: 2, ignore: [2]"));
   assert(contains(text, "{id: SRLATCH2, kind: srlatch, inputs: 2, ignore: []"));
   assert(contains(text, "{from: SRLATCH1.Q, to: SRLATCH2.S}"));
@@ -556,7 +563,7 @@ void test_sequential_feedback_round_trip() {
   assert(y.ok());
   assert(logic::wire_pins(nl, y.value, t.value).ok()); // OR1.Y -> T1.T
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "{from: T1.Q, to: OR1.1}"));
   assert(contains(text, "{from: T1.NQ, to: OR1.2}"));
   assert(contains(text, "{from: OR1.Y, to: T1.T}"));
@@ -568,7 +575,7 @@ void test_sequential_feedback_round_trip() {
   // NQ polarity survives the trip (not covered by netlists_equal).
   assert(back.netlist.driver_inv[logic::tie_flat(1, 0)] == 0);
   assert(back.netlist.driver_inv[logic::tie_flat(1, 1)] == 1);
-  assert(back.netlist.gates[0].nq_fanout == 1);
+  assert(back.netlist.slots[0].nq_fanout == 1);
   std::string again;
   logic::yaml::save_text(back.netlist, back.init, again);
   assert(again == text); // byte-identical
@@ -773,7 +780,7 @@ void test_examples() {
     // Comment headers mean the file bytes differ from the first save;
     // stability (save -> load -> save identical) is what must hold.
     std::string a;
-    logic::yaml::save_text(nl, zero_inits(), a);
+    logic::yaml::save_text(nl, zero_inits(nl), a);
     logic::yaml::Workspace ws;
     std::string err;
     assert(logic::yaml::load_text(a, ws, err));
@@ -841,7 +848,7 @@ void test_examples() {
     std::string err;
     assert(logic::yaml::load_text(load("buffer_bus"), ws, err));
     assert(nl.live_count == 4);
-    assert(nl.gates[2].kind == logic::GateKind::kTbuf);
+    assert(nl.slots[2].kind == logic::GateKind::kTbuf);
     assert(logic::is_shared_input(nl, 3, 0));
     assert(logic::shared_attachment_count(nl, 3, 0) == 2);
     assert(logic::pull_level_flat(nl, logic::tie_flat(3, 0)) == 1);
@@ -857,9 +864,9 @@ void test_examples() {
     std::string err;
     assert(logic::yaml::load_text(load("tieoff"), ws, err));
     assert(nl.live_count == 2);
-    assert(nl.gates[0].ignored_mask == (1u << 1));
-    assert(nl.gates[0].propagation_delay_ps == 1500);
-    assert(nl.gates[1].propagation_delay_ps == 250);
+    assert(nl.slots[0].ignored_mask == (1u << 1));
+    assert(nl.slots[0].propagation_delay_ps == 1500);
+    assert(nl.slots[1].propagation_delay_ps == 250);
     check_solve(nl, {kH}, {kH}); // AND(1, tied-0) = 0, NOT(0) = 1
     check_stable(nl);
   }
@@ -886,7 +893,7 @@ void test_examples() {
     assert(logic::yaml::load_text(load("gated_async_counter"), ws, err));
     logic::Netlist &nl = ws.netlist;
     assert(nl.live_count == 2);
-    assert(nl.gates[0].input_count == 5);
+    assert(nl.slots[0].input_count == 5);
     assert(ws.init[0] == kL);
     std::string text;
     logic::yaml::save_text(nl, ws.init, text);
@@ -901,9 +908,9 @@ void test_examples() {
     assert(logic::yaml::load_text(load("jk_t_latch_chain"), ws, err));
     logic::Netlist &nl = ws.netlist;
     assert(nl.live_count == 3);
-    assert(nl.gates[0].kind == logic::GateKind::kJk);
-    assert(nl.gates[1].kind == logic::GateKind::kT);
-    assert(nl.gates[2].kind == logic::GateKind::kDlatch);
+    assert(nl.slots[0].kind == logic::GateKind::kJk);
+    assert(nl.slots[1].kind == logic::GateKind::kT);
+    assert(nl.slots[2].kind == logic::GateKind::kDlatch);
     for (std::size_t s = 0; s < 3; ++s) {
       assert(ws.init[s] == kL);
     }
@@ -958,7 +965,7 @@ void test_shared_round_trip() {
   assert(logic::wire(nl, 1, 3, 0).ok());
   assert(logic::wire(nl, 2, 3, 1).ok());
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "  - {from: NOT1.Y, to: OR1.1}\n  - {from: NOT2.Y, to: OR1.1}\n"));
   assert(contains(text, "shared:\n  - {net: OR1.1}\n"));
   logic::yaml::Workspace ws{};
@@ -968,7 +975,7 @@ void test_shared_round_trip() {
   assert(logic::is_shared_input(ws.netlist, 3, 0));
   assert(logic::shared_attachment_count(ws.netlist, 3, 0) == 2);
   std::string text2;
-  logic::yaml::save_text(ws.netlist, zero_inits(), text2);
+  logic::yaml::save_text(ws.netlist, zero_inits(ws.netlist), text2);
   assert(text == text2);
   // Replay outputs identical: consensus high on NOT1.1=NOT2.1=0.
   const logic::LogicValue in[3] = {kL, kL, kL};
@@ -985,7 +992,7 @@ void test_shared_round_trip() {
   assert(logic::add_gate(empty, logic::GateKind::kAnd, 2).ok()); // AND1 @0
   assert(logic::mark_shared(empty, 0, 0).ok());
   std::string etext;
-  logic::yaml::save_text(empty, zero_inits(), etext);
+  logic::yaml::save_text(empty, zero_inits(empty), etext);
   assert(contains(etext, "shared:\n  - {net: AND1.1}\n"));
   logic::yaml::Workspace ews{};
   assert(logic::yaml::load_text(etext, ews, err));
@@ -993,7 +1000,7 @@ void test_shared_round_trip() {
   assert(logic::is_shared_input(ews.netlist, 0, 0));
   assert(logic::shared_attachment_count(ews.netlist, 0, 0) == 0);
   std::string etext2;
-  logic::yaml::save_text(ews.netlist, zero_inits(), etext2);
+  logic::yaml::save_text(ews.netlist, zero_inits(ews.netlist), etext2);
   assert(etext == etext2);
 }
 
@@ -1019,7 +1026,7 @@ void test_shared_inverted_extra_round_trip() {
   const std::size_t flat = logic::tie_flat(2, 0);
   assert(logic::shared_extra_inv(nl, flat, 0) == 1);
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "{from: DFF1.NQ, to: OR1.1}"));
   assert(contains(text, "shared:\n  - {net: OR1.1}\n"));
   logic::yaml::Workspace ws{};
@@ -1029,8 +1036,8 @@ void test_shared_inverted_extra_round_trip() {
   // Polarity itself survives (not just the shared_equal byte match):
   // the reloaded extra still reads inverted, with the NQ fanout moved.
   assert(logic::shared_extra_inv(ws.netlist, flat, 0) == 1);
-  assert(ws.netlist.gates[1].nq_fanout == 1);
-  assert(ws.netlist.gates[1].output_fanout == 0);
+  assert(ws.netlist.slots[1].nq_fanout == 1);
+  assert(ws.netlist.slots[1].output_fanout == 0);
   std::string again;
   logic::yaml::save_text(ws.netlist, ws.init, again);
   assert(again == text); // byte-identical
@@ -1115,7 +1122,7 @@ void test_pull_round_trip() {
   assert(logic::set_pull(nl, 0, 0, 2).ok()); // AND1.1 down (terminated)
   assert(logic::set_pull(nl, 1, 1, 1).ok()); // TBUF1.2 up (terminated enable)
   std::string text;
-  logic::yaml::save_text(nl, zero_inits(), text);
+  logic::yaml::save_text(nl, zero_inits(nl), text);
   assert(contains(text, "  - {id: TBUF1, kind: tbuf, inputs: 2, ignore: [], ignore_output: false, delay_ps: 0}\n"));
   assert(contains(text, "pulls:\n  - {net: AND1.1, pull: down}\n  - {net: TBUF1.2, pull: up}\n"));
   // Canonical section order: version, gates, wires, shared, pulls,
@@ -1135,7 +1142,7 @@ void test_pull_round_trip() {
   assert(logic::pull_level_flat(ws.netlist, logic::tie_flat(1, 1)) == 1);
   assert(logic::block_input_count(ws.netlist) == 1); // only AND1.2
   std::string text2;
-  logic::yaml::save_text(ws.netlist, zero_inits(), text2);
+  logic::yaml::save_text(ws.netlist, zero_inits(ws.netlist), text2);
   assert(text == text2);
   // Replay outputs identical: AND(idle-L, in) -> TBUF(enable idle-H) ->
   // NOT, for both block values.
@@ -1152,7 +1159,7 @@ void test_pull_round_trip() {
   // Pull-free workspaces save with no `pulls:` section (pre-012 bytes).
   logic::Netlist plain = make_pair();
   std::string ptext;
-  logic::yaml::save_text(plain, zero_inits(), ptext);
+  logic::yaml::save_text(plain, zero_inits(plain), ptext);
   assert(ptext.find("pulls:") == std::string::npos);
 }
 

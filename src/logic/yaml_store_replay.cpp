@@ -16,7 +16,6 @@
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/types.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -27,6 +26,14 @@ namespace wengine::logic::yaml::detail {
 
 [[nodiscard]] bool replay_gates(const Collected &in, const YAML::Node &sec, Netlist &tmp, std::string &err) {
   const std::vector<GateRow> &gate_rows = in.gates;
+  // Dynamic pool: grow to cover every file row before slot-indexed
+  // replay. The file-size gate in load_impl already capped the row
+  // count at kMaxGates, so growth cannot fail — the refusal below is
+  // unreachable, kept loud by construction.
+  if (!ensure_slots(tmp, gate_rows.size())) {
+    err = at_line(sec, "too many gates (max 1024)");
+    return false;
+  }
   for (std::size_t i = 0; i < gate_rows.size(); ++i) {
     const GateRow &g = gate_rows[i];
     for (std::size_t j = 0; j < i; ++j) {
@@ -35,7 +42,7 @@ namespace wengine::logic::yaml::detail {
         return false;
       }
     }
-    Gate &slot = tmp.gates[i];
+    Gate &slot = tmp.slots[i];
     slot.live = true;
     slot.kind = g.kind;
     slot.counter = g.counter;
@@ -57,9 +64,9 @@ namespace wengine::logic::yaml::detail {
       }
     }
   }
-  tmp.live_count = static_cast<std::uint16_t>(gate_rows.size());
+  tmp.live_count = static_cast<std::uint32_t>(gate_rows.size());
   tmp.dirty = true;
-  tmp.topo_size = 0;
+  tmp.topo_order.clear();
   return true;
 }
 
@@ -116,11 +123,11 @@ namespace wengine::logic::yaml::detail {
     }
     // NQ sources exist on sequential gates only (same rule as
     // logic::wire_pins — slot-built refs stay loud, never silent).
-    if (from.value.negated && !is_sequential_kind(tmp.gates[from.value.slot].kind)) {
+    if (from.value.negated && !is_sequential_kind(tmp.slots[from.value.slot].kind)) {
       err = at + "bad wire source '" + w.from + "'";
       return false;
     }
-    Gate &dst = tmp.gates[to.value.slot];
+    Gate &dst = tmp.slots[to.value.slot];
     const bool shared_marked = is_shared_input(tmp, to.value.slot, to.value.input);
     if (dst.drivers[to.value.input] != kNoDriver && !shared_marked) {
       err = at + "input already wired '" + w.to + "'";
@@ -148,10 +155,10 @@ namespace wengine::logic::yaml::detail {
     }
     dst.drivers[to.value.input] = from.value.slot;
     if (from.value.negated) {
-      ++tmp.gates[from.value.slot].nq_fanout;
+      ++tmp.slots[from.value.slot].nq_fanout;
       tmp.driver_inv[tie_flat(to.value.slot, to.value.input)] = 1;
     } else {
-      ++tmp.gates[from.value.slot].output_fanout;
+      ++tmp.slots[from.value.slot].output_fanout;
     }
   }
   return true;
@@ -186,8 +193,8 @@ namespace wengine::logic::yaml::detail {
       err = at + "tie needs two distinct pins (got '" + t.a + "' twice)";
       return false;
     }
-    const Gate &ga = tmp.gates[a.value.slot];
-    const Gate &gb = tmp.gates[b.value.slot];
+    const Gate &ga = tmp.slots[a.value.slot];
+    const Gate &gb = tmp.slots[b.value.slot];
     if (ga.drivers[a.value.input] != kNoDriver || gb.drivers[b.value.input] != kNoDriver) {
       err = at + "tie needs dangling pins (unwire first)";
       return false;
@@ -236,7 +243,7 @@ namespace wengine::logic::yaml::detail {
       err = at + "bad pull net '" + pr.net + "' (tied, untie it first)";
       return false;
     }
-    if ((tmp.gates[pin.value.slot].ignored_mask & static_cast<std::uint8_t>(1u << pin.value.input)) != 0) {
+    if ((tmp.slots[pin.value.slot].ignored_mask & static_cast<std::uint8_t>(1u << pin.value.input)) != 0) {
       err = at + "bad pull net '" + pr.net + "' (ignored, use it first)";
       return false;
     }
@@ -246,7 +253,7 @@ namespace wengine::logic::yaml::detail {
     }
   }
   tmp.dirty = true;
-  tmp.topo_size = 0;
+  tmp.topo_order.clear();
   return true;
 }
 
@@ -265,13 +272,20 @@ namespace wengine::logic::yaml::detail {
   return true;
 }
 
-[[nodiscard]] bool apply_inits_and_validate_clocks(const Collected &in, const Netlist &tmp, std::array<LogicValue, kMaxGates> &inits, std::string &err) {
+[[nodiscard]] bool apply_inits_and_validate_clocks(const Collected &in, const Netlist &tmp, std::vector<LogicValue> &inits, std::string &err) {
   // Per-slot power-on values: explicit `init:` keys land on their gate's
   // slot; every other slot reads Low. `check_gate_map` already rejected
-  // `init` on combinational rows.
-  inits.fill(LogicValue::kLow);
+  // `init` on combinational rows. The caller sizes `inits` to the pool;
+  // an init index past the end fails loudly instead of indexing out
+  // of bounds (unreachable after the file-size gate, kept loud by
+  // construction).
+  inits.assign(inits.size(), LogicValue::kLow);
   for (std::size_t i = 0; i < in.gates.size(); ++i) {
     if (in.gates[i].has_init) {
+      if (i >= inits.size()) {
+        err = "too many gates (max 1024)";
+        return false;
+      }
       inits[i] = in.gates[i].init;
     }
   }

@@ -42,6 +42,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace wengine::logic {
 
@@ -74,8 +75,8 @@ inline constexpr std::uint64_t kTimingUnitPs = 1;
  * @param[in] slot Gate slot.
  * @return Stored `propagation_delay_ps`, or `kTimingUnitPs` when the field is 0 (un-annotated). Never 0.
  */
-[[nodiscard]] inline std::uint64_t timing_gate_delay(const Netlist &nl, std::uint16_t slot) noexcept {
-  const std::uint64_t stored = (slot < kMaxGates && nl.gates[slot].live) ? nl.gates[slot].propagation_delay_ps : 0;
+[[nodiscard]] inline std::uint64_t timing_gate_delay(const Netlist &nl, Slot slot) noexcept {
+  const std::uint64_t stored = (slot < slot_count(nl) && nl.slots[slot].live) ? nl.slots[slot].propagation_delay_ps : 0;
   return (stored == 0) ? kTimingUnitPs : stored;
 }
 
@@ -89,7 +90,7 @@ inline constexpr std::uint64_t kTimingUnitPs = 1;
  */
 struct TimingSeed {
   /** @brief Gate slot: leader gate for block inputs, flop for forces. */
-  std::uint16_t slot = 0;
+  Slot slot = 0;
   /** @brief 0-based input index of the leader (block seeds only). */
   std::uint8_t input = 0;
   /** @brief True for a flop Q force, false for a block-input seed. */
@@ -112,7 +113,7 @@ struct TimingEvent {
   /** @brief Whole-picosecond offset from the window anchor. */
   std::uint64_t t_ps = 0;
   /** @brief Driving slot (or leader gate for input nets). */
-  std::uint16_t slot = 0;
+  Slot slot = 0;
   /** @brief Leader input index (input-net events only). */
   std::uint8_t input = 0;
   /** @brief True for input-net events, false for gate outputs. */
@@ -150,40 +151,97 @@ struct TimingTrace {
  * `cur` holds per-slot outputs, `blk` per-(slot,input) dangling-net
  * values (leaders written, members fanned out); the sink maps route
  * driver-slot and leader-flat changes to consumer (slot, input)
- * pairs in slot order. Sized to the existing fixed caps; no heap,
- * no exceptions. The adapter settles `cur`/`blk` to the window's
- * pre-state before calling `run_timing_window`, and builds the
- * topology-invariant sink maps once with `timing_build_sink_maps`
- * (rebuilt only after connectivity changes; per-window drains reuse
- * them untouched).
+ * pairs in slot order. Pool-sized vectors grown by
+ * `ensure_timing_scratch` (no fixed caps; growth preserves existing
+ * contents, value-init zeros for the new tail); the pending schedule
+ * stays a fixed `kMaxTimingEvents` event-budget array (pool-
+ * independent, see `kMaxTimingEvents`). The adapter settles
+ * `cur`/`blk` to the window's pre-state before calling
+ * `run_timing_window`, and builds the topology-invariant sink maps
+ * once with `timing_build_sink_maps` (rebuilt only after connectivity
+ * changes; per-window drains reuse them untouched).
  */
 struct TimingScratch {
-  /** @brief Current per-slot output (Q for sequential gates). */
-  std::array<LogicValue, kMaxGates> cur{};
-  /** @brief Current dangling-net values (4-state capable). */
-  std::array<LogicValue, kMaxGates * kMaxInputs> blk{};
-  /** @brief Pending recompute times (parallel to slots). */
+  /** @brief Current per-slot output (Q for sequential gates; `n` entries). */
+  std::vector<LogicValue> cur{};
+  /** @brief Current dangling-net values, 4-state capable (`n * kMaxInputs` entries). */
+  std::vector<LogicValue> blk{};
+  /** @brief Pending recompute times (parallel to slots; fixed event budget). */
   std::array<std::uint64_t, kMaxTimingEvents> pending_t{};
-  /** @brief Pending recompute slots. */
-  std::array<std::uint16_t, kMaxTimingEvents> pending_s{};
-  /** @brief Pending force flags (flop Q forces vs recomputes). */
+  /** @brief Pending recompute slots (fixed event budget). */
+  std::array<Slot, kMaxTimingEvents> pending_s{};
+  /** @brief Pending force flags (flop Q forces vs recomputes; fixed event budget). */
   std::array<std::uint8_t, kMaxTimingEvents> pending_force{};
-  /** @brief Pending forced values (force entries only). */
+  /** @brief Pending forced values, force entries only (fixed event budget). */
   std::array<LogicValue, kMaxTimingEvents> pending_val{};
   /** @brief Pending entry count. */
   std::size_t n_pending = 0;
-  /** @brief Consumer-slot heads per driver slot (kNoDriver = empty). */
-  std::array<std::uint16_t, kMaxGates> out_head{};
-  /** @brief Consumer-slot heads per leader flat (kNoDriver = empty). */
-  std::array<std::uint16_t, kMaxGates * kMaxInputs> in_head{};
-  /** @brief Intrusive next-links over the consumer pool. */
-  std::array<std::uint16_t, kMaxGates * kMaxInputs> sink_next{};
-  /** @brief Consumer slot per pool entry. */
-  std::array<std::uint16_t, kMaxGates * kMaxInputs> sink_slot{};
-  /** @brief Consumer input per pool entry. */
-  std::array<std::uint8_t, kMaxGates * kMaxInputs> sink_input{};
+  /** @brief Consumer-slot heads per driver slot (`n` entries; kNoDriver = empty). */
+  std::vector<Slot> out_head{};
+  /** @brief Consumer-slot heads per leader flat (`n * kMaxInputs` entries; kNoDriver = empty). */
+  std::vector<Slot> in_head{};
+  /** @brief Intrusive next-links over the consumer pool (`n * kMaxInputs` entries). */
+  std::vector<Slot> sink_next{};
+  /** @brief Consumer slot per pool entry (`n * kMaxInputs` entries). */
+  std::vector<Slot> sink_slot{};
+  /** @brief Consumer input per pool entry (`n * kMaxInputs` entries). */
+  std::vector<std::uint8_t> sink_input{};
   /** @brief Consumer pool fill. */
   std::size_t n_sink = 0;
+  /**
+   * @brief Loud size validation before any work (engine-seam D3 rule).
+   *
+   * @param[in] n Addressable slot count the vectors must cover
+   *            (`n * kMaxInputs` for the flat/pool vectors).
+   * @return kOk when every pool vector holds at least its share.
+   */
+  [[nodiscard]] core::Status validate(std::size_t n) const noexcept {
+    const std::size_t nflat = n * kMaxInputs;
+    if (cur.size() < n || blk.size() < nflat || out_head.size() < n || in_head.size() < nflat ||
+        sink_next.size() < nflat || sink_slot.size() < nflat || sink_input.size() < nflat) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    return core::Status::success();
+  }
+};
+
+/**
+ * @brief Grow scratch pool vectors to cover `n` slots.
+ *
+ * Sizes `cur`/`out_head` to `n` and `blk`/`in_head`/`sink_next`/
+ * `sink_slot`/`sink_input` to `n * kMaxInputs`. No-op when already
+ * sized; never shrinks; existing contents are preserved (growth
+ * value-inits the new tail). The pending schedule is untouched (fixed
+ * event budget, pool-independent).
+ *
+ * (No noexcept: vector growth may allocate.)
+ *
+ * @param[out] scratch Working state receiving pool-sized vectors.
+ * @param[in] n Addressable slot count the vectors must cover.
+ */
+inline void ensure_timing_scratch(TimingScratch &scratch, std::size_t n) {
+  const std::size_t nflat = n * kMaxInputs;
+  if (scratch.cur.size() < n) {
+    scratch.cur.resize(n);
+  }
+  if (scratch.blk.size() < nflat) {
+    scratch.blk.resize(nflat);
+  }
+  if (scratch.out_head.size() < n) {
+    scratch.out_head.resize(n);
+  }
+  if (scratch.in_head.size() < nflat) {
+    scratch.in_head.resize(nflat);
+  }
+  if (scratch.sink_next.size() < nflat) {
+    scratch.sink_next.resize(nflat);
+  }
+  if (scratch.sink_slot.size() < nflat) {
+    scratch.sink_slot.resize(nflat);
+  }
+  if (scratch.sink_input.size() < nflat) {
+    scratch.sink_input.resize(nflat);
+  }
 };
 
 /**
@@ -204,8 +262,8 @@ struct TimingScratch {
  * @param[in] blk Current dangling-net values (leaders authoritative).
  * @param[out] out Resolved four-state input value.
  */
-inline void timing_resolve_input(const Netlist &nl, std::uint16_t slot, std::uint8_t input, const LogicValue *cur, const LogicValue *blk, LogicValue &out) noexcept {
-  const Gate &g = nl.gates[slot];
+inline void timing_resolve_input(const Netlist &nl, Slot slot, std::uint8_t input, const LogicValue *cur, const LogicValue *blk, LogicValue &out) noexcept {
+  const Gate &g = nl.slots[slot];
   const std::size_t flat = tie_flat(slot, input);
   auto polar = [](LogicValue v, std::uint8_t inv) noexcept {
     if (inv == 0) {
@@ -219,15 +277,15 @@ inline void timing_resolve_input(const Netlist &nl, std::uint16_t slot, std::uin
   if (is_shared_flat(nl, flat)) {
     LogicValue span[1 + kMaxSharedExtra];
     std::size_t n = 0;
-    const std::uint16_t drv = g.drivers[input];
-    if (drv != kNoDriver && drv < kMaxGates && nl.gates[drv].live) {
+    const Slot drv = g.drivers[input];
+    if (drv != kNoDriver && drv < slot_count(nl) && nl.slots[drv].live) {
       span[n++] = polar(cur[drv], nl.driver_inv[flat]);
     }
-    for_each_extra(nl, flat, [&](std::uint8_t, std::uint16_t edrv, std::uint8_t einv) {
+    for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t einv) {
       if (n >= 1 + kMaxSharedExtra) {
         return;
       }
-      if (edrv >= kMaxGates || !nl.gates[edrv].live) {
+      if (edrv >= slot_count(nl) || !nl.slots[edrv].live) {
         return;
       }
       span[n++] = polar(cur[edrv], einv);
@@ -243,10 +301,10 @@ inline void timing_resolve_input(const Netlist &nl, std::uint16_t slot, std::uin
     out = gate_read(sunk);
     return;
   }
-  const std::uint16_t drv = g.drivers[input];
+  const Slot drv = g.drivers[input];
   if (drv != kNoDriver) {
     LogicValue sunk = LogicValue::kHighZ;
-    if (drv < kMaxGates && nl.gates[drv].live) {
+    if (drv < slot_count(nl) && nl.slots[drv].live) {
       if (!resolve_net(&cur[drv], 1, sunk)) {
         out = LogicValue::kUnknown; // unreachable: single live driver
         return;
@@ -302,11 +360,16 @@ inline void timing_resolve_input(const Netlist &nl, std::uint16_t slot, std::uin
  *
  * @param[out] nl Netlist to settle (topology recompiled when dirty).
  * @param[in] block_inputs Block input values in interface order.
- * @param[out] scratch Scratch receiving `blk`/`cur` (sequential `cur` preserved).
+ * @param[out] scratch Scratch receiving `blk`/`cur` (sequential `cur` preserved;
+ *            pool vectors grown to the pool size first, so adapters may
+ *            preload sequential `cur` only after sizing via
+ *            `ensure_timing_scratch`).
  * @param[in] filter Topology edge set (`kAll` or `kCombOnly`).
  * @return kOk on success; kInvalidArgument on cycle/size/X/Z errors.
+ *
+ * (No noexcept: pool workspace and scratch growth may allocate.)
  */
-[[nodiscard]] inline core::Status timing_settle_initial(Netlist &nl, std::span<const LogicValue> block_inputs, TimingScratch &scratch, EdgeFilter filter) noexcept {
+[[nodiscard]] inline core::Status timing_settle_initial(Netlist &nl, std::span<const LogicValue> block_inputs, TimingScratch &scratch, EdgeFilter filter) {
   core::Status st = topo::rebuild(nl, filter);
   if (!st.ok()) {
     return st;
@@ -314,14 +377,15 @@ inline void timing_resolve_input(const Netlist &nl, std::uint16_t slot, std::uin
   // Single dangling-idle prelude (BlockInterface seam): zero, consume
   // leaders, terminate pulls/ignores, fan out ties. The wheel holds no
   // twin — parity with `solve()` holds by construction.
-  st = fill_resolved(nl, block_inputs, scratch.blk.data());
+  ensure_timing_scratch(scratch, slot_count(nl));
+  st = fill_resolved(nl, block_inputs, std::span<LogicValue>(scratch.blk.data(), scratch.blk.size()));
   if (!st.ok()) {
     return st;
   }
   LogicValue ins[kMaxInputs];
-  for (std::uint16_t oi = 0; oi < nl.topo_size; ++oi) {
-    const std::uint16_t s = nl.topo_order[oi];
-    const Gate &g = nl.gates[s];
+  for (std::size_t oi = 0; oi < nl.topo_order.size(); ++oi) {
+    const Slot s = nl.topo_order[oi];
+    const Gate &g = nl.slots[s];
     if (is_sequential_kind(g.kind)) {
       continue;
     }
@@ -346,7 +410,7 @@ namespace timing_detail {
  * (research D4): the second insert is silent. Insert beyond the
  * budget refuses loudly (research D9).
  */
-[[nodiscard]] inline core::Status schedule_at(TimingScratch &scratch, std::uint64_t t, std::uint16_t slot, bool force, LogicValue val) noexcept {
+[[nodiscard]] inline core::Status schedule_at(TimingScratch &scratch, std::uint64_t t, Slot slot, bool force, LogicValue val) noexcept {
   for (std::size_t i = 0; i < scratch.n_pending; ++i) {
     if (scratch.pending_t[i] == t && scratch.pending_s[i] == slot) {
       return core::Status::success();
@@ -377,9 +441,9 @@ namespace timing_detail {
 /**
  * @brief Record one consumer's recompute after its driver's change.
  */
-[[nodiscard]] inline core::Status schedule_consumers(const Netlist &nl, TimingScratch &scratch, const std::uint16_t *head, std::size_t key, std::uint64_t now) noexcept {
-  for (std::uint16_t e = head[key]; e != kNoDriver; e = scratch.sink_next[e]) {
-    const std::uint16_t c = scratch.sink_slot[e];
+[[nodiscard]] inline core::Status schedule_consumers(const Netlist &nl, TimingScratch &scratch, const Slot *head, std::size_t key, std::uint64_t now) noexcept {
+  for (Slot e = head[key]; e != kNoDriver; e = scratch.sink_next[e]) {
+    const Slot c = scratch.sink_slot[e];
     const std::uint64_t delay = timing_gate_delay(nl, c);
     std::uint64_t at = 0;
     if (!checked_fire_at(now, delay, at)) {
@@ -426,49 +490,55 @@ namespace timing_detail {
  *
  * @param[in] nl Netlist to observe (read-only; never mutated).
  * @param[out] scratch Working state receiving `out_head`/`in_head`/
- *            `sink_next`/`sink_slot`/`sink_input`/`n_sink` (pending
- *            schedule, `cur`, and `blk` untouched).
+ *            `sink_next`/`sink_slot`/`sink_input`/`n_sink` (pool vectors
+ *            grown to the pool size first; pending schedule, `cur`, and
+ *            `blk` untouched).
+ *
+ * (No noexcept: scratch growth may allocate.)
  */
-inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) noexcept {
+inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) {
+  const std::size_t n = slot_count(nl);
+  const std::size_t nflat = n * kMaxInputs;
+  ensure_timing_scratch(scratch, n);
   scratch.n_sink = 0;
 
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+  for (Slot s = 0; s < n; ++s) {
     scratch.out_head[s] = kNoDriver;
   }
-  for (std::size_t f = 0; f < kMaxGates * kMaxInputs; ++f) {
+  for (std::size_t f = 0; f < nflat; ++f) {
     scratch.in_head[f] = kNoDriver;
   }
   // Reverse sink map in slot order: every consumer reachable from
   // the net that changed (driver slot, shared extra, or dangling
   // leader flat). Static nets (ignored, pulled, unmarked-shared
   // empties) never change and take no entry.
-  for (std::uint16_t c = 0; c < kMaxGates; ++c) {
-    const Gate &g = nl.gates[c];
+  for (Slot c = 0; c < n; ++c) {
+    const Gate &g = nl.slots[c];
     if (!g.live) {
       continue;
     }
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::size_t flat = static_cast<std::size_t>(c) * kMaxInputs + static_cast<std::size_t>(i);
-      const std::uint16_t drv = g.drivers[i];
+      const std::size_t flat = tie_flat(c, i);
+      const Slot drv = g.drivers[i];
       bool dynamic = false;
       if (drv != kNoDriver) {
-        if (drv < kMaxGates && nl.gates[drv].live && scratch.n_sink < kMaxGates * kMaxInputs) {
+        if (drv < n && nl.slots[drv].live && scratch.n_sink < nflat) {
           const std::size_t e = scratch.n_sink++;
           scratch.sink_slot[e] = c;
           scratch.sink_input[e] = i;
           scratch.sink_next[e] = scratch.out_head[drv];
-          scratch.out_head[drv] = static_cast<std::uint16_t>(e);
+          scratch.out_head[drv] = static_cast<Slot>(e);
         }
         dynamic = true;
       }
       if (is_shared_flat(nl, flat)) {
-        for_each_extra(nl, flat, [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
-          if (edrv < kMaxGates && nl.gates[edrv].live && scratch.n_sink < kMaxGates * kMaxInputs) {
+        for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t) {
+          if (edrv < n && nl.slots[edrv].live && scratch.n_sink < nflat) {
             const std::size_t e = scratch.n_sink++;
             scratch.sink_slot[e] = c;
             scratch.sink_input[e] = i;
             scratch.sink_next[e] = scratch.out_head[edrv];
-            scratch.out_head[edrv] = static_cast<std::uint16_t>(e);
+            scratch.out_head[edrv] = static_cast<Slot>(e);
           }
         });
         dynamic = true;
@@ -476,12 +546,12 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
       if (!dynamic && drv == kNoDriver && (g.ignored_mask & static_cast<std::uint8_t>(1u << i)) == 0 &&
           !is_pulled_flat(nl, flat)) {
         const std::size_t leader = tie_leader_flat(nl, flat);
-        if (scratch.n_sink < kMaxGates * kMaxInputs) {
+        if (scratch.n_sink < nflat) {
           const std::size_t e = scratch.n_sink++;
           scratch.sink_slot[e] = c;
           scratch.sink_input[e] = i;
           scratch.sink_next[e] = scratch.in_head[leader];
-          scratch.in_head[leader] = static_cast<std::uint16_t>(e);
+          scratch.in_head[leader] = static_cast<Slot>(e);
         }
       }
     }
@@ -516,20 +586,28 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
  * @param[in] seeds Seed span (slot order within each fire time).
  * @param[out] trace Filled trace (cleared on refusal).
  * @param[in,out] scratch Working state with prebuilt sink maps
- *            (pending schedule reset here; maps reused untouched).
+ *            (pending schedule reset here; maps reused untouched;
+ *            pool vectors grown to the pool size first, preserving
+ *            map contents).
  * @param[in] recompute_latches True in step windows: DLATCH/SRLATCH
  *            outputs recompute mid-window at their response delay;
  *            false in solve/truth windows (sequential gates are
  *            constants there, mirroring zero-delay `solve`).
- * @return kOk with a drained trace; kInternal on cap/overflow.
+ * @return kOk with a drained trace; kInternal on cap/overflow;
+ *         kInvalidArgument on a seed naming an out-of-pool slot
+ *         (block seeds: out-of-range input).
+ *
+ * (No noexcept: scratch growth may allocate.)
  */
-[[nodiscard]] inline core::Status run_timing_window_inner(const Netlist &nl, std::span<const TimingSeed> seeds, TimingTrace &trace, TimingScratch &scratch, bool recompute_latches) noexcept {
+[[nodiscard]] inline core::Status run_timing_window_inner(const Netlist &nl, std::span<const TimingSeed> seeds, TimingTrace &trace, TimingScratch &scratch, bool recompute_latches) {
+  const std::size_t n = slot_count(nl);
+  ensure_timing_scratch(scratch, n);
   trace.n_events = 0;
   trace.drain_ps = 0;
   trace.unit_ps = kTimingUnitPs;
   trace.n_annotated = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && nl.gates[s].propagation_delay_ps != 0) {
+  for (Slot s = 0; s < n; ++s) {
+    if (nl.slots[s].live && nl.slots[s].propagation_delay_ps != 0) {
       ++trace.n_annotated;
     }
   }
@@ -537,6 +615,9 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
   // Seeds in span order (callers pass slot order): block nets apply
   // at 0, flop forces schedule at their fire time.
   for (const TimingSeed &seed : seeds) {
+    if (seed.slot >= n) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
     if (seed.is_flop) {
       core::Status st = timing_detail::schedule_at(scratch, seed.fire_ps, seed.slot, true, seed.new_value);
       if (!st.ok()) {
@@ -544,7 +625,10 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
       }
       continue;
     }
-    const std::size_t leader = tie_leader_flat(nl, static_cast<std::size_t>(seed.slot) * kMaxInputs + seed.input);
+    if (seed.input >= kMaxInputs) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    const std::size_t leader = tie_leader_flat(nl, tie_flat(seed.slot, seed.input));
     if (scratch.blk[leader] == seed.new_value) {
       continue;
     }
@@ -560,8 +644,8 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
       return st;
     }
     scratch.blk[leader] = seed.new_value;
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
+    for (Slot s = 0; s < n; ++s) {
+      const Gate &g = nl.slots[s];
       if (!g.live) {
         continue;
       }
@@ -569,7 +653,7 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
         if (g.drivers[i] != kNoDriver) {
           continue;
         }
-        const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
+        const std::size_t flat = tie_flat(s, i);
         if (tie_leader_flat(nl, flat) == leader) {
           scratch.blk[flat] = seed.new_value;
         }
@@ -591,7 +675,7 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
       }
     }
     const std::uint64_t now = scratch.pending_t[best];
-    const std::uint16_t slot = scratch.pending_s[best];
+    const Slot slot = scratch.pending_s[best];
     const bool force = scratch.pending_force[best] != 0;
     const LogicValue forced = scratch.pending_val[best];
     scratch.pending_t[best] = scratch.pending_t[scratch.n_pending - 1];
@@ -599,7 +683,7 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
     scratch.pending_force[best] = scratch.pending_force[scratch.n_pending - 1];
     scratch.pending_val[best] = scratch.pending_val[scratch.n_pending - 1];
     --scratch.n_pending;
-    if (!nl.gates[slot].live) {
+    if (slot >= n || !nl.slots[slot].live) {
       continue;
     }
     if (force) {
@@ -626,8 +710,8 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
         return st;
       }
       scratch.cur[slot] = forced;
-      for (std::uint16_t e = scratch.out_head[slot]; e != kNoDriver; e = scratch.sink_next[e]) {
-        const std::uint16_t c = scratch.sink_slot[e];
+      for (Slot e = scratch.out_head[slot]; e != kNoDriver; e = scratch.sink_next[e]) {
+        const Slot c = scratch.sink_slot[e];
         const std::uint64_t cdelay = timing_gate_delay(nl, c);
         std::uint64_t cat = 0;
         if (!timing_detail::checked_fire_at(now, cdelay, cat)) {
@@ -640,7 +724,7 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
       }
       continue;
     }
-    const Gate &g = nl.gates[slot];
+    const Gate &g = nl.slots[slot];
     const bool is_latch = (g.kind == GateKind::kDlatch || g.kind == GateKind::kSrlatch);
     if (is_sequential_kind(g.kind) && !(recompute_latches && is_latch)) {
       continue;
@@ -689,13 +773,17 @@ inline void timing_build_sink_maps(const Netlist &nl, TimingScratch &scratch) no
  * @param[in] nl Netlist to observe (read-only; never mutated).
  * @param[in] seeds Seed span (slot order within each fire time).
  * @param[out] trace Filled trace (cleared on refusal).
- * @param[in,out] scratch Working state (sink maps built here).
+ * @param[in,out] scratch Working state (sink maps built here, pool
+ *            vectors grown to the pool size first).
  * @param[in] recompute_latches True in step windows, false in
  *            solve/truth windows (see `run_timing_window_inner`).
- * @return kOk with a drained trace; kInternal on cap/overflow.
+ * @return kOk with a drained trace; kInternal on cap/overflow;
+ *         kInvalidArgument on a seed naming an out-of-pool slot
+ *         (block seeds: out-of-range input).
+ *
+ * (No noexcept: sink-map and scratch growth may allocate.)
  */
-[[nodiscard]] inline core::Status run_timing_window(const Netlist &nl, std::span<const TimingSeed> seeds, TimingTrace &trace, TimingScratch &scratch,
-                                                    bool recompute_latches) noexcept {
+[[nodiscard]] inline core::Status run_timing_window(const Netlist &nl, std::span<const TimingSeed> seeds, TimingTrace &trace, TimingScratch &scratch, bool recompute_latches) {
   timing_build_sink_maps(nl, scratch);
   const core::Status st = run_timing_window_inner(nl, seeds, trace, scratch, recompute_latches);
   if (!st.ok()) {

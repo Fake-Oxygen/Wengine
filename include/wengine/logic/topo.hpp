@@ -16,6 +16,11 @@
  * outputs break loops, so feedback through flops validates while pure
  * combinational cycles still fail loudly).
  *
+ * Dynamic pool: the Kahn core and all four entries work over Netlist
+ * with pool-owned workspace scratch (indeg/queue/order/levels/seen);
+ * every bound is the pool's current size (slot_count), never kMaxGates.
+ * The workspace-backed entries grow scratch on demand (amortized).
+ *
  * Dependency rules (docs/logic.md section 4): header-only,
  * allocation-free, exception-free; depends on types.hpp, shared_net.hpp
  * (shared-extra driver-edge scan), tie_set.hpp (flat indexing — tie_set
@@ -34,6 +39,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <vector>
 
 namespace wengine::logic {
 
@@ -57,20 +64,20 @@ namespace detail {
 // a primary). Returns 0xFF when any extra driver is dangling (dead or
 // out of range) so the caller fails loudly; unmarked netlists hold no
 // extras and read exactly today's counts.
-[[nodiscard]] inline std::uint8_t extra_edge_count(const Netlist &nl, const Gate &g, std::uint16_t s, bool comb_only) noexcept {
+[[nodiscard]] inline std::uint8_t extra_edge_count(const Netlist &nl, const Gate &g, Slot s, bool comb_only) noexcept {
   std::uint8_t n = 0;
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     const std::size_t flat = tie_flat(s, i);
     bool dangling = false;
-    for_each_extra(nl, flat, [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
+    for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t) {
       if (dangling) {
         return;
       }
-      if (edrv >= kMaxGates || !nl.gates[edrv].live) {
+      if (edrv >= slot_count(nl) || !nl.slots[edrv].live) {
         dangling = true; // dangling extra: loud, never partial
         return;
       }
-      if (!comb_only || !is_sequential_kind(nl.gates[edrv].kind)) {
+      if (!comb_only || !is_sequential_kind(nl.slots[edrv].kind)) {
         ++n;
       }
     });
@@ -87,10 +94,10 @@ namespace detail {
 // comb_only=true counts only non-sequential drivers and returns 0xFF on
 // any dangling primary/extra so the caller fails loudly. Unmarked
 // netlists hold no extras and read exactly today's counts.
-[[nodiscard]] inline std::uint8_t gate_indeg(const Netlist &nl, const Gate &g, std::uint16_t s, bool comb_only) noexcept {
+[[nodiscard]] inline std::uint8_t gate_indeg(const Netlist &nl, const Gate &g, Slot s, bool comb_only) noexcept {
   std::uint8_t d = 0;
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
-    const std::uint16_t drv = g.drivers[i];
+    const Slot drv = g.drivers[i];
     if (drv == kNoDriver) {
       continue;
     }
@@ -98,7 +105,7 @@ namespace detail {
       ++d;
       continue;
     }
-    if (drv >= kMaxGates || !nl.gates[drv].live) {
+    if (drv >= slot_count(nl) || !nl.slots[drv].live) {
       // Dangling-driver defect marker: 0xFF is unreachable for
       // legitimate counts (at most input_count * 4 = 32 edges per
       // gate), so only truly dangling graphs trip the caller check.
@@ -106,7 +113,7 @@ namespace detail {
       // fully-wired 8-input gates, which are legal — not dangling.)
       return 0xFF;
     }
-    if (!is_sequential_kind(nl.gates[drv].kind)) {
+    if (!is_sequential_kind(nl.slots[drv].kind)) {
       ++d;
     }
   }
@@ -122,27 +129,27 @@ namespace detail {
 // (011) Max driver level + 1 over primary + extra edges: extra drivers
 // order the sink the same way primaries do. level_out may be nullptr
 // (the stepper path skips levels); out-of-range drivers read 0.
-[[nodiscard]] inline std::uint16_t emit_depth(const Netlist &nl, std::uint16_t cur, const std::uint16_t *level_out) noexcept {
-  std::uint16_t depth = 0;
-  const Gate &cg = nl.gates[cur];
+[[nodiscard]] inline Slot emit_depth(const Netlist &nl, Slot cur, const Slot *level_out) noexcept {
+  Slot depth = 0;
+  const Gate &cg = nl.slots[cur];
   for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-    const std::uint16_t drv = cg.drivers[i];
-    if (drv == kNoDriver || drv >= kMaxGates) {
+    const Slot drv = cg.drivers[i];
+    if (drv == kNoDriver || drv >= slot_count(nl)) {
       continue;
     }
-    const std::uint16_t base = (level_out != nullptr) ? level_out[drv] : 0;
-    const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
+    const Slot base = (level_out != nullptr) ? level_out[drv] : 0;
+    const Slot cand = static_cast<Slot>(base + 1);
     if (cand > depth) {
       depth = cand;
     }
   }
   for (std::uint8_t i = 0; i < cg.input_count; ++i) {
-    for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
-      if (edrv >= kMaxGates) {
+    for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, Slot edrv, std::uint8_t) {
+      if (edrv >= slot_count(nl)) {
         return;
       }
-      const std::uint16_t base = (level_out != nullptr) ? level_out[edrv] : 0;
-      const std::uint16_t cand = static_cast<std::uint16_t>(base + 1);
+      const Slot base = (level_out != nullptr) ? level_out[edrv] : 0;
+      const Slot cand = static_cast<Slot>(base + 1);
       if (cand > depth) {
         depth = cand;
       }
@@ -156,10 +163,10 @@ namespace detail {
 // for_each_extra walk (no separate uses_extra pre-scan); extra edges
 // drain symmetrically with primaries. kCombOnly skips sequential sinks
 // (seq edges cost 0 and seq gates never pop).
-inline void drain_successors(const Netlist &nl, EdgeFilter filter, std::uint16_t cur, std::uint8_t *indeg, std::uint16_t *queue, std::size_t &tail) noexcept {
+inline void drain_successors(const Netlist &nl, EdgeFilter filter, Slot cur, std::uint8_t *indeg, Slot *queue, std::size_t &tail) noexcept {
   const bool skip_seq = (filter == EdgeFilter::kCombOnly);
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live || indeg[s] == 0) {
       continue;
     }
@@ -178,7 +185,7 @@ inline void drain_successors(const Netlist &nl, EdgeFilter filter, std::uint16_t
     if (indeg[s] != 0) {
       bool drained = false;
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, std::uint16_t edrv, std::uint8_t) {
+        for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, Slot edrv, std::uint8_t) {
           if (edrv == cur) {
             --indeg[s];
             drained = true;
@@ -195,7 +202,7 @@ inline void drain_successors(const Netlist &nl, EdgeFilter filter, std::uint16_t
 // (011) True when cur drives s through any extra attachment (seam
 // adapter: single-input predicate is shared_uses_driver_flat).
 // Retained for detail-level callers; the Kahn drains below use the
-// single-walk for_each form directly.
+// single-walk for_each_extra form directly.
 
 /**
  * @brief Combinational indegree over comb-only edges: flop outputs read
@@ -209,9 +216,9 @@ inline void drain_successors(const Netlist &nl, EdgeFilter filter, std::uint16_t
  */
 inline void count_comb_indeg(const Netlist &nl, std::uint8_t *indeg, std::size_t &n_comb) noexcept {
   n_comb = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     indeg[s] = 0;
-    const Gate &g = nl.gates[s];
+    const Gate &g = nl.slots[s];
     if (!g.live || is_sequential_kind(g.kind)) {
       continue;
     }
@@ -246,16 +253,22 @@ enum class SeqOut : std::uint8_t {
  * @param[out] level_out Per-slot levels (may be nullptr to skip).
  * @param[out] n_out Number of emitted slots.
  * @param[in] seq_out How sequential gates appear in the output.
+ * @param[in] indeg Caller-owned scratch (kCap indegrees; zeroed here).
+ * @param[in] queue Caller-owned scratch (kCap slots: FIFO work queue).
  * @return True when every gate emitted; false on any defect (dangling
- *         driver, combinational cycle).
+ *         driver, combinational cycle) or undersized scratch.
  */
-inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order_out,
-                      std::uint16_t *level_out, std::size_t &n_out, SeqOut seq_out) noexcept {
+inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, Slot *order_out, Slot *level_out, std::size_t &n_out, SeqOut seq_out, std::span<std::uint8_t> indeg, std::span<Slot> queue) noexcept {
+  if (indeg.size() < slot_count(nl) || queue.size() < slot_count(nl)) {
+    return false;
+  }
   if (filter == EdgeFilter::kAll) {
-    std::uint8_t indeg[kMaxGates] = {};
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      indeg[s] = 0;
+    }
     std::size_t live = 0;
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      const Gate &g = nl.slots[s];
       if (!g.live) {
         continue;
       }
@@ -265,23 +278,22 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
         level_out[s] = 0;
       }
     }
-    std::uint16_t queue[kMaxGates];
     std::size_t head = 0;
     std::size_t tail = 0;
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      if (nl.gates[s].live && indeg[s] == 0) {
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      if (nl.slots[s].live && indeg[s] == 0) {
         queue[tail++] = s;
       }
     }
     std::size_t n_emit = 0;
     while (head < tail) {
-      const std::uint16_t cur = queue[head++];
-      const std::uint16_t depth = emit_depth(nl, cur, level_out);
+      const Slot cur = queue[head++];
+      const Slot depth = emit_depth(nl, cur, level_out);
       if (level_out != nullptr) {
         level_out[cur] = depth;
       }
       order_out[n_emit++] = cur;
-      drain_successors(nl, EdgeFilter::kAll, cur, indeg, queue, tail);
+      drain_successors(nl, EdgeFilter::kAll, cur, indeg.data(), queue.data(), tail);
     }
     n_out = n_emit;
     return n_emit == live;
@@ -289,18 +301,20 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
   // kCombOnly: sequential gates are always-ready roots (level 0). Only
   // combinational pops decrement successors — seq edges cost 0 and seq
   // gates never pop, so mixed fan-in (seq + comb) cannot queue early.
-  std::uint8_t indeg[kMaxGates] = {};
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    indeg[s] = 0;
+  }
   std::size_t n_comb = 0;
-  count_comb_indeg(nl, indeg, n_comb);
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && !is_sequential_kind(nl.gates[s].kind) && indeg[s] == 0xFF) {
+  count_comb_indeg(nl, indeg.data(), n_comb);
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (nl.slots[s].live && !is_sequential_kind(nl.slots[s].kind) && indeg[s] == 0xFF) {
       return false; // dangling driver defect: loud, never partial
     }
   }
   std::size_t n_emit = 0;
   if (seq_out == SeqOut::kPrependSeq) {
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      const Gate &g = nl.slots[s];
       if (!g.live || !is_sequential_kind(g.kind)) {
         continue;
       }
@@ -310,17 +324,16 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
       }
     }
   } else if (level_out != nullptr) {
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      if (nl.gates[s].live && is_sequential_kind(nl.gates[s].kind)) {
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      if (nl.slots[s].live && is_sequential_kind(nl.slots[s].kind)) {
         level_out[s] = 0;
       }
     }
   }
-  std::uint16_t queue[kMaxGates];
   std::size_t head = 0;
   std::size_t tail = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live || is_sequential_kind(g.kind)) {
       continue;
     }
@@ -330,20 +343,53 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
   }
   std::size_t n_comb_emit = 0;
   while (head < tail) {
-    const std::uint16_t cur = queue[head++];
-    const std::uint16_t depth = emit_depth(nl, cur, level_out);
+    const Slot cur = queue[head++];
+    const Slot depth = emit_depth(nl, cur, level_out);
     if (level_out != nullptr) {
       level_out[cur] = depth;
     }
     order_out[n_emit++] = cur;
     ++n_comb_emit;
-    drain_successors(nl, EdgeFilter::kCombOnly, cur, indeg, queue, tail);
+    drain_successors(nl, EdgeFilter::kCombOnly, cur, indeg.data(), queue.data(), tail);
   }
   n_out = n_emit;
   return n_comb_emit == n_comb;
 }
 
 } // namespace detail
+
+/**
+ * @brief Kahn scratch bundle: emission order, levels, indegrees, and
+ *        the FIFO work queue.
+ *
+ * One bundle serves rebuild, validate, and (indeg/queue only)
+ * compile_comb_order; reaches takes its own seen/stack pair (different
+ * shape). Sized by the pool (see ensure_workspace); validated loudly
+ * before any work.
+ *
+ */
+struct TopoScratch {
+  /** @brief Emission-order slots (pool-sized). */
+  std::span<Slot> order;
+  /** @brief Per-slot levels (pool-sized, zeroed by the caller). */
+  std::span<Slot> levels;
+  /** @brief Per-slot indegrees (pool-sized). */
+  std::span<std::uint8_t> indeg;
+  /** @brief FIFO work queue (pool-sized). */
+  std::span<Slot> queue;
+  /**
+   * @brief Loud size validation before any work (engine-seam D3 rule).
+   *
+   * @param[in] n Addressable slot count the spans must cover.
+   * @return kOk when every span holds at least `n` entries.
+   */
+  [[nodiscard]] core::Status validate(std::size_t n) const noexcept {
+    if (order.size() < n || levels.size() < n || indeg.size() < n || queue.size() < n) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    return core::Status::success();
+  }
+};
 
 /**
  * @brief Compile (or reuse) the deterministic level order.
@@ -355,54 +401,75 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
  *
  * @param[out] nl Netlist receiving topo_order/level/size/dirty.
  * @param[in] filter Edge set to count.
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success; kInvalidArgument on any defect (dangling
- *         driver, combinational cycle). The kAll path zeroes topo_size
- *         and keeps dirty on failure; kCombOnly leaves dirty/size
- *         untouched on failure.
+ *         driver, combinational cycle) or undersized scratch. The kAll
+ *         path clears the order and keeps dirty on failure; kCombOnly
+ *         leaves dirty/size untouched on failure.
  */
-[[nodiscard]] inline core::Status rebuild(Netlist &nl, EdgeFilter filter) noexcept {
+[[nodiscard]] inline core::Status rebuild(Netlist &nl, EdgeFilter filter, const TopoScratch &ts) noexcept {
+  if (!ts.validate(slot_count(nl)).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  for (std::size_t i = 0; i < slot_count(nl); ++i) {
+    ts.levels[i] = 0;
+  }
   if (filter == EdgeFilter::kAll) {
-    if (!nl.dirty && nl.topo_size == nl.live_count) {
+    if (!nl.dirty && nl.topo_order.size() == nl.live_count) {
       return core::Status::success();
     }
-    std::uint16_t order[kMaxGates];
-    std::uint16_t levels[kMaxGates] = {};
     std::size_t n_out = 0;
-    if (!detail::kahn_pure(nl, filter, order, levels, n_out, detail::SeqOut::kNone)) {
-      nl.topo_size = 0;
+    if (!detail::kahn_pure(nl, filter, ts.order.data(), ts.levels.data(), n_out, detail::SeqOut::kNone,
+                                 ts.indeg, ts.queue)) {
+      nl.topo_order.clear();
       nl.dirty = true;
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
-    for (std::size_t i = 0; i < n_out; ++i) {
-      nl.topo_order[i] = order[i];
-    }
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      if (nl.gates[s].live) {
-        nl.topo_level[s] = levels[s];
+    nl.topo_order.assign(ts.order.data(), ts.order.data() + n_out);
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      if (nl.slots[s].live) {
+        nl.topo_level[s] = ts.levels[s];
       }
     }
-    nl.topo_size = static_cast<std::uint16_t>(n_out);
     nl.dirty = false;
     return core::Status::success();
   }
   // kCombOnly: always recompiles; leaves dirty/size untouched on failure.
-  std::uint16_t order[kMaxGates];
-  std::uint16_t levels[kMaxGates] = {};
   std::size_t n_out = 0;
-  if (!detail::kahn_pure(nl, filter, order, levels, n_out, detail::SeqOut::kPrependSeq)) {
+  if (!detail::kahn_pure(nl, filter, ts.order.data(), ts.levels.data(), n_out, detail::SeqOut::kPrependSeq,
+                               ts.indeg, ts.queue)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  for (std::size_t i = 0; i < n_out; ++i) {
-    nl.topo_order[i] = order[i];
-  }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live) {
-      nl.topo_level[s] = levels[s];
+  nl.topo_order.assign(ts.order.data(), ts.order.data() + n_out);
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (nl.slots[s].live) {
+      nl.topo_level[s] = ts.levels[s];
     }
   }
-  nl.topo_size = static_cast<std::uint16_t>(n_out);
   nl.dirty = false;
   return core::Status::success();
+}
+
+/**
+ * @brief Compile (or reuse) the deterministic level order.
+ *
+ * Workspace-backed entry: grows the pool's Kahn scratch to the pool
+ * size, then runs the core above. No caller scratch, no fixed stack.
+ * (No noexcept: workspace growth may allocate.)
+ *
+ * @param[out] nl Netlist receiving topo_order/level/dirty.
+ * @param[in] filter Edge set to count.
+ * @return kOk on success; kInvalidArgument on any defect (dangling
+ *         driver, combinational cycle). The kAll path clears the order
+ *         and keeps dirty on failure; kCombOnly leaves dirty untouched
+ *         on failure.
+ */
+[[nodiscard]] inline core::Status rebuild(Netlist &nl, EdgeFilter filter) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  const TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
+                       std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
+  return rebuild(nl, filter, ts);
 }
 
 /**
@@ -415,24 +482,71 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
  *
  * @param[in] nl Netlist to check.
  * @param[in] filter Edge set to count.
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk when the netlist compiles; kInvalidArgument on any defect
- *         (dangling driver, combinational cycle).
+ *         (dangling driver, combinational cycle) or undersized scratch.
  */
-[[nodiscard]] inline core::Status validate(const Netlist &nl, EdgeFilter filter) noexcept {
-  std::uint16_t order[kMaxGates];
-  std::uint16_t levels[kMaxGates] = {};
+[[nodiscard]] inline core::Status validate(const Netlist &nl, EdgeFilter filter, const TopoScratch &ts) noexcept {
+  if (!ts.validate(slot_count(nl)).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  for (std::size_t i = 0; i < slot_count(nl); ++i) {
+    ts.levels[i] = 0;
+  }
   std::size_t n_out = 0;
   const detail::SeqOut mode =
       (filter == EdgeFilter::kAll) ? detail::SeqOut::kNone : detail::SeqOut::kPrependSeq;
-  if (!detail::kahn_pure(nl, filter, order, levels, n_out, mode)) {
+  if (!detail::kahn_pure(nl, filter, ts.order.data(), ts.levels.data(), n_out, mode, ts.indeg, ts.queue)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   return core::Status::success();
 }
 
 /**
- * @brief Reachability over the driver graph: iterative DFS on a fixed
- *        stack (no allocation).
+ * @brief Pure verdict over the same Kahn core.
+ *
+ * Workspace-backed entry: grows the pool's Kahn scratch to the pool
+ * size, then runs the core above. (No noexcept: workspace growth may
+ * allocate.)
+ *
+ * @param[in,out] nl Netlist to check (workspace grows; topology untouched).
+ * @param[in] filter Edge set to count.
+ * @return kOk when the netlist compiles; kInvalidArgument on any defect
+ *         (dangling driver, combinational cycle).
+ */
+[[nodiscard]] inline core::Status validate(Netlist &nl, EdgeFilter filter) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  const TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
+                       std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
+  return validate(nl, filter, ts);
+}
+
+/**
+ * @brief Pure verdict over the same Kahn core (const overload).
+ *
+ * For read-only nets: builds thread-local-sized scratch on the heap
+ * instead of touching the pool workspace, so const callers (config
+ * validation, export previews) keep working. Prefer the mutable entry
+ * in hot paths (no allocation once sized).
+ *
+ * @param[in] nl Netlist to check.
+ * @param[in] filter Edge set to count.
+ * @return kOk when the netlist compiles; kInvalidArgument on any defect
+ *         (dangling driver, combinational cycle).
+ */
+[[nodiscard]] inline core::Status validate(const Netlist &nl, EdgeFilter filter) {
+  const std::size_t n = slot_count(nl);
+  std::vector<Slot> order(n), levels(n), queue(n);
+  std::vector<std::uint8_t> indeg(n);
+  const TopoScratch ts{std::span<Slot>(order.data(), n), std::span<Slot>(levels.data(), n),
+                       std::span<std::uint8_t>(indeg.data(), n), std::span<Slot>(queue.data(), n)};
+  return validate(nl, filter, ts);
+}
+
+/**
+ * @brief Reachability over the driver graph: iterative DFS on caller
+ *        scratch (no allocation).
  *
  * kCombOnly excludes edges into sequential-gate inputs from the edge
  * set (flop Q outputs break loops); kAll counts every edge.
@@ -441,23 +555,29 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
  * @param[in] from Source slot.
  * @param[in] to Destination slot.
  * @param[in] filter Edge set to follow.
+ * @param[in] seen Caller-owned scratch (kCap visited flags, zeroed here).
+ * @param[in] stack Caller-owned scratch (kCap slots: DFS stack).
  * @return True when from can reach to (including from == to).
  */
-[[nodiscard]] inline bool reaches(const Netlist &nl, std::uint16_t from, std::uint16_t to,
-                                  EdgeFilter filter) noexcept {
+[[nodiscard]] inline bool reaches(const Netlist &nl, Slot from, Slot to, EdgeFilter filter,
+                                  std::span<std::uint8_t> seen, std::span<Slot> stack) noexcept {
   if (from == to) {
     return true;
   }
+  if (seen.size() < slot_count(nl) || stack.size() < slot_count(nl)) {
+    return false;
+  }
+  for (std::size_t i = 0; i < slot_count(nl); ++i) {
+    seen[i] = false;
+  }
   const bool skip_seq = (filter == EdgeFilter::kCombOnly);
-  bool seen[kMaxGates] = {};
-  std::uint16_t stack[kMaxGates];
   std::size_t top = 0;
   stack[top++] = from;
   seen[from] = true;
   while (top > 0) {
-    const std::uint16_t cur = stack[--top];
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const Gate &g = nl.gates[s];
+    const Slot cur = stack[--top];
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      const Gate &g = nl.slots[s];
       if (!g.live) {
         continue;
       }
@@ -496,6 +616,29 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
 }
 
 /**
+ * @brief Reachability over the driver graph.
+ *
+ * Workspace-backed entry: grows the pool's DFS scratch to the pool
+ * size, then runs the core above. (No noexcept: workspace growth may
+ * allocate.)
+ *
+ * @param[in,out] nl Netlist holding the driver graph (workspace grows).
+ * @param[in] from Source slot.
+ * @param[in] to Destination slot.
+ * @param[in] filter Edge set to follow.
+ * @return True when from can reach to (including from == to); false for
+ *         out-of-pool endpoints.
+ */
+[[nodiscard]] inline bool reaches(Netlist &nl, Slot from, Slot to, EdgeFilter filter) {
+  const std::size_t n = slot_count(nl);
+  if (from >= n || to >= n) {
+    return from == to;
+  }
+  ensure_workspace(nl, n);
+  return reaches(nl, from, to, filter, std::span<std::uint8_t>(nl.ws_seen.data(), n), std::span<Slot>(nl.ws_stack.data(), n));
+}
+
+/**
  * @brief Combinational-only level order for the stepper: Kahn over
  *        combinational edges only, same slot-order determinism as
  *        rebuild.
@@ -506,12 +649,35 @@ inline bool kahn_pure(const Netlist &nl, EdgeFilter filter, std::uint16_t *order
  * @param[in] nl Netlist to compile.
  * @param[out] order_out Emission-order combinational slots.
  * @param[out] n_out Number of emitted slots.
+ * @param[in] indeg Caller-owned scratch (kCap indegrees).
+ * @param[in] queue Caller-owned scratch (kCap slots: FIFO work queue).
+ * @return True on success; false on any combinational cycle or
+ *         dangling-driver defect (so stepping never evaluates a partial
+ *         order) or undersized scratch.
+ */
+[[nodiscard]] inline bool compile_comb_order(const Netlist &nl, Slot *order_out, std::size_t &n_out, std::span<std::uint8_t> indeg, std::span<Slot> queue) noexcept {
+  return detail::kahn_pure(nl, EdgeFilter::kCombOnly, order_out, nullptr, n_out, detail::SeqOut::kSkipSeq, indeg, queue);
+}
+
+/**
+ * @brief Combinational-only level order for the stepper.
+ *
+ * Workspace-backed entry: grows the pool's Kahn scratch to the pool
+ * size, then runs the core above. The caller-owned order buffer must
+ * hold at least pool-size slots. (No noexcept: workspace growth may
+ * allocate.)
+ *
+ * @param[in,out] nl Netlist to compile (workspace grows).
+ * @param[out] order_out Emission-order combinational slots.
+ * @param[out] n_out Number of emitted slots.
  * @return True on success; false on any combinational cycle or
  *         dangling-driver defect, so stepping never evaluates a partial
  *         order.
  */
-[[nodiscard]] inline bool compile_comb_order(const Netlist &nl, std::uint16_t *order_out, std::size_t &n_out) noexcept {
-  return detail::kahn_pure(nl, EdgeFilter::kCombOnly, order_out, nullptr, n_out, detail::SeqOut::kSkipSeq);
+[[nodiscard]] inline bool compile_comb_order(Netlist &nl, Slot *order_out, std::size_t &n_out) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  return compile_comb_order(nl, order_out, n_out, std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n));
 }
 
 } // namespace topo

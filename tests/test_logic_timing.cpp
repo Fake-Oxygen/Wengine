@@ -145,10 +145,10 @@ void test_pulse_unit_golden() {
 // arrival at t=2, chain arrival at t=17, pulse width 15 = 3 x 5.
 void test_pulse_annotated_golden() {
   HazardNet h = make_hazard();
-  h.nl.gates[h.n1].propagation_delay_ps = 5;
-  h.nl.gates[h.n2].propagation_delay_ps = 5;
-  h.nl.gates[h.n3].propagation_delay_ps = 5;
-  h.nl.gates[h.a].propagation_delay_ps = 2;
+  h.nl.slots[h.n1].propagation_delay_ps = 5;
+  h.nl.slots[h.n2].propagation_delay_ps = 5;
+  h.nl.slots[h.n3].propagation_delay_ps = 5;
+  h.nl.slots[h.a].propagation_delay_ps = 2;
   logic::TimingScratch scratch{};
   const std::vector<LogicValue> zero{logic::LogicValue::kLow, logic::LogicValue::kLow};
   assert(logic::timing_settle_initial(h.nl, zero, scratch, logic::EdgeFilter::kAll).ok());
@@ -177,15 +177,15 @@ void test_pulse_annotated_golden() {
 // timestamp separate the disciplines (spec FR-003).
 void test_transport_no_cancellation() {
   logic::Netlist nl;
-  const std::uint16_t b1 = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
-  const std::uint16_t b2 = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
-  const std::uint16_t g = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
+  const logic::Slot b1 = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
+  const logic::Slot b2 = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
+  const logic::Slot g = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
   assert(logic::wire_pins(nl, logic::PinRef{.slot = b1, .is_output = true}, logic::PinRef{.slot = b2}).ok());
   assert(logic::wire_pins(nl, logic::PinRef{.slot = b2, .is_output = true},
                           logic::PinRef{.slot = g, .is_output = false, .input = 1})
              .ok());
-  nl.gates[b1].propagation_delay_ps = 2;
-  nl.gates[g].propagation_delay_ps = 10;
+  nl.slots[b1].propagation_delay_ps = 2;
+  nl.slots[g].propagation_delay_ps = 10;
   // Block inputs in slot order: BUF1.1 (ord 0), G.1 (ord 1).
   logic::TimingScratch scratch{};
   const std::vector<LogicValue> zero{logic::LogicValue::kLow, logic::LogicValue::kLow};
@@ -212,8 +212,8 @@ void test_transport_no_cancellation() {
 // un-annotated; the header names the unit. Empty window drains 0ps.
 void test_unit_floor() {
   logic::Netlist nl;
-  const std::uint16_t n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
-  assert(nl.gates[n].propagation_delay_ps == 0);
+  const logic::Slot n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+  assert(nl.slots[n].propagation_delay_ps == 0);
   logic::TimingScratch scratch{};
   const std::vector<LogicValue> zero{logic::LogicValue::kLow};
   assert(logic::timing_settle_initial(nl, zero, scratch, logic::EdgeFilter::kAll).ok());
@@ -274,7 +274,7 @@ void test_same_instant_order_and_determinism() {
 // transients, never different endpoints).
 void test_wheel_end_state_parity() {
   HazardNet h = make_hazard();
-  h.nl.gates[h.n2].propagation_delay_ps = 7; // stagger: parity must hold regardless
+  h.nl.slots[h.n2].propagation_delay_ps = 7; // stagger: parity must hold regardless
   logic::TimingScratch scratch{};
   const std::vector<LogicValue> applied{logic::LogicValue::kHigh, logic::LogicValue::kHigh};
   const std::vector<LogicValue> zero{logic::LogicValue::kLow, logic::LogicValue::kLow};
@@ -432,10 +432,10 @@ void test_annotation_blindness() {
 // (never lags). DFF1 (cq=7) feeds NOT1: Q/NQ at t=7, ripple at t=8.
 void test_edge_flop_clock_to_q() {
   logic::Netlist nl;
-  const std::uint16_t d = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
-  const std::uint16_t n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+  const logic::Slot d = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
+  const logic::Slot n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
   assert(logic::wire_pins(nl, logic::PinRef{.slot = d, .is_output = true}, logic::PinRef{.slot = n}).ok());
-  nl.gates[d].propagation_delay_ps = 7;
+  nl.slots[d].propagation_delay_ps = 7;
   logic::TimingScratch scratch{};
   // Step-like pre-state: DFF1.D/DFF1.CLK block inputs Low, Q=0.
   const std::vector<LogicValue> zero{logic::LogicValue::kLow, logic::LogicValue::kLow};
@@ -460,15 +460,15 @@ void test_edge_flop_clock_to_q() {
 // state trajectory is the unchanged stepper's (pinned at CLI level).
 void test_d_arrival_race_offset() {
   logic::Netlist nl;
-  const std::uint16_t d1 = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
-  const std::uint16_t b = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
-  const std::uint16_t d2 = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
+  const logic::Slot d1 = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
+  const logic::Slot b = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
+  const logic::Slot d2 = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
   assert(logic::wire_pins(nl, logic::PinRef{.slot = d1, .is_output = true}, logic::PinRef{.slot = b}).ok());
   assert(logic::wire_pins(nl, logic::PinRef{.slot = b, .is_output = true},
                           logic::PinRef{.slot = d2, .is_output = false, .input = 0})
              .ok());
-  nl.gates[d1].propagation_delay_ps = 7;
-  nl.gates[b].propagation_delay_ps = 3;
+  nl.slots[d1].propagation_delay_ps = 7;
+  nl.slots[b].propagation_delay_ps = 3;
   logic::TimingScratch scratch{};
   // Block inputs: DFF1.D, DFF1.CLK, DFF2.CLK (DFF2.D is wired).
   const std::vector<LogicValue> zero{logic::LogicValue::kLow, logic::LogicValue::kLow, logic::LogicValue::kLow};
@@ -491,10 +491,10 @@ void test_d_arrival_race_offset() {
 void test_latch_response_delay() {
   auto build = []() {
     logic::Netlist nl;
-    const std::uint16_t l = logic::add_gate(nl, logic::GateKind::kDlatch, 2).value;
-    const std::uint16_t n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+    const logic::Slot l = logic::add_gate(nl, logic::GateKind::kDlatch, 2).value;
+    const logic::Slot n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
     assert(logic::wire_pins(nl, logic::PinRef{.slot = l, .is_output = true}, logic::PinRef{.slot = n}).ok());
-    nl.gates[l].propagation_delay_ps = 4;
+    nl.slots[l].propagation_delay_ps = 4;
     return std::pair<logic::Netlist, std::uint16_t>(std::move(nl), l);
   };
   // Transparent (EN=1): D 0->1 lands on Q at t=4, ripple at t=5.
@@ -628,16 +628,16 @@ void test_transient_and_unknown() {
 // pre-feature seq suites; the wheel never owns validation).
 void test_transient_sr_both_high() {
   logic::Netlist nl;
-  const std::uint16_t b1 = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
-  const std::uint16_t b2 = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
-  const std::uint16_t sr = logic::add_gate(nl, logic::GateKind::kSrlatch, 2).value;
+  const logic::Slot b1 = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
+  const logic::Slot b2 = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
+  const logic::Slot sr = logic::add_gate(nl, logic::GateKind::kSrlatch, 2).value;
   assert(logic::wire_pins(nl, logic::PinRef{.slot = b1, .is_output = true},
                           logic::PinRef{.slot = sr, .is_output = false, .input = 0})
              .ok());
   assert(logic::wire_pins(nl, logic::PinRef{.slot = b2, .is_output = true},
                           logic::PinRef{.slot = sr, .is_output = false, .input = 1})
              .ok());
-  nl.gates[b2].propagation_delay_ps = 4;
+  nl.slots[b2].propagation_delay_ps = 4;
   logic::TimingScratch scratch{};
   const std::vector<LogicValue> zero{logic::LogicValue::kLow, logic::LogicValue::kLow};
   assert(logic::timing_settle_initial(nl, zero, scratch, logic::EdgeFilter::kAll).ok());
@@ -663,15 +663,15 @@ void test_transient_sr_both_high() {
 void test_race_determinism() {
   auto run = []() {
     logic::Netlist nl;
-    const std::uint16_t d1 = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
-    const std::uint16_t b = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
-    const std::uint16_t d2 = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
+    const logic::Slot d1 = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
+    const logic::Slot b = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
+    const logic::Slot d2 = logic::add_gate(nl, logic::GateKind::kDff, 2).value;
     assert(logic::wire_pins(nl, logic::PinRef{.slot = d1, .is_output = true}, logic::PinRef{.slot = b}).ok());
     assert(logic::wire_pins(nl, logic::PinRef{.slot = b, .is_output = true},
                             logic::PinRef{.slot = d2, .is_output = false, .input = 0})
                .ok());
-    nl.gates[d1].propagation_delay_ps = 7;
-    nl.gates[b].propagation_delay_ps = 3;
+    nl.slots[d1].propagation_delay_ps = 7;
+    nl.slots[b].propagation_delay_ps = 3;
     logic::TimingScratch scratch{};
     const std::vector<LogicValue> zero{logic::LogicValue::kLow, logic::LogicValue::kLow, logic::LogicValue::kLow};
     assert(logic::timing_settle_initial(nl, zero, scratch, logic::EdgeFilter::kAll).ok());
@@ -715,15 +715,15 @@ void test_event_cap_breach() {
   std::vector<std::uint16_t> level;
   level.reserve(512);
   for (int k = 0; k < 512; ++k) {
-    const std::uint16_t b = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
-    nl.gates[b].propagation_delay_ps = static_cast<std::uint64_t>(2 * k + 1);
+    const logic::Slot b = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
+    nl.slots[b].propagation_delay_ps = static_cast<std::uint64_t>(2 * k + 1);
     level.push_back(b);
   }
   while (level.size() > 1) {
     std::vector<std::uint16_t> next;
     next.reserve(level.size() / 2);
     for (std::size_t i = 0; i < level.size(); i += 2) {
-      const std::uint16_t a = logic::add_gate(nl, logic::GateKind::kXor, 2).value;
+      const logic::Slot a = logic::add_gate(nl, logic::GateKind::kXor, 2).value;
       assert(logic::wire_pins(nl, logic::PinRef{.slot = level[i], .is_output = true}, logic::PinRef{.slot = a}).ok());
       assert(logic::wire_pins(nl, logic::PinRef{.slot = level[i + 1], .is_output = true},
                               logic::PinRef{.slot = a, .is_output = false, .input = 1})
@@ -752,10 +752,10 @@ void test_event_cap_breach() {
 // consumer at MAX+1 overflows.
 void test_time_overflow() {
   logic::Netlist nl;
-  const std::uint16_t g1 = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
-  const std::uint16_t g2 = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+  const logic::Slot g1 = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+  const logic::Slot g2 = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
   assert(logic::wire_pins(nl, logic::PinRef{.slot = g1, .is_output = true}, logic::PinRef{.slot = g2}).ok());
-  nl.gates[g1].propagation_delay_ps = 0xFFFFFFFFFFFFFFFFULL;
+  nl.slots[g1].propagation_delay_ps = 0xFFFFFFFFFFFFFFFFULL;
   logic::TimingScratch scratch{};
   const std::vector<LogicValue> zero{logic::LogicValue::kLow};
   assert(logic::timing_settle_initial(nl, zero, scratch, logic::EdgeFilter::kAll).ok());
@@ -1100,11 +1100,11 @@ void test_race_window_example_replay() {
 // construction, so each needs its own gate here.
 void test_settle_prelude_parity_with_fill_resolved() {
   logic::Netlist nl;
-  const std::uint16_t a = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
-  const std::uint16_t b = logic::add_gate(nl, logic::GateKind::kOr, 2).value;
-  const std::uint16_t c = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
-  const std::uint16_t d = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
-  const std::uint16_t e = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
+  const logic::Slot a = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
+  const logic::Slot b = logic::add_gate(nl, logic::GateKind::kOr, 2).value;
+  const logic::Slot c = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+  const logic::Slot d = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+  const logic::Slot e = logic::add_gate(nl, logic::GateKind::kBuf, 1).value;
   assert(logic::tie_pins(nl, logic::PinRef{.slot = a, .is_output = false, .input = 1},
                          logic::PinRef{.slot = b, .is_output = false, .input = 0})
              .ok());
@@ -1118,7 +1118,7 @@ void test_settle_prelude_parity_with_fill_resolved() {
   // (ord 1). Pulled/ignored/wired pins consume no column.
   assert(logic::block_input_count(nl) == 2);
   const std::vector<LogicValue> inputs{H, L};
-  LogicValue resolved[logic::kMaxGates * logic::kMaxInputs];
+  std::vector<LogicValue> resolved(logic::slot_count(nl) * logic::kMaxInputs, L);
   assert(logic::fill_resolved(nl, inputs, resolved).ok());
   // Spot the idle rule before the elementwise comparison.
   assert(resolved[logic::tie_flat(a, 0)] == H);
@@ -1132,7 +1132,7 @@ void test_settle_prelude_parity_with_fill_resolved() {
     v = L;
   }
   assert(logic::timing_settle_initial(nl, inputs, scratch, logic::EdgeFilter::kAll).ok());
-  for (std::size_t f = 0; f < logic::kMaxGates * logic::kMaxInputs; ++f) {
+  for (std::size_t f = 0; f < logic::slot_count(nl) * logic::kMaxInputs; ++f) {
     assert(scratch.blk[f] == resolved[f]);
   }
   // Settled outputs agree with the zero-delay solve on the same
@@ -1156,7 +1156,7 @@ void test_settle_pull_up_golden() {
   // Terminated NOT: no block inputs, empty window drains 0.
   {
     logic::Netlist nl;
-    const std::uint16_t n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+    const logic::Slot n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
     assert(logic::set_pull(nl, n, 0, 1).ok());
     assert(logic::block_input_count(nl) == 0);
     const std::vector<LogicValue> empty;
@@ -1179,7 +1179,7 @@ void test_settle_pull_up_golden() {
   // Pull-down mirrors: NOT(0)=1.
   {
     logic::Netlist nl;
-    const std::uint16_t n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
+    const logic::Slot n = logic::add_gate(nl, logic::GateKind::kNot, 1).value;
     assert(logic::set_pull(nl, n, 0, 2).ok());
     const std::vector<LogicValue> empty;
     logic::TimingScratch scratch{};
@@ -1194,7 +1194,7 @@ void test_settle_pull_up_golden() {
   // seed in 0->1 at t=0, AND.Y 0->1 at t=1 (unit delay), drain 1.
   {
     logic::Netlist nl;
-    const std::uint16_t g = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
+    const logic::Slot g = logic::add_gate(nl, logic::GateKind::kAnd, 2).value;
     assert(logic::set_pull(nl, g, 0, 1).ok());
     assert(logic::block_input_count(nl) == 1);
     const std::vector<LogicValue> zero{L};

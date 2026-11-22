@@ -42,7 +42,7 @@ int LogicPullSpec::run(ArgCursor &args, std::ostream &out) {
   if (wengine::logic::is_tied(nl, pin.slot, pin.input)) {
     return cli::usage_error(out, "input is tied (untie it first)", kUsage);
   }
-  if ((nl.gates[pin.slot].ignored_mask & static_cast<std::uint8_t>(1u << pin.input)) != 0) {
+  if ((nl.slots[pin.slot].ignored_mask & static_cast<std::uint8_t>(1u << pin.input)) != 0) {
     return cli::usage_error(out, "input is ignored (use it first)", kUsage);
   }
   if (!wengine::logic::set_pull(nl, pin.slot, pin.input, level).ok()) {

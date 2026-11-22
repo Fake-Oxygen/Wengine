@@ -63,6 +63,14 @@
  *   propagation_delay_ps (the network is reshaped; O0/O1 preserve
  *   delays in place).
  *
+ * Capacity (dynamic pool): optimize is a core over Netlist taking the
+ * caller-owned OptimizeScratch bundle (the data-model scratch table:
+ * work/fresh/min out-buffers replacing the old by-value locals,
+ * pending wires, labels/roots/feeds/reach, emit map, eval + Kahn
+ * scratch); the same-name wrapper below keeps today's by-value
+ * semantics over the dynamic pool with heap-backed scratch. Internal
+ * cross-calls are bare (no capacity parameter).
+ *
  * Dependency rules: header-only, allocation-free, exception-free like
  * the rest of wengine/logic. No iostream (report printing belongs to
  * the CLI verb in LOGIC-8; the engine exposes before/after counts via
@@ -88,14 +96,101 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <span>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace wengine::logic {
 
+/**
+ * @brief Caller-owned optimize scratch bundle (see the data-model
+ *        scratch table): work/fresh/min out-buffers replacing the old
+ *        by-value Netlist locals, pending wires, constness labels,
+ *        root/feed/reachability flags, DCE keep/stack, emit map, tie
+ *        scratch, eval scratch, and the nested Kahn bundle. Sized by
+ *        the pool (see ensure_workspace); validated loudly before any
+ *        work.
+ *
+ * Sequential sharing: the phases run one after another, so labels,
+ * keep, stack, tie scratch, and the eval/Kahn scratch are reused across
+ * phases (never live at once for two purposes).
+ *
+ */
+struct OptimizeScratch {
+  /** @brief O0/O1 fixpoint working net (caller-owned out-buffer). */
+  Netlist *work = nullptr;
+  /** @brief O2 fresh-build net (caller-owned out-buffer). */
+  Netlist *fresh = nullptr;
+  /** @brief Minimized-candidate net (caller-owned out-buffer). */
+  Netlist *min_buf = nullptr;
+  /** @brief Per-slot Constness labels (n entries). */
+  std::span<detail::Constness> labels;
+  /** @brief DCE/O2 root flags (n entries). */
+  std::span<bool> roots;
+  /** @brief Sequential-feed flags (n entries). */
+  std::span<bool> feeds;
+  /** @brief O2 reachability flags (n entries). */
+  std::span<bool> reach;
+  /** @brief DCE keep flags (n entries). */
+  std::span<bool> keep;
+  /** @brief DFS stack (n slots). */
+  std::span<Slot> stack;
+  /** @brief Orig-to-fresh driver map (n slots). */
+  std::span<Slot> emit_map;
+  /** @brief Tie scratch (n * kMaxInputs flats). */
+  std::span<std::size_t> tie_scratch;
+  /** @brief Resolved dangling values (n * kMaxInputs entries). */
+  std::span<LogicValue> resolved;
+  /** @brief Per-slot settled outputs (n entries). */
+  std::span<LogicValue> gate_out;
+  /** @brief Nested Kahn scratch bundle. */
+  topo::TopoScratch topo;
+  /**
+   * @brief Loud size validation before any work (engine-seam D3 rule).
+   *
+   * Covers the O0/O1 fixpoint scratch (work net, labels, roots, feeds,
+   * keep, DFS stack, tie scratch, eval scratch, Kahn bundle). The O2
+   * fresh-build scratch (fresh/min out-buffers, pending wires, emit
+   * map, reach flags, wiring maps) is validated separately by
+   * validate_o2(), so O0/O1 runs never pay for scratch they cannot
+   * touch.
+   *
+   * @param[in] n Addressable slot count the spans must cover.
+   * @return kOk when every O0/O1 span meets its data-model size and the work buffer is present.
+   */
+  [[nodiscard]] core::Status validate(std::size_t n) const noexcept {
+    if (work == nullptr) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    if (labels.size() < n || roots.size() < n || feeds.size() < n || keep.size() < n || stack.size() < n ||
+        tie_scratch.size() < n * kMaxInputs || resolved.size() < n * kMaxInputs || gate_out.size() < n) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    return topo.validate(n);
+  }
+  /**
+   * @brief Loud size validation for the O2 fresh-build scratch.
+   *
+   * @param[in] n Addressable slot count the spans must cover.
+   * @return kOk when every O2-only span meets its data-model size and
+   *         both out-buffers are present.
+   */
+  [[nodiscard]] core::Status validate_o2(std::size_t n) const noexcept {
+    if (fresh == nullptr || min_buf == nullptr) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    if (emit_map.size() < n || reach.size() < n) {
+      return core::Status::failure(core::StatusCode::kInvalidArgument);
+    }
+    return core::Status::success();
+  }
+};
 
 /**
  * @brief Pure optimizer: const ref in, new Netlist out; the input is
- *        never modified (all surgery happens on the copy).
+ *        never modified (all surgery happens on the caller's work buffer).
  *
  * Runs the O0/O1 fixpoint (bypass, De Morgan fusion at O1/O2, constant
  * folding, exact simplification, DCE) then, at O2, the fresh universal
@@ -107,78 +202,88 @@ namespace wengine::logic {
  *
  * @param[in] in Source netlist (read-only).
  * @param[in] opts Level (O0/O1/O2) plus the O2 target kind.
- * @return kOk with the optimized netlist on success; kInvalidArgument
- *         with an "optimize: ..." message on topology errors, kInternal
- *         on gate-budget exhaustion or internal iteration bounds. Never
- *         silently drops gates.
+ * @param[in] scr Caller-owned scratch (see OptimizeScratch).
+ * @param[out] out Caller-owned buffer receiving the optimized netlist
+ *             (heap at scale — the result is never returned by value,
+ *             which would put a pool-sized object on the caller stack).
+ * @return kOk on success; kInvalidArgument with an "optimize: ..."
+ *         message on topology errors, kInternal on gate-budget
+ *         exhaustion or undersized scratch. Never silently drops gates.
  * @note Optimizing twice is idempotent. O0 never grows the net
  *       (gates_after <= gates_before); O2 may grow large nets and the
  *       caller reports before/after counts.
  */
-[[nodiscard]] inline core::Result<Netlist> optimize(const Netlist &in, OptimizeOptions opts) noexcept {
+
+[[nodiscard]] inline core::Result<Netlist *> optimize(const Netlist &in, OptimizeOptions opts, OptimizeScratch &scr, Netlist &out) {
+  if (!scr.validate(slot_count(in)).ok()) {
+    return core::Result<Netlist *>::failure("optimize: scratch too small", core::StatusCode::kInternal);
+  }
+  if (opts.level == OptLevel::kO2 && !scr.validate_o2(slot_count(in)).ok()) {
+    return core::Result<Netlist *>::failure("optimize: scratch too small", core::StatusCode::kInternal);
+  }
   // 011: O2 replaces the workspace wholesale via its own emitter, which
   // has no shared-span vocabulary. Emitting O1-level output under an O2
   // request would be a silent contract break — refuse loudly, input
   // untouched, O0/O1 remain available. A verbatim-carry O2 emitter is
   // the named follow-on.
   if (opts.level == OptLevel::kO2 && any_shared_mark(in)) {
-    return core::Result<Netlist>::failure("optimize: shared nets unsupported at O2 (use O0/O1)", core::StatusCode::kInvalidArgument);
+    return core::Result<Netlist *>::failure("optimize: shared nets unsupported at O2 (use O0/O1)", core::StatusCode::kInvalidArgument);
   }
   // 012: O2's emitter has no buffer/pull vocabulary either (no Z in the
   // universal-gate rebuild, no flat-keyed pull_cfg in the fresh pool).
   // Refuse loudly, input untouched, O0/O1 remain available; a
   // verbatim-carry O2 emitter is the named follow-on.
   if (opts.level == OptLevel::kO2 && (has_buffer_gates(in) || any_pull(in))) {
-    return core::Result<Netlist>::failure("optimize: buffers/pulls unsupported at O2 (use O0/O1)", core::StatusCode::kInvalidArgument);
+    return core::Result<Netlist *>::failure("optimize: buffers/pulls unsupported at O2 (use O0/O1)", core::StatusCode::kInvalidArgument);
   }
-  Netlist nl = in;
+  Netlist &nl = *scr.work;
+  nl = in;
   nl.dirty = true;
-  nl.topo_size = 0;
+  nl.topo_order.clear();
   detail::recount_fanout(nl);
 
-  bool roots[kMaxGates] = {};
-  detail::collect_barrier_roots(nl, roots);
+  detail::collect_barrier_roots(nl, scr.roots.data());
 
   const bool want_fuse = (opts.level == OptLevel::kO1) || (opts.level == OptLevel::kO2);
-  constexpr std::size_t kMaxIters = 2 * kMaxGates + 16;
+  constexpr std::size_t kMaxItersBase = 16;
   std::size_t iter = 0;
+  // --- O0/O1 fixpoint (canonical shape: one call per pass) ---
   while (true) {
-    if (iter >= kMaxIters) {
-      return core::Result<Netlist>::failure("optimize: internal iteration bound", core::StatusCode::kInternal);
+    if (iter >= 2 * slot_count(nl) + kMaxItersBase) {
+      return core::Result<Netlist *>::failure("optimize: internal iteration bound", core::StatusCode::kInternal);
     }
     ++iter;
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll).ok()) {
-      return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
+    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
-    bool feeds_seq[kMaxGates] = {};
-    detail::compute_feeds_seq(nl, feeds_seq);
     bool changed = false;
-    if (detail::bypass_pass(nl, feeds_seq)) {
+    detail::compute_feeds_seq(nl, scr.feeds.data());
+    if (detail::bypass_pass(nl, scr.feeds.data(), scr.tie_scratch)) {
       changed = true;
     }
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll).ok()) {
-      return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
+    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
-    detail::compute_feeds_seq(nl, feeds_seq);
-    if (want_fuse && detail::fusion_sweep(nl, feeds_seq)) {
+    detail::compute_feeds_seq(nl, scr.feeds.data());
+    if (want_fuse && detail::fusion_sweep(nl, scr.feeds.data(), scr.tie_scratch)) {
       changed = true;
     }
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll).ok()) {
-      return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
+    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
-    if (detail::const_fold_pass(nl, roots)) {
+    if (detail::const_fold_pass(nl, scr.roots.data(), scr.labels, scr.tie_scratch)) {
       changed = true;
     }
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll).ok()) {
-      return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
+    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
-    if (detail::exact_simplify_pass(nl)) {
+    if (detail::exact_simplify_pass(nl, scr.resolved, scr.gate_out, scr.topo, scr.tie_scratch)) {
       changed = true;
     }
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll).ok()) {
-      return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
+    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
-    if (detail::dce_pass(nl, roots)) {
+    if (detail::dce_pass(nl, scr.roots.data(), scr.keep, scr.stack, scr.tie_scratch)) {
       changed = true;
     }
     if (!changed) {
@@ -187,76 +292,174 @@ namespace wengine::logic {
   }
 
   if (opts.level != OptLevel::kO2) {
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll).ok()) {
-      return core::Result<Netlist>::failure("optimize: topology error", core::StatusCode::kInternal);
+    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
-    return core::Result<Netlist>::success(nl);
+    out = nl;
+    return core::Result<Netlist *>::success(&out);
   }
 
   // --- O2: fresh universal build (phases live in optimize_o2_build.hpp;
   // optimize() only orchestrates) ---------------------------------------
-  bool reach[kMaxGates] = {};
-  detail::collect_reachable(nl, reach);
+  detail::collect_reachable(nl, scr.reach.data(), scr.keep, scr.stack);
 
-  Netlist out{};
-  std::uint16_t emit_map[kMaxGates];
-  for (std::size_t s = 0; s < kMaxGates; ++s) {
-    emit_map[s] = kNoDriver;
+  Netlist &fresh = *scr.fresh;
+  fresh = Netlist{};
+  for (std::size_t s = 0; s < slot_count(nl); ++s) {
+    scr.emit_map[s] = kNoDriver;
   }
-  detail::PendingWire pend[kMaxGates * kMaxInputs];
-  std::size_t npend = 0;
+  std::vector<detail::PendingWire> pend;
+  pend.reserve(slot_count(nl) * kMaxInputs);
   detail::ConvertCtx ctx{};
-  ctx.out = &out;
+  ctx.out = &fresh;
   ctx.target = opts.target;
-  ctx.emit_map = emit_map;
-  ctx.pend = pend;
-  ctx.npend = &npend;
-  ctx.pend_cap = kMaxGates * kMaxInputs;
+  ctx.emit_map = scr.emit_map.data();
+  ctx.pend = &pend;
 
   // Constant-aware shared pool: structural constant labels (ignored pins
   // tie to 0) let us reuse the pool instead of re-emitting logic for
   // constant gates. Internal constants share one pool; constant sinks get
   // dedicated output gates (sharing a sink would merge distinct block
   // outputs). This keeps 1-gate constants at 1-2 gates instead of 4+.
-  detail::Constness clabel[kMaxGates];
-  detail::classify(nl, clabel);
-  const detail::PoolNeeds pool_needs = detail::size_pool_needs(nl, reach, clabel);
+  detail::classify(nl, scr.labels.data());
+  const detail::PoolNeeds pool_needs = detail::size_pool_needs(nl, scr.reach.data(), scr.labels.data());
   {
-    const detail::BuildError perr = detail::emit_pool(out, ctx, opts.target, pool_needs);
+    const detail::BuildError perr = detail::emit_pool(fresh, ctx, opts.target, pool_needs);
     if (perr != detail::BuildError::kNone) {
-      return core::Result<Netlist>::failure(detail::build_error_message(perr), core::StatusCode::kInternal);
+      return core::Result<Netlist *>::failure(detail::build_error_message(perr), core::StatusCode::kInternal);
     }
   }
 
   // Creation pass in original slot order (fresh slots follow it).
   {
     const detail::BuildError cerr =
-        detail::create_networks(nl, reach, clabel, ctx, emit_map, opts.target);
+        detail::create_networks(nl, scr.reach.data(), scr.labels.data(), ctx, scr.emit_map.data(), opts.target);
     if (cerr != detail::BuildError::kNone) {
-      return core::Result<Netlist>::failure(detail::build_error_message(cerr), core::StatusCode::kInternal);
+      return core::Result<Netlist *>::failure(detail::build_error_message(cerr), core::StatusCode::kInternal);
     }
   }
 
   // Wiring pass from the complete map (wiring-time tying for sequential
   // nets only; pure-combinational output stays bit-identical).
+  //
+  // Fresh-pool scratch: emission grows `fresh` past the input pool, so
+  // the input-sized wrapper spans cannot serve the out-pool-indexed
+  // phases. These locals are sized to the emitted pool (cold path).
   {
+    const std::size_t m = slot_count(fresh);
+    std::vector<Slot> tie_first(m * kMaxInputs, kNoDriver);
+    std::vector<std::uint8_t> tie_first_in(m * kMaxInputs, 0);
     const bool structural_tie_duplicates = has_sequential_gates(nl);
-    const detail::BuildError werr =
-        detail::wire_pending(out, ctx, pend, npend, emit_map, structural_tie_duplicates);
+      const detail::BuildError werr = detail::wire_pending(
+          fresh, ctx, pend, scr.emit_map.data(), structural_tie_duplicates,
+        std::span<Slot>(tie_first.data(), tie_first.size()),
+        std::span<std::uint8_t>(tie_first_in.data(), tie_first_in.size()));
     if (werr != detail::BuildError::kNone) {
-      return core::Result<Netlist>::failure(detail::build_error_message(werr), core::StatusCode::kInternal);
+      return core::Result<Netlist *>::failure(detail::build_error_message(werr), core::StatusCode::kInternal);
     }
   }
-  detail::restore_masks(nl, out, reach, emit_map, opts.target);
-  // Vocabulary-preserving post-cleanup (dedup + double-inverter cancel +
-  // DCE to fixpoint) and minimized-vs-structural picking.
+  detail::restore_masks(nl, fresh, scr.reach.data(), scr.emit_map.data(), opts.target);
+  // Vocabulary-preserving post-cleanup (dedup + double-inverter
+  // cancellation + DCE to fixpoint) and minimized-vs-structural picking.
   {
-    const detail::BuildError perr = detail::post_cleanup(out, nl, reach, emit_map, opts.target);
+    const std::size_t m = slot_count(fresh);
+    auto proots = std::make_unique<bool[]>(m);
+    auto pfeeds = std::make_unique<bool[]>(m);
+    auto pkeep = std::make_unique<bool[]>(m);
+    std::vector<Slot> pstack(m);
+    std::vector<std::size_t> ptie(m * kMaxInputs, 0);
+    ensure_workspace(fresh, m);
+    const topo::TopoScratch fts{std::span<Slot>(fresh.ws_order.data(), m),
+                                std::span<Slot>(fresh.ws_levels.data(), m),
+                                std::span<std::uint8_t>(fresh.ws_indeg.data(), m),
+                                std::span<Slot>(fresh.ws_queue.data(), m)};
+    const detail::BuildError perr = detail::post_cleanup(fresh, nl, scr.reach.data(), scr.emit_map.data(), opts.target, std::span<bool>(proots.get(), m),
+        std::span<bool>(pfeeds.get(), m), std::span<bool>(pkeep.get(), m), std::span<Slot>(pstack.data(), m), std::span<std::size_t>(ptie.data(), ptie.size()), fts);
     if (perr != detail::BuildError::kNone) {
-      return core::Result<Netlist>::failure(detail::build_error_message(perr), core::StatusCode::kInternal);
+      return core::Result<Netlist *>::failure(detail::build_error_message(perr), core::StatusCode::kInternal);
     }
   }
-  return detail::finish_o2(out, nl, opts.target);
+  {
+    const std::size_t m = slot_count(fresh);
+    std::vector<LogicValue> mresolved(m * kMaxInputs);
+    std::vector<LogicValue> mgate_out(m);
+    ensure_workspace(fresh, m);
+    const topo::TopoScratch mts{std::span<Slot>(fresh.ws_order.data(), m),
+                                std::span<Slot>(fresh.ws_levels.data(), m),
+                                std::span<std::uint8_t>(fresh.ws_indeg.data(), m),
+                                std::span<Slot>(fresh.ws_queue.data(), m)};
+    const detail::BuildError ferr = detail::finish_o2(fresh, nl, opts.target, *scr.min_buf, std::span<LogicValue>(mresolved.data(), mresolved.size()),
+                                                      std::span<LogicValue>(mgate_out.data(), mgate_out.size()), mts);
+    if (ferr != detail::BuildError::kNone) {
+      return core::Result<Netlist *>::failure(detail::build_error_message(ferr), core::StatusCode::kInternal);
+    }
+  }
+  out = fresh;
+  return core::Result<Netlist *>::success(&out);
+}
+
+/**
+ * @brief Pure optimizer: const ref in, new Netlist out; the input is
+ *        never modified (all surgery happens on the copy).
+ *
+ * Workspace-backed convenience entry: heap-backed scratch sized by the
+ * pool; the core above serves caller-owned scratch.
+ *
+ * Runs the O0/O1 fixpoint (bypass, De Morgan fusion at O1/O2, constant
+ * folding, exact simplification, DCE) then, at O2, the fresh universal
+ * rebuild. Sequential nets ride through as opaque barriers.
+ *
+ * @param[in] in Source netlist (read-only).
+ * @param[in] opts Level (O0/O1/O2) plus the O2 target kind.
+ * @return kOk with the optimized netlist on success; kInvalidArgument
+ *         with an "optimize: ..." message on topology errors, kInternal
+ *         on gate-budget exhaustion or internal iteration bounds. Never
+ *         silently drops gates.
+ * @note Optimizing twice is idempotent. O0 never grows the net
+ *       (gates_after <= gates_before); O2 may grow large nets and the
+ *       caller reports before/after counts.
+ */
+[[nodiscard]] inline core::Result<Netlist> optimize(const Netlist &in, OptimizeOptions opts) {
+  const std::size_t n = slot_count(in);
+  const std::size_t nflat = n * kMaxInputs;
+  Netlist work;
+  Netlist fresh;
+  Netlist min_buf;
+  if (!ensure_slots(work, n) || !ensure_slots(fresh, n) || !ensure_slots(min_buf, n)) {
+    return core::Result<Netlist>::failure("optimize: netlist full", core::StatusCode::kInternal);
+  }
+  std::vector<detail::Constness> labels(n);
+  auto roots = std::make_unique<bool[]>(n);
+  auto feeds = std::make_unique<bool[]>(n);
+  auto reach = std::make_unique<bool[]>(n);
+  auto keep = std::make_unique<bool[]>(n);
+  std::vector<Slot> stack(n);
+  std::vector<Slot> emit_map(n);
+  std::vector<std::size_t> tie_scratch(nflat);
+  std::vector<LogicValue> resolved(nflat);
+  std::vector<LogicValue> gate_out(n);
+  std::vector<Slot> order(n);
+  std::vector<Slot> levels(n);
+  std::vector<std::uint8_t> indeg(n);
+  std::vector<Slot> queue(n);
+  OptimizeScratch scr{&work, &fresh, &min_buf,
+                      std::span<detail::Constness>(labels.data(), n),
+                      std::span<bool>(roots.get(), n),
+                      std::span<bool>(feeds.get(), n),
+                      std::span<bool>(reach.get(), n),
+                      std::span<bool>(keep.get(), n),
+                      std::span<Slot>(stack.data(), n),
+                      std::span<Slot>(emit_map.data(), n),
+                      std::span<std::size_t>(tie_scratch.data(), nflat),
+                      std::span<LogicValue>(resolved.data(), nflat),
+                      std::span<LogicValue>(gate_out.data(), n),
+                      topo::TopoScratch{std::span<Slot>(order.data(), n), std::span<Slot>(levels.data(), n), std::span<std::uint8_t>(indeg.data(), n), std::span<Slot>(queue.data(), n)}};
+  Netlist opt_out{};
+  auto r = optimize(in, opts, scr, opt_out);
+  if (!r.ok()) {
+    return core::Result<Netlist>::failure(r.error, r.status.code);
+  }
+  return core::Result<Netlist>::success(std::move(opt_out));
 }
 
 } // namespace wengine::logic

@@ -17,8 +17,9 @@
 namespace wengine::cli::logic {
 
 using wengine::logic::PinRef;
-using wengine::logic::kMaxGates;
 using wengine::logic::Netlist;
+using wengine::logic::Slot;
+using wengine::logic::slot_count;
 
 int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
   if (args.take_flag({"--help", "-h"})) {
@@ -37,8 +38,8 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
   if (nl.live_count == 0) {
     out << "  (none)\n";
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const auto &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const auto &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -108,13 +109,13 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
     if (nw == 0) {
       out << "  (none)\n";
     }
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const auto &g = nl.gates[s];
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      const auto &g = nl.slots[s];
       if (!g.live) {
         continue;
       }
       for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        const std::uint16_t drv = g.drivers[i];
+        const Slot drv = g.drivers[i];
         if (drv == wengine::logic::kNoDriver) {
           continue;
         }
@@ -125,7 +126,7 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
         const std::size_t flat = static_cast<std::size_t>(s) * wengine::logic::kMaxInputs + i;
         const std::uint8_t extra_n = wengine::logic::shared_extra_count(nl, s, i);
         for (std::uint8_t j = 0; j < extra_n; ++j) {
-          const std::uint16_t edrv = wengine::logic::shared_extra_driver(nl, flat, j);
+          const Slot edrv = wengine::logic::shared_extra_driver(nl, flat, j);
           const bool eneg = wengine::logic::shared_extra_inv(nl, flat, j) != 0;
           out << "  " << support::pin_text(nl, edrv, true, 0, eneg) << " -> " << support::pin_text(nl, s, false, i) << '\n';
         }
@@ -151,8 +152,8 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
       out << "  " << support::pin_text(nl, p.slot, true, 0, p.negated) << '\n';
     }
     std::vector<std::string> ignored;
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const auto &g = nl.gates[s];
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      const auto &g = nl.slots[s];
       if (!g.live) {
         continue;
       }
@@ -178,8 +179,8 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
     // Tie groups: one line per class (>= 2 members), members in slot
     // order joined by " = " (canonical leader first by construction).
     std::vector<std::string> tie_lines;
-    for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-      const auto &g = nl.gates[s];
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      const auto &g = nl.slots[s];
       if (!g.live) {
         continue;
       }
@@ -198,8 +199,8 @@ int LogicListSpec::run(ArgCursor &args, std::ostream &out) {
           continue;
         }
         std::string line;
-        for (std::uint16_t t = 0; t < kMaxGates; ++t) {
-          const auto &og = nl.gates[t];
+        for (Slot t = 0; t < slot_count(nl); ++t) {
+          const auto &og = nl.slots[t];
           if (!og.live) {
             continue;
           }

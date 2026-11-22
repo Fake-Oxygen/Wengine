@@ -1561,7 +1561,7 @@ void test_logic_verbs() {
     // (slot order): boxes (52,30) / (172,30) / (172,116); body top edge at
     // layout y = box.y + 4, left edge at layout x = box.x + 10 (2x raster).
     for (const wengine::logic::Placed &p : sc.gates) {
-      if (!wengine::logic::is_sequential_kind(ws.gates[p.slot].kind)) {
+      if (!wengine::logic::is_sequential_kind(ws.slots[p.slot].kind)) {
         continue;
       }
       const std::uint32_t top_y = static_cast<std::uint32_t>((p.y + 4) * 2);
@@ -1576,7 +1576,7 @@ void test_logic_verbs() {
     {
       const wengine::logic::Placed *dff = nullptr;
       for (const wengine::logic::Placed &p : sc.gates) {
-        if (ws.gates[p.slot].kind == wengine::logic::GateKind::kDff) {
+        if (ws.slots[p.slot].kind == wengine::logic::GateKind::kDff) {
           dff = &p;
           break;
         }

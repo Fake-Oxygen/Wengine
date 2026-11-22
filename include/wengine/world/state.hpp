@@ -111,7 +111,7 @@ struct State {
    * @brief Sequential pool, part 3 of 3b: retained member list (live
    *        edge-flop slots; empty = all domains).
    */
-  std::vector<std::uint16_t> seq_members;
+  std::vector<logic::Slot> seq_members;
   /**
    * @brief Sequential pool, part 3 of 3c: retained settled block
    *        outputs (rewritten every step, 0/1 values).
@@ -407,7 +407,7 @@ inline void fill_snapshot(const State &s, Snapshot &out) {
   if (out.seq_output.capacity() < s.seq_outputs.size()) {
     out.seq_output.reserve(s.seq_outputs.size());
   }
-  for (std::uint16_t i = 0; i < logic::kMaxGates; ++i) {
+  for (std::size_t i = 0; i < s.seq.valid.size(); ++i) {
     if (s.seq.valid[i] != 0) {
       out.seq_serial.push_back(s.seq.serial[i]);
       out.seq_value.push_back(static_cast<std::uint8_t>(s.seq.q[i]));

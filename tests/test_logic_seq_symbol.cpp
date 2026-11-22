@@ -45,7 +45,7 @@ void test_dff_symbol() {
   Netlist nl;
   assert(logic::add_gate(nl, GateKind::kDff, 5).ok()); // @0 full-control
   const logic::Placed box{0, 0, 52, 30};
-  const logic::SeqSym sym = logic::seq_symbol(box, nl.gates[0]);
+  const logic::SeqSym sym = logic::seq_symbol(box, nl.slots[0]);
   assert(sym.lx == 52 + 10 && sym.rx == 52 + 76 - 2);
   assert(sym.top == 30 + 4 && sym.bot == 30 + 56 - 4 && sym.mid == 30 + 28);
   assert(sym.face == "D");
@@ -57,7 +57,7 @@ void test_dff_symbol() {
   }
   assert(sym.q.x == 52 + 76 && sym.q.y == 30 + 28);
   assert(sym.nq_pt.x == 52 + 76 && sym.nq_pt.y == 30 + 46);
-  assert(sym.nq == ((nl.gates[0].nq_fanout > 0) || (!nl.gates[0].ignore_nq_output)));
+  assert(sym.nq == ((nl.slots[0].nq_fanout > 0) || (!nl.slots[0].ignore_nq_output)));
   assert(!sym.q_dot && !sym.nq_dot); // fresh gate: no fanout
 }
 
@@ -71,10 +71,10 @@ void test_mark_vocabulary() {
   const logic::Placed b1{1, 0, 52, 116};
   const logic::Placed b2{2, 0, 52, 202};
   const logic::Placed b3{3, 0, 52, 288};
-  const logic::SeqSym dl = logic::seq_symbol(b0, nl.gates[0]);
-  const logic::SeqSym jk = logic::seq_symbol(b1, nl.gates[1]);
-  const logic::SeqSym sr = logic::seq_symbol(b2, nl.gates[2]);
-  const logic::SeqSym t = logic::seq_symbol(b3, nl.gates[3]);
+  const logic::SeqSym dl = logic::seq_symbol(b0, nl.slots[0]);
+  const logic::SeqSym jk = logic::seq_symbol(b1, nl.slots[1]);
+  const logic::SeqSym sr = logic::seq_symbol(b2, nl.slots[2]);
+  const logic::SeqSym t = logic::seq_symbol(b3, nl.slots[3]);
   assert(dl.face == "DL" && dl.mark == logic::SeqMark::kNotch && dl.mark_y == 30 + 18);
   assert(jk.face == "JK" && jk.mark == logic::SeqMark::kWedge && jk.mark_y == 116 + 18);
   assert(sr.face == "SR" && sr.mark == logic::SeqMark::kNone);
@@ -89,7 +89,7 @@ void test_dots_from_model() {
   assert(logic::wire(nl, 0, 1, 1).ok());
   assert(logic::wire(nl, 0, 2, 1).ok());
   const logic::Placed box{0, 0, 52, 30};
-  const logic::SeqSym sym = logic::seq_symbol(box, nl.gates[0]);
+  const logic::SeqSym sym = logic::seq_symbol(box, nl.slots[0]);
   assert(sym.q_dot);   // output_fanout == 2
   assert(!sym.nq_dot); // combinational: never
   assert(sym.mark == logic::SeqMark::kNone && sym.face == "?");

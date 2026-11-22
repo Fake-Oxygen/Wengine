@@ -23,11 +23,12 @@
 // the same white-box placement as test_logic_seq_step.cpp). Per-kind
 // counters are assigned in slot order so O2's fresh build reproduces the
 // same display names.
-void barrier_place_seq(wengine::logic::Netlist &nl, std::uint16_t slot, wengine::logic::GateKind kind, std::uint32_t counter, std::uint8_t inputs = 2) {
+void barrier_place_seq(wengine::logic::Netlist &nl, wengine::logic::Slot slot, wengine::logic::GateKind kind, std::uint32_t counter, std::uint8_t inputs = 2) {
   assert(slot < wengine::logic::kMaxGates);
+  assert(wengine::logic::ensure_slots(nl, static_cast<std::size_t>(slot) + 1));
   assert(wengine::logic::is_sequential_kind(kind));
   assert(wengine::logic::valid_fanin(kind, inputs));
-  wengine::logic::Gate &g = nl.gates[slot];
+  wengine::logic::Gate &g = nl.slots[slot];
   assert(!g.live);
   g.live = true;
   g.kind = kind;
@@ -44,10 +45,10 @@ void barrier_place_seq(wengine::logic::Netlist &nl, std::uint16_t slot, wengine:
   }
   ++nl.live_count;
   nl.dirty = true;
-  nl.topo_size = 0;
+  nl.topo_order.clear();
 }
 
-void barrier_ignore(wengine::logic::Netlist &nl, std::uint16_t slot, std::uint8_t input) {
+void barrier_ignore(wengine::logic::Netlist &nl, wengine::logic::Slot slot, std::uint8_t input) {
   wengine::logic::PinRef pin{};
   pin.slot = slot;
   pin.is_output = false;
@@ -61,8 +62,8 @@ wengine::logic::Netlist barrier_closed_counter() {
   wengine::logic::Netlist nl;
   barrier_place_seq(nl, 0, wengine::logic::GateKind::kDff, 1); // DFF1 = Q0 (LSB)
   barrier_place_seq(nl, 1, wengine::logic::GateKind::kDff, 2); // DFF2 = Q1 (MSB)
-  const std::uint16_t n = wengine::logic::add_gate(nl, wengine::logic::GateKind::kNot, 1).value;
-  const std::uint16_t x = wengine::logic::add_gate(nl, wengine::logic::GateKind::kXor, 2).value;
+  const wengine::logic::Slot n = wengine::logic::add_gate(nl, wengine::logic::GateKind::kNot, 1).value;
+  const wengine::logic::Slot x = wengine::logic::add_gate(nl, wengine::logic::GateKind::kXor, 2).value;
   assert(wengine::logic::wire(nl, n, 0, 0).ok()); // NOT.Y -> DFF1.D
   assert(wengine::logic::wire(nl, 0, n, 0).ok()); // Q0 -> NOT.1
   assert(wengine::logic::wire(nl, x, 1, 0).ok()); // XOR.Y -> DFF2.D
@@ -82,9 +83,9 @@ wengine::logic::Netlist barrier_counter_glue() {
   wengine::logic::Netlist nl;
   barrier_place_seq(nl, 0, wengine::logic::GateKind::kDff, 1);   // DFF1 = Q0
   barrier_place_seq(nl, 1, wengine::logic::GateKind::kDff, 2);   // DFF2 = Q1
-  const std::uint16_t n = wengine::logic::add_gate(nl, wengine::logic::GateKind::kNot, 1).value;
-  const std::uint16_t x = wengine::logic::add_gate(nl, wengine::logic::GateKind::kXor, 2).value;
-  const std::uint16_t a = wengine::logic::add_gate(nl, wengine::logic::GateKind::kAnd, 3).value;
+  const wengine::logic::Slot n = wengine::logic::add_gate(nl, wengine::logic::GateKind::kNot, 1).value;
+  const wengine::logic::Slot x = wengine::logic::add_gate(nl, wengine::logic::GateKind::kXor, 2).value;
+  const wengine::logic::Slot a = wengine::logic::add_gate(nl, wengine::logic::GateKind::kAnd, 3).value;
   barrier_place_seq(nl, 5, wengine::logic::GateKind::kDlatch, 1); // DLATCH1
   assert(wengine::logic::wire(nl, n, 0, 0).ok());          // NOT.Y -> DFF1.D
   assert(wengine::logic::wire(nl, 0, n, 0).ok());          // Q0 -> NOT.1
@@ -108,7 +109,7 @@ wengine::logic::Netlist barrier_counter_glue() {
 // "constant" state. One block input, one output.
 wengine::logic::Netlist barrier_pipeline() {
   wengine::logic::Netlist nl;
-  const std::uint16_t b = wengine::logic::add_gate(nl, wengine::logic::GateKind::kBuf, 1).value; // BUF1 @0
+  const wengine::logic::Slot b = wengine::logic::add_gate(nl, wengine::logic::GateKind::kBuf, 1).value; // BUF1 @0
   barrier_place_seq(nl, 1, wengine::logic::GateKind::kDff, 1);                          // DFF1 @1
   barrier_place_seq(nl, 2, wengine::logic::GateKind::kDff, 2);                          // DFF2 @2
   assert(wengine::logic::wire(nl, b, 1, 0).ok()); // BUF.Y -> DFF1.D
@@ -128,9 +129,9 @@ wengine::logic::Netlist barrier_pipeline() {
 wengine::logic::Netlist barrier_jk_nq() {
   wengine::logic::Netlist nl;
   barrier_place_seq(nl, 0, wengine::logic::GateKind::kJk, 1, 3); // JK1: J=0 K=1 CLK=2
-  const std::uint16_t n = wengine::logic::add_gate(nl, wengine::logic::GateKind::kNot, 1).value;
-  const std::uint16_t a = wengine::logic::add_gate(nl, wengine::logic::GateKind::kAnd, 2).value;
-  const std::uint16_t q = wengine::logic::add_gate(nl, wengine::logic::GateKind::kAnd, 2).value;
+  const wengine::logic::Slot n = wengine::logic::add_gate(nl, wengine::logic::GateKind::kNot, 1).value;
+  const wengine::logic::Slot a = wengine::logic::add_gate(nl, wengine::logic::GateKind::kAnd, 2).value;
+  const wengine::logic::Slot q = wengine::logic::add_gate(nl, wengine::logic::GateKind::kAnd, 2).value;
   assert(wengine::logic::wire(nl, 0, n, 0).ok());  // Q -> NOT.1
   assert(wengine::logic::wire(nl, n, a, 0).ok());  // NOT.Y -> AND1.1
   assert(wengine::logic::wire(nl, 0, a, 1).ok());  // Q -> AND1.2 (AND1 = Q & ~Q)
@@ -166,8 +167,8 @@ wengine::logic::Netlist barrier_full_dff() {
   return nl;
 }
 
-std::string barrier_gate_name(const wengine::logic::Netlist &nl, std::uint16_t s) {
-  const wengine::logic::Gate &g = nl.gates[s];
+std::string barrier_gate_name(const wengine::logic::Netlist &nl, wengine::logic::Slot s) {
+  const wengine::logic::Gate &g = nl.slots[s];
   std::string n(wengine::logic::gate_kind_name(g.kind));
   n += std::to_string(g.counter);
   return n;
@@ -184,28 +185,33 @@ enum class SeqDriverCheck : std::uint8_t { kStrict = 0, kShapeOnly = 1 };
 void assert_seq_equal_with_check(const wengine::logic::Netlist &before, const wengine::logic::Netlist &after, SeqDriverCheck check) {
   std::size_t n_before = 0;
   std::size_t n_after = 0;
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-    if (after.gates[s].live && wengine::logic::is_sequential_kind(after.gates[s].kind)) {
+  const std::size_t n_slots =
+      before.slots.size() < after.slots.size() ? after.slots.size() : before.slots.size();
+  for (wengine::logic::Slot s = 0; s < n_slots; ++s) {
+    if (s < after.slots.size() && after.slots[s].live && wengine::logic::is_sequential_kind(after.slots[s].kind)) {
       ++n_after;
     }
   }
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-    const wengine::logic::Gate &g = before.gates[s];
+  for (wengine::logic::Slot s = 0; s < n_slots; ++s) {
+    if (s >= before.slots.size()) {
+      continue;
+    }
+    const wengine::logic::Gate &g = before.slots[s];
     if (!g.live || !wengine::logic::is_sequential_kind(g.kind)) {
       continue;
     }
     ++n_before;
     auto r = wengine::logic::resolve_gate(after, barrier_gate_name(before, s));
     assert(r.ok());
-    const wengine::logic::Gate &h = after.gates[r.value];
+    const wengine::logic::Gate &h = after.slots[r.value];
     assert(h.live && h.kind == g.kind);
     assert(h.input_count == g.input_count);
     assert(h.ignored_mask == g.ignored_mask);
     assert(h.ignore_output == g.ignore_output);
     assert(h.ignore_nq_output == g.ignore_nq_output);
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t d0 = g.drivers[i];
-      const std::uint16_t d1 = h.drivers[i];
+      const wengine::logic::Slot d0 = g.drivers[i];
+      const wengine::logic::Slot d1 = h.drivers[i];
       const std::size_t f0 = static_cast<std::size_t>(s) * wengine::logic::kMaxInputs + i;
       const std::size_t f1 = static_cast<std::size_t>(r.value) * wengine::logic::kMaxInputs + i;
       if (d0 == wengine::logic::kNoDriver) {
@@ -213,7 +219,7 @@ void assert_seq_equal_with_check(const wengine::logic::Netlist &before, const we
         continue;
       }
       assert(d1 != wengine::logic::kNoDriver);
-      assert(after.gates[d1].live);
+      assert(after.slots[d1].live);
       if (check == SeqDriverCheck::kStrict) {
         assert(barrier_gate_name(after, d1) == barrier_gate_name(before, d0));
       }
@@ -243,8 +249,13 @@ void assert_seq_shape_equal(const wengine::logic::Netlist &before, const wengine
 // for O2's fresh build where combinational consumers are renamed); the
 // 10-step run-parity check is the functional backstop.
 void assert_seq_fanout_equal(const wengine::logic::Netlist &before, const wengine::logic::Netlist &after) {
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-    const wengine::logic::Gate &g = before.gates[s];
+  const std::size_t n_slots =
+      before.slots.size() < after.slots.size() ? after.slots.size() : before.slots.size();
+  for (wengine::logic::Slot s = 0; s < n_slots; ++s) {
+    if (s >= before.slots.size()) {
+      continue;
+    }
+    const wengine::logic::Gate &g = before.slots[s];
     if (!g.live || !wengine::logic::is_sequential_kind(g.kind)) {
       continue;
     }
@@ -253,25 +264,29 @@ void assert_seq_fanout_equal(const wengine::logic::Netlist &before, const wengin
     for (std::uint8_t pol = 0; pol <= 1; ++pol) {
       std::size_t c0 = 0;
       std::size_t c1 = 0;
-      for (std::uint16_t u = 0; u < wengine::logic::kMaxGates; ++u) {
-        const wengine::logic::Gate &gu = before.gates[u];
-        if (!gu.live) {
-          continue;
-        }
-        for (std::uint8_t i = 0; i < gu.input_count; ++i) {
-          if (gu.drivers[i] == s &&
-              before.driver_inv[static_cast<std::size_t>(u) * wengine::logic::kMaxInputs + i] == pol) {
-            ++c0;
+      for (wengine::logic::Slot u = 0; u < n_slots; ++u) {
+        if (u < before.slots.size()) {
+          const wengine::logic::Gate &gu = before.slots[u];
+          if (gu.live) {
+            for (std::uint8_t i = 0; i < gu.input_count; ++i) {
+              if (gu.drivers[i] == s &&
+                  before.driver_inv[static_cast<std::size_t>(u) * wengine::logic::kMaxInputs + i] == pol) {
+                ++c0;
+              }
+            }
           }
         }
-        const wengine::logic::Gate &hu = after.gates[u];
+        if (u >= after.slots.size()) {
+          continue;
+        }
+        const wengine::logic::Gate &hu = after.slots[u];
         if (!hu.live) {
           continue;
         }
         for (std::uint8_t i = 0; i < hu.input_count; ++i) {
           // Map the after-side driver slot back through its display name:
           // sequential names are stable, combinational slots are not.
-          if (hu.drivers[i] >= wengine::logic::kMaxGates || !after.gates[hu.drivers[i]].live) {
+          if (hu.drivers[i] >= wengine::logic::slot_count(after) || !after.slots[hu.drivers[i]].live) {
             continue;
           }
           if (barrier_gate_name(after, hu.drivers[i]) != barrier_gate_name(before, s)) {
@@ -316,8 +331,8 @@ void assert_seq_run_parity_proj(const wengine::logic::Netlist &a, const wengine:
     }
     assert(wengine::logic::seq_step(ca, sa, std::span<const wengine::logic::LogicValue>(row_a.data(), nin_a)).ok());
     assert(wengine::logic::seq_step(cb, sb, std::span<const wengine::logic::LogicValue>(row_b.data(), nin_b)).ok());
-    for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-      const wengine::logic::Gate &g = a.gates[s];
+    for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(a); ++s) {
+      const wengine::logic::Gate &g = a.slots[s];
       if (!g.live || !wengine::logic::is_sequential_kind(g.kind)) {
         continue;
       }

@@ -57,7 +57,7 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
       return cli::usage_error(out, "cannot mark input shared", kUsage);
     }
   }
-  const auto &dst = nl.gates[to.value.slot];
+  const auto &dst = nl.slots[to.value.slot];
   const bool occupied = dst.drivers[to.value.input] != wengine::logic::kNoDriver;
   const bool shared = wengine::logic::is_shared_input(nl, to.value.slot, to.value.input);
   if (occupied && !shared) {
@@ -93,8 +93,8 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
         return cli::usage_error(out, "wire would close a combinational cycle", kUsage);
       }
     } else {
-      wengine::logic::Gate &dst_gate = nl.gates[to.value.slot];
-      wengine::logic::Gate &src_gate = nl.gates[from.value.slot];
+      wengine::logic::Gate &dst_gate = nl.slots[to.value.slot];
+      wengine::logic::Gate &src_gate = nl.slots[from.value.slot];
       dst_gate.drivers[to.value.input] = from.value.slot;
       ++src_gate.output_fanout;
       const bool acyclic = wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok();

@@ -19,10 +19,11 @@ namespace wengine::cli::logic {
 
 using wengine::logic::PinRef;
 using wengine::logic::GateKind;
-using wengine::logic::kMaxGates;
 using wengine::logic::kMaxInputs;
 using wengine::logic::kNoDriver;
 using wengine::logic::Netlist;
+using wengine::logic::Slot;
+using wengine::logic::slot_count;
 
 namespace support {
 
@@ -105,16 +106,16 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
   return text.size() >= prefix.size() && text.substr(0, prefix.size()) == prefix;
 }
 
-[[nodiscard]] std::string gate_name(const Netlist &nl, std::uint16_t slot) {
-  std::string s(wengine::logic::gate_kind_name(nl.gates[slot].kind));
-  s += std::to_string(nl.gates[slot].counter);
+[[nodiscard]] std::string gate_name(const Netlist &nl, Slot slot) {
+  std::string s(wengine::logic::gate_kind_name(nl.slots[slot].kind));
+  s += std::to_string(nl.slots[slot].counter);
   return s;
 }
 
-[[nodiscard]] std::string pin_text(const Netlist &nl, std::uint16_t slot, bool is_output, std::uint8_t input, bool negated) {
+[[nodiscard]] std::string pin_text(const Netlist &nl, Slot slot, bool is_output, std::uint8_t input, bool negated) {
   std::string s = gate_name(nl, slot);
   s += '.';
-  const auto &g = nl.gates[slot];
+  const auto &g = nl.slots[slot];
   if (is_output && wengine::logic::is_sequential_kind(g.kind)) {
     s += negated ? "NQ" : "Q";
   } else if (is_output) {
@@ -147,8 +148,8 @@ void push_matches(std::string_view partial, std::span<const std::string_view> op
 namespace support {
 
 void collect_gate_names(const Netlist &nl, std::string_view partial, std::vector<std::string> &out) {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live) {
       continue;
     }
     std::string name = gate_name(nl, s);
@@ -159,8 +160,8 @@ void collect_gate_names(const Netlist &nl, std::string_view partial, std::vector
 }
 
 void collect_pins(const Netlist &nl, bool want_out, bool want_in, std::string_view partial, std::vector<std::string> &out) {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const auto &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const auto &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -188,8 +189,8 @@ void collect_pins(const Netlist &nl, bool want_out, bool want_in, std::string_vi
 }
 
 void collect_block_inputs(const Netlist &nl, std::string_view partial, std::vector<std::string> &out) {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const auto &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const auto &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -239,12 +240,12 @@ core::Status compose_block_inputs(const Netlist &nl, std::vector<wengine::logic:
   const auto &pokes = poke_map();
   const std::size_t n = wengine::logic::block_input_count(nl);
   for (std::size_t ord = 0; ord < n; ++ord) {
-    std::uint16_t s = 0;
+    Slot s = 0;
     std::uint8_t i = 0;
     if (!wengine::logic::block_input_pin(nl, ord, s, i)) {
       return core::Status::failure(core::StatusCode::kInternal);
     }
-    const auto &g = nl.gates[s];
+    const auto &g = nl.slots[s];
     const std::size_t flat = wengine::logic::tie_flat(s, i);
     const auto it = pokes.find(flat);
     if (it == pokes.end() && g.kind == wengine::logic::GateKind::kDff && i == 4 && !wengine::logic::is_tied(nl, s, i)) {
@@ -264,11 +265,11 @@ std::size_t reap_stale_pokes(const Netlist &nl) {
   std::size_t dropped = 0;
   for (auto it = pokes.begin(); it != pokes.end();) {
     const std::size_t flat = it->first;
-    const auto slot = static_cast<std::uint16_t>(flat / kMaxInputs);
+    const Slot slot = static_cast<Slot>(flat / kMaxInputs);
     const auto input = static_cast<std::uint8_t>(flat % kMaxInputs);
-    bool live = slot < kMaxGates && nl.gates[slot].live && input < nl.gates[slot].input_count &&
-                nl.gates[slot].drivers[input] == kNoDriver &&
-                (nl.gates[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) == 0;
+    bool live = slot < slot_count(nl) && nl.slots[slot].live && input < nl.slots[slot].input_count &&
+                nl.slots[slot].drivers[input] == kNoDriver &&
+                (nl.slots[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) == 0;
     if (live) {
       ++it;
     } else {
@@ -282,9 +283,9 @@ std::size_t reap_stale_pokes(const Netlist &nl) {
 core::Status apply_async_and_report(Netlist &nl, std::ostream &out) {
   wengine::logic::SeqState &st = seq_state();
   wengine::logic::init_seq_state(st, nl);
-  std::array<wengine::logic::LogicValue, kMaxGates> old_q{};
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+  std::vector<wengine::logic::LogicValue> old_q(slot_count(nl), wengine::logic::LogicValue::kLow);
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (nl.slots[s].live && wengine::logic::is_sequential_kind(nl.slots[s].kind)) {
       old_q[s] = st.q[s];
     }
   }
@@ -306,8 +307,8 @@ core::Status apply_async_and_report(Netlist &nl, std::ostream &out) {
     st = committed;
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live || !wengine::logic::is_sequential_kind(nl.gates[s].kind)) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live || !wengine::logic::is_sequential_kind(nl.slots[s].kind)) {
       continue;
     }
     if (st.q[s] == old_q[s]) {
@@ -365,7 +366,7 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
     return core::Status::failure(core::StatusCode::kInternal);
   }
   const std::size_t nout = out_pins.size();
-  std::vector<std::uint64_t> scratch(kMaxGates, 0);
+  std::vector<std::uint64_t> scratch(slot_count(nl), 0);
   std::vector<std::uint64_t> words(nout == 0 ? 1 : nout, 0);
   const std::uint64_t nwords = (rows + 63ULL) / 64ULL;
   for (std::uint64_t w = 0; w < nwords; ++w) {
@@ -480,7 +481,7 @@ core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t t
   if (!os) {
     return core::Status::failure(core::StatusCode::kInternal);
   }
-  std::vector<std::uint64_t> scratch(kMaxGates, 0);
+  std::vector<std::uint64_t> scratch(slot_count(nl), 0);
   std::vector<std::uint64_t> words(nout == 0 ? 1 : nout, 0);
   const std::uint64_t nwords = (rows + 63ULL) / 64ULL;
   for (std::uint64_t w = 0; w < nwords; ++w) {
@@ -536,9 +537,8 @@ void save_yaml(std::ostream &os, const Netlist &nl) {
   // domains. Byte-identical to the v1 layout by construction.
   wengine::logic::SeqState &st = seq_state();
   wengine::logic::init_seq_state(st, nl);
-  std::array<wengine::logic::LogicValue, wengine::logic::kMaxGates> inits{};
-  inits.fill(wengine::logic::LogicValue::kLow);
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
+  std::vector<wengine::logic::LogicValue> inits(slot_count(nl), wengine::logic::LogicValue::kLow);
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     if (st.valid[s] != 0) {
       inits[s] = st.q[s];
     }
@@ -550,8 +550,8 @@ void save_yaml(std::ostream &os, const Netlist &nl) {
 
 [[nodiscard]] std::size_t wire_count(const Netlist &nl) noexcept {
   std::size_t n = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const auto &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const auto &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -568,11 +568,11 @@ void save_yaml(std::ostream &os, const Netlist &nl) {
 
 void report_contention(const Netlist &nl, const wengine::logic::SolveDiag &diag, std::ostream &out) {
   bool any_mark = false;
-  for (std::uint16_t s = 0; s < kMaxGates && !any_mark; ++s) {
-    if (!nl.gates[s].live) {
+  for (Slot s = 0; s < slot_count(nl) && !any_mark; ++s) {
+    if (!nl.slots[s].live) {
       continue;
     }
-    for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+    for (std::uint8_t i = 0; i < nl.slots[s].input_count; ++i) {
       if (wengine::logic::is_shared_input(nl, s, i)) {
         any_mark = true;
         break;
@@ -584,15 +584,19 @@ void report_contention(const Netlist &nl, const wengine::logic::SolveDiag &diag,
   }
   std::uint64_t total = 0;
   out << "contention:";
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (!nl.gates[s].live) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (!nl.slots[s].live) {
       continue;
     }
-    for (std::uint8_t i = 0; i < nl.gates[s].input_count; ++i) {
+    for (std::uint8_t i = 0; i < nl.slots[s].input_count; ++i) {
       if (!wengine::logic::is_shared_input(nl, s, i)) {
         continue;
       }
-      const std::uint32_t n = diag.per_net[static_cast<std::size_t>(s) * kMaxInputs + i];
+      // A diag smaller than the pool (e.g. the no-op step path, where no
+      // resolution ran) reads as zero — counts only exist for spans the
+      // funnel actually folded.
+      const std::size_t flat = static_cast<std::size_t>(s) * kMaxInputs + i;
+      const std::uint32_t n = (flat < diag.per_net.size()) ? diag.per_net[flat] : 0;
       total += n;
       out << ' ' << pin_text(nl, s, false, i) << '=' << n;
     }
@@ -651,7 +655,7 @@ namespace support {
 
 namespace yaml {
 
-bool load_text(const std::string &text, Netlist &out, std::array<wengine::logic::LogicValue, wengine::logic::kMaxGates> &inits, std::string &err) {
+bool load_text(const std::string &text, Netlist &out, std::vector<wengine::logic::LogicValue> &inits, std::string &err) {
   // Strict v1 loader lives in the versioned store
   // (src/logic/yaml_store.cpp, the single TU allowed to know yaml-cpp
   // exists); this CLI wrapper forwards the bundle. Atomic: `out` and

@@ -108,8 +108,8 @@ inline constexpr const char *kToolName = "wengine-logic";
 struct Workspace {
   /** @brief Gate topology in slot order (file order on load). */
   Netlist netlist;
-  /** @brief Per-slot power-on Q for sequential gates; kLow elsewhere. */
-  std::array<LogicValue, kMaxGates> init{};
+  /** @brief Per-slot power-on Q for sequential gates; kLow elsewhere (pool-sized). */
+  std::vector<LogicValue> init{};
 };
 
 /**
@@ -126,7 +126,7 @@ struct Workspace {
  * @note The byte layout is pinned by the save/load/save round-trip
  *       test — any change is a schema event, never incidental.
  */
-void save_text(const Netlist &nl, const std::array<LogicValue, kMaxGates> &inits, std::string &out);
+void save_text(const Netlist &nl, const std::vector<LogicValue> &inits, std::string &out);
 
 /**
  * @brief Strict load: build the workspace from `text` or refuse

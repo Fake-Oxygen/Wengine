@@ -85,7 +85,7 @@ class SequentialSolver : public core::ISolver {
     if (!(dt > 0.0) || !std::isfinite(dt)) {
       return {core::StatusCode::kInvalidArgument};
     }
-    const std::uint16_t *members = s.seq_members.empty() ? nullptr : s.seq_members.data();
+    const logic::Slot *members = s.seq_members.empty() ? nullptr : s.seq_members.data();
     const std::size_t n_members = s.seq_members.size();
     std::span<const logic::LogicValue> stimulus(s.seq_inputs.data(), s.seq_inputs.size());
     std::span<logic::LogicValue> outputs(s.seq_outputs.data(), s.seq_outputs.size());

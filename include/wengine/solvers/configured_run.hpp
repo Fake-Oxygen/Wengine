@@ -258,13 +258,12 @@ class ConfiguredRun {
         return fail("invalid sequential members (empty selection steps nothing)");
       }
       for (std::size_t k = 0; k < cfg.seq.members.size(); ++k) {
-        const std::uint16_t m = cfg.seq.members[k];
-        if (m >= logic::kMaxGates || !cfg.seq.netlist.gates[m].live) {
+        const logic::Slot m = cfg.seq.members[k];
+        if (m >= logic::slot_count(cfg.seq.netlist) || !cfg.seq.netlist.slots[m].live) {
           return fail("invalid sequential member (not a live slot)");
         }
-        const logic::GateKind mk = cfg.seq.netlist.gates[m].kind;
-        const bool edge_kind = mk == logic::GateKind::kDff || mk == logic::GateKind::kJk ||
-                               mk == logic::GateKind::kT;
+        const logic::GateKind mk = cfg.seq.netlist.slots[m].kind;
+        const bool edge_kind = mk == logic::GateKind::kDff || mk == logic::GateKind::kJk || mk == logic::GateKind::kT;
         if (!edge_kind) {
           return fail("invalid sequential member (not an edge flop)");
         }
@@ -357,9 +356,9 @@ class ConfiguredRun {
       // Workspace power-on values (006): seed every live sequential
       // slot from the section, pre-first-step. All-Low default keeps
       // direct-constructed configs on the legacy fresh-attach behavior.
-      for (std::uint16_t s = 0; s < logic::kMaxGates; ++s) {
-        if (st.seq.valid[s] != 0 && logic::is_sequential_kind(st.netlist.gates[s].kind)) {
-          st.seq.q[s] = cfg.seq.init_q[s];
+      for (logic::Slot s = 0; s < logic::slot_count(st.netlist); ++s) {
+        if (s < st.seq.valid.size() && st.seq.valid[s] != 0 && logic::is_sequential_kind(st.netlist.slots[s].kind)) {
+          st.seq.q[s] = (s < cfg.seq.init_q.size()) ? cfg.seq.init_q[s] : logic::LogicValue::kLow;
         }
       }
       st.seq_inputs = cfg.seq.stimulus;

@@ -5,6 +5,8 @@ the measured path, why that path matters, how to run it, how to read its
 output, and the pitfalls that make numbers lie. Measured numbers are
 machine-dependent: use the interpretation fields to decide what to compare
 (ns/iter across commits and configs), never treat absolute times as targets.
+Committed numbers live only on the pinned-environment baseline page
+(logic-scale below), which states its own reproduction terms.
 
 Build and run via the reproducible `bench` preset:
 
@@ -38,6 +40,8 @@ Pages:
   `bench_link_sockets`, `bench_sample_block`, `bench_tcp_worker`,
   `bench_signal`, `bench_signal_scale`, `bench_snapshot`.
 - [Logic benchmarks](logic.md): `bench_logic`.
+- [Logic scale baseline](logic-scale.md): `bench_logic_scale` (committed
+  pinned-environment numbers with their own reproduction terms).
 
 ```{toctree}
 :maxdepth: 1
@@ -45,4 +49,5 @@ Pages:
 solvers
 transport-signal
 logic
+logic-scale
 ```

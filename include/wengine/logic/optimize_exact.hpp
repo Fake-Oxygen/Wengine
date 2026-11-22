@@ -42,6 +42,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace wengine::logic {
 
@@ -66,8 +67,9 @@ enum class Constness : std::uint8_t {
 
 // Forward declarations for exact pass (defined in optimize_passes.hpp;
 // detach_slot_ties lives in tie_set.hpp).
-inline void recount_fanout(Netlist &nl) noexcept;
-inline void retag(Netlist &nl, std::uint16_t slot, GateKind kind) noexcept;
+ inline void recount_fanout(Netlist &nl) noexcept;
+
+inline void retag(Netlist &nl, Slot slot, GateKind kind) noexcept;
 
 /**
  * @brief Exact truth-table simplification (semantic, not just
@@ -82,14 +84,24 @@ inline void retag(Netlist &nl, std::uint16_t slot, GateKind kind) noexcept;
  * everywhere), allocation-free (fixed stack arrays), noexcept.
  *
  * @param[out] nl Netlist to simplify.
+ * @param[in] resolved Caller-owned eval scratch (`slot_count(nl) * kMaxInputs`
+ *            values) for the truth-table solve calls.
+ * @param[in] gate_out Caller-owned eval scratch (pool-size outputs) for
+ *            the truth-table solve calls.
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
+ * @param[in] tie_members Caller-owned scratch (`slot_count(nl) * kMaxInputs`
+ *            flats) for dead-class dissolution.
  * @return True when the net changed; false when limits, hidden
- *         outputs, or sequential gates skip the pass, or nothing was
- *         constant/dead.
+ *         outputs, or sequential gates skip the pass, nothing was
+ *         constant/dead, or scratch is undersized.
  * @note Opaque barrier: sequential nets are skipped entirely (block
  *       truth tables are history-dependent). Hidden outputs skip the
  *       pass (conservative: dead-for-visible may be live-for-hidden).
  */
-inline bool exact_simplify_pass(Netlist &nl) noexcept {
+
+inline bool exact_simplify_pass(Netlist &nl, std::span<LogicValue> resolved,
+                                 std::span<LogicValue> gate_out, const topo::TopoScratch &ts,
+                                 std::span<std::size_t> tie_members) noexcept {
   const std::size_t n = block_input_count(nl);
   const std::size_t m = block_output_count(nl);
   if (n == 0 || n > 10 || m == 0 || m > 16) {
@@ -120,8 +132,8 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
   // the hidden cone (an input dead for visible outputs may be live for
   // hidden ones). Skip exact when any hidden sink exists (conservative;
   // structural passes already preserve hidden cones).
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && nl.gates[s].ignore_output) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (nl.slots[s].live && nl.slots[s].ignore_output) {
       return false;
     }
   }
@@ -135,11 +147,11 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
   if (in_n != n || out_n != m) {
     return false;
   }
-  std::uint16_t out_slots[16];
+  Slot out_slots[16];
   for (std::size_t o = 0; o < m; ++o) {
     out_slots[o] = out_buf[o].slot;
   }
-  if (!topo::rebuild(nl, EdgeFilter::kAll).ok()) {
+  if (!topo::rebuild(nl, EdgeFilter::kAll, ts).ok()) {
     return false;
   }
   const std::size_t rows = static_cast<std::size_t>(1ULL << n);
@@ -155,7 +167,7 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
     for (std::size_t o = 0; o < m; ++o) {
       out_vals[o] = LogicValue::kLow;
     }
-    if (!solve(nl, std::span<const LogicValue>(in_vals, n), std::span<LogicValue>(out_vals, m)).ok()) {
+    if (!solve(nl, std::span<const LogicValue>(in_vals, n), std::span<LogicValue>(out_vals, m), nullptr, resolved, gate_out, ts).ok()) {
       return false;
     }
     for (std::size_t o = 0; o < m; ++o) {
@@ -230,7 +242,7 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
     }
     // Dissolve via the TieSet seam: untie every member, mark ignored.
     // The class always holds at least its leader pin, so this changes the net.
-    ignore_tie_class(nl, leader);
+    ignore_tie_class(nl, leader, tie_members);
     changed = true;
   }
   // Constant outputs: collapse to canonical form (same as structural
@@ -239,8 +251,8 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
     if (!is_const[o]) {
       continue;
     }
-    const std::uint16_t s = out_slots[o];
-    Gate &g = nl.gates[s];
+    const Slot s = out_slots[o];
+    Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -248,7 +260,7 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
       const bool canonical = g.kind == GateKind::kAnd && g.input_count == 2 && g.ignored_mask == 0x03u &&
                              g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
       if (!canonical) {
-        detach_slot_ties(nl, s);
+        detach_slot_ties(nl, s, tie_members);
         if (g.kind != GateKind::kAnd) {
           retag(nl, s, GateKind::kAnd);
         }
@@ -262,10 +274,9 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
         changed = true;
       }
     } else {
-      const bool canonical = g.kind == GateKind::kNand && g.input_count == 2 && g.ignored_mask == 0x03u &&
-                             g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
+      const bool canonical = g.kind == GateKind::kNand && g.input_count == 2 && g.ignored_mask == 0x03u && g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
       if (!canonical) {
-        detach_slot_ties(nl, s);
+        detach_slot_ties(nl, s, tie_members);
         if (g.kind != GateKind::kNand) {
           retag(nl, s, GateKind::kNand);
         }
@@ -283,7 +294,7 @@ inline bool exact_simplify_pass(Netlist &nl) noexcept {
   if (changed) {
     recount_fanout(nl);
     nl.dirty = true;
-    nl.topo_size = 0;
+    nl.topo_order.clear();
   }
   return changed;
 }

@@ -37,7 +37,7 @@ int LogicUntieSpec::run(ArgCursor &args, std::ostream &out) {
   if (pin.value.is_output) {
     return cli::usage_error(out, "untie needs an input pin (outputs are never tied)", kUsage);
   }
-  const auto &g = nl.gates[pin.value.slot];
+  const auto &g = nl.slots[pin.value.slot];
   if (g.drivers[pin.value.input] != wengine::logic::kNoDriver) {
     return cli::usage_error(out, "untie needs a dangling pin (unwire first)", kUsage);
   }
@@ -69,8 +69,8 @@ void LogicUntieSpec::complete(std::span<const std::string_view> prior_args, std:
   // to all inputs when nothing is tied so completion never goes silent.
   const Netlist &nl = workspace();
   bool any_tied = false;
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-    const auto &g = nl.gates[s];
+  for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+    const auto &g = nl.slots[s];
     if (!g.live) {
       continue;
     }

@@ -23,7 +23,7 @@ namespace {
 
 // Canonical display of a tie-leader flat index.
 [[nodiscard]] std::string leader_text(const Netlist &nl, std::size_t leader_flat) {
-  const auto slot = static_cast<std::uint16_t>(leader_flat / wengine::logic::kMaxInputs);
+  const wengine::logic::Slot slot = static_cast<wengine::logic::Slot>(leader_flat / wengine::logic::kMaxInputs);
   const auto input = static_cast<std::uint8_t>(leader_flat % wengine::logic::kMaxInputs);
   return support::pin_text(nl, slot, false, input);
 }
@@ -44,8 +44,8 @@ namespace {
     err = std::string("poke: bad block input pin '") + std::string(pin_text_arg) + "'";
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  if (pin.value.is_output || nl.gates[pin.value.slot].drivers[pin.value.input] != wengine::logic::kNoDriver ||
-      (nl.gates[pin.value.slot].ignored_mask & static_cast<std::uint8_t>(1u << pin.value.input)) != 0) {
+  if (pin.value.is_output || nl.slots[pin.value.slot].drivers[pin.value.input] != wengine::logic::kNoDriver ||
+      (nl.slots[pin.value.slot].ignored_mask & static_cast<std::uint8_t>(1u << pin.value.input)) != 0) {
     err = std::string("poke: '") + std::string(pin_text_arg) + "' is not a pokable block input (wired or ignored?)";
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
@@ -222,8 +222,8 @@ void LogicPokeSpec::complete(std::span<const std::string_view> prior_args, std::
   }
   // Bare prefix: valued forms for every pokable block input.
   const Netlist &nl = workspace();
-  for (std::uint16_t s = 0; s < wengine::logic::kMaxGates; ++s) {
-    const auto &g = nl.gates[s];
+  for (wengine::logic::Slot s = 0; s < wengine::logic::slot_count(nl); ++s) {
+    const auto &g = nl.slots[s];
     if (!g.live) {
       continue;
     }

@@ -90,9 +90,9 @@ void fit_view(View &v, float w, float h, float vw, float vh) noexcept {
   v.oy = (vh - h * z) * 0.5f;
 }
 
-[[nodiscard]] std::string gate_label(const wengine::logic::Netlist &nl, std::uint16_t slot) {
-  std::string s(wengine::logic::gate_kind_name(nl.gates[slot].kind));
-  s += std::to_string(nl.gates[slot].counter);
+[[nodiscard]] std::string gate_label(const wengine::logic::Netlist &nl, wengine::logic::Slot slot) {
+  std::string s(wengine::logic::gate_kind_name(nl.slots[slot].kind));
+  s += std::to_string(nl.slots[slot].counter);
   return s;
 }
 
@@ -371,7 +371,7 @@ void draw_scene(Scene &s, const wengine::logic::Netlist &nl, const wengine::logi
   }
   // Bodies.
   for (const auto &p : sc.gates) {
-    draw_gate_body(s, nl.gates[p.slot], static_cast<float>(p.x), static_cast<float>(p.y),
+    draw_gate_body(s, nl.slots[p.slot], static_cast<float>(p.x), static_cast<float>(p.y),
                    static_cast<float>(kLayoutBoxW), static_cast<float>(kLayoutBoxH));
   }
   // Fanout junction dots, one per fanning output (Q and NQ have
@@ -379,7 +379,7 @@ void draw_scene(Scene &s, const wengine::logic::Netlist &nl, const wengine::logi
   // NQ fanout so their dots render exactly as before).
   for (const auto &p : sc.gates) {
     const wengine::logic::Placed box{p.slot, p.level, p.x, p.y};
-    const wengine::logic::SeqSym sym = wengine::logic::seq_symbol(box, nl.gates[p.slot]);
+    const wengine::logic::SeqSym sym = wengine::logic::seq_symbol(box, nl.slots[p.slot]);
     if (sym.q_dot) {
       const ImVec2 c = T(static_cast<float>(sym.q.x), static_cast<float>(sym.q.y));
       s.dl->AddCircleFilled(c, kDotRPx * s.view.zoom, ink);

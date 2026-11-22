@@ -29,9 +29,9 @@
 
 #include <yaml-cpp/yaml.h>
 
-#include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace wengine::logic::yaml {
 
@@ -183,7 +183,7 @@ namespace {
   if (!validate_topology(tmp, err)) {
     return false;
   }
-  std::array<LogicValue, kMaxGates> inits{};
+  std::vector<LogicValue> inits(logic::slot_count(tmp), LogicValue::kLow);
   if (!apply_inits_and_validate_clocks(rows, tmp, inits, err)) {
     return false;
   }

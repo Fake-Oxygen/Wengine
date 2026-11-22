@@ -47,13 +47,34 @@
  * with EdgeFilter::kCombOnly plus seq_step() instead.
  *
  * Dependency rules (docs/logic.md section 4): header-only,
- * allocation-free, exception-free; fixed stack arrays (kMaxGates
- * bounds), no syscalls, no iostream. Determinism: slot-order snapshot
+ * allocation-free, exception-free; pool workspace (`ws_*` spans, no
+ * fixed stack), no syscalls, no iostream. Determinism: slot-order snapshot
  * plus slot-order commit; sync via init_seq_state is idempotent, so
  * calling seq_step every step (or sporadically) keeps state. Logic is a
  * standalone domain: this header must never depend on CLI types.
  * Consumers: the CLI step/poke/peek verbs, the SequentialSolver engine
  * path, and the test_logic_seq_step suite.
+ *
+ * Capacity (015): the pool is dynamic (see types.hpp) — every scan and
+ * init here is bounded by `slot_count(nl)`, never by the loud
+ * `kMaxGates` cap. The stepper entries are plain (non-template)
+ * functions over `Netlist`/`SeqState` with caller-owned scratch (the
+ * `SeqScratch` bundle plus the `topo::TopoScratch` bundle); the
+ * fewer-param wrappers below keep today's signatures over any pool by
+ * growing the pool workspace (`ensure_workspace` plus the `ws_*`
+ * spans) instead of fixed stack arrays. Caller-owned order buffers
+ * (`comb_order`) must hold at least pool-size slots. The 4-arg
+ * seq_step (outputs discarded) borrows `ws_next_q` as its discard
+ * buffer (next-Q values are dead after the commit phase, so the
+ * end-of-step output scan cannot observe them).
+ *
+ * Dependency rules (docs/logic.md section 4): header-only,
+ * allocation-free, exception-free, no syscalls, no iostream.
+ * Determinism: slot-order snapshot plus slot-order commit; sync via
+ * init_seq_state is idempotent. Logic is a standalone domain: this
+ * header must never depend on CLI types. Consumers: the CLI
+ * step/poke/peek verbs, the SequentialSolver engine path, and the
+ * test_logic_seq_step suite.
  */
 
 #include "wengine/core/status.hpp"
@@ -84,7 +105,7 @@ namespace detail {
  * @param[in] slot Slot to test.
  * @return True when slot steps on this edge.
  */
-[[nodiscard]] inline bool is_step_member(const std::uint16_t *members, std::size_t n_members, std::uint16_t slot) noexcept {
+[[nodiscard]] inline bool is_step_member(const Slot *members, std::size_t n_members, Slot slot) noexcept {
   if (members == nullptr) {
     return true;
   }
@@ -107,30 +128,34 @@ namespace detail {
  * @param[in] nl Netlist to evaluate.
  * @param[in] st Clocked state providing OLD Qs.
  * @param[in] resolved Pre-resolved dangling values from fill_resolved.
- * @param[out] gate_out Per-slot settled outputs.
- * @param[out] comb_order Combinational order from compile_comb_order.
+ * @param[out] gate_out Per-slot settled outputs (caller-owned).
+ * @param[out] comb_order Combinational order from compile_comb_order
+ *             (caller-owned, pool-sized).
  * @param[out] n_comb Number of combinational slots emitted.
+ * @param[in] diag Optional contention channel (nullptr = no counting).
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success; kInvalidArgument on combinational cycles,
- *         dangling drivers, or X/Z inputs.
+ *         dangling drivers, X/Z inputs, or undersized scratch.
  */
-[[nodiscard]] inline core::Status eval_comb_phase1(const Netlist &nl, const SeqState &st, const LogicValue *resolved,
-                                                    LogicValue *gate_out, std::uint16_t *comb_order,
-                                                    std::size_t &n_comb, SolveDiag *diag = nullptr) noexcept {
-  if (!topo::compile_comb_order(nl, comb_order, n_comb)) {
+[[nodiscard]] inline core::Status eval_comb_phase1(const Netlist &nl, const SeqState &st,
+                                                   const LogicValue *resolved, LogicValue *gate_out,
+                                                   Slot *comb_order, std::size_t &n_comb,
+                                                   SolveDiag *diag, const topo::TopoScratch &ts) noexcept {
+  if (!topo::compile_comb_order(nl, comb_order, n_comb, ts.indeg, ts.queue)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  for (std::size_t s = 0; s < kMaxGates; ++s) {
+  for (std::size_t s = 0; s < slot_count(nl); ++s) {
     gate_out[s] = LogicValue::kLow;
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && is_sequential_kind(nl.gates[s].kind)) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (nl.slots[s].live && is_sequential_kind(nl.slots[s].kind)) {
       gate_out[s] = st.q[s];
     }
   }
   LogicValue ins[kMaxInputs];
   for (std::size_t oi = 0; oi < n_comb; ++oi) {
-    const std::uint16_t s = comb_order[oi];
-    const Gate &g = nl.gates[s];
+    const Slot s = comb_order[oi];
+    const Gate &g = nl.slots[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
       if (!resolve_input(nl, s, i, gate_out, resolved, ins[i], diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
@@ -160,10 +185,10 @@ namespace detail {
  * @param[in] diag Optional contention channel (nullptr = no counting).
  * @return True on success; false on X/Z values.
  */
-[[nodiscard]] inline bool resolve_control(const Netlist &nl, std::uint16_t slot, std::uint8_t input,
+[[nodiscard]] inline bool resolve_control(const Netlist &nl, Slot slot, std::uint8_t input,
                                           const LogicValue *gate_out, const LogicValue *resolved,
                                           LogicValue &out, SolveDiag *diag = nullptr) noexcept {
-  const Gate &g = nl.gates[slot];
+  const Gate &g = nl.slots[slot];
   if (input >= g.input_count) {
     out = (g.kind == GateKind::kDff && input == 4) ? LogicValue::kHigh : LogicValue::kLow;
     return true;
@@ -182,6 +207,8 @@ namespace detail {
 /**
  * @brief True for the level-sensitive kinds (DLATCH and SRLATCH),
  *        resolved in the level settle instead of the edge snapshot.
+ *
+ * Capacity-free: kinds never scale.
  *
  * @param[in] k Kind to test.
  * @return True for kDlatch/kSrlatch, false otherwise.
@@ -204,17 +231,23 @@ namespace detail {
  * @param[out] st Pool receiving the committed latch Qs.
  * @param[in] resolved Pre-resolved dangling values.
  * @param[out] gate_out Phase-1 outputs, re-seeded with new latch Qs.
+ * @param[out] next_q Caller-owned snapshot scratch (pool-size entries).
+ * @param[in] diag Optional contention channel (nullptr = no counting).
  * @return kOk on success; kInvalidArgument on X/Z latch inputs or an
- *         illegal S=R=1 net (state untouched).
+ *         illegal S=R=1 net (state untouched) or undersized scratch.
  */
-[[nodiscard]] inline core::Status apply_level_resolve(const Netlist &nl, SeqState &st, const LogicValue *resolved,
-                                                      LogicValue *gate_out, SolveDiag *diag = nullptr) noexcept {
-  LogicValue next_q[kMaxGates];
-  for (std::size_t s = 0; s < kMaxGates; ++s) {
+[[nodiscard]] inline core::Status apply_level_resolve(const Netlist &nl, SeqState &st,
+                                                      const LogicValue *resolved, LogicValue *gate_out,
+                                                      std::span<LogicValue> next_q,
+                                                      SolveDiag *diag = nullptr) noexcept {
+  if (next_q.size() < slot_count(nl)) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
+  for (std::size_t s = 0; s < slot_count(nl); ++s) {
     next_q[s] = LogicValue::kLow;
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live || !is_level_kind(g.kind)) {
       continue;
     }
@@ -251,8 +284,8 @@ namespace detail {
       }
     }
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && is_level_kind(nl.gates[s].kind)) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (nl.slots[s].live && is_level_kind(nl.slots[s].kind)) {
       st.q[s] = next_q[s];
       gate_out[s] = next_q[s]; // seed phase-1-with-level-Qs for edge use
     }
@@ -280,15 +313,24 @@ namespace detail {
  * @param[in] members Member slots to step, or nullptr for every live flop.
  * @param[in] n_members Member count (ignored when members is nullptr).
  * @param[in] diag Optional contention channel (nullptr = no counting).
+ * @param[in] ss Caller-owned step scratch (see SeqScratch).
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success; kInvalidArgument on topology errors
  *         (combinational cycle under kCombOnly), size mismatches, X/Z
- *         inputs or state, or S=R=1 nets (state untouched).
+ *         inputs or state, S=R=1 nets (state untouched), or undersized
+ *         scratch.
  */
-[[nodiscard]] inline core::Status seq_step_filtered(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
-                                                    std::span<LogicValue> block_outputs, const std::uint16_t *members,
-                                                    std::size_t n_members, SolveDiag *diag = nullptr) noexcept {
+[[nodiscard]] inline core::Status seq_step_filtered(Netlist &nl, SeqState &st,
+                                                     std::span<const LogicValue> block_inputs,
+                                                     std::span<LogicValue> block_outputs,
+                                                     const Slot *members, std::size_t n_members,
+                                                     SolveDiag *diag, const SeqScratch &ss,
+                                                     const topo::TopoScratch &ts) noexcept {
+  if (!ss.validate(slot_count(nl)).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
   init_seq_state(st, nl);
-  if (!topo::validate(nl, EdgeFilter::kCombOnly).ok()) {
+  if (!topo::validate(nl, EdgeFilter::kCombOnly, ts).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t n_in = block_input_count(nl);
@@ -299,22 +341,19 @@ namespace detail {
   // Defensive: Qs are Low/High by construction (power-on Low, commits write
   // snapshots only). A corrupted pool (or a future tri-state Q) fails loudly
   // before any eval reads it.
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     if (st.valid[s] != 0 && st.q[s] != LogicValue::kLow && st.q[s] != LogicValue::kHigh) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
   }
   // Dangling-input resolution (same order/rules as solve): leaders consume
   // block_inputs in slot order, X/Z rejected; ignored pins tie to kLow.
-  LogicValue resolved[kMaxGates * kMaxInputs];
-  if (!fill_resolved(nl, block_inputs, resolved).ok()) {
+  if (!fill_resolved(nl, block_inputs, ss.resolved).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
 
-  std::uint16_t comb_order[kMaxGates];
   std::size_t n_comb = 0;
-  LogicValue gate_out[kMaxGates];
-  if (!detail::eval_comb_phase1(nl, st, resolved, gate_out, comb_order, n_comb, diag).ok()) {
+  if (!detail::eval_comb_phase1(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.comb_order.data(), n_comb, diag, ts).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
 
@@ -322,23 +361,22 @@ namespace detail {
   // nets and commit before any edge snapshot, so edge flops wired from
   // latch Q see end-of-level values. Fails with state untouched on X/Z
   // (or, from US2, S=R=1). Unconditional: domain filtering is edge-only.
-  if (!detail::apply_level_resolve(nl, st, resolved, gate_out, diag).ok()) {
+  if (!detail::apply_level_resolve(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.next_q, diag).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
 
   // Snapshot: D (input 0) for every edge flop + CLK (input 1) validation,
   // in slot order. Level kinds (DLATCH/SRLATCH) are exempt — settled
-  // above; advances never gate their Q. Full-control DFFs additionally
+  // above; advances never gate level Q. Full-control DFFs additionally
   // resolve RST/SET/EN with priority RST > SET > EN-hold > D (reset wins
   // RST+SET; EN=Low holds Q). D/CLK resolve first so X/Z there fails
   // loudly even for held flops. X/Z anywhere fails before any commit
   // (state untouched).
-  LogicValue next_q[kMaxGates];
-  for (std::size_t s = 0; s < kMaxGates; ++s) {
-    next_q[s] = LogicValue::kLow;
+  for (std::size_t s = 0; s < slot_count(nl); ++s) {
+    ss.next_q[s] = LogicValue::kLow;
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live || !is_sequential_kind(g.kind)) {
       continue;
     }
@@ -350,10 +388,10 @@ namespace detail {
     }
     LogicValue d = LogicValue::kLow;
     LogicValue clk = LogicValue::kLow;
-    if (!resolve_input(nl, s, 0, gate_out, resolved, d, diag)) {
+    if (!resolve_input(nl, s, 0, ss.gate_out.data(), ss.resolved.data(), d, diag)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
-    if (!resolve_input(nl, s, 1, gate_out, resolved, clk, diag)) {
+    if (!resolve_input(nl, s, 1, ss.gate_out.data(), ss.resolved.data(), clk, diag)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
     if ((d != LogicValue::kLow && d != LogicValue::kHigh) ||
@@ -365,9 +403,9 @@ namespace detail {
       // it. CLK (input 1) validated above; per the SEQ4 rule the edge
       // itself is the call, so the value does not gate the update.
       if (d == LogicValue::kHigh) {
-        next_q[s] = (st.q[s] == LogicValue::kHigh) ? LogicValue::kLow : LogicValue::kHigh;
+        ss.next_q[s] = (st.q[s] == LogicValue::kHigh) ? LogicValue::kLow : LogicValue::kHigh;
       } else {
-        next_q[s] = st.q[s]; // hold: T ignored this edge
+        ss.next_q[s] = st.q[s]; // hold: T ignored this edge
       }
       continue;
     }
@@ -377,7 +415,7 @@ namespace detail {
       // Resolve the clock (input 2) here; per the SEQ4 rule it is
       // validated, not gating. Excitation resolves from pre-edge Q.
       LogicValue jk_clk = LogicValue::kLow;
-      if (!resolve_input(nl, s, 2, gate_out, resolved, jk_clk, diag)) {
+      if (!resolve_input(nl, s, 2, ss.gate_out.data(), ss.resolved.data(), jk_clk, diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
       if (jk_clk != LogicValue::kLow && jk_clk != LogicValue::kHigh) {
@@ -386,15 +424,15 @@ namespace detail {
       const bool j = (d == LogicValue::kHigh);
       const bool k = (clk == LogicValue::kHigh);
       if (!j && !k) {
-        next_q[s] = st.q[s]; // hold
+        ss.next_q[s] = st.q[s]; // hold
       } else if (j && !k) {
-        next_q[s] = LogicValue::kHigh; // set
+        ss.next_q[s] = LogicValue::kHigh; // set
       } else if (!j && k) {
-        next_q[s] = LogicValue::kLow; // reset
+        ss.next_q[s] = LogicValue::kLow; // reset
       } else if (st.q[s] == LogicValue::kHigh) {
-        next_q[s] = LogicValue::kLow; // toggle
+        ss.next_q[s] = LogicValue::kLow; // toggle
       } else {
-        next_q[s] = LogicValue::kHigh; // toggle
+        ss.next_q[s] = LogicValue::kHigh; // toggle
       }
       continue;
     }
@@ -402,56 +440,55 @@ namespace detail {
       LogicValue rst = LogicValue::kLow;
       LogicValue set = LogicValue::kLow;
       LogicValue en = LogicValue::kHigh;
-      if (!detail::resolve_control(nl, s, 2, gate_out, resolved, rst, diag) ||
-          !detail::resolve_control(nl, s, 3, gate_out, resolved, set, diag) ||
-          !detail::resolve_control(nl, s, 4, gate_out, resolved, en, diag)) {
+      if (!detail::resolve_control(nl, s, 2, ss.gate_out.data(), ss.resolved.data(), rst, diag) ||
+          !detail::resolve_control(nl, s, 3, ss.gate_out.data(), ss.resolved.data(), set, diag) ||
+          !detail::resolve_control(nl, s, 4, ss.gate_out.data(), ss.resolved.data(), en, diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
       if (rst == LogicValue::kHigh) {
-        next_q[s] = LogicValue::kLow;
+        ss.next_q[s] = LogicValue::kLow;
         continue;
       }
       if (set == LogicValue::kHigh) {
-        next_q[s] = LogicValue::kHigh;
+        ss.next_q[s] = LogicValue::kHigh;
         continue;
       }
       if (en == LogicValue::kLow) {
-        next_q[s] = st.q[s]; // synchronous hold: D ignored this edge
+        ss.next_q[s] = st.q[s]; // synchronous hold: D ignored this edge
         continue;
       }
     }
     // Edge capture for bare DFFs (004: DLATCH/SRLATCH are level-exempt
     // and never reach here). CLK validated above; the edge itself is the
     // call. T/JK flops take their own branches earlier (003-jk-t-flops).
-    next_q[s] = d;
+    ss.next_q[s] = d;
   }
 
   // Commit: parallel Q update in slot order (members only for subsets;
   // level kinds already committed by the level settle and stay exempt).
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (nl.gates[s].live && is_sequential_kind(nl.gates[s].kind) && !detail::is_level_kind(nl.gates[s].kind) &&
-        detail::is_step_member(members, n_members, s)) {
-      st.q[s] = next_q[s];
-      gate_out[s] = next_q[s]; // seed phase 2 with NEW Qs
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (nl.slots[s].live && is_sequential_kind(nl.slots[s].kind) && !detail::is_level_kind(nl.slots[s].kind) && detail::is_step_member(members, n_members, s)) {
+      st.q[s] = ss.next_q[s];
+      ss.gate_out[s] = ss.next_q[s]; // seed phase 2 with NEW Qs
     }
   }
 
   // Phase 2: zero-delay re-settle with NEW Qs for end-of-step outputs.
   LogicValue ins[kMaxInputs];
   for (std::size_t oi = 0; oi < n_comb; ++oi) {
-    const std::uint16_t s = comb_order[oi];
-    const Gate &g = nl.gates[s];
+    const Slot s = ss.comb_order[oi];
+    const Gate &g = nl.slots[s];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (!resolve_input(nl, s, i, gate_out, resolved, ins[i], diag)) {
+      if (!resolve_input(nl, s, i, ss.gate_out.data(), ss.resolved.data(), ins[i], diag)) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
     }
-    gate_out[s] = eval_gate(g.kind, ins, g.input_count);
+    ss.gate_out[s] = eval_gate(g.kind, ins, g.input_count);
   }
 
   std::size_t out_cursor = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live) {
       continue;
     }
@@ -459,19 +496,56 @@ namespace detail {
       if (out_cursor >= block_outputs.size()) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
-      block_outputs[out_cursor++] = gate_out[s];
+      block_outputs[out_cursor++] = ss.gate_out[s];
     }
     if (is_sequential_kind(g.kind) && g.nq_fanout == 0 && !g.ignore_nq_output) {
       if (out_cursor >= block_outputs.size()) {
         return core::Status::failure(core::StatusCode::kInvalidArgument);
       }
-      block_outputs[out_cursor++] = apply_polarity(gate_out[s], 1);
+      block_outputs[out_cursor++] = apply_polarity(ss.gate_out[s], 1);
     }
   }
   if (out_cursor != block_outputs.size()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   return core::Status::success();
+}
+
+/**
+ * @brief Single rising edge over a flop subset.
+ *
+ * Workspace-backed convenience entry: grows the pool's step/Kahn
+ * scratch to the pool size, then runs the core above. (No noexcept:
+ * workspace growth may allocate.)
+ *
+ * @param[out] nl Netlist to step (topology validated, never mutated;
+ *             workspace grows).
+ * @param[out] st Pool synced (via init_seq_state) and committed.
+ * @param[in] block_inputs Input values in interface order.
+ * @param[out] block_outputs End-of-step values in interface order.
+ * @param[in] members Member slots to step, or nullptr for every live flop.
+ * @param[in] n_members Member count (ignored when members is nullptr).
+ * @param[in] diag Optional contention channel (nullptr = no counting).
+ * @return kOk on success; kInvalidArgument on topology errors
+ *         (combinational cycle under kCombOnly), size mismatches, X/Z
+ *         inputs or state, or S=R=1 nets (state untouched).
+ */
+[[nodiscard]] inline core::Status seq_step_filtered(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
+                                                     std::span<LogicValue> block_outputs, const Slot *members,
+                                                     std::size_t n_members, SolveDiag *diag = nullptr) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  if (diag != nullptr && diag->per_net.size() < n * kMaxInputs) {
+    diag->per_net.assign(n * kMaxInputs, 0);
+  }
+  const SeqScratch ss{std::span<LogicValue>(nl.ws_resolved.data(), n * kMaxInputs),
+                      std::span<Slot>(nl.ws_comb_order.data(), n),
+                      std::span<LogicValue>(nl.ws_gate_out.data(), n), std::span<LogicValue>(nl.ws_next_q.data(), n),
+                      std::span<LogicValue>(nl.ws_forced_q.data(), n),
+                      std::span<std::uint8_t>(nl.ws_force.data(), n)};
+  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
+                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
+  return seq_step_filtered(nl, st, block_inputs, block_outputs, members, n_members, diag, ss, ts);
 }
 
 /**
@@ -483,13 +557,49 @@ namespace detail {
  * @param[out] st Pool synced and committed.
  * @param[in] block_inputs Input values in interface order.
  * @param[out] block_outputs End-of-step values in interface order.
+ * @param[in] diag Optional contention channel (nullptr = no counting).
+ * @param[in] ss Caller-owned step scratch (see SeqScratch).
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success; kInvalidArgument on any seq_step_filtered
  *         failure (state untouched).
  */
-[[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
-                                           std::span<LogicValue> block_outputs,
-                                           SolveDiag *diag = nullptr) noexcept {
-  return seq_step_filtered(nl, st, block_inputs, block_outputs, nullptr, 0, diag);
+[[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st,
+                                           std::span<const LogicValue> block_inputs,
+                                           std::span<LogicValue> block_outputs, SolveDiag *diag,
+                                           const SeqScratch &ss,
+                                           const topo::TopoScratch &ts) noexcept {
+  return seq_step_filtered(nl, st, block_inputs, block_outputs, nullptr, 0, diag, ss, ts);
+}
+
+/**
+ * @brief Single rising edge over the whole netlist (global clock).
+ *
+ * Workspace-backed convenience entry: grows the pool's step/Kahn
+ * scratch to the pool size, then runs the core above. (No noexcept:
+ * workspace growth may allocate.)
+ *
+ * @param[out] nl Netlist to step (workspace grows).
+ * @param[out] st Pool synced and committed.
+ * @param[in] block_inputs Input values in interface order.
+ * @param[out] block_outputs End-of-step values in interface order.
+ * @param[in] diag Optional contention channel (nullptr = no counting).
+ * @return kOk on success; kInvalidArgument on any seq_step_filtered
+ *         failure (state untouched).
+ */
+[[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs, std::span<LogicValue> block_outputs, SolveDiag *diag = nullptr) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  if (diag != nullptr && diag->per_net.size() < n * kMaxInputs) {
+    diag->per_net.assign(n * kMaxInputs, 0);
+  }
+  const SeqScratch ss{std::span<LogicValue>(nl.ws_resolved.data(), n * kMaxInputs),
+                      std::span<Slot>(nl.ws_comb_order.data(), n),
+                      std::span<LogicValue>(nl.ws_gate_out.data(), n), std::span<LogicValue>(nl.ws_next_q.data(), n),
+                      std::span<LogicValue>(nl.ws_forced_q.data(), n),
+                      std::span<std::uint8_t>(nl.ws_force.data(), n)};
+  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
+                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
+  return seq_step(nl, st, block_inputs, block_outputs, diag, ss, ts);
 }
 
 /**
@@ -507,12 +617,17 @@ namespace detail {
  * @param[out] nl Netlist holding the control nets.
  * @param[out] st Pool receiving forced Qs.
  * @param[in] block_inputs Input values in interface order.
+ * @param[in] ss Caller-owned step scratch (see SeqScratch).
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success (including no-op nets); kInvalidArgument on
- *         topology errors, size mismatches, or X/Z controls (state
- *         untouched).
+ *         topology errors, size mismatches, X/Z controls (state
+ *         untouched), or undersized scratch.
  */
-[[nodiscard]] inline core::Status apply_async_controls(Netlist &nl, SeqState &st,
-                                                       std::span<const LogicValue> block_inputs) noexcept {
+[[nodiscard]] inline core::Status apply_async_controls(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs,
+                                                        const SeqScratch &ss, const topo::TopoScratch &ts) noexcept {
+  if (!ss.validate(slot_count(nl)).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
   init_seq_state(st, nl);
   if (!has_sequential_gates(nl)) {
     return core::Status::success(); // (011) Vacuous settle: no flops to
@@ -520,55 +635,80 @@ namespace detail {
     // authoring on combinational netlists. Callers validate topology on
     // their own path; only SeqState forcing lives here.
   }
-  if (!topo::validate(nl, EdgeFilter::kCombOnly).ok()) {
+  if (!topo::validate(nl, EdgeFilter::kCombOnly, ts).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t n_in = block_input_count(nl);
   if (block_inputs.size() != n_in) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     if (st.valid[s] != 0 && st.q[s] != LogicValue::kLow && st.q[s] != LogicValue::kHigh) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
   }
-  LogicValue resolved[kMaxGates * kMaxInputs];
-  if (!fill_resolved(nl, block_inputs, resolved).ok()) {
+  if (!fill_resolved(nl, block_inputs, ss.resolved).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  LogicValue gate_out[kMaxGates];
-  std::uint16_t comb_order[kMaxGates];
   std::size_t n_comb = 0;
-  if (!detail::eval_comb_phase1(nl, st, resolved, gate_out, comb_order, n_comb).ok()) {
+  if (!detail::eval_comb_phase1(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.comb_order.data(), n_comb, nullptr, ts).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  LogicValue forced_q[kMaxGates];
-  bool force[kMaxGates] = {};
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    const Gate &g = nl.gates[s];
+  for (std::size_t s = 0; s < slot_count(nl); ++s) {
+    ss.forced_q[s] = LogicValue::kLow;
+    ss.force[s] = 0;
+  }
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    const Gate &g = nl.slots[s];
     if (!g.live || !is_sequential_kind(g.kind) || g.kind != GateKind::kDff || g.input_count <= 2) {
       continue;
     }
     LogicValue rst = LogicValue::kLow;
     LogicValue set = LogicValue::kLow;
-    if (!detail::resolve_control(nl, s, 2, gate_out, resolved, rst) ||
-        !detail::resolve_control(nl, s, 3, gate_out, resolved, set)) {
+    if (!detail::resolve_control(nl, s, 2, ss.gate_out.data(), ss.resolved.data(), rst) || !detail::resolve_control(nl, s, 3, ss.gate_out.data(), ss.resolved.data(), set)) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
     if (rst == LogicValue::kHigh) {
-      forced_q[s] = LogicValue::kLow;
-      force[s] = true;
+      ss.forced_q[s] = LogicValue::kLow;
+      ss.force[s] = 1;
     } else if (set == LogicValue::kHigh) {
-      forced_q[s] = LogicValue::kHigh;
-      force[s] = true;
+      ss.forced_q[s] = LogicValue::kHigh;
+      ss.force[s] = 1;
     }
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (force[s]) {
-      st.q[s] = forced_q[s];
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (ss.force[s]) {
+      st.q[s] = ss.forced_q[s];
     }
   }
   return core::Status::success();
+}
+
+/**
+ * @brief Immediate async-apply for full-control DFFs.
+ *
+ * Workspace-backed convenience entry: grows the pool's step/Kahn
+ * scratch to the pool size, then runs the core above. (No noexcept:
+ * workspace growth may allocate.)
+ *
+ * @param[out] nl Netlist holding the control nets (workspace grows).
+ * @param[out] st Pool receiving forced Qs.
+ * @param[in] block_inputs Input values in interface order.
+ * @return kOk on success (including no-op nets); kInvalidArgument on
+ *         topology errors, size mismatches, or X/Z controls (state
+ *         untouched).
+ */
+[[nodiscard]] inline core::Status apply_async_controls(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  const SeqScratch ss{std::span<LogicValue>(nl.ws_resolved.data(), n * kMaxInputs),
+                      std::span<Slot>(nl.ws_comb_order.data(), n),
+                      std::span<LogicValue>(nl.ws_gate_out.data(), n), std::span<LogicValue>(nl.ws_next_q.data(), n),
+                      std::span<LogicValue>(nl.ws_forced_q.data(), n),
+                      std::span<std::uint8_t>(nl.ws_force.data(), n)};
+  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
+                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
+  return apply_async_controls(nl, st, block_inputs, ss, ts);
 }
 
 /**
@@ -588,39 +728,71 @@ namespace detail {
  * @param[out] nl Netlist holding the latch nets.
  * @param[out] st Pool receiving settled latch Qs.
  * @param[in] block_inputs Input values in interface order.
+ * @param[in] ss Caller-owned step scratch (see SeqScratch).
+ * @param[in] ts Caller-owned Kahn scratch (see TopoScratch).
  * @return kOk on success (including no-op nets); kInvalidArgument on
- *         topology errors, size mismatches, X/Z inputs, or S=R=1 nets
- *         (state untouched).
+ *         topology errors, size mismatches, X/Z inputs, S=R=1 nets
+ *         (state untouched), or undersized scratch.
  */
-[[nodiscard]] inline core::Status apply_level_latches(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs) noexcept {
+[[nodiscard]] inline core::Status apply_level_latches(Netlist &nl, SeqState &st,
+                                                       std::span<const LogicValue> block_inputs,
+                                                       const SeqScratch &ss,
+                                                       const topo::TopoScratch &ts) noexcept {
+  if (!ss.validate(slot_count(nl)).ok()) {
+    return core::Status::failure(core::StatusCode::kInvalidArgument);
+  }
   init_seq_state(st, nl);
   if (!has_sequential_gates(nl)) {
     return core::Status::success(); // (011) Vacuous settle: no latches to
     // settle (same rationale as apply_async_controls above).
   }
-  if (!topo::validate(nl, EdgeFilter::kCombOnly).ok()) {
+  if (!topo::validate(nl, EdgeFilter::kCombOnly, ts).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   const std::size_t n_in = block_input_count(nl);
   if (block_inputs.size() != n_in) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     if (st.valid[s] != 0 && st.q[s] != LogicValue::kLow && st.q[s] != LogicValue::kHigh) {
       return core::Status::failure(core::StatusCode::kInvalidArgument);
     }
   }
-  LogicValue resolved[kMaxGates * kMaxInputs];
-  if (!fill_resolved(nl, block_inputs, resolved).ok()) {
+  if (!fill_resolved(nl, block_inputs, ss.resolved).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  LogicValue gate_out[kMaxGates];
-  std::uint16_t comb_order[kMaxGates];
   std::size_t n_comb = 0;
-  if (!detail::eval_comb_phase1(nl, st, resolved, gate_out, comb_order, n_comb).ok()) {
+  if (!detail::eval_comb_phase1(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.comb_order.data(), n_comb, nullptr, ts).ok()) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  return detail::apply_level_resolve(nl, st, resolved, gate_out);
+  return detail::apply_level_resolve(nl, st, ss.resolved.data(), ss.gate_out.data(), ss.next_q);
+}
+
+/**
+ * @brief Immediate level-settle for DLATCH/SRLATCH.
+ *
+ * Workspace-backed convenience entry: grows the pool's step/Kahn
+ * scratch to the pool size, then runs the core above. (No noexcept:
+ * workspace growth may allocate.)
+ *
+ * @param[out] nl Netlist holding the latch nets (workspace grows).
+ * @param[out] st Pool receiving settled latch Qs.
+ * @param[in] block_inputs Input values in interface order.
+ * @return kOk on success (including no-op nets); kInvalidArgument on
+ *         topology errors, size mismatches, X/Z inputs, or S=R=1 nets
+ *         (state untouched).
+ */
+[[nodiscard]] inline core::Status apply_level_latches(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
+  const SeqScratch ss{std::span<LogicValue>(nl.ws_resolved.data(), n * kMaxInputs),
+                      std::span<Slot>(nl.ws_comb_order.data(), n),
+                      std::span<LogicValue>(nl.ws_gate_out.data(), n), std::span<LogicValue>(nl.ws_next_q.data(), n),
+                      std::span<LogicValue>(nl.ws_forced_q.data(), n),
+                      std::span<std::uint8_t>(nl.ws_force.data(), n)};
+  const topo::TopoScratch ts{std::span<Slot>(nl.ws_order.data(), n), std::span<Slot>(nl.ws_levels.data(), n),
+                             std::span<std::uint8_t>(nl.ws_indeg.data(), n), std::span<Slot>(nl.ws_queue.data(), n)};
+  return apply_level_latches(nl, st, block_inputs, ss, ts);
 }
 
 /**
@@ -628,19 +800,21 @@ namespace detail {
  *        Q / find_seq_serial). Computes the same end-of-step values;
  *        only the caller-visible copy is dropped.
  *
- * @param[out] nl Netlist to step.
+ * Workspace-backed thin wrapper over the 5-arg form: the discard
+ * buffer borrows `ws_next_q` (next-Q values are dead after the commit
+ * phase, so the output scan cannot observe them).
+ *
+ * @param[out] nl Netlist to step (workspace grows).
  * @param[out] st Pool synced and committed.
  * @param[in] block_inputs Input values in interface order.
  * @return kOk on success; kInvalidArgument on any seq_step failure
  *         (state untouched).
  */
-[[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs) noexcept {
+[[nodiscard]] inline core::Status seq_step(Netlist &nl, SeqState &st, std::span<const LogicValue> block_inputs) {
+  const std::size_t n = slot_count(nl);
+  ensure_workspace(nl, n);
   const std::size_t n_out = block_output_count(nl);
-  LogicValue scratch[kMaxGates];
-  for (std::size_t i = 0; i < kMaxGates; ++i) {
-    scratch[i] = LogicValue::kLow;
-  }
-  std::span<LogicValue> out_span(scratch, n_out);
+  std::span<LogicValue> out_span(nl.ws_next_q.data(), n_out);
   return seq_step(nl, st, block_inputs, out_span);
 }
 

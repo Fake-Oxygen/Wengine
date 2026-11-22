@@ -24,7 +24,6 @@
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/types.hpp"
 
-#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -40,7 +39,7 @@ struct SequentialRunConfig {
   /** @brief Stimulus in block-interface order, Low/High only. */
   std::vector<LogicValue> stimulus;    // block-interface order, Low/High only
   /** @brief Flattened edge-flop slots to step (empty with step_all_domains). */
-  std::vector<std::uint16_t> members;  // flattened edge-flop slots to step
+  std::vector<Slot> members;  // flattened edge-flop slots to step
   /** @brief True steps every live edge flop; false steps members only. */
   bool step_all_domains = true;        // true = every live edge flop steps
   /** @brief Explicitly provided (driver gate for non-logic solvers). */
@@ -52,7 +51,7 @@ struct SequentialRunConfig {
    * All-Low default preserves the legacy fresh-attach behavior for
    * direct construction.
    */
-  std::array<LogicValue, kMaxGates> init_q{};
+  std::vector<LogicValue> init_q{};
 };
 
 } // namespace wengine::logic

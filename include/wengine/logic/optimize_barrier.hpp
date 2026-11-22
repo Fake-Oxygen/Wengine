@@ -9,9 +9,8 @@
  * observes flops outside the block interface, so lack of fanout never
  * makes a state element dead.
  *
- * This header is the single home for barrier mechanics so the pass
- * implementations stay combinational-only in spirit:
- * is_frozen_kind / is_barrier_root is one predicate, not N switch cases;
+ * This header is the single home for barrier mechanics: is_frozen_kind /
+ * is_barrier_root is one predicate, not N switch cases;
  * compute_feeds_seq is one O(G*fanin) reverse scan per fixpoint
  * iteration (passes read feeds_seq[s] instead of rescanning all
  * sequential users per gate); collect_barrier_roots lets DCE and O2
@@ -20,6 +19,13 @@
  * wire_fresh_with_polarity is fresh-build wiring with Q/NQ accounting
  * matching wire_pins; DedupKey / MergeTied is the explicit typed dedup
  * contract.
+ *
+ * Capacity (dynamic pool): every entry works over Netlist; the detail
+ * seam keeps one workspace-backed convenience entry (collect_reachable
+ * 2-arg for its test_logic.cpp caller; the scratch-taking core takes
+ * the seed span). follow_drivers takes the DFS stack as caller-owned
+ * scratch. DedupKey factories take 32-bit slots. Internal cross-calls
+ * are bare (no capacity parameter).
  *
  * Dependency rules: header-only, allocation-free, exception-free;
  * depends on eval.hpp, netlist.hpp, seq_state.hpp, and types.hpp. Logic
@@ -36,12 +42,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <span>
 
 namespace wengine::logic::detail {
 
 /**
  * @brief A sequential gate is frozen: passes never retype, fold, drop,
  *        bypass, fuse, dedup, or cancel through it.
+ *
+ * Capacity-free: kinds never scale.
  *
  * @param[in] k Kind to test.
  * @return True for DFF/DLATCH/JK/T/SRLATCH.
@@ -55,8 +65,9 @@ namespace wengine::logic::detail {
  * @param[in] s Slot to test.
  * @return True for live sequential gates; false otherwise.
  */
-[[nodiscard]] inline bool is_barrier_gate(const Netlist &nl, std::uint16_t s) noexcept {
-  return s < kMaxGates && nl.gates[s].live && is_frozen_kind(nl.gates[s].kind);
+
+[[nodiscard]] inline bool is_barrier_gate(const Netlist &nl, Slot s) noexcept {
+  return s < slot_count(nl) && nl.slots[s].live && is_frozen_kind(nl.slots[s].kind);
 }
 
 /**
@@ -70,12 +81,13 @@ namespace wengine::logic::detail {
  * @param[in] s Slot to test.
  * @return True when s feeds a shared input (any attachment).
  */
-[[nodiscard]] inline bool drives_shared(const Netlist &nl, std::uint16_t s) noexcept {
-  if (s >= kMaxGates) {
+
+[[nodiscard]] inline bool drives_shared(const Netlist &nl, Slot s) noexcept {
+  if (s >= slot_count(nl)) {
     return false;
   }
-  for (std::uint16_t u = 0; u < kMaxGates; ++u) {
-    const Gate &g = nl.gates[u];
+  for (Slot u = 0; u < slot_count(nl); ++u) {
+    const Gate &g = nl.slots[u];
     if (!g.live) {
       continue;
     }
@@ -106,11 +118,12 @@ namespace wengine::logic::detail {
  * @param[in] s Slot to test.
  * @return True when any configured input of s carries the mark.
  */
-[[nodiscard]] inline bool has_marked_input(const Netlist &nl, std::uint16_t s) noexcept {
-  if (s >= kMaxGates || !nl.gates[s].live) {
+
+[[nodiscard]] inline bool has_marked_input(const Netlist &nl, Slot s) noexcept {
+  if (s >= slot_count(nl) || !nl.slots[s].live) {
     return false;
   }
-  const Gate &g = nl.gates[s];
+  const Gate &g = nl.slots[s];
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     if (is_shared_flat(nl, tie_flat(s, i))) {
       return true;
@@ -132,11 +145,12 @@ namespace wengine::logic::detail {
  * @param[in] s Slot to test.
  * @return True when any configured input of s carries a pull.
  */
-[[nodiscard]] inline bool has_pulled_input(const Netlist &nl, std::uint16_t s) noexcept {
-  if (s >= kMaxGates || !nl.gates[s].live) {
+
+[[nodiscard]] inline bool has_pulled_input(const Netlist &nl, Slot s) noexcept {
+  if (s >= slot_count(nl) || !nl.slots[s].live) {
     return false;
   }
-  const Gate &g = nl.gates[s];
+  const Gate &g = nl.slots[s];
   for (std::uint8_t i = 0; i < g.input_count; ++i) {
     if (is_pulled_flat(nl, tie_flat(s, i))) {
       return true;
@@ -155,11 +169,12 @@ namespace wengine::logic::detail {
  * @param[in] s Slot to test.
  * @return True for live output-fanout-0 gates, live sequential gates, and live shared feeders.
  */
-[[nodiscard]] inline bool is_barrier_root(const Netlist &nl, std::uint16_t s) noexcept {
-  if (s >= kMaxGates || !nl.gates[s].live) {
+
+[[nodiscard]] inline bool is_barrier_root(const Netlist &nl, Slot s) noexcept {
+  if (s >= slot_count(nl) || !nl.slots[s].live) {
     return false;
   }
-  return nl.gates[s].output_fanout == 0 || is_frozen_kind(nl.gates[s].kind) || drives_shared(nl, s);
+  return nl.slots[s].output_fanout == 0 || is_frozen_kind(nl.slots[s].kind) || drives_shared(nl, s);
 }
 
 /**
@@ -167,10 +182,11 @@ namespace wengine::logic::detail {
  *        is_barrier_root.
  *
  * @param[in] nl Netlist to scan.
- * @param[out] roots Per-slot root flags.
+ * @param[out] roots Per-slot root flags (caller-owned, pool-sized entries).
  */
+
 inline void collect_barrier_roots(const Netlist &nl, bool *roots) noexcept {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     roots[s] = is_barrier_root(nl, s);
   }
 }
@@ -182,26 +198,30 @@ inline void collect_barrier_roots(const Netlist &nl, bool *roots) noexcept {
  *
  * @param[in] nl Netlist holding the driver graph.
  * @param[in] seeds Seed flags (roots to start from).
- * @param[out] keep Per-slot reachability flags.
+ * @param[out] keep Per-slot reachability flags (caller-owned).
+ * @param[in] stack Caller-owned DFS stack (pool-sized slots).
  */
-inline void follow_drivers(const Netlist &nl, const bool *seeds, bool *keep) noexcept {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+
+inline void follow_drivers(const Netlist &nl, const bool *seeds, bool *keep, std::span<Slot> stack) noexcept {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     keep[s] = false;
   }
-  std::uint16_t stack[kMaxGates];
+  if (stack.size() < slot_count(nl)) {
+    return;
+  }
   std::size_t top = 0;
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
-    if (seeds[s] && nl.gates[s].live) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
+    if (seeds[s] && nl.slots[s].live) {
       keep[s] = true;
       stack[top++] = s;
     }
   }
   while (top > 0) {
-    const std::uint16_t cur = stack[--top];
-    const Gate &g = nl.gates[cur];
+    const Slot cur = stack[--top];
+    const Gate &g = nl.slots[cur];
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::uint16_t d = g.drivers[i];
-      if (d != kNoDriver && d < kMaxGates && nl.gates[d].live && !keep[d]) {
+      const Slot d = g.drivers[i];
+      if (d != kNoDriver && d < slot_count(nl) && nl.slots[d].live && !keep[d]) {
         keep[d] = true;
         stack[top++] = d;
       }
@@ -209,8 +229,8 @@ inline void follow_drivers(const Netlist &nl, const bool *seeds, bool *keep) noe
     // 011: extras are driver-graph edges — a pass that dropped an extra
     // would silently shrink a span (correctness, not policy).
     for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, std::uint16_t d, std::uint8_t) {
-        if (d < kMaxGates && nl.gates[d].live && !keep[d]) {
+      for_each_extra(nl, tie_flat(cur, i), [&](std::uint8_t, Slot d, std::uint8_t) {
+        if (d < slot_count(nl) && nl.slots[d].live && !keep[d]) {
           keep[d] = true;
           stack[top++] = d;
         }
@@ -226,12 +246,33 @@ inline void follow_drivers(const Netlist &nl, const bool *seeds, bool *keep) noe
  *        through; driver cones of kept flops follow via the DFS).
  *
  * @param[in] nl Netlist to scan.
+ * @param[out] reach Per-slot reachability flags (caller-owned).
+ * @param[in] seeds Caller-owned scratch (pool-sized root flags).
+ * @param[in] stack Caller-owned DFS stack (pool-sized slots; see
+ *            follow_drivers).
+ */
+
+inline void collect_reachable(const Netlist &nl, bool *reach, std::span<bool> seeds, std::span<Slot> stack) noexcept {
+  if (seeds.size() < slot_count(nl)) {
+    return;
+  }
+  collect_barrier_roots(nl, seeds.data());
+  follow_drivers(nl, seeds.data(), reach, stack);
+}
+
+/**
+ * @brief Reachable set for the O2 fresh build (2-arg convenience form
+ *        for the alias-scale test caller; heap-backed seed/stack
+ *        scratch).
+ *
+ * @param[in] nl Netlist to scan.
  * @param[out] reach Per-slot reachability flags.
  */
-inline void collect_reachable(const Netlist &nl, bool *reach) noexcept {
-  bool seeds[kMaxGates] = {};
-  collect_barrier_roots(nl, seeds);
-  follow_drivers(nl, seeds, reach);
+inline void collect_reachable(const Netlist &nl, bool *reach) {
+  const std::size_t n = slot_count(nl);
+  auto seeds = std::make_unique<bool[]>(n);
+  auto stack = std::make_unique<Slot[]>(n);
+  collect_reachable(nl, reach, std::span<bool>(seeds.get(), n), std::span<Slot>(stack.get(), n));
 }
 
 /**
@@ -240,25 +281,26 @@ inline void collect_reachable(const Netlist &nl, bool *reach) noexcept {
  *        of scanning all users.
  *
  * @param[in] nl Netlist to scan.
- * @param[out] feeds_seq Per-slot sequential-user flags.
+ * @param[out] feeds_seq Per-slot sequential-user flags (caller-owned).
  */
+
 inline void compute_feeds_seq(const Netlist &nl, bool *feeds_seq) noexcept {
-  for (std::uint16_t s = 0; s < kMaxGates; ++s) {
+  for (Slot s = 0; s < slot_count(nl); ++s) {
     feeds_seq[s] = false;
   }
-  for (std::uint16_t u = 0; u < kMaxGates; ++u) {
-    const Gate &user = nl.gates[u];
+  for (Slot u = 0; u < slot_count(nl); ++u) {
+    const Gate &user = nl.slots[u];
     if (!user.live || !is_frozen_kind(user.kind)) {
       continue;
     }
     for (std::uint8_t i = 0; i < user.input_count; ++i) {
-      const std::uint16_t d = user.drivers[i];
-      if (d < kMaxGates && nl.gates[d].live) {
+      const Slot d = user.drivers[i];
+      if (d < slot_count(nl) && nl.slots[d].live) {
         feeds_seq[d] = true;
       }
       // 011: extras feed the same way primaries do.
-      for_each_extra(nl, tie_flat(u, i), [&](std::uint8_t, std::uint16_t e, std::uint8_t) {
-        if (e < kMaxGates && nl.gates[e].live) {
+      for_each_extra(nl, tie_flat(u, i), [&](std::uint8_t, Slot e, std::uint8_t) {
+        if (e < slot_count(nl) && nl.slots[e].live) {
           feeds_seq[e] = true;
         }
       });
@@ -281,17 +323,17 @@ inline void compute_feeds_seq(const Netlist &nl, bool *feeds_seq) noexcept {
  * @param[in] drv Fresh driver slot (kNoDriver when dangling).
  * @param[in] inv Q/NQ polarity of the sink pin (non-zero reads negated).
  */
-inline void wire_fresh_with_polarity(Netlist &out, std::uint16_t fresh, std::uint8_t input,
-                                     std::uint16_t drv, std::uint8_t inv) noexcept {
-  if (fresh >= kMaxGates || input >= kMaxInputs) {
+
+inline void wire_fresh_with_polarity(Netlist &out, Slot fresh, std::uint8_t input, Slot drv, std::uint8_t inv) noexcept {
+  if (fresh >= slot_count(out) || input >= kMaxInputs) {
     return;
   }
-  out.gates[fresh].drivers[input] = drv;
+  out.slots[fresh].drivers[input] = drv;
   out.driver_inv[tie_flat(fresh, input)] = inv;
-  if (drv < kMaxGates && out.gates[drv].live) {
-    ++out.gates[drv].output_fanout;
+  if (drv < slot_count(out) && out.slots[drv].live) {
+    ++out.slots[drv].output_fanout;
     if (inv != 0) {
-      ++out.gates[drv].nq_fanout;
+      ++out.slots[drv].nq_fanout;
     }
   }
 }
@@ -313,6 +355,8 @@ enum class MergeTied : std::uint8_t { kStrict = 0, kMergeTied = 1 };
  *        slot, tied dangling pins by tie leader (under kMergeTied),
  *        untied dangling pins by unique (slot, input) so they never
  *        merge.
+ *
+ * Capacity-free: keys are 32-bit at every capacity (flats fit).
  */
 struct DedupKey {
   /** @brief Key value: 0 means dead/never-match. */
@@ -330,12 +374,13 @@ struct DedupKey {
    */
   [[nodiscard]] static constexpr DedupKey dead() noexcept { return DedupKey{0}; }
   /**
-   * @brief Wired-input key from the driver slot.
+   * @brief Wired-input key from the driver slot (32-bit: widening-safe
+   *        at every capacity).
    *
    * @param[in] d Driver slot.
    * @return Key for a wired input.
    */
-  [[nodiscard]] static constexpr DedupKey wired(std::uint16_t d) noexcept {
+  [[nodiscard]] static constexpr DedupKey wired(std::uint32_t d) noexcept {
     return DedupKey{static_cast<std::uint32_t>(d) + 1u};
   }
   /**
@@ -348,14 +393,21 @@ struct DedupKey {
     return DedupKey{0x10000u + leader};
   }
   /**
-   * @brief Unique key for one (slot, input): never merges.
+   * @brief Unique key for one (slot, input): never merges (32-bit slot:
+   *        widening-safe at every capacity).
    *
    * @param[in] s Gate slot.
    * @param[in] i 0-based input index.
    * @return Key unique to this pin.
    */
-  [[nodiscard]] static DedupKey unique(std::uint16_t s, std::uint8_t i) noexcept {
+  [[nodiscard]] static DedupKey unique(std::uint32_t s, std::uint8_t i) noexcept {
     return DedupKey{0x20000u + static_cast<std::uint32_t>(tie_flat(s, i))};
+  }
+
+private:
+  // Slot-width-independent flat arithmetic for the unique() key.
+  [[nodiscard]] static constexpr std::size_t tie_flat(std::uint32_t s, std::uint8_t i) noexcept {
+    return static_cast<std::size_t>(s) * kMaxInputs + static_cast<std::size_t>(i);
   }
 };
 
@@ -369,7 +421,8 @@ struct DedupKey {
  *            (same-source tied dangling pins merge).
  * @return Key for this input.
  */
-[[nodiscard]] inline DedupKey dedup_key_for(const Netlist &nl, std::uint16_t s, std::uint8_t i, MergeTied merge) noexcept {
+
+[[nodiscard]] inline DedupKey dedup_key_for(const Netlist &nl, Slot s, std::uint8_t i, MergeTied merge) noexcept {
   // 011: inputs of a marked sink never merge — the span (primary AND
   // extras) is the identity, and the key only sees the primary.
   if (has_marked_input(nl, s)) {
@@ -382,9 +435,9 @@ struct DedupKey {
   if (has_pulled_input(nl, s)) {
     return DedupKey::unique(s, i);
   }
-  const std::uint16_t d = nl.gates[s].drivers[i];
+  const Slot d = nl.slots[s].drivers[i];
   if (d != kNoDriver) {
-    return (d < kMaxGates && nl.gates[d].live) ? DedupKey::wired(d) : DedupKey::dead();
+    return (d < slot_count(nl) && nl.slots[d].live) ? DedupKey::wired(d) : DedupKey::dead();
   }
   if (merge == MergeTied::kStrict) {
     return DedupKey::unique(s, i); // never merges

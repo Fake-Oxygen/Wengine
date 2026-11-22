@@ -204,11 +204,11 @@ void test_creation() {
   Netlist nl;
   auto d1 = logic::add_gate(nl, GateKind::kDff, 2);
   assert(d1.ok());
-  assert(nl.gates[d1.value].counter == 1);
-  assert(nl.gates[d1.value].input_count == 2);
+  assert(nl.slots[d1.value].counter == 1);
+  assert(nl.slots[d1.value].input_count == 2);
   auto l1 = logic::add_gate(nl, GateKind::kDlatch); // default fan-in is 2
   assert(l1.ok());
-  assert(nl.gates[l1.value].counter == 1);
+  assert(nl.slots[l1.value].counter == 1);
   assert(nl.live_count == 2);
   // Wrong fan-in stays loud, state untouched.
   assert(!logic::add_gate(nl, GateKind::kDff, 1).ok());
@@ -222,12 +222,12 @@ void test_creation() {
   // JK/T creation: fixed fan-in with per-kind never-reused counters.
   auto j1 = logic::add_gate(nl, GateKind::kJk, 3);
   assert(j1.ok());
-  assert(nl.gates[j1.value].counter == 1);
-  assert(nl.gates[j1.value].input_count == 3);
+  assert(nl.slots[j1.value].counter == 1);
+  assert(nl.slots[j1.value].input_count == 3);
   auto t1 = logic::add_gate(nl, GateKind::kT); // default fan-in is 2
   assert(t1.ok());
-  assert(nl.gates[t1.value].counter == 1);
-  assert(nl.gates[t1.value].input_count == 2);
+  assert(nl.slots[t1.value].counter == 1);
+  assert(nl.slots[t1.value].input_count == 2);
   assert(logic::resolve_gate(nl, "JK1").value == j1.value);
   assert(logic::resolve_gate(nl, "t1").value == t1.value);
   assert(!logic::resolve_gate(nl, "JK2").ok());
@@ -241,8 +241,8 @@ void test_creation() {
   // SRLATCH creation: fixed fan-in with per-kind never-reused counters.
   auto s1 = logic::add_gate(nl, GateKind::kSrlatch); // default fan-in is 2
   assert(s1.ok());
-  assert(nl.gates[s1.value].counter == 1);
-  assert(nl.gates[s1.value].input_count == 2);
+  assert(nl.slots[s1.value].counter == 1);
+  assert(nl.slots[s1.value].input_count == 2);
   assert(logic::resolve_gate(nl, "SRLATCH1").value == s1.value);
   assert(logic::resolve_gate(nl, "srlatch1").value == s1.value);
   assert(!logic::resolve_gate(nl, "SRLATCH2").ok());
@@ -254,14 +254,14 @@ void test_creation() {
   assert(logic::remove_gate(nl, d1.value).ok());
   auto d2 = logic::add_gate(nl, GateKind::kDff, 2);
   assert(d2.ok());
-  assert(nl.gates[d2.value].counter == 2);
+  assert(nl.slots[d2.value].counter == 2);
   assert(logic::resolve_gate(nl, "DFF2").value == d2.value);
   // TBUF creation (012): exactly 2 inputs (default 2) with per-kind
   // never-reused counters (TBUF1, TBUF2, ...).
   auto b1 = logic::add_gate(nl, GateKind::kTbuf);
   assert(b1.ok());
-  assert(nl.gates[b1.value].counter == 1);
-  assert(nl.gates[b1.value].input_count == 2);
+  assert(nl.slots[b1.value].counter == 1);
+  assert(nl.slots[b1.value].input_count == 2);
   assert(logic::resolve_gate(nl, "TBUF1").value == b1.value);
   assert(logic::resolve_gate(nl, "tbuf1").value == b1.value);
   assert(!logic::add_gate(nl, GateKind::kTbuf, 1).ok());
@@ -269,12 +269,12 @@ void test_creation() {
   assert(logic::remove_gate(nl, b1.value).ok());
   auto b2 = logic::add_gate(nl, GateKind::kTbuf, 2);
   assert(b2.ok());
-  assert(nl.gates[b2.value].counter == 2);
+  assert(nl.slots[b2.value].counter == 2);
   assert(logic::resolve_gate(nl, "TBUF2").value == b2.value);
   // Combinational creation unchanged.
   auto a = logic::add_gate(nl, GateKind::kAnd, 2);
   assert(a.ok());
-  assert(nl.gates[a.value].counter == 1);
+  assert(nl.slots[a.value].counter == 1);
 }
 
 void test_jk_t_pins() {
