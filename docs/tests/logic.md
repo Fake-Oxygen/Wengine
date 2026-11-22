@@ -121,6 +121,77 @@ ctest --test-dir build -R logic_adjacency
 `bench_logic_scale` (+ the Delta 016 record); scale instantiation
 lives in `test_logic_scale`.
 
+## test_logic_word_batch
+
+**What it checks**: batch-vs-single word agreement on every slice
+(`eval_block_words` batches + single-slice tail vs per-slice
+`eval_block_word` — every word `==`), scalar `solve` row agreement on
+every truth row, repeat determinism, and the pool-backed overload —
+across all 8 combinational kinds, fan-in 1..8, input counts 1..12,
+tie-off/ignored dangling inputs, tie classes, pull termination
+(up/down), sequential fallthrough (DFF zero/NQ convention), degenerate
+nets (empty, no-output), an unbounded 32-input spot-slice net
+(including a large `word_base`), batch-then-tail caller composition,
+and refusal-verdict parity (shared ≥2 attachments, live `kTbuf`,
+out-of-range lanes, undersized scratch, output-size mismatch — batched
+and single entries refuse with the identical code).
+
+**Purpose**: the batched entry shares one traversal across 4 slices —
+this binary is the behavior pin proving the sharing changes nothing
+but speed.
+
+**Guards against**: lane-shifted words (wrong `word_base` math),
+gate-truth drift between the two spellings, tail-path divergence,
+broken partial-word masking, guard/arity regressions, and silent
+semantic change smuggled inside a performance feature.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_word_batch
+./build/test_logic_word_batch
+```
+
+**Prerequisites**: standard build only.
+
+**Boundaries**: single-slice reference behavior lives in
+`test_logic`; measured per-gate-word curves live in `bench_logic`
+(+ the Delta 017 before/after record); scale instantiation lives in
+`test_logic_scale`.
+
+## test_logic_input_resolution
+
+**What it checks**: InputResolution seam properties — one span assembly
+(`assemble_input_span` owns primary-first compact order, dead flag,
+and stored polarities once), one idle map (`pull_map_idle`), one
+polarity fold (`apply_span_polarity`), one contention count
+(`span_has_contention`) — with scalar, transient, and word adapters
+agreeing on clean 0/1 nets and keeping their own failure vocabularies
+by design (scalar loud, word bit-parallel with multi-attachment + live
+`kTbuf` refused at the entries, transient X/Z-transparent).
+
+**Purpose**: three evaluators shared one resolution seam after the
+triplication fix — this binary pins that the seam units and the three
+adapters cannot drift apart on the nets they all accept.
+
+**Guards against**: span-order drift (primary-first compact order),
+polarity-fold divergence, pull-map disagreement, contention-count
+skew, and floating/contended nets leaking into an adapter that must
+refuse them.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_input_resolution
+./build/test_logic_input_resolution
+```
+
+**Prerequisites**: standard build only.
+
+**Boundaries**: scalar/word parity on full nets lives in
+`test_logic`; batch-vs-single parity lives in `test_logic_word_batch`;
+four-state tables live in `test_logic_four_state`.
+
 ## test_logic_four_state
 
 **What it checks**: four-state value-table parity (014): the

@@ -356,6 +356,12 @@ citing one of these rows (the gate above).
 A follow-on cites its evidence as: the targeted stage's curve changed,
 no other stage regressed beyond the stated variance, both runs cited.
 
+(017 data-parallel word ops answered this gate for the word-evaluation
+stage: the before/after per-gate-word record — default size plus the
+10k/100k/1M ladder — lives beside the `bench_logic` catalog entry in
+`docs/benchmarks/logic.md`, with the parity proof in
+`test_logic_word_batch`.)
+
 #### Fidelity note (one pool)
 
 The harness drives the same dynamic pool the domain ships — one u32

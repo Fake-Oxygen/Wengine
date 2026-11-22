@@ -366,12 +366,55 @@ core::Status write_truth_csv(Netlist &nl, std::uint64_t rows, const std::vector<
     return core::Status::failure(core::StatusCode::kInternal);
   }
   const std::size_t nout = out_pins.size();
-  std::vector<std::uint64_t> scratch(slot_count(nl), 0);
-  std::vector<std::uint64_t> words(nout == 0 ? 1 : nout, 0);
+  // (017) Slice-blocked word eval: full batches share one traversal,
+  // the tail stays on the single-slice path. Output bytes unchanged.
+  constexpr std::size_t kBW = wengine::logic::kWordBatchWidth;
   const std::uint64_t nwords = (rows + 63ULL) / 64ULL;
-  for (std::uint64_t w = 0; w < nwords; ++w) {
+  const std::uint64_t nbatches = nwords / static_cast<std::uint64_t>(kBW);
+  std::vector<std::uint64_t> scratch(slot_count(nl) * kBW, 0);
+  std::vector<std::uint64_t> words(nout == 0 ? kBW : nout * kBW, 0);
+  const std::span<std::uint64_t> scratch_span{scratch.data(), scratch.size()};
+  for (std::uint64_t b = 0; b < nbatches; ++b) {
+    const std::uint64_t base = b * static_cast<std::uint64_t>(kBW);
+    std::span<std::uint64_t> out_span = nout == 0 ? std::span<std::uint64_t>{} : std::span<std::uint64_t>{words.data(), nout * kBW};
+    const core::Status st = wengine::logic::eval_block_words(nl, base, scratch_span, out_span);
+    if (!st.ok()) {
+      return st;
+    }
+    for (std::size_t w = 0; w < kBW; ++w) {
+      for (std::uint64_t bl = 0; bl < 64; ++bl) {
+        const std::uint64_t row = (base + static_cast<std::uint64_t>(w)) * 64ULL + bl;
+        if (row >= rows) {
+          break;
+        }
+        bool col_first = true;
+        for (std::size_t j = 0; j < in_pins.size(); ++j) {
+          if (!col_first) {
+            os << ',';
+          }
+          col_first = false;
+          os << ((((row >> j) & 1ULL) != 0ULL) ? '1' : '0');
+        }
+        for (std::size_t o = 0; o < nout; ++o) {
+          if (!col_first) {
+            os << ',';
+          }
+          col_first = false;
+          os << ((((words[o * kBW + w] >> bl) & 1ULL) != 0ULL) ? '1' : '0');
+        }
+        if (want_settle) {
+          os << ',' << settle_ps[row];
+        }
+        os << '\n';
+        if (!os) {
+          return core::Status::failure(core::StatusCode::kInternal);
+        }
+      }
+    }
+  }
+  for (std::uint64_t w = nbatches * static_cast<std::uint64_t>(kBW); w < nwords; ++w) {
     std::span<std::uint64_t> out_span = nout == 0 ? std::span<std::uint64_t>{} : std::span<std::uint64_t>{words.data(), nout};
-    const core::Status st = wengine::logic::eval_block_word(nl, w, std::span<std::uint64_t>{scratch.data(), scratch.size()}, out_span);
+    const core::Status st = wengine::logic::eval_block_word(nl, w, scratch_span, out_span);
     if (!st.ok()) {
       return st;
     }
@@ -481,12 +524,56 @@ core::Status write_truth_pretty(Netlist &nl, std::uint64_t rows, std::uint64_t t
   if (!os) {
     return core::Status::failure(core::StatusCode::kInternal);
   }
-  std::vector<std::uint64_t> scratch(slot_count(nl), 0);
-  std::vector<std::uint64_t> words(nout == 0 ? 1 : nout, 0);
+  // (017) Slice-blocked word eval: full batches share one traversal,
+  // the tail stays on the single-slice path. Output bytes unchanged.
+  constexpr std::size_t kBW = wengine::logic::kWordBatchWidth;
   const std::uint64_t nwords = (rows + 63ULL) / 64ULL;
-  for (std::uint64_t w = 0; w < nwords; ++w) {
+  const std::uint64_t nbatches = nwords / static_cast<std::uint64_t>(kBW);
+  std::vector<std::uint64_t> scratch(slot_count(nl) * kBW, 0);
+  std::vector<std::uint64_t> words(nout == 0 ? kBW : nout * kBW, 0);
+  const std::span<std::uint64_t> scratch_span{scratch.data(), scratch.size()};
+  for (std::uint64_t b = 0; b < nbatches; ++b) {
+    const std::uint64_t base = b * static_cast<std::uint64_t>(kBW);
+    std::span<std::uint64_t> out_span = nout == 0 ? std::span<std::uint64_t>{} : std::span<std::uint64_t>{words.data(), nout * kBW};
+    const core::Status st = wengine::logic::eval_block_words(nl, base, scratch_span, out_span);
+    if (!st.ok()) {
+      return st;
+    }
+    for (std::size_t w = 0; w < kBW; ++w) {
+      for (std::uint64_t bl = 0; bl < 64; ++bl) {
+        const std::uint64_t row = (base + static_cast<std::uint64_t>(w)) * 64ULL + bl;
+        if (row >= rows) {
+          break;
+        }
+        for (std::size_t c = 0; c < ncols; ++c) {
+          if (c != 0) {
+            os << " | ";
+          }
+          const char bit = (c < nin) ? ((((row >> c) & 1ULL) != 0ULL) ? '1' : '0')
+                                     : ((((words[(c - nin) * kBW + w] >> bl) & 1ULL) != 0ULL) ? '1' : '0');
+          const std::size_t width = widths[c];
+          const std::size_t left = (width - 1) / 2;
+          const std::size_t right = width - 1 - left;
+          os << std::string(left, ' ') << bit << std::string(right, ' ');
+        }
+        if (want_settle) {
+          std::uint64_t v = settle_ps[row];
+          std::size_t digits = 1;
+          for (std::uint64_t t = v; t >= 10; t /= 10) {
+            ++digits;
+          }
+          os << " | " << std::string(settle_width - digits, ' ') << v;
+        }
+        os << '\n';
+        if (!os) {
+          return core::Status::failure(core::StatusCode::kInternal);
+        }
+      }
+    }
+  }
+  for (std::uint64_t w = nbatches * static_cast<std::uint64_t>(kBW); w < nwords; ++w) {
     std::span<std::uint64_t> out_span = nout == 0 ? std::span<std::uint64_t>{} : std::span<std::uint64_t>{words.data(), nout};
-    const core::Status st = wengine::logic::eval_block_word(nl, w, std::span<std::uint64_t>{scratch.data(), scratch.size()}, out_span);
+    const core::Status st = wengine::logic::eval_block_word(nl, w, scratch_span, out_span);
     if (!st.ok()) {
       return st;
     }

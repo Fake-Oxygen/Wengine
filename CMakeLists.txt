@@ -695,6 +695,14 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic_adjacency PRIVATE wengine_core)
     add_test(NAME logic_adjacency COMMAND test_logic_adjacency)
 
+    # 017 data-parallel word ops: batch-vs-single parity corpus
+    # (batch + tail agreement, scalar agreement, repeat determinism,
+    # spot slices for unbounded nets, refusal pins), links wengine_core
+    # alone like test_logic.
+    add_executable(test_logic_word_batch tests/test_logic_word_batch.cpp)
+    target_link_libraries(test_logic_word_batch PRIVATE wengine_core)
+    add_test(NAME logic_word_batch COMMAND test_logic_word_batch)
+
     # LOGIC-V2-SEQ1 sequential kind vocabulary (DFF/DLATCH): parsing +
     # fan-in + names only, links wengine_core alone like test_logic.
     add_executable(test_logic_seq_kinds tests/test_logic_seq_kinds.cpp)

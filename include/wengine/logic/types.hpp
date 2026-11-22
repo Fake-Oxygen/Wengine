@@ -225,6 +225,21 @@ static_assert(static_cast<int>(LogicValue::kHighZ) == 2 && static_cast<int>(Logi
 /** @brief Maximum gate fan-in (8): the allowed per-kind range is 1..8. */
 inline constexpr std::size_t kMaxInputs = 8;
 /**
+ * @brief Slices per batched word-eval pass (017): one level-order
+ *        traversal yields this many consecutive slice words per gate.
+ *
+ * Pool-shape vocabulary (beside kMaxInputs): the pool workspace
+ * (ws_wordblock) and the batch scratch contract size from it, so it
+ * lives here rather than in block_interface.hpp (which depends on this
+ * header, never the reverse). One AVX2 register of 64-bit lanes on
+ * x86-64; plain scalar batch loop the optimizer auto-vectorizes at
+ * -O3 (no intrinsics, no target attributes). Single-slice tail covers
+ * non-multiple counts.
+ */
+inline constexpr std::size_t kWordBatchWidth = 4;
+
+static_assert(kWordBatchWidth == 4, "batch width is the contract width: tail math and tests assume 4");
+/**
  * @brief Loud maximum slot cap (1048576): growth past this fails loudly,
  *        never silently. Pool storage and every scan/init are bounded by
  *        the current pool size — the cap only bounds how far the pool may
@@ -537,6 +552,13 @@ struct Netlist {
   std::vector<Slot> ws_in_pos{};
   /** @brief Word-eval gate-word workspace (pool-sized). */
   std::vector<std::uint64_t> ws_words{};
+  /**
+   * @brief Batched word-eval gate-word workspace (017): slot-major
+   *        [slot][kWordBatchWidth] lanes for one batched pass. Grown on
+   *        demand like every ws_* array; never serialized, excluded from
+   *        equality like all workspace.
+   */
+  std::vector<std::uint64_t> ws_wordblock{};
   /** @brief Stepper next-Q workspace (pool-sized). */
   std::vector<LogicValue> ws_next_q{};
   /** @brief Stepper async-forced-Q workspace (pool-sized). */
@@ -807,6 +829,9 @@ inline void ensure_workspace(Netlist &nl, std::size_t n) {
   }
   if (nl.ws_words.size() < n) {
     nl.ws_words.resize(n);
+  }
+  if (nl.ws_wordblock.size() < n * kWordBatchWidth) {
+    nl.ws_wordblock.resize(n * kWordBatchWidth);
   }
   if (nl.ws_next_q.size() < n) {
     nl.ws_next_q.resize(n);

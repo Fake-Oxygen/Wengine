@@ -77,7 +77,10 @@ int main(int argc, char **argv) {
 
   std::uint32_t rng = 0xC10C1CBu ^ (static_cast<std::uint32_t>(argc) * 0x9E3779B9u + 0xC2B2AE35u);
   Netlist nl;
-  std::vector<std::uint16_t> layer_base;
+  // (017) Slot-width layer bases: the old uint16_t bases truncated past
+  // 65535 slots, capping the harness below kMaxGates. Slot-width bases
+  // keep setup valid up to the loud cap (needed for the 100k/1M points).
+  std::vector<Slot> layer_base;
   layer_base.reserve(depth);
   bool setup_ok = true;
   for (std::size_t d = 0; d < depth && setup_ok; ++d) {
@@ -93,15 +96,14 @@ int main(int argc, char **argv) {
         setup_ok = false;
         break;
       }
-      const std::uint16_t cur = added.value;
+      const Slot cur = added.value;
       if (d == 0) {
         continue; // layer 0 inputs dangle: block inputs
       }
-      const std::uint16_t prev = layer_base[d - 1];
-      const std::uint32_t off = xorshift(rng) % static_cast<std::uint32_t>(width);
+      const Slot prev = layer_base[d - 1];
+      const std::size_t off = static_cast<std::size_t>(xorshift(rng)) % width;
       for (std::uint8_t i = 0; i < fanin; ++i) {
-        const std::uint16_t drv =
-            static_cast<std::uint16_t>(prev + ((c + static_cast<std::size_t>(i) + off) % width));
+        const Slot drv = prev + static_cast<Slot>((c + static_cast<std::size_t>(i) + off) % width);
         if (!wire(nl, drv, cur, i).ok()) {
           setup_ok = false;
           break;
@@ -173,6 +175,82 @@ int main(int argc, char **argv) {
   std::cout << "bench_logic: " << gates << " gates (" << width << "w x " << depth << "d) x "
             << words << " words, " << static_cast<double>(ns) / gate_words
             << " ns/gate-word (checksum=" << checksum << ")\n";
+
+  // (017) Batched twin of the word loop above: same net, same slices,
+  // opaque xorshift wrap, checksummed outputs. Full batches share one
+  // traversal via eval_block_words; the tail stays single-slice. The
+  // before/after per-gate-word delta is the committed 017 record.
+  {
+    constexpr std::size_t kBW = wengine::logic::kWordBatchWidth;
+    std::vector<std::uint64_t> bscratch(kMaxGates * kBW, 0);
+    std::vector<std::uint64_t> bout(n_out == 0 ? kBW : n_out * kBW, 0);
+    std::span<std::uint64_t> bscratch_span(bscratch.data(), bscratch.size());
+    std::span<std::uint64_t> bout_span(bout.data(), n_out * kBW);
+    const std::uint64_t nbatches = words / static_cast<std::uint64_t>(kBW);
+    std::uint64_t bchecksum = 0;
+    auto b0 = std::chrono::high_resolution_clock::now();
+    for (std::uint64_t b = 0; b < nbatches; ++b) {
+      const auto st = eval_block_words(nl, b * static_cast<std::uint64_t>(kBW), bscratch_span, bout_span);
+      if (st.ok()) {
+        continue;
+      }
+      // Same wrap rule as the single-slice loop above, lane by lane;
+      // single-slice outputs fold into the checksum as they land.
+      for (std::size_t w = 0; w < kBW; ++w) {
+        const std::uint64_t slice = b * static_cast<std::uint64_t>(kBW) + static_cast<std::uint64_t>(w);
+        const auto sst = eval_block_word(nl, slice, std::span<std::uint64_t>(scratch.data(), scratch.size()),
+                                         out_span);
+        if (sst.ok()) {
+          for (std::size_t i = 0; i < n_out; ++i) {
+            bchecksum ^= out[i] + static_cast<std::uint64_t>(w);
+            bchecksum += out[i] * 0x9E3779B97F4A7C15ULL;
+          }
+          continue;
+        }
+        const std::size_t need = bit_words_for_inputs(block_input_count(nl));
+        if (need == 0) {
+          std::cout << "bench_logic_batch: run failed\n";
+          return 1;
+        }
+        const auto wrap =
+            eval_block_word(nl, slice % static_cast<std::uint64_t>(need),
+                            std::span<std::uint64_t>(scratch.data(), scratch.size()), out_span);
+        if (!wrap.ok()) {
+          std::cout << "bench_logic_batch: run failed\n";
+          return 1;
+        }
+        for (std::size_t i = 0; i < n_out; ++i) {
+          bchecksum ^= out[i] + static_cast<std::uint64_t>(w);
+          bchecksum += out[i] * 0x9E3779B97F4A7C15ULL;
+        }
+      }
+    }
+    for (std::uint64_t w = nbatches * static_cast<std::uint64_t>(kBW); w < words; ++w) {
+      const auto st = eval_block_word(nl, w, std::span<std::uint64_t>(scratch.data(), scratch.size()),
+                                      out_span);
+      if (!st.ok()) {
+        std::cout << "bench_logic_batch: tail failed\n";
+        return 1;
+      }
+      for (std::size_t i = 0; i < n_out; ++i) {
+        bchecksum ^= out[i] + w;
+        bchecksum += out[i] * 0x9E3779B97F4A7C15ULL;
+      }
+    }
+    auto b1 = std::chrono::high_resolution_clock::now();
+
+    for (std::size_t i = 0; i < n_out * kBW; ++i) {
+      bchecksum ^= bout[i];
+      bchecksum += bout[i] * 0x9E3779B97F4A7C15ULL;
+    }
+    bchecksum ^= static_cast<std::uint64_t>(gates) * 0xBF58476D1CE4E5B9ULL;
+    do_not_optimize(bchecksum);
+
+    const auto bns = std::chrono::duration_cast<std::chrono::nanoseconds>(b1 - b0).count();
+    std::cout << "bench_logic_batch: " << gates << " gates (" << width << "w x " << depth << "d) x "
+              << words << " words, " << static_cast<double>(bns) / gate_words
+              << " ns/gate-word (checksum=" << bchecksum << ")\n";
+  }
 
   // Scalar shared-path bench (VAL2 measurement baseline): marked nets with
   // mixed attachments + pulls, opaque xorshift inputs like the word bench.
@@ -308,7 +386,12 @@ int main(int argc, char **argv) {
     for (std::size_t i = 0; i < n_out; ++i) {
       schecksum ^= static_cast<std::uint64_t>(bout[i]) * 0x9E3779B97F4A7C15ULL + i;
     }
-    for (std::size_t f = 0; f < kMaxGates * kMaxInputs; ++f) {
+    // (017) Bound by the live channel size: solve() sizes per_net to
+    // the pool (n*kMaxInputs), not kMaxGates*kMaxInputs — the old bound
+    // read out-of-bounds past the pool on every run (defect predates
+    // this feature; fixed here because the batch record needs a clean
+    // full-sweep run). Zeros beyond the pool would contribute nothing.
+    for (std::size_t f = 0; f < diag.per_net.size(); ++f) {
       schecksum += static_cast<std::uint64_t>(diag.per_net[f]);
     }
     schecksum ^= static_cast<std::uint64_t>(n_in) * 0xBF58476D1CE4E5B9ULL;

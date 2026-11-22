@@ -525,6 +525,33 @@ inline void build_input_positions(const Netlist &nl, Slot *in_pos) noexcept {
 inline constexpr std::size_t kBitWordSize = 64;
 
 /**
+ * @brief Slices per batched word-eval pass (017): one level-order
+ *        traversal yields kWordBatchWidth consecutive slice words per
+ *        gate. Width lives in types.hpp (pool-shape vocabulary beside
+ *        kMaxInputs); this seam only derives the batch scratch size.
+ *
+ * One AVX2 register of 64-bit lanes on x86-64; plain scalar batch loop
+ * the optimizer auto-vectorizes at -O3 (no intrinsics, no target
+ * attributes). Single-slice tail covers non-multiple counts.
+ */
+
+/**
+ * @brief Batched gate scratch words for n slots: n * kWordBatchWidth.
+ *
+ * Slot-major layout ([slot][lane]) shared with eval_block_words.
+ *
+ * @param[in] n_slots Slot count the scratch must cover.
+ * @return Word count for one full batch over n_slots.
+ */
+[[nodiscard]] constexpr std::size_t batch_words(std::size_t n_slots) noexcept {
+  return n_slots * kWordBatchWidth;
+}
+
+static_assert(batch_words(0) == 0, "empty pool needs no batch scratch");
+static_assert(batch_words(1) == kWordBatchWidth, "one slot takes one batch row");
+static_assert(batch_words(3) == 3 * kWordBatchWidth, "batch scratch scales per slot");
+
+/**
  * @brief Full-truth word count for n block inputs: ceil(2^n / 64).
  *
  * @param[in] n_inputs Block input count.
