@@ -577,12 +577,10 @@ inline bool try_minimized_o2(Netlist &src, OptTarget target, Netlist &out_min,
       }
     }
   }
-  // Adjacency (016): the minimized build wrote tables directly — one
-  // rebuild before the validation below (which reads the chains), plus
-  // the heap and feeder counters for the same bulk-write reason.
-  adjacency::adjacency_rebuild(built);
-  free_heap_rebuild(built);
-  feeds_recompute(built);
+  // PoolStore (016): the minimized build wrote tables directly — one seam
+  // rebuilds every derived store before the validation below (which reads
+  // the chains).
+  pool_store::rebuild_all(built);
   recount_fanout(built);
   built.dirty = true;
   built.topo_order.clear();

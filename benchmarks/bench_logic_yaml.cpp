@@ -137,8 +137,7 @@ bool build_layered(Netlist &nl, std::size_t n, std::size_t kInputs) {
       }
     }
   }
-  adjacency::adjacency_rebuild(nl);
-  free_heap_rebuild(nl);
+  pool_store::rebuild_all(nl); // bulk direct build: one seam rebuilds every derived store
   return true;
 }
 

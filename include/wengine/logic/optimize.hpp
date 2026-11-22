@@ -365,14 +365,11 @@ struct OptimizeScratch {
       return core::Result<Netlist *>::failure(detail::build_error_message(werr), core::StatusCode::kInternal);
     }
   }
-  // Adjacency (016): the fresh build wrote tables directly — one
-  // rebuild covers every edge, and the post-cleanup surgery below
-  // maintains the chains from there. The free-slot heap rebuilds for
-  // the same bulk-write reason, as do the feeder counters.
-  adjacency::adjacency_rebuild(fresh);
-  free_heap_rebuild(fresh);
-  feeds_recompute(fresh);
-  adjacency::adjacency_rebuild(fresh);
+  // PoolStore (016): the fresh build wrote tables directly — one seam
+  // rebuilds every derived store (chains, tie index, heap, feeders) from
+  // the tables, and the post-cleanup surgery below maintains them from
+  // there. (This used to be a duplicated adjacency_rebuild pair.)
+  pool_store::rebuild_all(fresh);
   detail::restore_masks(nl, fresh, scr.reach.data(), scr.emit_map.data(), opts.target);
   // Vocabulary-preserving post-cleanup (dedup + double-inverter
   // cancellation + DCE to fixpoint) and minimized-vs-structural picking.

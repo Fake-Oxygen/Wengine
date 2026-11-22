@@ -142,37 +142,11 @@ double median_of(std::vector<double> &v) {
   return v[v.size() / 2];
 }
 
-// Deterministic heap footprint of one live net (pool bytes): the sum
-// over every Netlist vector of size()*element_size, plus sizeof(Netlist)
-// for the handle itself. No allocator sampling: every size is exact, so
+// Deterministic heap footprint of one live net: the single PoolStore seam
+// (pool_store::bytes). No allocator sampling: every size is exact, so
 // identical args re-run to bit-identical footprints.
 std::size_t pool_bytes(const Netlist &nl) {
-  std::size_t b = sizeof(Netlist);
-  b += nl.slots.size() * sizeof(Gate);
-  b += nl.driver_inv.size() * sizeof(std::uint8_t);
-  b += nl.tie_rep.size() * sizeof(Slot);
-  b += nl.shared_meta.size() * sizeof(std::uint8_t);
-  b += nl.extra_drivers.size() * sizeof(Slot);
-  b += nl.extra_inv.size() * sizeof(std::uint8_t);
-  b += nl.pull_cfg.size() * sizeof(std::uint8_t);
-  b += nl.topo_order.size() * sizeof(Slot);
-  b += nl.topo_level.size() * sizeof(Slot);
-  b += nl.ws_indeg.size() * sizeof(std::uint8_t);
-  b += nl.ws_queue.size() * sizeof(Slot);
-  b += nl.ws_order.size() * sizeof(Slot);
-  b += nl.ws_levels.size() * sizeof(Slot);
-  b += nl.ws_resolved.size() * sizeof(LogicValue);
-  b += nl.ws_gate_out.size() * sizeof(LogicValue);
-  b += nl.ws_in_pos.size() * sizeof(Slot);
-  b += nl.ws_words.size() * sizeof(std::uint64_t);
-  b += nl.ws_next_q.size() * sizeof(LogicValue);
-  b += nl.ws_forced_q.size() * sizeof(LogicValue);
-  b += nl.ws_force.size() * sizeof(std::uint8_t);
-  b += nl.ws_comb_order.size() * sizeof(Slot);
-  b += nl.ws_survivors.size() * sizeof(std::size_t);
-  b += nl.ws_seen.size() * sizeof(std::uint8_t);
-  b += nl.ws_stack.size() * sizeof(Slot);
-  return b;
+  return wengine::logic::pool_store::bytes(nl);
 }
 
 // Motif net construction: first kInputs gates are dangling-input NOTs
@@ -318,8 +292,7 @@ bool build_dedup_twin(Netlist &nl, std::size_t n, std::size_t kInputs) {
   nl.dirty = true;
   nl.topo_order.clear();
   recount_fanout(nl);
-  adjacency::adjacency_rebuild(nl); // bulk direct build: one chain rebuild
-  free_heap_rebuild(nl); // bulk direct build: reindex free slots
+  pool_store::rebuild_all(nl); // bulk direct build: one seam rebuilds every derived store
   return true;
 }
 

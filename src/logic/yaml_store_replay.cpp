@@ -366,13 +366,10 @@ struct WirePins {
 }
 
 [[nodiscard]] bool validate_topology(Netlist &tmp, std::string &err) {
-  // Bulk replay wrote tables directly: one chain rebuild before the
-  // whole-graph validation below (which reads the chains), plus the
-  // free-slot heap (replay bypasses add_gate for slots) and the feeder
-  // counters.
-  adjacency::adjacency_rebuild(tmp);
-  free_heap_rebuild(tmp);
-  feeds_recompute(tmp);
+  // Bulk replay wrote tables directly: one PoolStore seam rebuilds every
+  // derived store (chains, tie index, heap, feeders) before the
+  // whole-graph validation below (which reads the chains).
+  pool_store::rebuild_all(tmp);
   // Flop-aware cycle check (mirrors the wire verb): combinational loops
   // always fail; feedback through sequential gates validates sequentially.
   if (has_sequential_gates(tmp)) {

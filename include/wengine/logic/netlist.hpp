@@ -40,6 +40,7 @@
 #include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/block_interface.hpp"
 #include "wengine/logic/pins.hpp"
+#include "wengine/logic/pool_store.hpp"
 #include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/tie_set.hpp"
 #include "wengine/logic/topo.hpp"
@@ -127,7 +128,7 @@ namespace wengine::logic {
     // (detach_slot_ties clears on remove, reset_all_ties on reset).
   }
   ++nl.live_count;
-  nl.dirty = true;
+  pool_store::note_edge_event(nl);
   return core::Result<Slot>::success(slot);
 }
 
@@ -254,7 +255,7 @@ namespace wengine::logic {
   if (nl.live_count > 0) {
     --nl.live_count;
   }
-  nl.dirty = true;
+  pool_store::note_edge_event(nl);
   return core::Status::success();
 }
 
@@ -302,10 +303,9 @@ namespace detail {
 
 // --- Shared-feeder counters (016, US6) --------------------------------------
 // feeds_shared[driver] counts the driver's live edges landing on
-// shared-marked inputs, maintained at every edge event next to the
-// fanout counters. drives_shared (optimize_barrier.hpp) consults them
-// in O(1). Invariant: exact on every valid net; bulk writers recompute
-// via feeds_recompute.
+// shared-marked inputs. Owned by the PoolStore seam (pool_store.hpp) —
+// these forwarders keep the logic::detail::feeds_* names working for the
+// mutation paths below; bulk writers recompute via feeds_recompute.
 
 /**
  * @brief Decrement marked-input drivers of one sink (before its rewrite).
@@ -314,25 +314,7 @@ namespace detail {
  * @param[in] sink Sink slot being rewritten.
  */
 inline void feeds_release_sink(Netlist &nl, Slot sink) noexcept {
-  if (sink >= slot_count(nl)) {
-    return;
-  }
-  const Gate &g = nl.slots[sink];
-  for (std::uint8_t i = 0; i < g.input_count; ++i) {
-    const std::size_t flat = tie_flat(sink, i);
-    if (!is_shared_flat(nl, flat)) {
-      continue;
-    }
-    const Slot drv = g.drivers[i];
-    if (drv < slot_count(nl) && nl.slots[drv].live && nl.feeds_shared[drv] > 0) {
-      --nl.feeds_shared[drv];
-    }
-    for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t) {
-      if (edrv < slot_count(nl) && nl.slots[edrv].live && nl.feeds_shared[edrv] > 0) {
-        --nl.feeds_shared[edrv];
-      }
-    });
-  }
+  pool_store::detail::feeds_release_sink(nl, sink);
 }
 
 /**
@@ -342,25 +324,7 @@ inline void feeds_release_sink(Netlist &nl, Slot sink) noexcept {
  * @param[in] sink Sink slot just rewritten.
  */
 inline void feeds_acquire_sink(Netlist &nl, Slot sink) noexcept {
-  if (sink >= slot_count(nl)) {
-    return;
-  }
-  const Gate &g = nl.slots[sink];
-  for (std::uint8_t i = 0; i < g.input_count; ++i) {
-    const std::size_t flat = tie_flat(sink, i);
-    if (!is_shared_flat(nl, flat)) {
-      continue;
-    }
-    const Slot drv = g.drivers[i];
-    if (drv < slot_count(nl) && nl.slots[drv].live) {
-      ++nl.feeds_shared[drv];
-    }
-    for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t) {
-      if (edrv < slot_count(nl) && nl.slots[edrv].live) {
-        ++nl.feeds_shared[edrv];
-      }
-    });
-  }
+  pool_store::detail::feeds_acquire_sink(nl, sink);
 }
 
 } // namespace detail
@@ -369,15 +333,13 @@ inline void feeds_acquire_sink(Netlist &nl, Slot sink) noexcept {
  * @brief Recompute every shared-feeder counter from the tables
  *        (bulk-load/build path). Cold paths only.
  *
+ * Forwarder to the PoolStore seam (pool_store::recompute_feeds): the one
+ * bulk rebuild is pool_store::rebuild_all().
+ *
  * @param[out] nl Netlist whose counters rebuild.
  */
 inline void feeds_recompute(Netlist &nl) noexcept {
-  for (Slot s = 0; s < static_cast<Slot>(slot_count(nl)); ++s) {
-    nl.feeds_shared[s] = 0;
-  }
-  for (Slot s = 0; s < static_cast<Slot>(slot_count(nl)); ++s) {
-    detail::feeds_acquire_sink(nl, s);
-  }
+  pool_store::recompute_feeds(nl);
 }
 
 namespace detail {
@@ -415,7 +377,7 @@ namespace detail {
   } else {
     ++from.output_fanout;
   }
-  nl.dirty = true;
+  pool_store::note_edge_event(nl);
   return core::Status::success();
 }
 
@@ -688,7 +650,7 @@ namespace detail {
   if (!adjacency::adj_insert_edge(nl, from_slot, to_slot, to_input, 0)) {
     return core::Status::failure(core::StatusCode::kInternal);
   }
-  nl.dirty = true;
+  pool_store::note_edge_event(nl);
   return core::Status::success();
 }
 
@@ -780,7 +742,7 @@ namespace detail {
       }
     }
   }
-  nl.dirty = true;
+  pool_store::note_edge_event(nl);
   return core::Status::success();
 }
 
@@ -836,7 +798,7 @@ namespace detail {
     if (nl.feeds_shared[from_slot] > 0) {
       --nl.feeds_shared[from_slot];
     }
-    nl.dirty = true;
+    pool_store::note_edge_event(nl);
     return core::Status::success();
   }
   return core::Status::failure(core::StatusCode::kInvalidArgument); // edge not attached
@@ -1064,13 +1026,12 @@ inline void reset_netlist(Netlist &nl) noexcept {
   for (std::size_t i = 0; i < nl.next_counter.size(); ++i) {
     nl.next_counter[i] = 1;
   }
-  // Adjacency (016): every edge is gone; chains clear eagerly (O(pool)
+  // Derived stores (016): every edge is gone; one seam clears the
+  // chains, tie member index, free-slot heap, and feeder counters (O(pool)
   // like the slot loop above — reset is already a wholesale pass).
-  adjacency::adjacency_clear(nl);
-  // Free-slot heap (016): every slot is dead; rebuild the index.
-  free_heap_rebuild(nl);
+  pool_store::clear_derived(nl);
   nl.live_count = 0;
-  nl.dirty = true;
+  pool_store::note_edge_event(nl);
 }
 
 /**
