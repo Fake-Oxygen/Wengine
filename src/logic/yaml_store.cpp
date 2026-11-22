@@ -31,6 +31,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace wengine::logic::yaml {
@@ -171,13 +172,18 @@ namespace {
 
   // Replay in engine-seam dependency order (not file order): slots,
   // shared marks (wires read them), wires, ties (disjoint from marks),
-  // pulls (after ties and wires).
+  // pulls (after ties and wires). The gate index is built once slots
+  // exist so pin-heavy sections resolve O(1) instead of O(N) per pin.
   Netlist tmp{};
+  GateIndex idx{};
   constexpr const char *kReplayOrder[5] = {"gates", "shared", "wires", "ties", "pulls"};
   for (const char *name : kReplayOrder) {
     const SectionSpec *s = section_by_name(name);
-    if (!s->replay(rows, root[s->name], tmp, err)) {
+    if (!s->replay(rows, root[s->name], tmp, idx, err)) {
       return false;
+    }
+    if (name == std::string_view("gates")) {
+      build_gate_index(tmp, idx);
     }
   }
   if (!validate_topology(tmp, err)) {

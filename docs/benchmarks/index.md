@@ -39,7 +39,7 @@ Pages:
 - [Transport and signal benchmarks](transport-signal.md): `bench_link`,
   `bench_link_sockets`, `bench_sample_block`, `bench_tcp_worker`,
   `bench_signal`, `bench_signal_scale`, `bench_snapshot`.
-- [Logic benchmarks](logic.md): `bench_logic`.
+- [Logic benchmarks](logic.md): `bench_logic`, `bench_logic_yaml`.
 - [Logic scale baseline](logic-scale.md): `bench_logic_scale` (committed
   pinned-environment numbers with their own reproduction terms).
 

@@ -951,6 +951,57 @@ void test_examples() {
   }
 }
 
+// Bulk-load scale guard (LOGIC-V2-SCALE4 follow-up): a 4096-gate layered
+// net round-trips save->load->save byte-identically with equal
+// workspaces. This exercises the bulk replay path (hash-set duplicate
+// check, gate index, fast wire loop) above the sizes the small
+// round-trips cover; wall-time budgets live in bench_logic_yaml, not
+// here (no timing asserts — CI machines vary).
+void test_scale_round_trip() {
+  constexpr std::size_t kGates = 4096;
+  constexpr std::size_t kInputs = 6;
+  logic::Netlist nl{};
+  std::uint32_t rng = 0xC0FFEEu;
+  for (std::size_t i = 0; i < kGates; ++i) {
+    logic::GateKind kind = logic::GateKind::kNot;
+    std::uint8_t fan = 1;
+    if (i >= kInputs) {
+      const unsigned pick = rng % 3;
+      rng ^= rng << 13;
+      rng ^= rng >> 17;
+      rng ^= rng << 5;
+      kind = (pick == 0) ? logic::GateKind::kAnd : (pick == 1) ? logic::GateKind::kOr : logic::GateKind::kXor;
+      fan = 2;
+    }
+    const auto r = logic::add_gate(nl, kind, fan);
+    assert(r.ok());
+    if (i >= kInputs) {
+      for (std::uint8_t k = 0; k < 2; ++k) {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        const auto dst = static_cast<logic::Slot>(rng % i);
+        assert(logic::wire(nl, dst, static_cast<logic::Slot>(i), k).ok());
+      }
+    }
+  }
+  assert(nl.live_count == static_cast<std::uint32_t>(kGates));
+  std::string text;
+  logic::yaml::save_text(nl, zero_inits(nl), text);
+  assert(!text.empty());
+  logic::yaml::Workspace ws;
+  std::string err;
+  assert(logic::yaml::load_text(text, ws, err));
+  assert(ws.netlist.live_count == static_cast<std::uint32_t>(kGates));
+  logic::yaml::Workspace want;
+  want.netlist = nl;
+  want.init = zero_inits(nl);
+  assert(workspaces_equal(want, ws));
+  std::string again;
+  logic::yaml::save_text(ws.netlist, ws.init, again);
+  assert(again == text);
+}
+
 // 011 US4: marks + repeated wires survive save→load→save
 // byte-identically (zero-attachment marks included); replay outputs
 // identical; unmarked duplicates keep the byte-identical refusal.
@@ -1302,6 +1353,7 @@ int main() {
   test_shared_schema_refusals();
   test_pull_round_trip();
   test_pull_schema_refusals();
+  test_scale_round_trip();
   test_examples();
   std::cout << "test_logic_yaml: OK\n";
   return 0;

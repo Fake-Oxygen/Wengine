@@ -390,23 +390,24 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
 /**
  * @brief Parse `<NAME>.Y` (output) or `<NAME>.<1..k>` (1-based input).
  *
- * Sequential gates additionally accept named pins (case-insensitive)
- * from the kind table (DFF `D`/`CLK` plus `RST`/`SET`/`EN` on
- * full-control flops only; DLATCH `D`/`EN`; JK `J`/`K`/`CLK`;
- * T `T`/`CLK`; SRLATCH `S`/`R`; every flop also `Q`/`NQ`). Numeric
- * aliases keep working for all kinds; names on combinational gates are
- * rejected; kind-foreign names (e.g. `D` on a JK flop) fall through to
- * the numeric parser and fail there. Input range validates against the
- * gate's configured fan-in.
+ * Bulk-load seam: the gate-name lookup is a caller-supplied callable
+ * returning `core::Result<Slot>` with the exact `resolve_gate` error
+ * vocabulary ("unknown gate" for well-formed-but-absent names, anything
+ * else for malformed names), so the YAML workspace loader can substitute
+ * its O(1) gate index while interactive verbs keep the linear scan.
+ * Suffix parsing (named sequential pins, Q/NQ, Y, numerics) stays here —
+ * the one table-owned spelling, never duplicated at call sites.
  *
  * @param[in] nl Netlist holding the named gate.
  * @param[in] text Pin spelling to parse.
+ * @param[in] lookup_gate Gate-name lookup (resolve_gate vocabulary).
  * @return kOk with the PinRef on success; kInvalidArgument for a
  *         malformed pin ("bad pin: ..."), an absent gate
  *         ("unknown gate"), or an out-of-range input index
  *         ("input index out of range").
  */
-[[nodiscard]] inline core::Result<PinRef> parse_pin(const Netlist &nl, std::string_view text) noexcept {
+template <typename GateLookup>
+[[nodiscard]] inline core::Result<PinRef> parse_pin_with(const Netlist &nl, std::string_view text, GateLookup &&lookup_gate) {
   std::size_t dot = text.find('.');
   if (dot == std::string_view::npos) {
     return core::Result<PinRef>::failure("bad pin: want NAME.Y|NAME.i");
@@ -419,7 +420,7 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
   if (gate_text.empty() || suffix.empty()) {
     return core::Result<PinRef>::failure("bad pin: want NAME.Y|NAME.i");
   }
-  auto gate = resolve_gate(nl, gate_text);
+  auto gate = lookup_gate(gate_text);
   if (!gate.ok()) {
     if (gate.error == std::string_view("unknown gate")) {
       return core::Result<PinRef>::failure("unknown gate");
@@ -478,6 +479,32 @@ static_assert(kind_table_valid(), "logic kind table: default/mask/pin rows incon
   ref.is_output = false;
   ref.input = static_cast<std::uint8_t>(idx - 1);
   return core::Result<PinRef>::success(ref);
+}
+
+/**
+ * @brief Parse `<NAME>.Y` (output) or `<NAME>.<1..k>` (1-based input).
+ *
+ * Sequential gates additionally accept named pins (case-insensitive)
+ * from the kind table (DFF `D`/`CLK` plus `RST`/`SET`/`EN` on
+ * full-control flops only; DLATCH `D`/`EN`; JK `J`/`K`/`CLK`;
+ * T `T`/`CLK`; SRLATCH `S`/`R`; every flop also `Q`/`NQ`). Numeric
+ * aliases keep working for all kinds; names on combinational gates are
+ * rejected; kind-foreign names (e.g. `D` on a JK flop) fall through to
+ * the numeric parser and fail there. Input range validates against the
+ * gate's configured fan-in.
+ *
+ * Thin wrapper over parse_pin_with with the linear resolve_gate
+ * lookup (single-pin interactive cost is trivial).
+ *
+ * @param[in] nl Netlist holding the named gate.
+ * @param[in] text Pin spelling to parse.
+ * @return kOk with the PinRef on success; kInvalidArgument for a
+ *         malformed pin ("bad pin: ..."), an absent gate
+ *         ("unknown gate"), or an out-of-range input index
+ *         ("input index out of range").
+ */
+[[nodiscard]] inline core::Result<PinRef> parse_pin(const Netlist &nl, std::string_view text) noexcept {
+  return parse_pin_with(nl, text, [&](std::string_view name) noexcept { return resolve_gate(nl, name); });
 }
 
 } // namespace wengine::logic

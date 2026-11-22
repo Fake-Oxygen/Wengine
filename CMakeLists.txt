@@ -1128,4 +1128,11 @@ if(BUILD_BENCHMARKS)
     # wengine_core only, never the assertion policy.
     add_executable(bench_logic_scale benchmarks/bench_logic_scale.cpp)
     target_link_libraries(bench_logic_scale PRIVATE wengine_core)
+
+    # Workspace save/load scaling (LOGIC-V2-SCALE4 follow-up): canonical
+    # YAML save_text/load_text wall times over a size ladder to 1M.
+    # Links wengine_logic_yaml (the only bench allowed to know yaml-cpp
+    # exists), never the assertion policy.
+    add_executable(bench_logic_yaml benchmarks/bench_logic_yaml.cpp)
+    target_link_libraries(bench_logic_yaml PRIVATE wengine_core wengine_logic_yaml)
 endif()

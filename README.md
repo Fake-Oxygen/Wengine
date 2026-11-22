@@ -840,7 +840,8 @@ launch/run/complete/recall/quit, history sharing, choice-dialog open/cancel,
 non-TTY + extra-args shapes). Benchmarks:
 `bench_ohm`, `bench_s0`, `bench_i2c`, `bench_projectile`, `bench_signal`
 (ns/source-step over a live Runner + SignalSolver, opaque params), `bench_logic`
-(ns/gate-word over a live Netlist, opaque width/depth/words args), `bench_signal_scale`
+ (ns/gate-word over a live Netlist, opaque width/depth/words args), `bench_logic_yaml`
+ (workspace save/load wall seconds over a size ladder to 1M gates, byte-identity check), `bench_signal_scale`
 (dense-vs-sparse bytes + ns/step, find_serial/fan-in slopes, subscriber
 pairs, custom-source churn, separated native/Lua/snapshot/filter/serial
 costs with crossover points; args select live, gap, steps, sums, fan-in,

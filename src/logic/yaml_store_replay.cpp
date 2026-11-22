@@ -25,24 +25,14 @@
 
 namespace wengine::logic::yaml::detail {
 
-[[nodiscard]] bool replay_gates(const Collected &in, const YAML::Node &sec, Netlist &tmp, std::string &err) {
-  const std::vector<GateRow> &gate_rows = in.gates;
-  // Dynamic pool: grow to cover every file row before slot-indexed
-  // replay. The file-size gate in load_impl already capped the row
-  // count at kMaxGates, so growth cannot fail — the refusal below is
-  // unreachable, kept loud by construction.
-  if (!ensure_slots(tmp, gate_rows.size())) {
-    err = at_line(sec, "too many gates (max " + std::to_string(kMaxGates) + ")");
-    return false;
-  }
-  for (std::size_t i = 0; i < gate_rows.size(); ++i) {
-    const GateRow &g = gate_rows[i];
-    for (std::size_t j = 0; j < i; ++j) {
-      if (gate_rows[j].kind == g.kind && gate_rows[j].counter == g.counter) {
-        err = "line " + std::to_string(line_of(sec[i])) + ": duplicate gate id '" + g.id + "'";
-        return false;
-      }
-    }
+namespace {
+
+// Slot fill shared by replay_gates and the wire-cycle diagnostic below
+// (rows already validated by the checkers; the caller ensures capacity
+// and, for the live path, duplicate rejection first).
+void fill_gate_slots(const Collected &in, Netlist &tmp) {
+  for (std::size_t i = 0; i < in.gates.size(); ++i) {
+    const GateRow &g = in.gates[i];
     Gate &slot = tmp.slots[i];
     slot.live = true;
     slot.kind = g.kind;
@@ -65,9 +55,37 @@ namespace wengine::logic::yaml::detail {
       }
     }
   }
-  tmp.live_count = static_cast<std::uint32_t>(gate_rows.size());
+  tmp.live_count = static_cast<std::uint32_t>(in.gates.size());
   tmp.dirty = true;
   tmp.topo_order.clear();
+}
+
+} // namespace
+
+[[nodiscard]] bool replay_gates(const Collected &in, const YAML::Node &sec, Netlist &tmp, const GateIndex &idx, std::string &err) {
+  (void)idx; // slots do not exist yet: nothing to index.
+  const std::vector<GateRow> &gate_rows = in.gates;
+  // Dynamic pool: grow to cover every file row before slot-indexed
+  // replay. The file-size gate in load_impl already capped the row
+  // count at kMaxGates, so growth cannot fail — the refusal below is
+  // unreachable, kept loud by construction.
+  if (!ensure_slots(tmp, gate_rows.size())) {
+    err = at_line(sec, "too many gates (max " + std::to_string(kMaxGates) + ")");
+    return false;
+  }
+  // Duplicate gate ids: hash set on (kind-ordinal, counter), O(N).
+  // The old pairwise scan was O(N^2) — the 100k-gate load wall.
+  std::unordered_set<std::uint64_t> seen;
+  seen.reserve(gate_rows.size() * 2 + 1);
+  for (std::size_t i = 0; i < gate_rows.size(); ++i) {
+    const GateRow &g = gate_rows[i];
+    const std::uint64_t key = gate_index_key(kind_ordinal(g.kind), g.counter);
+    if (!seen.insert(key).second) {
+      err = "line " + std::to_string(line_of(sec[i])) + ": duplicate gate id '" + g.id + "'";
+      return false;
+    }
+  }
+  fill_gate_slots(in, tmp);
   return true;
 }
 
@@ -77,10 +95,10 @@ namespace wengine::logic::yaml::detail {
 // Mark validation mirrors the engine seam exactly: live inputs,
 // untied destinations (ties do not exist yet at this point, so the
 // loader's tie-time check below guards the other direction).
-[[nodiscard]] bool replay_shared(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, std::string &err) {
+[[nodiscard]] bool replay_shared(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, const GateIndex &idx, std::string &err) {
   for (const SharedRow &sr : in.shared) {
     const std::string at = "line " + std::to_string(sr.line) + ": ";
-    const auto pin = parse_pin(tmp, sr.net);
+    const auto pin = parse_pin_indexed(tmp, idx, sr.net);
     if (!pin.ok() || pin.value.is_output) {
       err = at + "bad shared net '" + sr.net + "'";
       return false;
@@ -97,82 +115,167 @@ namespace wengine::logic::yaml::detail {
   return true;
 }
 
-[[nodiscard]] bool replay_wires(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, std::string &err) {
-  for (const WireRow &w : in.wires) {
-    const std::string at = "line " + std::to_string(w.line) + ": ";
-    const auto from = parse_pin(tmp, w.from);
-    if (!from.ok()) {
-      if (from.error == std::string_view("unknown gate")) {
-        err = at + "unknown gate in wire source '" + w.from + "'";
-      } else {
-        err = at + "bad wire source '" + w.from + "'";
-      }
-      return false;
-    }
-    const auto to = parse_pin(tmp, w.to);
-    if (!to.ok()) {
-      if (to.error == std::string_view("unknown gate")) {
-        err = at + "unknown gate in wire destination '" + w.to + "'";
-      } else {
-        err = at + "bad wire destination '" + w.to + "'";
-      }
-      return false;
-    }
-    if (!from.value.is_output || to.value.is_output) {
-      err = at + "wire needs FROM.out TO.in (got '" + w.from + "' -> '" + w.to + "')";
-      return false;
-    }
-    // NQ sources exist on sequential gates only (same rule as
-    // logic::wire_pins — slot-built refs stay loud, never silent).
-    if (from.value.negated && !is_sequential_kind(tmp.slots[from.value.slot].kind)) {
-      err = at + "bad wire source '" + w.from + "'";
-      return false;
-    }
-    Gate &dst = tmp.slots[to.value.slot];
-    const bool shared_marked = is_shared_input(tmp, to.value.slot, to.value.input);
-    if (dst.drivers[to.value.input] != kNoDriver && !shared_marked) {
-      err = at + "input already wired '" + w.to + "'";
-      return false;
-    }
-    // Q-boundary (same rule as logic::wire): an edge into a
-    // sequential-gate input can never close a combinational cycle, so
-    // file order never affects acceptance. The whole-graph validator at
-    // the end stays authoritative.
-    if (!is_sequential_kind(dst.kind) &&
-        topo::reaches(tmp, to.value.slot, from.value.slot, EdgeFilter::kCombOnly)) {
-      err = at + "wire closes a combinational cycle '" + w.from + "' -> '" + w.to + "'";
-      return false;
-    }
-    if (dst.drivers[to.value.input] != kNoDriver) {
-      // 011: repeated `to:` on a marked input appends an extra via the
-      // SharedNet/engine seam (same cap the engine enforces, loudly,
-      // never truncated).
-      const std::uint8_t inv = from.value.negated ? 1 : 0;
-      if (!logic::detail::append_shared_extra(tmp, from.value.slot, to.value.slot, to.value.input, inv).ok()) {
-        err = at + "shared net full (cap 4) '" + w.to + "'";
-        return false;
-      }
-      continue;
-    }
-    dst.drivers[to.value.input] = from.value.slot;
-    // Adjacency (016): the per-wire probe above reads chains, so this
-    // direct table write maintains them incrementally (the end-of-load
-    // rebuild in validate_topology stays as the bulk-path backstop).
-    (void)adjacency::adj_insert_edge(tmp, from.value.slot, to.value.slot, to.value.input, 0);
-    if (from.value.negated) {
-      ++tmp.slots[from.value.slot].nq_fanout;
-      tmp.driver_inv[tie_flat(to.value.slot, to.value.input)] = 1;
+namespace {
+
+// One resolved wire row: pin validation + occupancy + NQ rules, edge
+// append excluded. Shared by the fast bulk loop and the slow cycle
+// diagnostic so their accept sets stay identical (same diagnostics,
+// same order).
+struct WirePins {
+  PinRef from{};
+  PinRef to{};
+};
+
+[[nodiscard]] bool resolve_wire_row(const Netlist &tmp, const GateIndex &idx, const WireRow &w, WirePins &pins, std::string &err) {
+  const std::string at = "line " + std::to_string(w.line) + ": ";
+  const auto from = parse_pin_indexed(tmp, idx, w.from);
+  if (!from.ok()) {
+    if (from.error == std::string_view("unknown gate")) {
+      err = at + "unknown gate in wire source '" + w.from + "'";
     } else {
-      ++tmp.slots[from.value.slot].output_fanout;
+      err = at + "bad wire source '" + w.from + "'";
     }
+    return false;
+  }
+  const auto to = parse_pin_indexed(tmp, idx, w.to);
+  if (!to.ok()) {
+    if (to.error == std::string_view("unknown gate")) {
+      err = at + "unknown gate in wire destination '" + w.to + "'";
+    } else {
+      err = at + "bad wire destination '" + w.to + "'";
+    }
+    return false;
+  }
+  if (!from.value.is_output || to.value.is_output) {
+    err = at + "wire needs FROM.out TO.in (got '" + w.from + "' -> '" + w.to + "')";
+    return false;
+  }
+  // NQ sources exist on sequential gates only (same rule as
+  // logic::wire_pins — slot-built refs stay loud, never silent).
+  if (from.value.negated && !is_sequential_kind(tmp.slots[from.value.slot].kind)) {
+    err = at + "bad wire source '" + w.from + "'";
+    return false;
+  }
+  const Gate &dst = tmp.slots[to.value.slot];
+  const bool shared_marked = is_shared_input(tmp, to.value.slot, to.value.input);
+  // Range proof for -O3: the parser guarantees input < input_count <=
+  // kMaxInputs, but GCC loses that range through the indexed-lookup
+  // seam — keep the subscript provably in-bounds (unreachable, loud).
+  if (to.value.input >= kMaxInputs) {
+    err = at + "bad wire destination '" + w.to + "'";
+    return false;
+  }
+  if (dst.drivers[to.value.input] != kNoDriver && !shared_marked) {
+    err = at + "input already wired '" + w.to + "'";
+    return false;
+  }
+  pins.from = from.value;
+  pins.to = to.value;
+  return true;
+}
+
+// Edge append for one validated row (primary driver or 011 shared
+// extra). Returns false with the cap diagnostic on shared overflow.
+[[nodiscard]] bool append_wire_edge(Netlist &tmp, const WireRow &w, const WirePins &pins, std::string &err) {
+  Gate &dst = tmp.slots[pins.to.slot];
+  if (dst.drivers[pins.to.input] != kNoDriver) {
+    // 011: repeated `to:` on a marked input appends an extra via the
+    // SharedNet/engine seam (same cap the engine enforces, loudly,
+    // never truncated).
+    const std::uint8_t inv = pins.from.negated ? 1 : 0;
+    if (!logic::detail::append_shared_extra(tmp, pins.from.slot, pins.to.slot, pins.to.input, inv).ok()) {
+      err = "line " + std::to_string(w.line) + ": shared net full (cap 4) '" + w.to + "'";
+      return false;
+    }
+    return true;
+  }
+  dst.drivers[pins.to.input] = pins.from.slot;
+  // Adjacency (016): direct table write; the end-of-load rebuild in
+  // validate_topology stays as the bulk-path backstop.
+  (void)adjacency::adj_insert_edge(tmp, pins.from.slot, pins.to.slot, pins.to.input, 0);
+  if (pins.from.negated) {
+    ++tmp.slots[pins.from.slot].nq_fanout;
+    tmp.driver_inv[tie_flat(pins.to.slot, pins.to.input)] = 1;
+  } else {
+    ++tmp.slots[pins.from.slot].output_fanout;
   }
   return true;
 }
 
-[[nodiscard]] bool replay_ties(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, std::string &err) {
+// Slow cycle diagnostic (failure path only): replays the rows onto a
+// scratch net with the old per-wire cycle probe to name the first
+// closing wire. The fast bulk loop below skips that probe — its O(N)
+// seen-zeroing per wire dominates large loads — while the single
+// whole-graph check stays authoritative.
+[[nodiscard]] bool locate_cycle_wire(const Collected &in, std::string &err) {
+  Netlist scratch{};
+  if (!ensure_slots(scratch, in.gates.size())) {
+    err = "too many gates (max " + std::to_string(kMaxGates) + ")";
+    return false;
+  }
+  fill_gate_slots(in, scratch);
+  GateIndex sidx;
+  build_gate_index(scratch, sidx);
+  std::string dummy;
+  if (!replay_shared(in, YAML::Node{}, scratch, sidx, dummy)) {
+    err = std::move(dummy); // unreachable: shared replay passed above
+    return false;
+  }
+  for (const WireRow &w : in.wires) {
+    WirePins pins{};
+    if (!resolve_wire_row(scratch, sidx, w, pins, dummy)) {
+      err = "workspace topology error"; // unreachable: rows resolved above
+      return false;
+    }
+    if (!append_wire_edge(scratch, w, pins, dummy)) {
+      err = "workspace topology error"; // unreachable: caps passed above
+      return false;
+    }
+    // Q-boundary (same rule as logic::wire): an edge into a
+    // sequential-gate input can never close a combinational cycle, so
+    // file order never affects acceptance. The whole-graph validator
+    // at the end stays authoritative.
+    if (!is_sequential_kind(scratch.slots[pins.to.slot].kind) &&
+        topo::reaches(scratch, pins.to.slot, pins.from.slot, EdgeFilter::kCombOnly)) {
+      err = "line " + std::to_string(w.line) + ": wire closes a combinational cycle '" + w.from + "' -> '" + w.to + "'";
+      return false;
+    }
+  }
+  err = "workspace topology error";
+  return false;
+}
+
+} // namespace
+
+[[nodiscard]] bool replay_wires(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, const GateIndex &idx, std::string &err) {
+  // Fast bulk loop: pin/occupancy/NQ validation + edge append, no
+  // per-wire cycle probe. The probe's whole-pool seen-zeroing per wire
+  // is O(N*W) — the second half of the 100k-gate load wall. Cycles are
+  // caught once below by the whole-graph check (same authority as
+  // validate_topology); only that failure pays for the slow
+  // line-numbered diagnostic above.
+  for (const WireRow &w : in.wires) {
+    WirePins pins{};
+    if (!resolve_wire_row(tmp, idx, w, pins, err)) {
+      return false;
+    }
+    if (!append_wire_edge(tmp, w, pins, err)) {
+      return false;
+    }
+  }
+  adjacency::adjacency_rebuild(tmp);
+  const bool acyclic = has_sequential_gates(tmp) ? topo::validate(tmp, EdgeFilter::kCombOnly).ok()
+                                                 : topo::rebuild(tmp, EdgeFilter::kAll).ok();
+  if (acyclic) {
+    return true;
+  }
+  return locate_cycle_wire(in, err);
+}
+
+[[nodiscard]] bool replay_ties(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, const GateIndex &idx, std::string &err) {
   for (const TieRow &t : in.ties) {
     const std::string at = "line " + std::to_string(t.line) + ": ";
-    const auto a = parse_pin(tmp, t.a);
+    const auto a = parse_pin_indexed(tmp, idx, t.a);
     if (!a.ok()) {
       if (a.error == std::string_view("unknown gate")) {
         err = at + "unknown gate in tie pin '" + t.a + "'";
@@ -181,7 +284,7 @@ namespace wengine::logic::yaml::detail {
       }
       return false;
     }
-    const auto b = parse_pin(tmp, t.b);
+    const auto b = parse_pin_indexed(tmp, idx, t.b);
     if (!b.ok()) {
       if (b.error == std::string_view("unknown gate")) {
         err = at + "unknown gate in tie pin '" + t.b + "'";
@@ -228,10 +331,10 @@ namespace wengine::logic::yaml::detail {
 // the pull diagnostic, mirroring the interactive verbs) and after
 // wires (pulled destinations wire normally). Replay order is file
 // order; row validation replays the engine seams exactly.
-[[nodiscard]] bool replay_pulls(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, std::string &err) {
+[[nodiscard]] bool replay_pulls(const Collected &in, const YAML::Node & /*sec*/, Netlist &tmp, const GateIndex &idx, std::string &err) {
   for (const PullRow &pr : in.pulls) {
     const std::string at = "line " + std::to_string(pr.line) + ": ";
-    const auto pin = parse_pin(tmp, pr.net);
+    const auto pin = parse_pin_indexed(tmp, idx, pr.net);
     if (!pin.ok()) {
       err = at + "bad pull net '" + pr.net + "'";
       return false;
