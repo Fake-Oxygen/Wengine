@@ -158,43 +158,30 @@ namespace detail {
   return depth;
 }
 
-// (011) Per-pop successor update: drain one indegree unit per
-// primary/extra edge from cur, queueing newly-ready gates. Single
-// for_each_extra walk (no separate uses_extra pre-scan); extra edges
-// drain symmetrically with primaries. kCombOnly skips sequential sinks
-// (seq edges cost 0 and seq gates never pop).
+// (016) Per-pop successor update: drain one indegree unit per recorded
+// edge from cur, queueing newly-ready gates. The chain enumerates
+// sinks in ascending (sink, input, extra) order — the same visit order
+// the full-pool scan produced (primaries-then-extras per sink), so
+// queue pushes land identically: decrements commute, pushes fire at
+// the zero crossing, and later same-sink edges skip on the indeg==0
+// guard exactly as before. kCombOnly skips sequential sinks (seq edges
+// cost 0 and seq gates never pop).
 inline void drain_successors(const Netlist &nl, EdgeFilter filter, Slot cur, std::uint8_t *indeg, Slot *queue, std::size_t &tail) noexcept {
+  if (cur >= nl.succ_head.size()) {
+    return;
+  }
   const bool skip_seq = (filter == EdgeFilter::kCombOnly);
-  for (Slot s = 0; s < slot_count(nl); ++s) {
-    const Gate &g = nl.slots[s];
-    if (!g.live || indeg[s] == 0) {
+  for (Slot e = nl.succ_head[cur]; e != kNoDriver; e = nl.succ_next[e]) {
+    const Slot s = nl.succ_sink[e];
+    if (s >= slot_count(nl) || !nl.slots[s].live || indeg[s] == 0) {
       continue;
     }
-    if (skip_seq && is_sequential_kind(g.kind)) {
+    if (skip_seq && is_sequential_kind(nl.slots[s].kind)) {
       continue;
     }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] == cur) {
-        --indeg[s];
-        if (indeg[s] == 0) {
-          queue[tail++] = s;
-          break; // one push per gate (remaining inputs from cur already counted)
-        }
-      }
-    }
-    if (indeg[s] != 0) {
-      bool drained = false;
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        for_each_extra(nl, tie_flat(s, i), [&](std::uint8_t, Slot edrv, std::uint8_t) {
-          if (edrv == cur) {
-            --indeg[s];
-            drained = true;
-          }
-        });
-      }
-      if (drained && indeg[s] == 0) {
-        queue[tail++] = s;
-      }
+    --indeg[s];
+    if (indeg[s] == 0) {
+      queue[tail++] = s;
     }
   }
 }
@@ -548,6 +535,11 @@ struct TopoScratch {
  * @brief Reachability over the driver graph: iterative DFS on caller
  *        scratch (no allocation).
  *
+ * Successors come from the maintained adjacency (016): each pop walks
+ * only the driver's recorded edges in ascending sink order — the same
+ * visit order the full-pool scan produced — so verdicts are identical
+ * while the cost tracks the reachable cone, not the pool size.
+ *
  * kCombOnly excludes edges into sequential-gate inputs from the edge
  * set (flop Q outputs break loops); kAll counts every edge.
  *
@@ -576,34 +568,16 @@ struct TopoScratch {
   seen[from] = true;
   while (top > 0) {
     const Slot cur = stack[--top];
-    for (Slot s = 0; s < slot_count(nl); ++s) {
-      const Gate &g = nl.slots[s];
-      if (!g.live) {
+    if (cur >= nl.succ_head.size()) {
+      continue;
+    }
+    for (Slot e = nl.succ_head[cur]; e != kNoDriver; e = nl.succ_next[e]) {
+      const Slot s = nl.succ_sink[e];
+      if (s >= slot_count(nl) || !nl.slots[s].live || seen[s]) {
         continue;
       }
-      if (skip_seq && is_sequential_kind(g.kind)) {
+      if (skip_seq && is_sequential_kind(nl.slots[s].kind)) {
         continue; // Q-boundary: no cycle path continues through a flop
-      }
-      bool uses_cur = false;
-      for (std::uint8_t i = 0; i < g.input_count; ++i) {
-        if (g.drivers[i] == cur) {
-          uses_cur = true;
-          break;
-        }
-      }
-      if (!uses_cur) {
-        // Shared extras are driver-graph edges too (011): a cycle
-        // closing through an extra attachment must fail the same
-        // flop-aware check as any wire. Unmarked netlists hold no
-        // extras, so this loop is a no-op there.
-        for (std::uint8_t i = 0; i < g.input_count && !uses_cur; ++i) {
-          if (shared_uses_driver_flat(nl, tie_flat(s, i), cur)) {
-            uses_cur = true;
-          }
-        }
-      }
-      if (!uses_cur || seen[s]) {
-        continue;
       }
       if (s == to) {
         return true;

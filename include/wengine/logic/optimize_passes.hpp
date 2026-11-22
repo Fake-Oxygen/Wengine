@@ -34,6 +34,7 @@
  */
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/optimize_types.hpp"
@@ -241,19 +242,48 @@ inline bool dce_pass(Netlist &nl, const bool *is_root, std::span<bool> keep, std
  */
 
 inline void rewire_users(Netlist &nl, Slot from_slot, Slot target) noexcept {
-  for (Slot u = 0; u < slot_count(nl); ++u) {
+  if (target == from_slot) {
+    return; // defensive: callers always rewire onto a distinct driver
+  }
+  // Walk the replaced driver's recorded primary edges (016): extras are
+  // frozen spans (011 driver-side freeze) and never move. The head is
+  // re-read per edge and the driver's chain strictly shrinks, so this
+  // terminates with exactly the old scan's rewrites at
+  // fanout-proportional cost.
+  while (from_slot < nl.succ_head.size() && nl.succ_head[from_slot] != kNoDriver) {
+    Slot e = nl.succ_head[from_slot];
+    while (e != kNoDriver && nl.succ_extra[e] != 0) {
+      e = nl.succ_next[e];
+    }
+    if (e == kNoDriver) {
+      break; // only frozen extras remain
+    }
+    const Slot u = nl.succ_sink[e];
+    const std::uint8_t i = nl.succ_input[e];
     Gate &user = nl.slots[u];
-    if (!user.live) {
+    if (user.drivers[i] != from_slot) {
+      (void)adjacency::adj_unlink_edge(nl, from_slot, u, i, 0); // phantom: drop, never hang
       continue;
     }
-    for (std::uint8_t i = 0; i < user.input_count; ++i) {
-      if (user.drivers[i] == from_slot) {
-        user.drivers[i] = target;
-        if (target == kNoDriver) {
-          user.ignored_mask =
-              static_cast<std::uint8_t>(user.ignored_mask & static_cast<std::uint8_t>(~(1u << i)));
-        }
+    user.drivers[i] = target;
+    // Adjacency (016): the edge moves drivers. Unlink-then-insert
+    // reuses the freed slot.
+    (void)adjacency::adj_unlink_edge(nl, from_slot, u, i, 0);
+    if (target != kNoDriver) {
+      (void)adjacency::adj_insert_edge(nl, target, u, i, 0);
+    }
+    // Feeder counters (016): the edge left/joined a marked input.
+    const std::size_t flat = tie_flat(u, i);
+    if (is_shared_flat(nl, flat)) {
+      if (nl.feeds_shared[from_slot] > 0) {
+        --nl.feeds_shared[from_slot];
       }
+      if (target != kNoDriver && target < slot_count(nl) && nl.slots[target].live) {
+        ++nl.feeds_shared[target];
+      }
+    }
+    if (target == kNoDriver) {
+      user.ignored_mask = static_cast<std::uint8_t>(user.ignored_mask & static_cast<std::uint8_t>(~(1u << i)));
     }
   }
 }
@@ -409,6 +439,12 @@ inline bool drop_inputs(Netlist &nl, Slot s, Constness *label, const Constness *
     orig_leader[k] = tie_leader_flat(nl, of);
     orig_tied[k] = is_tied(nl, s, kept_orig[k]);
   }
+  // Adjacency (016): detach this sink's edges before the index shift,
+  // re-insert the kept row after (tables are truth at each call).
+  // Feeder counters ride along (marked sinks skip the pass, so the
+  // pair is a no-op there — kept for unconditional correctness).
+  adjacency::adj_detach_sink(nl, s);
+  detail::feeds_release_sink(nl, s);
   for (std::uint8_t i = 0; i < n; ++i) {
     g.drivers[i] = kept_drv[i];
   }
@@ -423,6 +459,8 @@ inline bool drop_inputs(Netlist &nl, Slot s, Constness *label, const Constness *
   }
   g.ignored_mask = mask;
   g.input_count = n;
+  adjacency::adj_insert_sink(nl, s);
+  detail::feeds_acquire_sink(nl, s);
   // Rebuild ties for kept pins (indices may have shifted) via the TieSet
   // seam — index-shift re-election lives in tie_set.hpp, not here.
   reindex_kept_ties(nl, s, orig_leader, orig_tied, n, tie_survivors);
@@ -572,6 +610,8 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root, std::span<Constnes
       const bool canonical = g.kind == GateKind::kAnd && g.input_count == 2 && g.ignored_mask == 0x03u && g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
       if (!canonical) {
         detach_slot_ties(nl, s, tie_survivors);
+        // Adjacency (016): every driver below clears — detach first.
+        adjacency::adj_detach_sink(nl, s);
         if (g.kind != GateKind::kAnd) {
           retag(nl, s, GateKind::kAnd);
         }
@@ -590,6 +630,8 @@ inline bool const_fold_pass(Netlist &nl, const bool *is_root, std::span<Constnes
                              g.drivers[1] == kNoDriver;
       if (!canonical) {
         detach_slot_ties(nl, s, tie_survivors);
+        // Adjacency (016): every driver below clears — detach first.
+        adjacency::adj_detach_sink(nl, s);
         if (g.kind != GateKind::kNand) {
           retag(nl, s, GateKind::kNand);
         }
@@ -674,7 +716,13 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq, std::span<std::size
       (void)remove_gate(nl, s, tie_survivors);
       changed = true;
     } else if (hk == GateKind::kBuf) {
-      g.drivers[0] = nl.slots[h].drivers[0];
+      // Adjacency (016): single edge move (h->s,0 becomes t->s,0).
+      const Slot t = nl.slots[h].drivers[0];
+      (void)adjacency::adj_unlink_edge(nl, h, s, 0, 0);
+      g.drivers[0] = t;
+      if (t != kNoDriver) {
+        (void)adjacency::adj_insert_edge(nl, t, s, 0, 0);
+      }
       changed = true;
     } else {
       if (is_frozen_kind(hk)) {
@@ -707,11 +755,15 @@ inline bool fusion_sweep(Netlist &nl, const bool *feeds_seq, std::span<std::size
         continue;
       }
       const Gate &src = nl.slots[h];
+      // Adjacency (016): full row copy — detach this sink's edges, copy,
+      // re-insert (extras cannot be present: marked sinks skip above).
+      adjacency::adj_detach_sink(nl, s);
       g.input_count = src.input_count;
       g.ignored_mask = src.ignored_mask;
       for (std::size_t i = 0; i < kMaxInputs; ++i) {
         g.drivers[i] = src.drivers[i];
       }
+      adjacency::adj_insert_sink(nl, s);
       // Preserve input-input ties: each dangling dest pin joins its src
       // counterpart's class (internal + outside ties follow; the src gate
       // goes away via later DCE, leaving the fused pins tied).

@@ -1,6 +1,7 @@
 // test_logic_seq_cycles: topology validation with sequential gates —
 // combinational cycles stay rejected while flop/clock/latch feedback loops
 // are allowed. Guards the comb-vs-sequential cycle distinction.
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/seq_state.hpp"
@@ -39,6 +40,7 @@ void place_seq(Netlist &nl, logic::Slot slot, GateKind kind, std::uint32_t count
   ++nl.live_count;
   nl.dirty = true;
   nl.topo_order.clear();
+  logic::free_heap_rebuild(nl); // direct revive bypasses add_gate: reindex
 }
 
 void test_validate_empty_and_comb_acyclic() {
@@ -59,6 +61,7 @@ void test_validate_rejects_comb_cycles() {
   const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   nl.slots[a].drivers[0] = n;
   nl.slots[n].drivers[0] = a;
+  logic::adjacency::adjacency_rebuild(nl); // hand-poked cycle: sync chains
   nl.dirty = true;
   assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
 
@@ -66,6 +69,7 @@ void test_validate_rejects_comb_cycles() {
   Netlist self;
   const logic::Slot s = logic::add_gate(self, GateKind::kAnd, 2).value;
   self.slots[s].drivers[0] = s;
+  logic::adjacency::adjacency_rebuild(self); // hand-poked self-loop: sync chains
   self.dirty = true;
   assert(!logic::topo::validate(self, logic::EdgeFilter::kCombOnly).ok());
 }
@@ -144,6 +148,7 @@ void test_comb_cycle_still_rejected_with_flop_present() {
   assert(!logic::wire(nl, n, a, 0).ok()); // NOT.Y -> AND.0: comb cycle, loud
   // Hand-built comb cycle beside a flop fails whole-graph validation too.
   nl.slots[a].drivers[1] = n;
+  logic::adjacency::adjacency_rebuild(nl); // hand-poked cycle: sync chains
   nl.dirty = true;
   assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());
 }

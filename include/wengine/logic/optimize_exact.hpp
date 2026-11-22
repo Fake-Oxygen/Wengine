@@ -34,6 +34,7 @@
 #pragma once
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/optimize_types.hpp"
@@ -261,6 +262,8 @@ inline bool exact_simplify_pass(Netlist &nl, std::span<LogicValue> resolved,
                              g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
       if (!canonical) {
         detach_slot_ties(nl, s, tie_members);
+        // Adjacency (016): every driver below clears — detach first.
+        adjacency::adj_detach_sink(nl, s);
         if (g.kind != GateKind::kAnd) {
           retag(nl, s, GateKind::kAnd);
         }
@@ -277,6 +280,8 @@ inline bool exact_simplify_pass(Netlist &nl, std::span<LogicValue> resolved,
       const bool canonical = g.kind == GateKind::kNand && g.input_count == 2 && g.ignored_mask == 0x03u && g.drivers[0] == kNoDriver && g.drivers[1] == kNoDriver;
       if (!canonical) {
         detach_slot_ties(nl, s, tie_members);
+        // Adjacency (016): every driver below clears — detach first.
+        adjacency::adj_detach_sink(nl, s);
         if (g.kind != GateKind::kNand) {
           retag(nl, s, GateKind::kNand);
         }

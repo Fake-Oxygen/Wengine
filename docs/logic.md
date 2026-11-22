@@ -197,6 +197,17 @@ both raster paths consume it without changing it.
 - Topology compiled once per mutation (`wire`/`add`/`remove` dirty flag):
   Kahn's algorithm over slot order → deterministic level order, cycle
   check included. Steady-state `solve` never re-sorts.
+- Derived indexes (016, never serialized, rebuilt lazily after load):
+  a per-driver successor adjacency backing the Kahn drain, the
+  wire-time cycle probe, gate removal, and driver rewiring; a
+  per-leader tie-class member index behind tie enumeration; a
+  free-slot min-heap behind gate allocation (identical slots as the
+  lowest-free scan); per-driver shared-feeder counters behind the 011
+  freeze predicates. Every index is maintained incrementally by the
+  mutation seam at a cost proportional to the mutation; bulk writers
+  (checkpoints, YAML, O2 fresh builds, reset) rebuild once. All
+  consumer-visible outputs are bit-identical to the pre-index scans
+  (pinned by `test_logic_adjacency`).
 - Bit-parallel truth evaluation: pack up to 64 input assignments into one
   `uint64_t` word per net; each gate is one branchless word op
   (`& | ^ ~`) over the whole column. Cost is

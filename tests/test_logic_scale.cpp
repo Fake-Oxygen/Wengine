@@ -162,6 +162,8 @@ void build_layered_bulk(Netlist &nl, std::size_t n, std::size_t kInputs) {
   nl.live_count = static_cast<std::uint32_t>(n);
   nl.dirty = true;
   detail::recount_fanout(nl);
+  adjacency::adjacency_rebuild(nl); // bulk direct build: one chain rebuild
+  free_heap_rebuild(nl); // bulk direct build: reindex free slots
 }
 
 // Scalar/word bit-exact parity over every truth row, plus bit-identical

@@ -64,6 +64,9 @@ using TieSnapshot = std::vector<Slot>;
  *
  * @param[out] nl Netlist receiving the snapshot.
  * @param[in] snap Snapshot to install.
+ * @note Bulk writer: callers must rebuild the member index afterwards
+ *       (tie_chains_rebuild) — the star table alone no longer
+ *       describes class membership for readers.
  */
 inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept {
   nl.tie_rep = snap;
@@ -127,6 +130,11 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept {
 /**
  * @brief Slot-order member enumeration for one class leader.
  *
+ * Reads the maintained chain (016): ascending member flats, head at
+ * the class minimum. Singletons enumerate themselves when the pin is
+ * live, dangling, and non-ignored (the pre-chain rule, preserved
+ * exactly); non-leader flats enumerate nothing.
+ *
  * @param[in] nl Netlist holding the tie table.
  * @param[in] leader Class leader flat to enumerate.
  * @param[out] out Caller buffer receiving member flats.
@@ -135,30 +143,36 @@ inline void restore_ties(Netlist &nl, const TieSnapshot &snap) noexcept {
  *         entries are stored). Pure readout.
  */
 [[nodiscard]] inline std::size_t tie_class_members(const Netlist &nl, std::size_t leader, std::size_t *out, std::size_t cap) noexcept {
-  std::size_t n = 0;
-  for (Slot s = 0; s < slot_count(nl); ++s) {
-    const Gate &g = nl.slots[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (g.drivers[i] != kNoDriver) {
-        continue;
-      }
-      if ((g.ignored_mask & static_cast<std::uint8_t>(1u << i)) != 0) {
-        continue;
-      }
-      const std::size_t f = tie_flat(s, i);
-      if (tie_leader_flat(nl, f) != leader) {
-        continue;
-      }
+  if (leader >= nl.tie_head.size()) {
+    return 0;
+  }
+  if (nl.tie_head[leader] != kNoDriver) {
+    std::size_t n = 0;
+    for (Slot e = nl.tie_head[leader]; e != kNoDriver; e = nl.tie_next[e]) {
       if (n < cap) {
-        out[n] = f;
+        out[n] = static_cast<std::size_t>(e);
       }
       ++n;
     }
+    return n;
   }
-  return n;
+  // Singleton or non-leader: exactly the pre-chain rule.
+  if (nl.tie_rep[leader] != 0) {
+    return 0; // non-leader member: enumerates nothing
+  }
+  const auto slot = static_cast<Slot>(leader / kMaxInputs);
+  const auto input = static_cast<std::uint8_t>(leader % kMaxInputs);
+  if (slot >= slot_count(nl) || !nl.slots[slot].live || input >= nl.slots[slot].input_count) {
+    return 0;
+  }
+  const Gate &g = nl.slots[slot];
+  if (g.drivers[input] != kNoDriver || (g.ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
+    return 0;
+  }
+  if (cap > 0) {
+    out[0] = leader;
+  }
+  return 1;
 }
 
 namespace detail {
@@ -187,9 +201,158 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
 }
 } // namespace detail
 
+namespace tie_detail {
+// --- Per-leader member chains (016, US3) -------------------------------------
+// head[leader_flat] is the first member flat (ascending); heads hold
+// kNoDriver for singletons. tie_next[member_flat] links the rest.
+// Only this seam writes tie_head/tie_next; everyone else calls the
+// functions below. Chains mirror tie_rep exactly: every non-singleton
+// class enumerates slot-order ascending, head == class minimum.
+
+/**
+ * @brief Insert one flat into the leader's chain, ascending.
+ *
+ * Flats are unique per class. No-op positions are impossible by
+ * construction (callers unlink before moving).
+ *
+ * @param[out] nl Netlist holding the chains.
+ * @param[in] leader Class leader flat.
+ * @param[in] flat Member flat to insert.
+ */
+inline void chain_insert_ordered(Netlist &nl, std::size_t leader, std::size_t flat) noexcept {
+  Slot *link = &nl.tie_head[leader];
+  while (*link != kNoDriver && static_cast<std::size_t>(*link) < flat) {
+    link = &nl.tie_next[*link];
+  }
+  nl.tie_next[flat] = *link;
+  *link = static_cast<Slot>(flat);
+}
+
+// Unlink flat from leader's chain; true when present.
+[[nodiscard]] inline bool chain_unlink(Netlist &nl, std::size_t leader, std::size_t flat) noexcept {
+  if (leader >= nl.tie_head.size() || flat >= nl.tie_next.size()) {
+    return false;
+  }
+  Slot *link = &nl.tie_head[leader];
+  while (*link != kNoDriver) {
+    if (static_cast<std::size_t>(*link) == flat) {
+      *link = nl.tie_next[flat];
+      nl.tie_next[flat] = kNoDriver;
+      return true;
+    }
+    link = &nl.tie_next[*link];
+  }
+  return false;
+}
+
+// Merge two ascending chains (la, lb) into one ascending chain headed
+// at keep. Singleton classes contribute their lone leader flat.
+inline void chain_merge(Netlist &nl, std::size_t keep, std::size_t la, std::size_t lb) noexcept {
+  std::size_t a = (nl.tie_head[la] != kNoDriver) ? static_cast<std::size_t>(nl.tie_head[la]) : la;
+  bool a_single = (nl.tie_head[la] == kNoDriver);
+  std::size_t b = (nl.tie_head[lb] != kNoDriver) ? static_cast<std::size_t>(nl.tie_head[lb]) : lb;
+  bool b_single = (nl.tie_head[lb] == kNoDriver);
+  const std::size_t kNone = static_cast<std::size_t>(kNoDriver);
+  std::size_t tail = kNone;
+  auto emit = [&](std::size_t f) {
+    if (tail == kNone) {
+      nl.tie_head[keep] = static_cast<Slot>(f);
+    } else {
+      nl.tie_next[tail] = static_cast<Slot>(f);
+    }
+    tail = f;
+  };
+  auto step_a = [&]() {
+    const std::size_t f = a;
+    if (a_single) {
+      a = kNone;
+    } else {
+      a = static_cast<std::size_t>(nl.tie_next[a]);
+    }
+    emit(f);
+  };
+  auto step_b = [&]() {
+    const std::size_t f = b;
+    if (b_single) {
+      b = kNone;
+    } else {
+      b = static_cast<std::size_t>(nl.tie_next[b]);
+    }
+    emit(f);
+  };
+  while (a != kNone || b != kNone) {
+    if (b == kNone || (a != kNone && a < b)) {
+      step_a();
+    } else {
+      step_b();
+    }
+  }
+  nl.tie_next[tail] = kNoDriver;
+  if (keep != la) {
+    nl.tie_head[la] = kNoDriver;
+  }
+  if (keep != lb) {
+    nl.tie_head[lb] = kNoDriver;
+  }
+}
+// Reconcile one class chain after its reps were re-starred: link the
+// ascending survivor list under the new minimum (dissolve when the
+// class holds one or zero members). The old key always clears, so a
+// migrated minimum cannot leave a stale keyed chain behind.
+inline void chain_reconcile(Netlist &nl, std::size_t old_key, const std::size_t *members, std::size_t n) noexcept {
+  if (old_key < nl.tie_head.size()) {
+    nl.tie_head[old_key] = kNoDriver;
+  }
+  if (n <= 1) {
+    return; // empty or singleton: no chain
+  }
+  const Slot first = static_cast<Slot>(members[0]);
+  nl.tie_head[first] = first;
+  for (std::size_t k = 1; k < n; ++k) {
+    nl.tie_next[members[k - 1]] = static_cast<Slot>(members[k]);
+  }
+  nl.tie_next[members[n - 1]] = kNoDriver;
+}
+} // namespace tie_detail
+
+/**
+ * @brief Rebuild every tie-class chain from the star table (bulk-load
+ *        path): single ascending scan, O(pins). Cold paths only.
+ *
+ * (No noexcept: the tail map allocates.)
+ *
+ * @param[out] nl Netlist whose chains rebuild.
+ */
+inline void tie_chains_rebuild(Netlist &nl) {
+  const std::size_t nflat = slot_count(nl) * kMaxInputs;
+  for (std::size_t f = 0; f < nl.tie_head.size(); ++f) {
+    nl.tie_head[f] = kNoDriver;
+  }
+  std::vector<Slot> tail(nflat, kNoDriver);
+  for (std::size_t f = 0; f < nflat; ++f) {
+    if (nl.tie_rep[f] == 0) {
+      continue; // singleton: no chain
+    }
+    const std::size_t leader = static_cast<std::size_t>(nl.tie_rep[f] - 1u);
+    if (leader >= nflat) {
+      continue; // corrupt rep: loaders validate before installing
+    }
+    if (tail[leader] == kNoDriver) {
+      nl.tie_head[leader] = static_cast<Slot>(f);
+    } else {
+      nl.tie_next[tail[leader]] = static_cast<Slot>(f);
+    }
+    nl.tie_next[f] = kNoDriver;
+    tail[leader] = static_cast<Slot>(f);
+  }
+}
+
 /**
  * @brief Number of tied peers in the class (1 for a singleton or a
  *        leader alone).
+ *
+ * Reads the maintained chain (016) for live in-range pins; the
+ * degenerate out-of-range/dead cases keep the exact pre-chain scan.
  *
  * @param[in] nl Netlist holding the tie table.
  * @param[in] slot Gate slot.
@@ -197,19 +360,30 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
  * @return Member count of the pin's class.
  */
 [[nodiscard]] inline std::size_t tie_group_size(const Netlist &nl, Slot slot, std::uint8_t input) noexcept {
-  const std::size_t flat = tie_flat(slot, input);
-  const std::size_t leader = tie_leader_flat(nl, flat);
-  std::size_t n = 0;
-  for (Slot s = 0; s < slot_count(nl); ++s) {
-    const Gate &g = nl.slots[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      if (tie_leader_flat(nl, tie_flat(s, i)) == leader) {
-        ++n;
+  if (slot >= slot_count(nl) || !nl.slots[slot].live || input >= nl.slots[slot].input_count) {
+    std::size_t n = 0;
+    const std::size_t flat = tie_flat(slot, input);
+    const std::size_t leader = tie_leader_flat(nl, flat);
+    for (Slot s = 0; s < slot_count(nl); ++s) {
+      const Gate &g = nl.slots[s];
+      if (!g.live) {
+        continue;
+      }
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        if (tie_leader_flat(nl, tie_flat(s, i)) == leader) {
+          ++n;
+        }
       }
     }
+    return n;
+  }
+  const std::size_t leader = tie_leader_flat(nl, tie_flat(slot, input));
+  if (leader >= nl.tie_head.size() || nl.tie_head[leader] == kNoDriver) {
+    return 1; // singleton class (wired pins included, as before)
+  }
+  std::size_t n = 0;
+  for (Slot e = nl.tie_head[leader]; e != kNoDriver; e = nl.tie_next[e]) {
+    ++n;
   }
   return n;
 }
@@ -266,19 +440,11 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
     return core::Status::success(); // idempotent
   }
   const std::size_t new_leader = (la < lb) ? la : lb;
-  // Re-star every member of both classes around the new leader.
-  for (Slot s = 0; s < slot_count(nl); ++s) {
-    const Gate &g = nl.slots[s];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::size_t f = tie_flat(s, i);
-      const std::size_t l = tie_leader_flat(nl, f);
-      if (l == la || l == lb) {
-        nl.tie_rep[f] = static_cast<Slot>(new_leader + 1u);
-      }
-    }
+  // Re-star every member of both classes around the new leader, walking
+  // the maintained chains (016: class-proportional, never the pool).
+  tie_detail::chain_merge(nl, new_leader, la, lb);
+  for (Slot e = nl.tie_head[new_leader]; e != kNoDriver; e = nl.tie_next[e]) {
+    nl.tie_rep[e] = static_cast<Slot>(new_leader + 1u);
   }
   return core::Status::success();
 }
@@ -323,24 +489,22 @@ inline void tie_reelect(Netlist &nl, const std::size_t *survivors, std::size_t n
     return core::Status::failure(core::StatusCode::kInvalidArgument); // scratch too small
   }
   const std::size_t leader = tie_leader_flat(nl, flat);
+  // Collect survivors by walking the class chain (016), skipping the
+  // removed pin; slot order is the chain order. Scratch capacity is
+  // guaranteed by the size check above.
   std::size_t n_surv = 0;
-  for (Slot s = 0; s < slot_count(nl); ++s) {
-    const Gate &o = nl.slots[s];
-    if (!o.live) {
+  for (Slot e = nl.tie_head[leader]; e != kNoDriver; e = nl.tie_next[e]) {
+    if (static_cast<std::size_t>(e) == flat) {
       continue;
     }
-    for (std::uint8_t i = 0; i < o.input_count; ++i) {
-      const std::size_t f = tie_flat(s, i);
-      if (f == flat) {
-        continue;
-      }
-      if (tie_leader_flat(nl, f) == leader) {
-        survivors[n_surv++] = f;
-      }
-    }
+    survivors[n_surv++] = static_cast<std::size_t>(e);
   }
   nl.tie_rep[flat] = 0;
+  // Unlink the pin, re-star the survivors, and reconcile the chain
+  // (dissolve clears it; a migrated minimum re-keys it).
+  (void)tie_detail::chain_unlink(nl, leader, flat);
   detail::tie_reelect(nl, survivors.data(), n_surv);
+  tie_detail::chain_reconcile(nl, leader, survivors.data(), n_surv);
   return core::Status::success();
 }
 
@@ -405,30 +569,23 @@ inline void detach_slot_ties(Netlist &nl, Slot s, std::span<std::size_t> survivo
   }
   for (std::size_t li = 0; li < n_leaders; ++li) {
     const std::size_t l = leaders[li];
-    std::size_t n_surv = 0;
-    for (Slot t = 0; t < slot_count(nl); ++t) {
-      if (t == s) {
-        continue;
-      }
-      const Gate &o = nl.slots[t];
-      if (!o.live) {
-        continue;
-      }
-      for (std::uint8_t j = 0; j < o.input_count; ++j) {
-        const std::size_t f = tie_flat(t, j);
-        if (tie_leader_flat(nl, f) == l) {
-          survivors[n_surv++] = f;
-        }
-      }
-    }
-    // Clear the whole class (this slot + survivors), then re-star survivors.
+    // Unlink this slot's flats from the class chain (016) and clear
+    // only this slot's star entries.
     for (std::uint8_t i = 0; i < n; ++i) {
-      nl.tie_rep[tie_flat(s, i)] = 0;
+      const std::size_t f = tie_flat(s, i);
+      if (tie_leader_flat(nl, f) == l) {
+        (void)tie_detail::chain_unlink(nl, l, f);
+        nl.tie_rep[f] = 0;
+      }
     }
-    for (std::size_t k = 0; k < n_surv; ++k) {
-      nl.tie_rep[survivors[k]] = 0;
+    // Collect survivors in chain order, re-star, and reconcile the
+    // chain (dissolve clears it; a migrated minimum re-keys it).
+    std::size_t n_surv = 0;
+    for (Slot e = nl.tie_head[l]; e != kNoDriver; e = nl.tie_next[e]) {
+      survivors[n_surv++] = static_cast<std::size_t>(e);
     }
     detail::tie_reelect(nl, survivors.data(), n_surv);
+    tie_detail::chain_reconcile(nl, l, survivors.data(), n_surv);
   }
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     nl.tie_rep[tie_flat(s, static_cast<std::uint8_t>(i))] = 0;
@@ -476,28 +633,37 @@ inline void reindex_kept_ties(Netlist &nl, Slot s, const std::size_t *orig_leade
     if (done) {
       continue;
     }
-    std::size_t n_surv = 0;
+    // Unlink this slot's old flats from the class chain (016): any
+    // chain member on slot s is a kept pin moving to a new flat.
+    for (Slot e = nl.tie_head[orig]; e != kNoDriver;) {
+      const Slot cur = e;
+      e = nl.tie_next[e];
+      if (static_cast<std::size_t>(cur) / kMaxInputs == s) {
+        (void)tie_detail::chain_unlink(nl, orig, static_cast<std::size_t>(cur));
+      }
+    }
+    // Clear this slot's whole tie row (mirrors the old wholesale
+    // clear: dropped positions must read singleton).
+    for (std::size_t i = 0; i < kMaxInputs; ++i) {
+      nl.tie_rep[tie_flat(s, static_cast<std::uint8_t>(i))] = 0;
+    }
+    // Re-insert kept pins at their new flats, ascending; outside
+    // survivors keep their positions.
     for (std::uint8_t j = 0; j < n; ++j) {
       if (orig_tied[j] && orig_leader[j] == orig) {
-        survivors[n_surv++] = tie_flat(s, j);
+        tie_detail::chain_insert_ordered(nl, orig, tie_flat(s, j));
       }
     }
-    for (Slot t = 0; t < slot_count(nl); ++t) {
-      if (t == s) {
-        continue;
-      }
-      const Gate &o = nl.slots[t];
-      if (!o.live) {
-        continue;
-      }
-      for (std::uint8_t j = 0; j < o.input_count; ++j) {
-        const std::size_t f = tie_flat(t, j);
-        if (tie_leader_flat(nl, f) == orig) {
-          survivors[n_surv++] = f;
-        }
-      }
+    // Re-star the rebuilt class around its new minimum (identical to
+    // the old collect-and-reelect: same member set, same minimum),
+    // then reconcile the chain (dissolve clears it; a migrated
+    // minimum re-keys it).
+    std::size_t n_surv = 0;
+    for (Slot e = nl.tie_head[orig]; e != kNoDriver; e = nl.tie_next[e]) {
+      survivors[n_surv++] = static_cast<std::size_t>(e);
     }
     detail::tie_reelect(nl, survivors.data(), n_surv);
+    tie_detail::chain_reconcile(nl, orig, survivors.data(), n_surv);
   }
 }
 
@@ -527,6 +693,10 @@ inline void ignore_tie_class(Netlist &nl, std::size_t leader, std::span<std::siz
     nl.tie_rep[members[k]] = 0;
     nl.slots[slot].ignored_mask =
         static_cast<std::uint8_t>(nl.slots[slot].ignored_mask | static_cast<std::uint8_t>(1u << input));
+  }
+  // The class dissolves into ignored pins: clear its chain head.
+  if (leader < nl.tie_head.size()) {
+    nl.tie_head[leader] = kNoDriver;
   }
 }
 
@@ -640,6 +810,10 @@ inline void set_tie_rep_entry(Netlist &nl, std::size_t flat, Slot rep) noexcept 
 inline void reset_all_ties(Netlist &nl) noexcept {
   for (std::size_t i = 0; i < slot_count(nl) * kMaxInputs; ++i) {
     nl.tie_rep[i] = 0;
+  }
+  // Bulk clear: every class dissolves, so every chain head clears.
+  for (std::size_t i = 0; i < nl.tie_head.size(); ++i) {
+    nl.tie_head[i] = kNoDriver;
   }
 }
 

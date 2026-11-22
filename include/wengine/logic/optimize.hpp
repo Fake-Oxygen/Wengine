@@ -81,6 +81,7 @@
 
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/optimize_barrier.hpp"
@@ -244,6 +245,12 @@ struct OptimizeScratch {
 
   detail::collect_barrier_roots(nl, scr.roots.data());
 
+  // (016, US6): the fixpoint passes never create sequential gates (only
+  // retags to combinational kinds), so one scan per invocation
+  // suffices; a stale true on a now-sequential-free net selects the
+  // combinational filter, which coincides with kAll there.
+  const bool seq_net = has_sequential_gates(nl);
+
   const bool want_fuse = (opts.level == OptLevel::kO1) || (opts.level == OptLevel::kO2);
   constexpr std::size_t kMaxItersBase = 16;
   std::size_t iter = 0;
@@ -253,7 +260,7 @@ struct OptimizeScratch {
       return core::Result<Netlist *>::failure("optimize: internal iteration bound", core::StatusCode::kInternal);
     }
     ++iter;
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
       return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     bool changed = false;
@@ -261,26 +268,26 @@ struct OptimizeScratch {
     if (detail::bypass_pass(nl, scr.feeds.data(), scr.tie_scratch)) {
       changed = true;
     }
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
       return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     detail::compute_feeds_seq(nl, scr.feeds.data());
     if (want_fuse && detail::fusion_sweep(nl, scr.feeds.data(), scr.tie_scratch)) {
       changed = true;
     }
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
       return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     if (detail::const_fold_pass(nl, scr.roots.data(), scr.labels, scr.tie_scratch)) {
       changed = true;
     }
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
       return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     if (detail::exact_simplify_pass(nl, scr.resolved, scr.gate_out, scr.topo, scr.tie_scratch)) {
       changed = true;
     }
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
       return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     if (detail::dce_pass(nl, scr.roots.data(), scr.keep, scr.stack, scr.tie_scratch)) {
@@ -292,7 +299,7 @@ struct OptimizeScratch {
   }
 
   if (opts.level != OptLevel::kO2) {
-    if (!topo::rebuild(nl, has_sequential_gates(nl) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
       return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     out = nl;
@@ -358,6 +365,14 @@ struct OptimizeScratch {
       return core::Result<Netlist *>::failure(detail::build_error_message(werr), core::StatusCode::kInternal);
     }
   }
+  // Adjacency (016): the fresh build wrote tables directly — one
+  // rebuild covers every edge, and the post-cleanup surgery below
+  // maintains the chains from there. The free-slot heap rebuilds for
+  // the same bulk-write reason, as do the feeder counters.
+  adjacency::adjacency_rebuild(fresh);
+  free_heap_rebuild(fresh);
+  feeds_recompute(fresh);
+  adjacency::adjacency_rebuild(fresh);
   detail::restore_masks(nl, fresh, scr.reach.data(), scr.emit_map.data(), opts.target);
   // Vocabulary-preserving post-cleanup (dedup + double-inverter
   // cancellation + DCE to fixpoint) and minimized-vs-structural picking.
@@ -368,13 +383,16 @@ struct OptimizeScratch {
     auto pkeep = std::make_unique<bool[]>(m);
     std::vector<Slot> pstack(m);
     std::vector<std::size_t> ptie(m * kMaxInputs, 0);
+    auto pbuckets = std::make_unique<std::uint64_t[]>(m);
+    auto pbhead = std::make_unique<Slot[]>(m);
+    auto pbnext = std::make_unique<Slot[]>(m);
     ensure_workspace(fresh, m);
     const topo::TopoScratch fts{std::span<Slot>(fresh.ws_order.data(), m),
                                 std::span<Slot>(fresh.ws_levels.data(), m),
                                 std::span<std::uint8_t>(fresh.ws_indeg.data(), m),
                                 std::span<Slot>(fresh.ws_queue.data(), m)};
     const detail::BuildError perr = detail::post_cleanup(fresh, nl, scr.reach.data(), scr.emit_map.data(), opts.target, std::span<bool>(proots.get(), m),
-        std::span<bool>(pfeeds.get(), m), std::span<bool>(pkeep.get(), m), std::span<Slot>(pstack.data(), m), std::span<std::size_t>(ptie.data(), ptie.size()), fts);
+        std::span<bool>(pfeeds.get(), m), std::span<bool>(pkeep.get(), m), std::span<Slot>(pstack.data(), m), std::span<std::size_t>(ptie.data(), ptie.size()), std::span<std::uint64_t>(pbuckets.get(), m), std::span<Slot>(pbhead.get(), m), std::span<Slot>(pbnext.get(), m), fts);
     if (perr != detail::BuildError::kNone) {
       return core::Result<Netlist *>::failure(detail::build_error_message(perr), core::StatusCode::kInternal);
     }

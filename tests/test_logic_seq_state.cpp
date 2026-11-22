@@ -43,6 +43,7 @@ void place_seq(Netlist &nl, logic::Slot slot, GateKind kind, std::uint32_t count
   ++nl.live_count;
   nl.dirty = true;
   nl.topo_order.clear();
+  logic::free_heap_rebuild(nl); // direct revive bypasses add_gate: reindex
 }
 
 void kill_gate(Netlist &nl, logic::Slot slot) {

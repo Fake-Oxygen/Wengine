@@ -57,6 +57,7 @@
 // leaves the target cleared. Write failures yield kInternal.
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/types.hpp"
@@ -493,6 +494,10 @@ inline bool get_f64_le(std::istream &in, double &v) {
   }
   tmp.entities.restore(std::move(gens), std::move(free));
   if (version == 1) {
+    logic::adjacency::adjacency_rebuild(tmp.netlist); // bulk load: one rebuild, then exact
+    logic::free_heap_rebuild(tmp.netlist);           // bulk load: reindex free slots
+    logic::tie_chains_rebuild(tmp.netlist);          // bulk load: reindex tie classes
+    logic::feeds_recompute(tmp.netlist);            // bulk load: recount shared feeders
     s = std::move(tmp); // v1 has no signal section: signals stay empty
     return core::Status::success();
   }
@@ -1312,6 +1317,10 @@ inline bool get_f64_le(std::istream &in, double &v) {
       }
     }
   }
+  logic::adjacency::adjacency_rebuild(tmp.netlist); // bulk load: one rebuild, then exact
+  logic::free_heap_rebuild(tmp.netlist);           // bulk load: reindex free slots
+  logic::tie_chains_rebuild(tmp.netlist);          // bulk load: reindex tie classes
+  logic::feeds_recompute(tmp.netlist);            // bulk load: recount shared feeders
   s = std::move(tmp);
   return core::Status::success();
 }

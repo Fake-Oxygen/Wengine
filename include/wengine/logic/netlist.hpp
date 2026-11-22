@@ -37,6 +37,7 @@
  */
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/block_interface.hpp"
 #include "wengine/logic/pins.hpp"
 #include "wengine/logic/shared_net.hpp"
@@ -85,13 +86,11 @@ namespace wengine::logic {
   if (nl.next_counter[ord] == 0) {
     nl.next_counter[ord] = 1; // tolerate zero-init (scaffold default)
   }
-  Slot slot = kNoDriver;
-  for (Slot s = 0; s < slot_count(nl); ++s) {
-    if (!nl.slots[s].live) {
-      slot = s;
-      break;
-    }
-  }
+  // Lowest free slot wins (016): the free-slot heap answers exactly
+  // what the slot-order scan answered — deterministic, and identical
+  // op sequences allocate identically. ensure_slots indexes fresh
+  // slots, so a heap miss here means genuine growth (or a full pool).
+  Slot slot = detail::heap_pop_free(nl);
   if (slot == kNoDriver) {
     // Pool full: grow geometrically (amortized); loud refusal past the
     // max cap, never silent. The appended slot is the old size — every
@@ -102,7 +101,10 @@ namespace wengine::logic {
     if (!ensure_slots(nl, old + 1)) {
       return core::Result<Slot>::failure("netlist full");
     }
-    slot = static_cast<Slot>(old);
+    slot = detail::heap_pop_free(nl);
+    if (slot == kNoDriver) {
+      return core::Result<Slot>::failure("netlist full"); // defensive: growth left no free slot
+    }
   }
   Gate &g = nl.slots[slot];
   g.live = true;
@@ -175,6 +177,12 @@ namespace wengine::logic {
     const Slot drv = g.drivers[i];
     if (drv != kNoDriver && drv < slot_count(nl) && nl.slots[drv].live) {
       const std::size_t flat = tie_flat(slot, i);
+      // Adjacency (016): release the primary edge into this slot.
+      (void)adjacency::adj_unlink_edge(nl, drv, slot, i, 0);
+      // Feeder counters (016): the released edge left a marked input.
+      if (is_shared_flat(nl, flat) && nl.feeds_shared[drv] > 0) {
+        --nl.feeds_shared[drv];
+      }
       if (nl.driver_inv[flat] != 0) {
         nl.driver_inv[flat] = 0;
         if (nl.slots[drv].nq_fanout > 0) {
@@ -190,6 +198,12 @@ namespace wengine::logic {
     const std::size_t flat = tie_flat(slot, i);
     for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t einv) {
       if (edrv < slot_count(nl) && nl.slots[edrv].live) {
+        // Adjacency (016): release this extra edge into this slot.
+        (void)adjacency::adj_unlink_edge(nl, edrv, slot, i, 1);
+        // Feeder counters (016): extras only exist on marked inputs.
+        if (nl.feeds_shared[edrv] > 0) {
+          --nl.feeds_shared[edrv];
+        }
         if (einv != 0) {
           if (nl.slots[edrv].nq_fanout > 0) {
             --nl.slots[edrv].nq_fanout;
@@ -201,24 +215,25 @@ namespace wengine::logic {
     });
     shared_clear_flat(nl, flat);
   }
-  for (Slot s = 0; s < slot_count(nl); ++s) {
-    Gate &o = nl.slots[s];
-    if (!o.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < o.input_count; ++i) {
-      if (o.drivers[i] == slot) {
-        // Primary attachment of the removed gate: unwire promotes extra
-        // 0 when the input holds more drivers (mark preserved).
-        (void)unwire(nl, s, i);
-      } else {
-        // Extra attachment of the removed gate: release exactly that
-        // edge (left-compact; remaining drivers resolve unchanged).
-        const std::size_t flat = tie_flat(s, i);
-        if (shared_uses_driver_flat(nl, flat, slot)) {
-          (void)unwire_driver(nl, slot, s, i);
-        }
-      }
+  // Release every edge this gate drives (016): walk the removed
+  // gate's recorded successors. The head is re-read per edge because
+  // unwire may relink via promotion; every iteration unlinks at least
+  // one of the slot's chain edges, so the walk terminates with every
+  // driven edge released at fanout-proportional cost — no full-pool
+  // sweep.
+  while (slot < nl.succ_head.size() && nl.succ_head[slot] != kNoDriver) {
+    const Slot e = nl.succ_head[slot];
+    const Slot s = nl.succ_sink[e];
+    const std::uint8_t i = nl.succ_input[e];
+    const std::uint8_t x = nl.succ_extra[e];
+    if (x != 0) {
+      // Extra attachment of the removed gate: release exactly that
+      // edge (left-compact; remaining drivers resolve unchanged).
+      (void)unwire_driver(nl, slot, s, i);
+    } else {
+      // Primary attachment of the removed gate: unwire promotes extra
+      // 0 when the input holds more drivers (mark preserved).
+      (void)unwire(nl, s, i);
     }
   }
   g.live = false;
@@ -227,6 +242,8 @@ namespace wengine::logic {
   g.ignore_nq_output = true; // fresh-state default (NQ hidden unless `use`d)
   g.output_fanout = 0;
   g.nq_fanout = 0;
+  // Adjacency (016): the freed slot recycles through the heap.
+  detail::heap_push_free(nl, slot);
   g.input_count = default_fanin(g.kind);
   for (std::size_t i = 0; i < kMaxInputs; ++i) {
     g.drivers[i] = kNoDriver;
@@ -283,6 +300,88 @@ namespace wengine::logic {
 
 namespace detail {
 
+// --- Shared-feeder counters (016, US6) --------------------------------------
+// feeds_shared[driver] counts the driver's live edges landing on
+// shared-marked inputs, maintained at every edge event next to the
+// fanout counters. drives_shared (optimize_barrier.hpp) consults them
+// in O(1). Invariant: exact on every valid net; bulk writers recompute
+// via feeds_recompute.
+
+/**
+ * @brief Decrement marked-input drivers of one sink (before its rewrite).
+ *
+ * @param[out] nl Netlist holding feeder counters.
+ * @param[in] sink Sink slot being rewritten.
+ */
+inline void feeds_release_sink(Netlist &nl, Slot sink) noexcept {
+  if (sink >= slot_count(nl)) {
+    return;
+  }
+  const Gate &g = nl.slots[sink];
+  for (std::uint8_t i = 0; i < g.input_count; ++i) {
+    const std::size_t flat = tie_flat(sink, i);
+    if (!is_shared_flat(nl, flat)) {
+      continue;
+    }
+    const Slot drv = g.drivers[i];
+    if (drv < slot_count(nl) && nl.slots[drv].live && nl.feeds_shared[drv] > 0) {
+      --nl.feeds_shared[drv];
+    }
+    for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t) {
+      if (edrv < slot_count(nl) && nl.slots[edrv].live && nl.feeds_shared[edrv] > 0) {
+        --nl.feeds_shared[edrv];
+      }
+    });
+  }
+}
+
+/**
+ * @brief Increment marked-input drivers of one sink (after its rewrite).
+ *
+ * @param[out] nl Netlist holding feeder counters.
+ * @param[in] sink Sink slot just rewritten.
+ */
+inline void feeds_acquire_sink(Netlist &nl, Slot sink) noexcept {
+  if (sink >= slot_count(nl)) {
+    return;
+  }
+  const Gate &g = nl.slots[sink];
+  for (std::uint8_t i = 0; i < g.input_count; ++i) {
+    const std::size_t flat = tie_flat(sink, i);
+    if (!is_shared_flat(nl, flat)) {
+      continue;
+    }
+    const Slot drv = g.drivers[i];
+    if (drv < slot_count(nl) && nl.slots[drv].live) {
+      ++nl.feeds_shared[drv];
+    }
+    for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t) {
+      if (edrv < slot_count(nl) && nl.slots[edrv].live) {
+        ++nl.feeds_shared[edrv];
+      }
+    });
+  }
+}
+
+} // namespace detail
+
+/**
+ * @brief Recompute every shared-feeder counter from the tables
+ *        (bulk-load/build path). Cold paths only.
+ *
+ * @param[out] nl Netlist whose counters rebuild.
+ */
+inline void feeds_recompute(Netlist &nl) noexcept {
+  for (Slot s = 0; s < static_cast<Slot>(slot_count(nl)); ++s) {
+    nl.feeds_shared[s] = 0;
+  }
+  for (Slot s = 0; s < static_cast<Slot>(slot_count(nl)); ++s) {
+    detail::feeds_acquire_sink(nl, s);
+  }
+}
+
+namespace detail {
+
 /**
  * @brief Append one extra driver to a marked, occupied input (011).
  *
@@ -303,7 +402,14 @@ namespace detail {
   if (!st.ok()) {
     return st; // cap: loud, never truncated
   }
+  // Adjacency (016): the extra is a driver-graph edge exactly like a
+  // primary (pool-sized capacity: infallible by construction).
+  if (!adjacency::adj_insert_edge(nl, from_slot, to_slot, to_input, 1)) {
+    return core::Status::failure(core::StatusCode::kInternal);
+  }
   Gate &from = nl.slots[from_slot];
+  // Feeder counters (016): extras only exist on marked inputs.
+  ++nl.feeds_shared[from_slot];
   if (inv != 0) {
     ++from.nq_fanout;
   } else {
@@ -338,7 +444,22 @@ namespace detail {
   if (is_tied(nl, slot, input)) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // tied: untie first
   }
-  shared_set_mark(nl, tie_flat(slot, input)); // idempotent
+  const std::size_t flat = tie_flat(slot, input);
+  if (is_shared_flat(nl, flat)) {
+    return core::Status::success(); // idempotent: counters already count this span
+  }
+  shared_set_mark(nl, flat);
+  // Feeder counters (016): pre-existing attachments now land on a marked
+  // input (marking an occupied input is legal — the CLI --shared path).
+  const Slot drv = nl.slots[slot].drivers[input];
+  if (drv != kNoDriver && drv < slot_count(nl) && nl.slots[drv].live) {
+    ++nl.feeds_shared[drv];
+  }
+  for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t) {
+    if (edrv < slot_count(nl) && nl.slots[edrv].live) {
+      ++nl.feeds_shared[edrv];
+    }
+  });
   return core::Status::success();
 }
 
@@ -368,6 +489,12 @@ namespace detail {
   }
   if (shared_extra_flat(nl, flat) != 0) {
     return core::Status::failure(core::StatusCode::kInvalidArgument); // unwire extras first
+  }
+  // Feeder counters (016): a remaining primary edge stops landing on a
+  // marked input (at most one attachment may exist here).
+  const Slot drv = nl.slots[slot].drivers[input];
+  if (drv != kNoDriver && drv < slot_count(nl) && nl.slots[drv].live && nl.feeds_shared[drv] > 0) {
+    --nl.feeds_shared[drv];
   }
   shared_clear_flat(nl, flat);
   return core::Status::success();
@@ -552,6 +679,15 @@ namespace detail {
   to.drivers[to_input] = from_slot;
   ++from.output_fanout;
   nl.driver_inv[tie_flat(to_slot, to_input)] = 0; // slot-wire is never inverted
+  // Feeder counters (016): the new edge lands on a marked input.
+  if (shared_marked) {
+    ++nl.feeds_shared[from_slot];
+  }
+  // Adjacency (016): primary edge (probe ran above on the pre-wire
+  // chains; pool-sized capacity: infallible by construction).
+  if (!adjacency::adj_insert_edge(nl, from_slot, to_slot, to_input, 0)) {
+    return core::Status::failure(core::StatusCode::kInternal);
+  }
   nl.dirty = true;
   return core::Status::success();
 }
@@ -607,10 +743,18 @@ namespace detail {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
   to.drivers[to_input] = kNoDriver;
+  // Adjacency (016): release the primary edge (pool-sized: unlink first
+  // so the promotion insert below reuses the freed slot).
+  (void)adjacency::adj_unlink_edge(nl, drv, to_slot, to_input, 0);
   if (drv < slot_count(nl) && nl.slots[drv].live) {
     // Polarity-aware release: NQ edges decrement nq_fanout, Q edges
     // decrement output_fanout.
     const std::size_t flat = tie_flat(to_slot, to_input);
+    // Feeder counters (016): the released edge left a marked input.
+    // (Promotion below is edge-neutral: extra out, primary in.)
+    if (is_shared_flat(nl, flat) && nl.feeds_shared[drv] > 0) {
+      --nl.feeds_shared[drv];
+    }
     if (nl.driver_inv[flat] != 0) {
       nl.driver_inv[flat] = 0;
       if (nl.slots[drv].nq_fanout > 0) {
@@ -629,6 +773,10 @@ namespace detail {
       if (shared_pop_front(nl, flat, promoted, promoted_inv)) {
         to.drivers[to_input] = promoted;
         nl.driver_inv[flat] = promoted_inv;
+        // Adjacency (016): the promoted edge moves from extra to
+        // primary (same driver and sink, flag flips).
+        (void)adjacency::adj_unlink_edge(nl, promoted, to_slot, to_input, 1);
+        (void)adjacency::adj_insert_edge(nl, promoted, to_slot, to_input, 0);
       }
     }
   }
@@ -682,8 +830,14 @@ namespace detail {
       --nl.slots[from_slot].output_fanout;
     }
     shared_erase_at(nl, flat, j);
+    // Adjacency (016): release exactly this extra edge.
+    (void)adjacency::adj_unlink_edge(nl, from_slot, to_slot, to_input, 1);
+    // Feeder counters (016): extras only exist on marked inputs.
+    if (nl.feeds_shared[from_slot] > 0) {
+      --nl.feeds_shared[from_slot];
+    }
     nl.dirty = true;
-      return core::Status::success();
+    return core::Status::success();
   }
   return core::Status::failure(core::StatusCode::kInvalidArgument); // edge not attached
 }
@@ -892,6 +1046,7 @@ inline void reset_netlist(Netlist &nl) noexcept {
     g.ignore_nq_output = true; // fresh-state default (NQ hidden unless `use`d)
     g.output_fanout = 0;
     g.nq_fanout = 0;
+    nl.feeds_shared[s] = 0; // derived counters die with the slot
     g.propagation_delay_ps = 0;
     for (std::size_t i = 0; i < kMaxInputs; ++i) {
       g.drivers[i] = kNoDriver;
@@ -909,6 +1064,11 @@ inline void reset_netlist(Netlist &nl) noexcept {
   for (std::size_t i = 0; i < nl.next_counter.size(); ++i) {
     nl.next_counter[i] = 1;
   }
+  // Adjacency (016): every edge is gone; chains clear eagerly (O(pool)
+  // like the slot loop above — reset is already a wholesale pass).
+  adjacency::adjacency_clear(nl);
+  // Free-slot heap (016): every slot is dead; rebuild the index.
+  free_heap_rebuild(nl);
   nl.live_count = 0;
   nl.dirty = true;
 }

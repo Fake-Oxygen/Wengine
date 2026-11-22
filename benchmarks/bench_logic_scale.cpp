@@ -51,6 +51,7 @@
 // call site sizes scratch. The committed 015 numbers stay the "before"
 // baseline.
 
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/optimize.hpp"
@@ -317,6 +318,8 @@ bool build_dedup_twin(Netlist &nl, std::size_t n, std::size_t kInputs) {
   nl.dirty = true;
   nl.topo_order.clear();
   recount_fanout(nl);
+  adjacency::adjacency_rebuild(nl); // bulk direct build: one chain rebuild
+  free_heap_rebuild(nl); // bulk direct build: reindex free slots
   return true;
 }
 
@@ -720,13 +723,16 @@ bool run_point(std::uint64_t motif, std::size_t n, std::uint64_t words, std::uin
     for (std::size_t i = 0; i < pool_n; ++i) {
       feeds[i] = false;
     }
+    std::vector<std::uint64_t> buckets(pool_n, 0);
+    std::vector<Slot> bheads(pool_n, kNoDriver), bnexts(pool_n, kNoDriver);
     const std::size_t fp_dedup = fp_base + pool_bytes(twin);
     double dedup_s = 0.0;
     Checksum dck;
     {
       const double t = time_s([&] {
         if (!dedup_universal_pass(twin, GateKind::kNand, feeds.get(),
-                                  std::span<std::size_t>(twin.ws_survivors.data(), pool_n * kMaxInputs))) {
+                                  std::span<std::size_t>(twin.ws_survivors.data(), pool_n * kMaxInputs),
+                                  std::span<std::uint64_t>(buckets.data(), pool_n), std::span<Slot>(bheads.data(), pool_n), std::span<Slot>(bnexts.data(), pool_n))) {
           dck.mix(0xC0FFEEu); // no merges: still a measured scan
         }
         for (std::size_t s = 0; s < n; ++s) {

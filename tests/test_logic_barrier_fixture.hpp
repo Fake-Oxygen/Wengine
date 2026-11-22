@@ -46,6 +46,7 @@ void barrier_place_seq(wengine::logic::Netlist &nl, wengine::logic::Slot slot, w
   ++nl.live_count;
   nl.dirty = true;
   nl.topo_order.clear();
+  wengine::logic::free_heap_rebuild(nl); // direct revive bypasses add_gate: reindex
 }
 
 void barrier_ignore(wengine::logic::Netlist &nl, wengine::logic::Slot slot, std::uint8_t input) {

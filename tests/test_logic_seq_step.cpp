@@ -3,6 +3,7 @@
 // Guards edge/level stepping semantics.
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/topo.hpp"
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/seq_step.hpp"
@@ -44,6 +45,7 @@ void place_seq(Netlist &nl, logic::Slot slot, GateKind kind, std::uint32_t count
   ++nl.live_count;
   nl.dirty = true;
   nl.topo_order.clear();
+  logic::free_heap_rebuild(nl); // direct revive bypasses add_gate: reindex
 }
 
 void ignore_input(Netlist &nl, std::uint16_t slot, std::uint8_t input) {
@@ -650,6 +652,7 @@ void test_comb_cycle_still_rejected() {
   const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
   assert(logic::wire(nl, a, n, 0).ok());
   nl.slots[a].drivers[1] = n; // hand-poked comb cycle (wire() refuses it)
+  logic::adjacency::adjacency_rebuild(nl); // sync chains
   nl.dirty = true;
   SeqState st;
   assert(!logic::topo::validate(nl, logic::EdgeFilter::kCombOnly).ok());

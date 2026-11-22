@@ -160,8 +160,7 @@ enum class LogicValue : std::uint8_t {
  *        kUnknown == 3 must never change (persisted vocabulary
  *        convention, docs/logic.md §12).
  */
-static_assert(static_cast<int>(LogicValue::kHighZ) == 2 && static_cast<int>(LogicValue::kUnknown) == 3,
-              "LogicValue numbering is append-only");
+static_assert(static_cast<int>(LogicValue::kHighZ) == 2 && static_cast<int>(LogicValue::kUnknown) == 3, "LogicValue numbering is append-only");
 
 /**
  * @brief Single funnel every input resolves through.
@@ -474,6 +473,52 @@ struct Netlist {
   std::vector<Slot> topo_order{};
   /** @brief Per-slot level in the compiled order (0 for sources and sequential roots). */
   std::vector<Slot> topo_level{};
+  /**
+   * @brief Derived successor adjacency (016): one entry per live driver
+   *        edge (primary wires and shared-net extras alike). Per-driver
+   *        chains enumerate sinks in ascending slot order — the order the
+   *        Kahn drain and the reachability probe consume. Maintained
+   *        incrementally by the mutation seam (adjacency.hpp owns these
+   *        arrays); loaders and fresh-net builds repopulate them once via
+   *        adjacency_rebuild. Never serialized; excluded from equality
+   *        like all workspace.
+   */
+  /** @brief Per-slot head edge index; kNoDriver when the driver holds no recorded edge. */
+  std::vector<Slot> succ_head{};
+  /** @brief Per-edge next index within the driver's chain; kNoDriver at the tail. */
+  std::vector<Slot> succ_next{};
+  /** @brief Per-edge sink slot. */
+  std::vector<Slot> succ_sink{};
+  /** @brief Per-edge sink input index. */
+  std::vector<std::uint8_t> succ_input{};
+  /** @brief Per-edge extra flag: 1 when the edge is a shared-net extra attachment. */
+  std::vector<std::uint8_t> succ_extra{};
+  /** @brief Recycled edge indices; inserts pop, removals push (no tombstones). */
+  std::vector<Slot> succ_free{};
+  /**
+   * @brief Derived tie-class member index (016): per-leader chains over
+   *        flat pin positions in ascending flat order. Maintained by the
+   *        TieSet seam; never serialized; excluded from equality.
+   */
+  /** @brief Per-flat head member flat; kNoDriver when the class is a singleton. */
+  std::vector<Slot> tie_head{};
+  /** @brief Per-flat next member flat in the class chain; kNoDriver at the tail. */
+  std::vector<Slot> tie_next{};
+  /**
+   * @brief Derived free-slot min-heap (016): dead slot indices with the
+   *        lowest free on top, so allocation answers equal the
+   *        lowest-free-slot scan. Maintained by add/remove; rebuilt on
+   *        load/reset. Never serialized; excluded from equality.
+   */
+  std::vector<Slot> free_heap{};
+  /**
+   * @brief Derived per-slot shared-feeder count (016): number of the
+   *        slot's live edges landing on shared-marked inputs. Maintained
+   *        by the same seam events as output_fanout; consulted by the
+   *        011 freeze predicates. Never serialized; excluded from
+   *        equality.
+   */
+  std::vector<Slot> feeds_shared{};
   /** @brief Kahn indegree workspace (pool-sized). */
   std::vector<std::uint8_t> ws_indeg{};
   /** @brief Kahn queue workspace (pool-sized). */
@@ -587,6 +632,115 @@ struct Netlist {
   return nl.slots.size();
 }
 
+namespace detail {
+
+// --- Free-slot min-heap (016, US5) ------------------------------------------
+// Dead slot indices with the lowest free on top, so allocation answers
+// equal the lowest-free-slot scan (FR-017). Invariant: the heap holds
+// exactly the dead slots. add_gate pops, remove_gate pushes,
+// ensure_slots indexes fresh slots, bulk writers rebuild via
+// free_heap_rebuild. Heap order is deterministic for identical op
+// sequences. All pushes run under pre-reserved capacity (ensure_slots
+// reserves the pool size), so noexcept holders never allocate.
+
+/**
+ * @brief Sift heap element i up toward the root (min-heap order).
+ *
+ * @param[out] nl Netlist holding the heap.
+ * @param[in] i Element index to sift.
+ */
+inline void heap_sift_up(Netlist &nl, std::size_t i) noexcept {
+  while (i > 0) {
+    const std::size_t p = (i - 1u) / 2u;
+    if (nl.free_heap[p] <= nl.free_heap[i]) {
+      break;
+    }
+    const Slot t = nl.free_heap[p];
+    nl.free_heap[p] = nl.free_heap[i];
+    nl.free_heap[i] = t;
+    i = p;
+  }
+}
+
+/**
+ * @brief Sift heap element i down toward the leaves (min-heap order).
+ *
+ * @param[out] nl Netlist holding the heap.
+ * @param[in] i Element index to sift.
+ */
+inline void heap_sift_down(Netlist &nl, std::size_t i) noexcept {
+  const std::size_t n = nl.free_heap.size();
+  while (true) {
+    const std::size_t l = 2u * i + 1u;
+    if (l >= n) {
+      break;
+    }
+    std::size_t m = l;
+    const std::size_t r = l + 1u;
+    if (r < n && nl.free_heap[r] < nl.free_heap[l]) {
+      m = r;
+    }
+    if (nl.free_heap[i] <= nl.free_heap[m]) {
+      break;
+    }
+    const Slot t = nl.free_heap[m];
+    nl.free_heap[m] = nl.free_heap[i];
+    nl.free_heap[i] = t;
+    i = m;
+  }
+}
+
+/**
+ * @brief Push one freed slot onto the heap (capacity pre-reserved).
+ *
+ * @param[out] nl Netlist holding the heap.
+ * @param[in] s Dead slot index.
+ */
+inline void heap_push_free(Netlist &nl, Slot s) noexcept {
+  nl.free_heap.push_back(s);
+  heap_sift_up(nl, nl.free_heap.size() - 1u);
+}
+
+/**
+ * @brief Pop the lowest free slot, or kNoDriver when none is recycled.
+ *
+ * @param[out] nl Netlist holding the heap.
+ * @return Lowest dead slot, or kNoDriver when the heap is empty.
+ */
+[[nodiscard]] inline Slot heap_pop_free(Netlist &nl) noexcept {
+  if (nl.free_heap.empty()) {
+    return kNoDriver;
+  }
+  const Slot top = nl.free_heap[0];
+  nl.free_heap[0] = nl.free_heap.back();
+  nl.free_heap.pop_back();
+  if (!nl.free_heap.empty()) {
+    heap_sift_down(nl, 0);
+  }
+  return top;
+}
+
+} // namespace detail
+
+/**
+ * @brief Rebuild the free-slot heap from the tables (bulk-load/reset
+ *        path): every dead slot indexed, heapified bottom-up.
+ *        Idempotent and exact; cold paths only.
+ *
+ * @param[out] nl Netlist whose heap rebuilds.
+ */
+inline void free_heap_rebuild(Netlist &nl) noexcept {
+  nl.free_heap.clear();
+  for (Slot s = 0; s < static_cast<Slot>(slot_count(nl)); ++s) {
+    if (!nl.slots[s].live) {
+      nl.free_heap.push_back(s);
+    }
+  }
+  for (std::size_t i = nl.free_heap.size() / 2u; i-- > 0;) {
+    detail::heap_sift_down(nl, i);
+  }
+}
+
 /**
  * @brief Flat pin index: slot * kMaxInputs + input.
  *
@@ -618,6 +772,7 @@ struct Netlist {
   if (need > kMaxGates) {
     return false; // loud max cap: the caller maps this to Status
   }
+  const std::size_t old_size = nl.slots.size();
   std::size_t cap = nl.slots.size() * 2;
   if (cap < kInitialSlots) {
     cap = kInitialSlots;
@@ -636,6 +791,39 @@ struct Netlist {
   nl.extra_inv.resize(cap * kMaxInputs * kMaxSharedExtra);
   nl.pull_cfg.resize(cap * kMaxInputs);
   nl.topo_level.resize(cap);
+  // The free-slot heap never exceeds the pool: reserve once so pushes
+  // in noexcept paths never allocate (length is managed by push/pop).
+  nl.free_heap.reserve(cap);
+  // Derived members grow with the pool: per-slot arrays take the pool
+  // size (heads fill kNoDriver — the no-edge state; counters zero-fill
+  // correctly by value-init). The successor edge pool is pool-sized too:
+  // primaries (<= cap*kMaxInputs) plus extras (<= cap*kMaxInputs*
+  // kMaxSharedExtra) always fit, so noexcept seam inserts are
+  // infallible by construction and no call site sizes the pool.
+  nl.succ_head.resize(cap, kNoDriver);
+  nl.tie_head.resize(cap * kMaxInputs, kNoDriver);
+  nl.tie_next.resize(cap * kMaxInputs, kNoDriver);
+  nl.feeds_shared.resize(cap);
+  const std::size_t old_edge = nl.succ_next.size();
+  const std::size_t edge_cap = cap * kMaxInputs * (1u + kMaxSharedExtra);
+  nl.succ_next.resize(edge_cap, kNoDriver);
+  nl.succ_sink.resize(edge_cap, kNoDriver);
+  nl.succ_input.resize(edge_cap, 0);
+  nl.succ_extra.resize(edge_cap, 0);
+  for (std::size_t e = old_edge; e < edge_cap; ++e) {
+    nl.succ_free.push_back(static_cast<Slot>(e));
+  }
+  if (cap > old_size) {
+    // Fresh slots are free: index them, then restore the heap in one
+    // bottom-up pass. Growth is geometric, so total indexing over a
+    // build stays linear (amortized).
+    for (std::size_t s = old_size; s < cap; ++s) {
+      nl.free_heap.push_back(static_cast<Slot>(s));
+    }
+    for (std::size_t i = nl.free_heap.size() / 2u; i-- > 0;) {
+      detail::heap_sift_down(nl, i);
+    }
+  }
   return true;
 }
 

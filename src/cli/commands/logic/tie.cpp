@@ -73,6 +73,7 @@ int LogicTieSpec::run(ArgCursor &args, std::ostream &out) {
   // fails here: the tie is reverted so the refused net changes no state.
   if (!support::apply_async_and_report(nl, out).ok()) {
     wengine::logic::restore_ties(nl, tie_before);
+    wengine::logic::tie_chains_rebuild(nl); // bulk restore: reindex members
     return cli::usage_error(out, "tie: S=1,R=1 is illegal (SR latch holds state, tie reverted)", kUsage);
   }
   return core::kExitOk;

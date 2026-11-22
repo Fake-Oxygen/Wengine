@@ -86,6 +86,71 @@ longer — the full 1M parity run is kill-list territory, not ctest).
 **Boundaries**: million-gate reach and per-stage curves live in
 `bench_logic_scale`; current-scale goldens live in `test_logic`.
 
+## test_logic_adjacency
+
+**What it checks**: cached-adjacency and maintained-index parity vs
+the pre-change scan oracle (`tests/logic_scan_reference.hpp`):
+Kahn-drain push sequences, wire-probe verdicts, tie member/size/count
+readouts, shared-feeder predicates, slot-assignment replays, optimizer
+pipelines and per-sweep dedup state — each asserted old-vs-new
+identical — plus the content invariants (chains == tables after every
+mutation), interleaved mutation/query sequences with
+checkpoint-load/reset between queries, and loud-refusal pins
+(undersized scratch never yields partial results).
+
+**Purpose**: the topology, cycle-check, and tie-enumeration scans were
+replaced by incrementally maintained indexes; this binary is the
+behavior pin that lets every consumer prove its outputs are
+bit-identical to the scans they replaced.
+
+**Guards against**: stale-cache wrong verdicts (the defect class that
+would be worse than the scans), merge-direction/order drift in dedup
+and rewiring, allocation-order drift in gate slots, tie-table drift,
+and silent partial results on undersized scratch.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_adjacency
+./build/test_logic_adjacency
+```
+
+**Prerequisites**: standard build only.
+
+**Boundaries**: measured per-stage curves live in
+`bench_logic_scale` (+ the Delta 016 record); scale instantiation
+lives in `test_logic_scale`.
+
+## test_logic_four_state
+
+**What it checks**: four-state value-table parity (014): the
+`four_state.hpp` tables vs the zero-delay 2-state evaluator in
+`eval.hpp` — every combinational kind, every valid fan-in,
+exhaustive bit patterns, plus hand-derived 4-state goldens
+(dominant values, X/Z transparent-vs-dominant behavior, latch
+response) with no 2-state counterpart, against IEEE 1364
+gate-level semantics plus the shipped funnel.
+
+**Purpose**: the fast path never branches on mode, so the two
+evaluators stay separate by design (D10) — agreement on clean
+Low/High nets is pinned here instead of by unification.
+
+**Guards against**: funnel drift between the value tables and the
+evaluator, wrong dominant/transparent values, and latch-response
+divergence.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_four_state
+./build/test_logic_four_state
+```
+
+**Prerequisites**: standard build only.
+
+**Boundaries**: delay-honoring evaluation lives in
+`test_logic_timing`; current-scale goldens live in `test_logic`.
+
 ## test_logic_layout
 
 **What it checks**: pure layered geometry over the compiled topology:
@@ -709,6 +774,35 @@ name — run the including binary).
 
 **Boundaries**: rendering and persistence are not covered; functional
 equivalence beyond 10-step parity belongs to the runner goldens.
+
+## logic_scan_reference.hpp
+
+**What it checks**: nothing by itself — it is the frozen pre-change
+scan oracle (016): verbatim copies of the topology drain,
+reachability successor discovery, tie member/group/re-star scans,
+shared-feeder predicate, all-pairs dedup loop, lowest-free-slot scan,
+rewire sweep, and remove sink sweep that the cached indexes replaced.
+
+**Purpose**: every parity comparison in `test_logic_adjacency`
+runs reference-vs-engine on the same net; freezing the scans (not
+re-deriving "equivalent" logic) keeps the oracle honest.
+
+**Guards against**: oracle drift — any edit here must be a verbatim
+re-extraction, never a "simplification", or the parity proofs it
+backs become circular.
+
+**How to run**:
+
+```sh
+ctest --test-dir build -R logic_adjacency
+```
+
+**Prerequisites**: standard build only; header-only, included by
+`test_logic_adjacency` (not a standalone binary, so no own CTest
+name — run the including binary).
+
+**Boundaries**: allocation behavior is not covered; behavioral
+equivalence beyond old-vs-new agreement belongs to the corpus tests.
 
 ## logic_pty_smoke.py
 

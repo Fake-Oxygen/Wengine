@@ -3,6 +3,7 @@
 #include "wengine/cli/logic_registry.hpp"
 #include "wengine/cli/status.hpp"
 #include "wengine/core/status.hpp"
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/topo.hpp"
@@ -97,7 +98,11 @@ int LogicWireSpec::run(ArgCursor &args, std::ostream &out) {
       wengine::logic::Gate &src_gate = nl.slots[from.value.slot];
       dst_gate.drivers[to.value.input] = from.value.slot;
       ++src_gate.output_fanout;
+      // Adjacency (016): the tentative edge must be visible to the
+      // chain-reading validator below, then exactly reverted.
+      (void)wengine::logic::adjacency::adj_insert_edge(nl, from.value.slot, to.value.slot, to.value.input, 0);
       const bool acyclic = wengine::logic::topo::validate(nl, wengine::logic::EdgeFilter::kCombOnly).ok();
+      (void)wengine::logic::adjacency::adj_unlink_edge(nl, from.value.slot, to.value.slot, to.value.input, 0);
       dst_gate.drivers[to.value.input] = wengine::logic::kNoDriver;
       --src_gate.output_fanout;
       if (!acyclic) {

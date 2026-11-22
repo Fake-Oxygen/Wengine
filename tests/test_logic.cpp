@@ -4,6 +4,7 @@
 #include "wengine/logic/eval.hpp"
 #include "wengine/logic/topo.hpp"
 #include "wengine/logic/netlist.hpp"
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/optimize.hpp"
 #include "wengine/logic/seq_state.hpp"
 #include "wengine/logic/seq_step.hpp"
@@ -2276,6 +2277,7 @@ void test_topo_module_parity() {
     const logic::Slot n = logic::add_gate(nl, GateKind::kNot, 1).value;
     nl.slots[a].drivers[0] = n;
     nl.slots[n].drivers[0] = a;
+    logic::adjacency::adjacency_rebuild(nl); // hand-poked cycle: sync chains
     nl.dirty = true;
     assert(!logic::topo::rebuild(nl, logic::EdgeFilter::kAll).ok());
     nl.dirty = true;

@@ -10,6 +10,7 @@
 
 #include "yaml_store_detail.hpp"
 
+#include "wengine/logic/adjacency.hpp"
 #include "wengine/logic/clock_domains.hpp"
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/seq_state.hpp"
@@ -154,6 +155,10 @@ namespace wengine::logic::yaml::detail {
       continue;
     }
     dst.drivers[to.value.input] = from.value.slot;
+    // Adjacency (016): the per-wire probe above reads chains, so this
+    // direct table write maintains them incrementally (the end-of-load
+    // rebuild in validate_topology stays as the bulk-path backstop).
+    (void)adjacency::adj_insert_edge(tmp, from.value.slot, to.value.slot, to.value.input, 0);
     if (from.value.negated) {
       ++tmp.slots[from.value.slot].nq_fanout;
       tmp.driver_inv[tie_flat(to.value.slot, to.value.input)] = 1;
@@ -258,6 +263,13 @@ namespace wengine::logic::yaml::detail {
 }
 
 [[nodiscard]] bool validate_topology(Netlist &tmp, std::string &err) {
+  // Bulk replay wrote tables directly: one chain rebuild before the
+  // whole-graph validation below (which reads the chains), plus the
+  // free-slot heap (replay bypasses add_gate for slots) and the feeder
+  // counters.
+  adjacency::adjacency_rebuild(tmp);
+  free_heap_rebuild(tmp);
+  feeds_recompute(tmp);
   // Flop-aware cycle check (mirrors the wire verb): combinational loops
   // always fail; feedback through sequential gates validates sequentially.
   if (has_sequential_gates(tmp)) {

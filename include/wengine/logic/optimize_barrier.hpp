@@ -77,34 +77,20 @@ namespace wengine::logic::detail {
  * never removed, retagged, or rewired-through — rewire_users only
  * rewrites primaries, so touching a shared feeder would silently shrink spans.
  *
+ * Maintained-counter read (016): feeds_shared[s] counts s's live edges
+ * onto marked inputs, so the predicate answers in O(1) with verdicts
+ * identical to the full-pool scan it replaces.
+ *
  * @param[in] nl Netlist holding drivers and extras.
  * @param[in] s Slot to test.
  * @return True when s feeds a shared input (any attachment).
  */
 
 [[nodiscard]] inline bool drives_shared(const Netlist &nl, Slot s) noexcept {
-  if (s >= slot_count(nl)) {
+  if (s >= slot_count(nl) || !nl.slots[s].live) {
     return false;
   }
-  for (Slot u = 0; u < slot_count(nl); ++u) {
-    const Gate &g = nl.slots[u];
-    if (!g.live) {
-      continue;
-    }
-    for (std::uint8_t i = 0; i < g.input_count; ++i) {
-      const std::size_t flat = tie_flat(u, i);
-      if (!is_shared_flat(nl, flat)) {
-        continue;
-      }
-      if (g.drivers[i] == s) {
-        return true;
-      }
-      if (shared_uses_driver_flat(nl, flat, s)) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return nl.feeds_shared[s] > 0;
 }
 
 /**

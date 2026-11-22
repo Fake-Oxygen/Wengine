@@ -240,9 +240,11 @@ or estimated number is recorded anywhere in the tables. The 1M reach
 test for the kill-list follow-ons: the first optimization that kills a
 per-op kCap scan re-runs the standing 1M invocation as its
 before/after evidence.
-SC-001 status: reach demonstrated through 262144 (all stages), 1M
-build/wire demonstrated; 1M compile/solve/word/step pending the
-kill list. No vectorization, threading, GPU, or structural-rework
+SC-001 status: closed by the 016 follow-on — reach demonstrated at
+1048576 on both motifs (all stages measured), recorded beside the
+baseline in `#### 1M reach on the 016 tree (015 Phase 9 closure)`
+below. The declined cells above stand as the pre-optimization
+record. No vectorization, threading, GPU, or structural-rework
 proposal proceeds on weaker evidence (the gate above).
 
 #### Re-run demonstration (T037)
@@ -420,3 +422,233 @@ is 30–200x cheaper per gate at 16384 than the committed baseline
 not just faster). The full-ladder re-run to 262144+ is the standing
 next step; the 1M growth verdicts (free-slot scan steepening,
 wire-probe clearance) re-baseline then.
+
+### Delta 016 — cached adjacency & maintained indexes (016-cached-adjacency-lists)
+
+Committed invocation (identical to the baseline ladder):
+`bench_logic_scale 0 1024 65536 4 5 21600 5` (motif 0; sizes
+1024/4096/16384/65536; R=5, tapered to 2 above 16384).
+
+Environment: same host class and toolchain as the pinned baseline
+(Arch Linux, GNU 16.2.1, `bench` preset `-O3 -DNDEBUG`), run
+2026-11-22 from the 016 tree (`build-bench/bench_logic_scale`).
+All rows measured (no `UNMEASURED-AT-SIZE` at any ladder point).
+
+#### After-table (motif 0; medians, checksum omitted for brevity — the
+#### harness printed identical checksums to the pre-change runs)
+
+| stage | 1024 | 4096 | 16384 | 65536 |
+| --- | --- | --- | --- | --- |
+| growth-add | 412.5 ns/gate (n=1024) | 171.5 ns/gate (n=4096) | 526.4 ns/gate (n=16384) | 607.8 ns/gate (n=65536) |
+| growth-wire | 211.2 ns/wire (n=2036) | 825.2 ns/wire (n=8180) | 3290.8 ns/wire (n=32756) | 12934.6 ns/wire (n=131060) |
+| compile-rebuild | 20.3 ns/gate (n=1) | 24.2 ns/gate (n=1) | 30.0 ns/gate (n=1) | 42.9 ns/gate (n=1) |
+| solve | 15.3 ns/gate (n=25) | 17.4 ns/gate (n=25) | 19.5 ns/gate (n=25) | 24.1 ns/gate (n=10) |
+| word | 13.6 ns/gate (n=25) | 14.5 ns/gate (n=25) | 19.3 ns/gate (n=25) | 23.4 ns/gate (n=10) |
+| shared-solve | 14.8 ns/gate (n=5) | 16.1 ns/gate (n=5) | 24.0 ns/gate (n=5) | 29.2 ns/gate (n=2) |
+| step | 54.5 ns/gate (n=5) | 96.3 ns/gate (n=5) | 107.9 ns/gate (n=5) | 168.1 ns/gate (n=2) |
+| optimize | 1682.8 ns/gate (n=1) | 2222.2 ns/gate (n=1) | 2202.0 ns/gate (n=1) | 1980.4 ns/gate (n=1) |
+| dedup | 373.4 ns/gate (n=1) | 1557.6 ns/gate (n=1) | 6443.9 ns/gate (n=1) | 29280.1 ns/gate (n=1) |
+| remove | 54.7 ns/gate (n=1024) | 121.2 ns/gate (n=4096) | 162.0 ns/gate (n=16384) | 155.8 ns/gate (n=65536) |
+| reset | 28.7 ns/gate (n=1) | 36.6 ns/gate (n=1) | 76.3 ns/gate (n=1) | 45.5 ns/gate (n=1) |
+
+#### Before/after ratios at 65536 (baseline row ÷ delta row)
+
+| stage | ratio | verdict |
+| --- | --- | --- |
+| compile-rebuild | ~97,000x | quadratic term gone; flat per-gate (20→43 ns across 64x growth) |
+| step | ~48,500x | per-step Kahn linear (validate path) |
+| remove | ~26,200x | sink sweep → fanout walk; flat per-gate (55→156 ns) |
+| optimize | ~4,940x | fixpoint Kahns linear; curve flat (variance only) |
+| dedup | ~124x | key builds hoisted per sweep + in-bucket visits |
+| growth-wire | ~332x | probe follows the reachable cone, not the pool |
+| growth-add | ~207x | free-slot heap; steepest-measured slope gone |
+| word | ~17x | Cap floor (full-capacity init) partially lifted by adjacency-adjacent work |
+| solve | ~14x | same floor effect |
+| shared-solve | ~11x | same floor effect |
+| reset | ~5x | extra O(pool) passes (chain/heap/tie clears); negligible absolute |
+
+#### Slope evidence (the contracted outcomes, SC-001..003/SC-006..008)
+
+- compile-rebuild per-gate 20.3 → 42.9 ns across 64x growth
+  (2.1x, vs the baseline's capacity-proportional quadratic-in-disguise).
+- growth-add per-gate 412.5 → 607.8 ns across 64x growth (the
+  baseline's ~3.9x-per-4x steepest slope is gone; the 1024 cell costs
+  more than before in absolute terms — O(log n) heap work vs a
+  1024-scan — and wins by 207x at the top).
+- growth-wire per-wire 211.2 → 12934.6 ns (61x per 64x): the
+  kCap pool-scan floor is gone and the honest cone cost shows —
+  reachable cones deepen with the layered motif, exactly the
+  cone-proportional contract (FR-004), not a pool term.
+- remove per-gate 54.7 → 155.8 ns (flat; the 1024 cell reads higher
+  from heap/clear constants, negligible absolutely).
+- dedup per-gate 373.4 → 29280.1 ns (78x per 64x): pair visits now
+  run only within hash buckets with identical merge order, but the
+  isolated all-pairs twin (dense universal duplicates) still grows
+  super-linearly — the visit skeleton is the documented next
+  candidate if a post-016 baseline re-ranks it (research D11
+  treatment applies: measure first).
+- optimize per-gate flat (1682.8 → 1980.4 ns, variance only).
+- No-regression check: solve/word/shared-solve track the baseline
+  shape (falling per-gate as the fixed init amortizes) at 11–17x
+  lower absolute values; step keeps its shape 44–48,500x lower; no
+  other stage regressed beyond the variance policy (small-size cells
+  move within scheduler jitter — compare slopes, never raw walls).
+
+#### Footprint delta (SC-005)
+
+Per-size peak (`fp=`): 392080 B at 1024, 1565584 at 4096,
+6259600 at 16384, 25035664 at 65536 — linear in pool size. The new
+derived state accounts for it: the pool-sized successor edge pool
+(`cap*kMaxInputs*4` entries × 10 B ≈ 320 B/gate at cap) dominates,
+plus one head/count slot per gate and one tie-chain link per tied
+pin. No per-operation growth: steady-state consumption is
+allocation-free after workspace warmup (pinned by the parity suite's
+bit-identical repeats, not by addresses).
+
+#### Row-for-row citations
+
+Before-numbers: the committed motif-0 ladder table above
+(`### Baseline`, sizes 1024/4096/16384/65536). Verdicts under test:
+Kahn per-pop sweep (CONFIRMED) → gone; per-add free-slot scan
+(CONFIRMED super-linear) → flat; per-remove sweep (CONFIRMED) →
+flat; per-wire probe (CLEARED within variance, kCap floor) → floor
+removed, cone cost visible; all-pairs dedup (MIXED) → 124x with a
+residual super-linear tail on the adversarial twin; full-capacity
+init (CONFIRMED present) → reduced but still the evaluation floor.
+Kill-list order to beat is updated by these numbers; the deferred
+rows (step-path Kahn frequency, O0 fixpoint rebuild count,
+full-capacity init) re-rank on this table per the hotspot gate.
+
+#### 1M reach on the 016 tree (015 Phase 9 closure: T041/T042/T044)
+
+The standing reach invocation re-run on the 016 tree
+(`bench_logic_scale` rebuilt from the current tree under the bench
+preset; same host class and taper as the pinned baseline — reps 2
+above 16384, steps tapered; the guard history point at 65536
+doubles as the no-change reproduction check):
+
+```text
+bench_logic_scale 0 65536 1048576 3 5 21600 2
+bench_logic_scale 3 65536 1048576 3 5 21600 2
+```
+
+Every cell measured on both motifs; zero `UNMEASURED-AT-SIZE`
+(the baseline's 1M row declined everything past build/wire, and its
+motif-3 262144 optimize). All numbers below are measured medians
+(`min` beside where the harness reports it); no estimates, per
+FR-006. The baseline's own reach rows above stand as the
+pre-optimization record; this subsection is the beside-record on the
+016 tree, not an overwrite.
+
+Motif 0, 262144 (guard-history point, all measured):
+
+| stage | median | min | ops |
+| --- | --- | --- | --- |
+| growth-add | 637.9 ns/gate | 637.9 | 262144 |
+| growth-wire | 83665.6 ns/wire | 83665.6 | 524276 |
+| compile-rebuild | 125.2 ns/gate | 125.2 | 1 |
+| solve | 82.9 ns/gate | 69.8 | 10 |
+| word | 59.6 ns/gate | 32.1 | 10 |
+| shared-solve | 67.7 ns/gate | 43.1 | 2 |
+| step | 338.5 ns/gate | 325.5 | 2 |
+| optimize | 2129.3 ns/gate | 2129.3 | 1 |
+| dedup | 89.6 ns/gate | 89.6 | 1 |
+| remove | 234.8 ns/gate | 234.8 | 262144 |
+| reset | 52.5 ns/gate | 52.5 | 1 |
+
+Motif 0, 1048576 (all measured):
+
+| stage | median | min | ops |
+| --- | --- | --- | --- |
+| growth-add | 852.9 ns/gate | 852.9 | 1048576 |
+| growth-wire | 337057.4 ns/wire | 337057.4 | 2097140 |
+| compile-rebuild | 300.4 ns/gate | 300.4 | 1 |
+| solve | 121.2 ns/gate | 106.6 | 10 |
+| word | 85.5 ns/gate | 74.8 | 10 |
+| shared-solve | 129.6 ns/gate | 107.9 | 2 |
+| step | 932.2 ns/gate | 889.4 | 2 |
+| optimize | 2841.9 ns/gate | 2841.9 | 1 |
+| dedup | 227.1 ns/gate | 227.1 | 1 |
+| remove | 545.9 ns/gate | 545.9 | 1048576 |
+| reset | 43.7 ns/gate | 43.7 | 1 |
+
+Motif 3, 262144 (all measured — including the optimize cell the
+baseline guard declined):
+
+| stage | median | min | ops |
+| --- | --- | --- | --- |
+| growth-add | 691.9 ns/gate | 691.9 | 262144 |
+| growth-wire | 80918.7 ns/wire | 80918.7 | 531765 |
+| compile-rebuild | 141.1 ns/gate | 141.1 | 1 |
+| solve | 119.3 ns/gate | 100.4 | 10 |
+| word | 77.0 ns/gate | 41.5 | 10 |
+| shared-solve | 121.1 ns/gate | 108.7 | 2 |
+| step | 537.7 ns/gate | 493.2 | 2 |
+| optimize | 3029.7 ns/gate | 3029.7 | 1 |
+| dedup | 90.2 ns/gate | 90.2 | 1 |
+| remove | 244.5 ns/gate | 244.5 | 262144 |
+| reset | 50.6 ns/gate | 50.6 | 1 |
+
+Motif 3, 1048576 (all measured):
+
+| stage | median | min | ops |
+| --- | --- | --- | --- |
+| growth-add | 857.7 ns/gate | 857.7 | 1048576 |
+| growth-wire | 322501.6 ns/wire | 322501.6 | 2127099 |
+| compile-rebuild | 199.7 ns/gate | 199.7 | 1 |
+| solve | 90.7 ns/gate | 90.4 | 10 |
+| word | 60.1 ns/gate | 58.3 | 10 |
+| shared-solve | 107.0 ns/gate | 93.4 | 2 |
+| step | 630.0 ns/gate | 617.8 | 2 |
+| optimize | 3356.0 ns/gate | 3356.0 | 1 |
+| dedup | 141.3 ns/gate | 141.3 | 1 |
+| remove | 314.4 ns/gate | 314.4 | 1048576 |
+| reset | 36.6 ns/gate | 36.6 | 1 |
+
+Footprints at 1048576: steady 400556944 B (~382 MB, linear in pool
+size on both motifs); step 411042792 B; optimize 805308192 B and
+dedup 801113888 B (the dedup twin, transient — freed after the
+stage, never in the steady footprint).
+
+T041 verdict (SC-001 reach): demonstrated. A 1048576-live-gate net
+was built, wired, compiled, scalar-solved, word-evaluated, and
+stepped on the measured path in one session on each motif, with the
+harness printing per-stage checksums throughout. Scalar/word
+bit-exact parity, bit-identical repeats, and prefix-slice agreement
+at the 1M instantiation are pinned by
+`WENGINE_LOGIC_SCALE_GATES=1048576 ./build/test_logic_scale`
+(`test_logic_scale: OK` on the current tree).
+
+T044 re-grounded kill-list ranking at the 1M end (stage wall totals
+= median × ops × gates; seconds, motif 0 / motif 3):
+
+| rank | stage | motif 0 | motif 3 | side |
+| --- | --- | --- | --- | --- |
+| 1 | optimize | 2980 | 3519 | compile |
+| 2 | step | 1955 | 1321 | evaluation |
+| 3 | solve | 1271 | 951 | evaluation |
+| 4 | word | 896 | 630 | evaluation |
+| 5 | growth-add | 894 | 899 | mutation |
+| 6 | growth-wire | 707 | 686 | mutation |
+| 7 | remove | 572 | 330 | mutation |
+| 8 | compile-rebuild | 315 | 209 | compile |
+| 9 | shared-solve | 272 | 225 | evaluation |
+| 10 | dedup | 238 | 148 | compile |
+| 11 | reset | 46 | 38 | mutation |
+
+Side totals at 1M (motif 0 / motif 3): mutation 2219 / 1954 s,
+compile 3533 / 3877 s, evaluation 4394 / 3127 s. The 1M-end leader
+is the optimize fixpoint (~50–59 min), then sequential stepping and
+scalar solve. Compile-rebuild steepens past 65536 (motif 0:
+51.7 → 125.2 → 300.4 ns/gate) — the chain-walk drain at a 400 MB
+working set — yet stays four orders of magnitude below the old
+per-pop-scan regime it replaced (baseline: 3.5 ms/gate at 65536).
+Dedup cost stays content-dominated, not size-dominated: the reach
+ladder's twin dedups at 46 → 90 → 227 ns/gate while the Delta
+ladder's twin (a different argc seed, heavier merge structure) ran
+the 124x-reduced super-linear tail — same code, different content.
+Any follow-on now cites these cells per the hotspot gate.
+
+SC-001 status: closed. Reach demonstrated at 1048576 on both
+motifs (all stages measured); 1M compile/solve/word/step no longer
+pending.

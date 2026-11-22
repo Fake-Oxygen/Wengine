@@ -688,6 +688,13 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic_scale PRIVATE wengine_core)
     add_test(NAME logic_scale COMMAND test_logic_scale)
 
+    # 016 cached adjacency: parity corpus vs the pre-change scan oracle
+    # (tests/logic_scan_reference.hpp), links wengine_core alone like
+    # test_logic.
+    add_executable(test_logic_adjacency tests/test_logic_adjacency.cpp)
+    target_link_libraries(test_logic_adjacency PRIVATE wengine_core)
+    add_test(NAME logic_adjacency COMMAND test_logic_adjacency)
+
     # LOGIC-V2-SEQ1 sequential kind vocabulary (DFF/DLATCH): parsing +
     # fan-in + names only, links wengine_core alone like test_logic.
     add_executable(test_logic_seq_kinds tests/test_logic_seq_kinds.cpp)

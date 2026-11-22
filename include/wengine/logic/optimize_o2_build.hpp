@@ -396,8 +396,10 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
                                              std::span<bool> post_roots, std::span<bool> post_feeds,
                                              std::span<bool> keep, std::span<Slot> stack,
                                              std::span<std::size_t> tie_survivors,
+                                             std::span<std::uint64_t> buckets, std::span<Slot> bhead, std::span<Slot> bnext,
                                              const topo::TopoScratch &ts) noexcept {
-  if (post_roots.size() < slot_count(out) || post_feeds.size() < slot_count(out)) {
+  if (post_roots.size() < slot_count(out) || post_feeds.size() < slot_count(out) || buckets.size() < slot_count(out) ||
+      bhead.size() < slot_count(out) || bnext.size() < slot_count(out)) {
     return BuildError::kTopo;
   }
   const GateKind u = universal_kind(target);
@@ -421,10 +423,10 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
     bool pchanged = false;
     compute_feeds_seq(out, post_feeds.data());
     if (seq_net) {
-      if (dedup_universal_tied_pass(out, u, post_feeds.data(), tie_survivors)) {
+      if (dedup_universal_tied_pass(out, u, post_feeds.data(), tie_survivors, buckets, bhead, bnext)) {
         pchanged = true;
       }
-    } else if (dedup_universal_pass(out, u, post_feeds.data(), tie_survivors)) {
+    } else if (dedup_universal_pass(out, u, post_feeds.data(), tie_survivors, buckets, bhead, bnext)) {
       pchanged = true;
     }
     if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, ts).ok()) {
