@@ -822,6 +822,14 @@ if(BUILD_TESTS)
     target_link_libraries(test_logic_four_state PRIVATE wengine_core)
     add_test(NAME logic_four_state COMMAND test_logic_four_state)
 
+    # InputResolution seam: one span assembly, three narrow adapters
+    # (scalar loud / word bit-parallel / transient X/Z-transparent) with
+    # 0/1 agreement pinned here. Links wengine_core alone like
+    # test_logic.
+    add_executable(test_logic_input_resolution tests/test_logic_input_resolution.cpp)
+    target_link_libraries(test_logic_input_resolution PRIVATE wengine_core)
+    add_test(NAME logic_input_resolution COMMAND test_logic_input_resolution)
+
     # LOGIC-7 schematic layout: pure header-only geometry (no SDL), links
     # wengine_core alone like test_logic.
     add_executable(test_logic_layout tests/test_logic_layout.cpp)

@@ -17,8 +17,8 @@
  *
  * Dependency rules (docs/logic.md sections 4, 8): header-only,
  * allocation-free, exception-free; caller-owned buffers throughout
- * (same contract as block_interface). Depends only on shared_net.hpp,
- * tie_set.hpp, types.hpp, and core/status. Shared representation
+ * (same contract as block_interface). Depends only on input_resolution.hpp,
+ * shared_net.hpp, tie_set.hpp, types.hpp, and core/status. Shared representation
  * (shared_meta / extra_*) is owned by shared_net.hpp — this header
  * calls that seam and never names bit shifts, masks, or strides.
  * Logic is a standalone domain: this header must never depend on CLI
@@ -27,6 +27,7 @@
  */
 
 #include "wengine/core/status.hpp"
+#include "wengine/logic/input_resolution.hpp"
 #include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/tie_set.hpp"
 #include "wengine/logic/types.hpp"
@@ -417,6 +418,10 @@ inline void build_input_positions(const Netlist &nl, Slot *in_pos) noexcept {
  *        caller fans ties out first); ignored dangling pins tie to kLow.
  *
  * The one funnel every scalar evaluator (solve, stepper phases, async and level apply) resolves through.
+ * ScalarResolver adapter over the InputResolution seam: span assembly,
+ * polarity, pull-map, and contention detection come from
+ * `input_res`; the loud failure vocabulary (dead/X/Z refuse with
+ * `false`) stays here.
  *
  * @param[in] nl Netlist holding drivers and ignore marks.
  * @param[in] slot Gate slot of the sink.
@@ -433,103 +438,73 @@ inline void build_input_positions(const Netlist &nl, Slot *in_pos) noexcept {
   if (diag != nullptr && diag->per_net.size() < slot_count(nl) * kMaxInputs) {
     return false; // undersized diagnostic channel: loud, never silent
   }
-  const Gate &g = nl.slots[slot];
-  const std::size_t flat = tie_flat(slot, input);
-  if (is_shared_flat(nl, flat)) {
+  if (slot >= slot_count(nl) || input >= kMaxInputs) {
+    return false;
+  }
+  input_res::InputSpan span{};
+  input_res::assemble_input_span(nl, slot, input, span);
+  if (span.is_shared) {
     // Shared-net span (011): every attachment contributes its present
-    // value with per-attachment polarity, assembled primary-first in
-    // compact index order, folded through the unchanged single funnel.
-    // Agreement resolves to the level; low-vs-high resolves kUnknown;
-    // no attachments resolve kHighZ. Non-level results fail loudly —
-    // the shipped consumer contract (state and timing untouched).
-    // Marked inputs never take the dangling/block path below, even
-    // when empty: an empty span is kHighZ by contract, never a poked
+    // value with per-attachment polarity, assembled once by the seam
+    // primary-first in compact index order, folded through the unchanged
+    // single funnel. Agreement resolves to the level; low-vs-high
+    // resolves kUnknown; no attachments resolve kHighZ. Non-level results
+    // fail loudly — the shipped consumer contract (state and timing
+    // untouched). Marked inputs never take the dangling/block path below,
+    // even when empty: an empty span is kHighZ by contract, never a poked
     // block value.
-    LogicValue span[1 + kMaxSharedExtra];
-    std::size_t n = 0;
-    const Slot drv = g.drivers[input];
-    if (drv != kNoDriver) {
-      if (drv >= slot_count(nl) || !nl.slots[drv].live) {
-        return false;
-      }
-      span[n++] = apply_polarity(gate_out[drv], nl.driver_inv[flat]);
+    if (span.has_dead) {
+      return false; // dangling extra / dead driver: loud, never partial
     }
-    bool dangling_extra = false;
-    for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t einv) {
-      if (dangling_extra) {
-        return;
-      }
-      if (edrv >= slot_count(nl) || !nl.slots[edrv].live) {
-        dangling_extra = true; // dangling extra: loud, never partial
-        return;
-      }
-      span[n++] = apply_polarity(gate_out[edrv], einv);
-    });
-    if (dangling_extra) {
-      return false;
+    LogicValue vals[1 + kMaxSharedExtra];
+    for (std::size_t k = 0; k < span.n; ++k) {
+      vals[k] = input_res::apply_span_polarity(gate_out[span.drv[k]], span.inv[k]);
     }
     LogicValue sunk = LogicValue::kLow;
-    if (!resolve_net(span, n, sunk)) {
+    if (!resolve_net(vals, span.n, sunk)) {
       return false;
     }
-    // (011) Contention counting (SolveDiag): a span presenting both
-    // polarized low and high increments per_net[flat] by exactly one —
-    // computed at span assembly, independent of the funnel's X logic
-    // (future X/Z-presenting drivers must not false-count). Detection
-    // happens at the net, before any downstream consumer refusal below.
-    if (diag != nullptr) {
-      bool saw_low = false;
-      bool saw_high = false;
-      for (std::size_t k = 0; k < n; ++k) {
-        saw_low = saw_low || (span[k] == LogicValue::kLow);
-        saw_high = saw_high || (span[k] == LogicValue::kHigh);
-      }
-      if (saw_low && saw_high) {
-        ++diag->per_net[flat];
-      }
+    // (011) Contention counting (SolveDiag): owned once by the seam —
+    // a span presenting both polarized low and high increments
+    // per_net[flat] by exactly one, computed at span assembly,
+    // independent of the funnel's X logic.
+    if (diag != nullptr && input_res::span_has_contention(vals, span.n)) {
+      ++diag->per_net[span.flat];
     }
-    // (012) Pull map: an all-floating span resolves through the
-    // destination input's pull to its idle level (up → kHigh,
-    // down → kLow, none → kHighZ). Driven spans (agreement,
-    // contention, unknown) are inert under every pull setting; counts
-    // above are computed at span assembly, before this map, so a pull
-    // neither creates nor masks one.
-    if (sunk == LogicValue::kHighZ && is_pulled_flat(nl, flat)) {
-      sunk = (pull_level_flat(nl, flat) == 1) ? LogicValue::kHigh : LogicValue::kLow;
-    }
+    // (012) Pull map: owned once by the seam — an all-floating span
+    // resolves through the destination pull to idle; driven spans are
+    // inert under every pull setting.
+    sunk = input_res::pull_map_idle(nl, span.flat, sunk);
     if (sunk != LogicValue::kLow && sunk != LogicValue::kHigh) {
       return false;
     }
     out = sunk;
     return true;
   }
-  const Slot drv = g.drivers[input];
-  if (drv != kNoDriver) {
-    if (drv >= slot_count(nl)) {
+  if (span.n == 1) {
+    // Single-driver wired input: polarity folds before the funnel (the
+    // seam order — identical to post-funnel inversion on Low/High, and
+    // 4-state-preserving on X/Z where the old post-funnel fold drifted).
+    if (span.has_dead) {
       return false;
     }
+    const LogicValue pv = input_res::apply_span_polarity(gate_out[span.drv[0]], span.inv[0]);
     LogicValue sunk = LogicValue::kLow;
-    if (!resolve_net(&gate_out[drv], 1, sunk)) {
+    if (!resolve_net(&pv, 1, sunk)) {
       return false;
     }
-    // (012) Loud level check (the shared branch's rule, extended):
-    // a non-level sunk value is reachable only via Z-producing drivers
-    // (disabled buffers — impossible pre-012). Z maps through the
-    // pull to idle; unpulled Z (and anything else non-level) fails
-    // loudly instead of flowing into eval_gate (whose is_high arm
-    // would silently read Z as low).
+    // (012) Loud level check: a non-level sunk value is reachable only
+    // via Z-producing drivers (disabled buffers). Z maps through the
+    // seam pull-map to idle; unpulled Z (and anything else non-level)
+    // fails loudly instead of flowing into eval_gate.
+    sunk = input_res::pull_map_idle(nl, span.flat, sunk);
     if (sunk != LogicValue::kLow && sunk != LogicValue::kHigh) {
-      if (sunk == LogicValue::kHighZ && is_pulled_flat(nl, flat)) {
-        out = (pull_level_flat(nl, flat) == 1) ? LogicValue::kHigh : LogicValue::kLow;
-        return true;
-      }
       return false;
     }
-    // NQ source: the sink reads the negated value (T005).
-    out = apply_polarity(sunk, nl.driver_inv[static_cast<std::size_t>(slot) * kMaxInputs + input]);
+    out = sunk;
     return true;
   }
-  if ((g.ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
+  if (input_res::input_is_ignored(nl, slot, input)) {
     out = LogicValue::kLow;
     return true;
   }
@@ -706,6 +681,13 @@ inline constexpr std::size_t kBitWordSize = 64;
  *        word 0 (same rule as scalar kLow); dangling block inputs read
  *        their procedural interface column.
  *
+ * WordResolver adapter over the InputResolution seam: span assembly and
+ * word polarity come from `input_res`; the single-bit failure
+ * vocabulary stays here (multi-attachment shared spans and live TBUF
+ * nets are refused at the word-loop entries via `shared_word_blocked` /
+ * `has_buffer_gates`, never inside the lane fold — the per-word safety
+ * nets below are unreachable and cost nothing).
+ *
  * in_pos maps (slot, input) to the block-input ordinal (kNoDriver for
  * wired/ignored pins — never read on those paths; tied members carry
  * their leader's ordinal).
@@ -721,23 +703,44 @@ inline constexpr std::size_t kBitWordSize = 64;
 [[nodiscard]] inline std::uint64_t resolve_word(const Netlist &nl, Slot slot, std::uint8_t input,
                                                 const std::uint64_t *gate_scratch, const Slot *in_pos,
                                                 std::uint64_t word_index) noexcept {
-  const Slot drv = nl.slots[slot].drivers[input];
-  if (drv != kNoDriver) {
-    const std::uint64_t v = gate_scratch[drv];
-    if (nl.driver_inv[static_cast<std::size_t>(slot) * kMaxInputs + input] != 0) {
-      return ~v;
+  input_res::InputSpan span{};
+  input_res::assemble_input_span(nl, slot, input, span);
+  if (span.n == 1 && !span.has_dead) {
+    // Wired single (or a single-attachment shared mark riding the
+    // primary word path unchanged): one source word with NQ polarity.
+    // Bounds hold by construction (topology pre-validated drivers; the
+    // dead guard above keeps the read in-bounds on defensive paths).
+    if (span.drv[0] >= slot_count(nl)) {
+      return 0;
     }
-    return v;
+    return input_res::apply_word_polarity(gate_scratch[span.drv[0]], span.inv[0]);
   }
-  if ((nl.slots[slot].ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
+  if (span.n > 1) {
+    // Multi-attachment shared span: no 1-bit form. Word-loop entries
+    // refuse via shared_word_blocked before looping; this arm is the
+    // per-word safety net for future callers (unreachable, zero
+    // per-word cost).
+    return 0;
+  }
+  if (span.has_dead) {
+    // Dead driver on a topology the entries already refused: stay
+    // in-bounds and neutral rather than reading out-of-range.
+    return 0;
+  }
+  if (input_res::input_is_ignored(nl, slot, input)) {
     return 0;
   }
   // (012) Terminated (pull-only) dangling inputs never reach the
   // procedural column map (is_block_input excludes them): up reads the
   // all-ones word, down the all-zero word — the word twin of the idle
   // rule in fill_resolved. Pull-only netlists stream truth unchanged.
-  if (is_pulled_flat(nl, tie_flat(slot, input))) {
-    return (pull_level_flat(nl, tie_flat(slot, input)) == 1) ? ~static_cast<std::uint64_t>(0ULL) : static_cast<std::uint64_t>(0ULL);
+  // Shared-empty pulled nets land here too (same idle word the scalar
+  // pull-map produces); shared-empty unpulled is floating (scalar fails
+  // loudly there — excluded from the 0/1 property, rides the dangling
+  // column today).
+  const std::size_t flat = tie_flat(slot, input);
+  if (is_pulled_flat(nl, flat)) {
+    return input_res::pull_idle_word(nl, flat);
   }
   const std::size_t p = static_cast<std::size_t>(in_pos[static_cast<std::size_t>(slot) * kMaxInputs + input]);
   return input_column_word(p, word_index);

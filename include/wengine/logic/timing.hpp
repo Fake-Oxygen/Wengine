@@ -33,6 +33,7 @@
 #include "wengine/core/status.hpp"
 #include "wengine/logic/block_interface.hpp"
 #include "wengine/logic/four_state.hpp"
+#include "wengine/logic/input_resolution.hpp"
 #include "wengine/logic/shared_net.hpp"
 #include "wengine/logic/tie_set.hpp"
 #include "wengine/logic/topo.hpp"
@@ -247,13 +248,14 @@ inline void ensure_timing_scratch(TimingScratch &scratch, std::size_t n) {
 /**
  * @brief Transient-tolerant twin of `resolve_input`.
  *
- * Assembles the same driver span (primary plus shared extras with
- * per-attachment NQ polarity) through the same `resolve_net` funnel,
- * maps pulls and ignored pins the same way — but never refuses:
- * X/Z flow through (Z at a gate input reads as X), so transient
- * contention windows and released-buffer windows stay visible in
- * the trace instead of failing. No contention counting (the settled
- * path owns SolveDiag).
+ * TransientResolver adapter over the InputResolution seam: span
+ * assembly, per-attachment polarity, and the pull-map come from
+ * `input_res` (the same assembly the scalar adapter folds loudly) —
+ * but never refuses: dead attachments are transparent, X/Z flow
+ * through (Z at a gate input reads as X), so transient contention
+ * windows and released-buffer windows stay visible in the trace
+ * instead of failing. No contention counting (the settled path owns
+ * SolveDiag).
  *
  * @param[in] nl Netlist holding drivers, marks, and polarities.
  * @param[in] slot Gate slot of the sink.
@@ -263,69 +265,47 @@ inline void ensure_timing_scratch(TimingScratch &scratch, std::size_t n) {
  * @param[out] out Resolved four-state input value.
  */
 inline void timing_resolve_input(const Netlist &nl, Slot slot, std::uint8_t input, const LogicValue *cur, const LogicValue *blk, LogicValue &out) noexcept {
-  const Gate &g = nl.slots[slot];
-  const std::size_t flat = tie_flat(slot, input);
-  auto polar = [](LogicValue v, std::uint8_t inv) noexcept {
-    if (inv == 0) {
-      return v;
-    }
-    return timing_nq_of(v);
-  };
-  auto gate_read = [&](LogicValue v) noexcept {
+  auto gate_read = [](LogicValue v) noexcept {
     return (v == LogicValue::kHighZ) ? LogicValue::kUnknown : v;
   };
-  if (is_shared_flat(nl, flat)) {
-    LogicValue span[1 + kMaxSharedExtra];
+  if (slot >= slot_count(nl) || input >= kMaxInputs) {
+    out = LogicValue::kUnknown;
+    return;
+  }
+  input_res::InputSpan span{};
+  input_res::assemble_input_span(nl, slot, input, span);
+  if (span.is_shared || span.n > 0) {
+    // Shared span and single-driver wired share one fold: polarize each
+    // live attachment (seam polarity, 4-state-preserving), funnel once,
+    // pull-map once, then the transient gate read (Z -> X). Dead
+    // attachments are transparent here by design (the scalar adapter
+    // refuses them loudly on the same assembly) — the wheel never
+    // refuses mid-window.
+    LogicValue vals[1 + kMaxSharedExtra];
     std::size_t n = 0;
-    const Slot drv = g.drivers[input];
-    if (drv != kNoDriver && drv < slot_count(nl) && nl.slots[drv].live) {
-      span[n++] = polar(cur[drv], nl.driver_inv[flat]);
+    for (std::size_t k = 0; k < span.n; ++k) {
+      const Slot d = span.drv[k];
+      if (d >= slot_count(nl) || !nl.slots[d].live) {
+        continue; // transparent: contributes nothing to the funnel
+      }
+      vals[n++] = input_res::apply_span_polarity(cur[d], span.inv[k]);
     }
-    for_each_extra(nl, flat, [&](std::uint8_t, Slot edrv, std::uint8_t einv) {
-      if (n >= 1 + kMaxSharedExtra) {
-        return;
-      }
-      if (edrv >= slot_count(nl) || !nl.slots[edrv].live) {
-        return;
-      }
-      span[n++] = polar(cur[edrv], einv);
-    });
     LogicValue sunk = LogicValue::kHighZ;
-    if (!resolve_net(span, n, sunk)) {
-      out = LogicValue::kUnknown; // ill-formed span: unreachable (n <= 1+cap, live drivers only)
+    if (!resolve_net(vals, n, sunk)) {
+      out = LogicValue::kUnknown; // ill-formed span: unreachable (n <= 1+cap)
       return;
     }
-    if (sunk == LogicValue::kHighZ && is_pulled_flat(nl, flat)) {
-      sunk = (pull_level_flat(nl, flat) == 1) ? LogicValue::kHigh : LogicValue::kLow;
-    }
+    sunk = input_res::pull_map_idle(nl, span.flat, sunk);
     out = gate_read(sunk);
     return;
   }
-  const Slot drv = g.drivers[input];
-  if (drv != kNoDriver) {
-    LogicValue sunk = LogicValue::kHighZ;
-    if (drv < slot_count(nl) && nl.slots[drv].live) {
-      if (!resolve_net(&cur[drv], 1, sunk)) {
-        out = LogicValue::kUnknown; // unreachable: single live driver
-        return;
-      }
-    }
-    if (sunk == LogicValue::kHighZ && is_pulled_flat(nl, flat)) {
-      out = (pull_level_flat(nl, flat) == 1) ? LogicValue::kHigh : LogicValue::kLow;
-      return;
-    }
-    out = gate_read(polar(sunk, nl.driver_inv[flat]));
-    return;
-  }
-  if ((g.ignored_mask & static_cast<std::uint8_t>(1u << input)) != 0) {
+  if (input_res::input_is_ignored(nl, slot, input)) {
     out = LogicValue::kLow;
     return;
   }
-  const std::size_t leader = tie_leader_flat(nl, flat);
+  const std::size_t leader = tie_leader_flat(nl, span.flat);
   LogicValue v = blk[leader];
-  if (v == LogicValue::kHighZ && is_pulled_flat(nl, flat)) {
-    v = (pull_level_flat(nl, flat) == 1) ? LogicValue::kHigh : LogicValue::kLow;
-  }
+  v = input_res::pull_map_idle(nl, span.flat, v);
   out = v;
 }
 
