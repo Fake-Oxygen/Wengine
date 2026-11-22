@@ -38,9 +38,11 @@
 #include "wengine/logic/netlist.hpp"
 #include "wengine/logic/optimize_types.hpp"
 #include "wengine/logic/optimize_barrier.hpp"
+#include "wengine/logic/optimize_dedup_index.hpp"
 #include "wengine/logic/optimize_exact.hpp"
 #include "wengine/logic/optimize_o2_emit.hpp"
 #include "wengine/logic/optimize_passes.hpp"
+#include "wengine/logic/optimize_skip.hpp"
 #include "wengine/logic/types.hpp"
 
 #include <cstddef>
@@ -64,62 +66,14 @@ namespace detail {
 // pure-combinational output stays bit-identical).
 
 // --- O2 dedup key bucketing (016, US6) ----------------------------------
-// The all-pairs sweep rebuilds + sorts every gate's key multiset per
-// pair. Phase A builds each live universal gate's sorted key once and
-// folds it into a deterministic 64-bit FNV-1a hash (fixed offset basis,
-// no runtime randomness); phase B visits pairs in the same ascending
-// (s, t) order but skips hash-mismatched pairs after one integer
-// compare, running the exact key compare only on hash hits. Merge
-// decisions, directions, and skips are identical to the all-pairs
-// scan — collisions fall through to the exact compare and never merge
-// on hash equality alone.
-
-/**
- * @brief Build one gate's sorted dedup key multiset + its hash.
- *
- * Key semantics identical to the pre-bucket inline code (same
- * matchable rule, same insertion sort). A zero hash is remapped to 1
- * so 0 stays the unmatchable sentinel.
- *
- * @param[in] nl Netlist holding drivers and ties.
- * @param[in] s Candidate gate slot.
- * @param[in] merge kStrict / kMergeTied key rule.
- * @param[out] sorted Sorted key multiset (kMaxInputs entries).
- * @return Non-zero hash when matchable; 0 when not matchable.
- */
-[[nodiscard]] inline std::uint64_t dedup_sorted_key(const Netlist &nl, Slot s, MergeTied merge,
-                                                    std::uint32_t (&sorted)[kMaxInputs]) noexcept {
-  const Gate &a = nl.slots[s];
-  for (std::uint8_t i = 0; i < a.input_count; ++i) {
-    const DedupKey k = dedup_key_for(nl, s, i, merge);
-    sorted[i] = k.v;
-    if (!k.matchable()) {
-      return 0;
-    }
-  }
-  for (std::uint8_t i = 1; i < a.input_count; ++i) {
-    std::uint32_t key = sorted[i];
-    std::uint8_t j = i;
-    while (j > 0 && sorted[j - 1] > key) {
-      sorted[j] = sorted[j - 1];
-      --j;
-    }
-    sorted[j] = key;
-  }
-  std::uint64_t h = 1469598103934665603ULL; // FNV-1a offset basis (fixed)
-  const std::uint8_t hdr[2] = {static_cast<std::uint8_t>(merge), a.input_count};
-  for (std::size_t k = 0; k < 2; ++k) {
-    h ^= hdr[k];
-    h *= 1099511628211ULL;
-  }
-  for (std::uint8_t i = 0; i < a.input_count; ++i) {
-    for (unsigned b = 0; b < 4; ++b) {
-      h ^= static_cast<std::uint64_t>((sorted[i] >> (b * 8u)) & 0xFFu);
-      h *= 1099511628211ULL;
-    }
-  }
-  return (h != 0) ? h : 1;
-}
+// See optimize_dedup_index.hpp (DedupIndex): phase A builds each live
+// universal gate's sorted key once and folds it into a deterministic
+// 64-bit FNV-1a hash; phase B visits pairs in ascending (s, t) order
+// but skips hash-mismatched pairs after one integer compare, running
+// the exact key compare on hash hits only. Merge decisions,
+// directions, and skips are identical to the all-pairs scan —
+// collisions fall through to the exact compare and never merge on
+// hash equality alone.
 
 /**
  * @brief One O2 dedup sweep: merge identical non-sink universal gates.
@@ -147,72 +101,18 @@ namespace detail {
  * @return True when any merge happened (caller re-runs to fixpoint).
  */
 inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge, const bool *feeds_seq, std::span<std::size_t> tie_survivors,
-                                     std::span<std::uint64_t> bucket, std::span<Slot> bhead, std::span<Slot> bnext) noexcept {
+                                      std::span<std::uint64_t> bucket, std::span<Slot> bhead, std::span<Slot> bnext) noexcept {
   const std::size_t n = slot_count(nl);
-  if (n == 0 || bucket.size() < n || bhead.size() < n || bnext.size() < n) {
+  DedupIndex idx{bucket, bhead, bnext, n};
+  if (!idx.valid()) {
     return false;
   }
   recount_fanout(nl);
   bool changed = false;
-  // Phase A: one sorted-key build + hash per candidate, chained into
-  // buckets (hash % n) in ascending slot order. Non-candidates hash 0
-  // and stay out of every chain.
-  for (std::size_t i = 0; i < n; ++i) {
-    bhead[i] = kNoDriver;
-    bucket[i] = 0;
-  }
-  for (Slot s = static_cast<Slot>(n); s-- > 0;) {
-    const Gate &a = nl.slots[s];
-    if (!a.live || a.kind != u || a.ignored_mask != 0) {
-      continue;
-    }
-    std::uint32_t sorted[kMaxInputs];
-    const std::uint64_t h = dedup_sorted_key(nl, s, merge, sorted);
-    if (h == 0) {
-      continue;
-    }
-    bucket[s] = h;
-    const std::size_t idx = static_cast<std::size_t>(h % static_cast<std::uint64_t>(n));
-    bnext[s] = bhead[idx];
-    bhead[idx] = s;
-  }
-  // Unlink one slot from its bucket chain (selective-rehash helper).
-  auto bucket_unlink = [&](Slot x) {
-    const std::uint64_t h = (x < n) ? bucket[x] : 0;
-    if (h == 0) {
-      return;
-    }
-    const std::size_t idx = static_cast<std::size_t>(h % static_cast<std::uint64_t>(n));
-    Slot *link = &bhead[idx];
-    while (*link != kNoDriver && *link != x) {
-      link = &bnext[*link];
-    }
-    if (*link == x) {
-      *link = bnext[x];
-      bnext[x] = kNoDriver;
-    }
-  };
-  // Rebuild one slot's hash and bucket membership from current tables.
-  auto bucket_refresh = [&](Slot x) {
-    bucket_unlink(x);
-    bucket[x] = 0;
-    if (x >= n || !nl.slots[x].live || nl.slots[x].kind != u || nl.slots[x].ignored_mask != 0) {
-      return;
-    }
-    std::uint32_t sorted[kMaxInputs];
-    const std::uint64_t h = dedup_sorted_key(nl, x, merge, sorted);
-    if (h == 0) {
-      return;
-    }
-    bucket[x] = h;
-    const std::size_t idx = static_cast<std::size_t>(h % static_cast<std::uint64_t>(n));
-    Slot *link = &bhead[idx];
-    while (*link != kNoDriver && *link < x) {
-      link = &bnext[*link];
-    }
-    bnext[x] = *link;
-    *link = x;
-  };
+  // Phase A (DedupIndex): one sorted-key build + hash per candidate,
+  // chained into buckets in ascending slot order. Non-candidates hash
+  // 0 and stay out of every chain.
+  idx.build(nl, u, merge);
   // Phase B: ascending s; within s, ascending bucket members above s.
   // Skipped pairs are cross-bucket (keys differ), which the all-pairs
   // loop rejects without state change — so the merge sequence is
@@ -222,27 +122,27 @@ inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge, 
     if (!nl.slots[s].live || nl.slots[s].kind != u || nl.slots[s].output_fanout == 0) {
       continue; // sinks preserved (output count stable)
     }
-    if (nl.slots[s].ignored_mask != 0 || bucket[s] == 0) {
+    if (nl.slots[s].ignored_mask != 0 || idx.bucket[s] == 0) {
       continue;
     }
     bool merged = true;
     while (merged) {
       merged = false;
       if (!nl.slots[s].live || nl.slots[s].kind != u || nl.slots[s].output_fanout == 0 ||
-          nl.slots[s].ignored_mask != 0 || bucket[s] == 0) {
+          nl.slots[s].ignored_mask != 0 || idx.bucket[s] == 0) {
         break; // s went quiet mid-sweep (defensive; keys are static here)
       }
-      const std::size_t idx = static_cast<std::size_t>(bucket[s] % static_cast<std::uint64_t>(n));
-      Slot t = bhead[idx];
+      const std::size_t bkt = static_cast<std::size_t>(idx.bucket[s] % static_cast<std::uint64_t>(n));
+      Slot t = idx.head[bkt];
       while (t != kNoDriver && t <= s) {
-        t = bnext[t];
+        t = idx.next[t];
       }
       while (t != kNoDriver) {
-        const Slot nxt = bnext[t];
+        const Slot nxt = idx.next[t];
         bool same = false;
         if (t < n && nl.slots[t].live && nl.slots[t].kind == u && nl.slots[t].output_fanout != 0 &&
             nl.slots[t].input_count == nl.slots[s].input_count && nl.slots[t].ignored_mask == 0 &&
-            bucket[t] != 0 && bucket[t] == bucket[s]) {
+            idx.bucket[t] != 0 && idx.bucket[t] == idx.bucket[s]) {
           // Exact compare on freshly rebuilt key sets (hash hits only):
           // collisions fall through here and never merge on hash alone.
           std::uint32_t a_sorted[kMaxInputs];
@@ -265,13 +165,12 @@ inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge, 
         }
         // Merge higher (t) into lower (s): rewire users, remove duplicate.
         // Never merge a gate feeding a sequential gate (opaque barrier).
-        if (feeds_seq != nullptr && feeds_seq[t]) {
+        if (skip::seq_user(feeds_seq, t)) {
           t = nxt;
           continue;
         }
-        // 011: never merge through a shared span (unreachable today — O2
-        // refuses marked netlists upfront — but the freeze is structural).
-        if (drives_shared(nl, t) || drives_shared(nl, s)) {
+        // SkipPolicy merge freeze: never through a shared span.
+        if (skip::merge_locked(nl, s, t)) {
           t = nxt;
           continue;
         }
@@ -299,9 +198,9 @@ inline bool dedup_universal_pass_impl(Netlist &nl, GateKind u, MergeTied merge, 
         }
         rewire_users(nl, t, s);
         (void)remove_gate(nl, t, tie_survivors);
-        // Selective rehash: buckets are exact again before the next pair.
+        // Selective rehash: the index is exact again before the next pair.
         for (std::size_t k = 0; k < affected.size(); ++k) {
-          bucket_refresh(affected[k]);
+          idx.refresh(nl, affected[k], u, merge);
         }
         changed = true;
         merged = true;
@@ -415,11 +314,11 @@ inline bool double_inv_universal_pass(Netlist &nl, GateKind u, const bool *feeds
     // G == E: rewire users, remove G (D becomes orphan if it only drove G;
     // later DCE removes it). Never cancel a gate feeding a sequential
     // gate (opaque barrier).
-    if (feeds_seq != nullptr && feeds_seq[s]) {
+    if (skip::seq_user(feeds_seq, s)) {
       continue;
     }
-    // 011: never cancel through a shared span (see the dedup guard above).
-    if (drives_shared(nl, s)) {
+    // SkipPolicy merge freeze: never cancel through a shared span.
+    if (skip::shared_driver(nl, s)) {
       continue;
     }
     rewire_users(nl, s, e);

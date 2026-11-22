@@ -2,11 +2,12 @@
 
 /**
  * @file
- * Optimizer option vocabulary (levels, targets, parse): the shared
- * vocabulary seam of the optimize stage of the logic pipeline (netlist
- * parse -> state -> eval -> layout/topo -> optimize). Extracted from
- * optimize.hpp so pass/emit/cleanup headers stay standalone without a
- * circular include.
+ * Optimizer option vocabulary (levels, targets, parse) plus the shared
+ * failure vocabulary (BuildError): the shared vocabulary seam of the
+ * optimize stage of the logic pipeline (netlist parse -> state -> eval
+ * -> layout/topo -> optimize). Extracted from optimize.hpp so
+ * pass/emit/cleanup headers stay standalone without a circular
+ * include.
  *
  * Dependency rules: header-only, depends only on core/status. Logic is
  * a standalone domain — never depends on CLI types. Consumers:
@@ -102,3 +103,53 @@ struct OptimizeOptions {
 }
 
 } // namespace wengine::logic
+
+namespace wengine::logic::detail {
+
+/**
+ * @brief Failure modes of the O2 fresh build (mapped to loud messages
+ *        once, in optimize(), so every phase stays a plain predicate).
+ *
+ * Capacity-free: failure modes never scale. Lives here (shared
+ * vocabulary) so the Pass fixpoint driver in optimize_pass.hpp can
+ * report the same modes without including the O2 build header.
+ */
+enum class BuildError : std::uint8_t {
+  /** @brief No failure. */
+  kNone = 0,
+  /** @brief Gate budget exceeded (kMaxGates). */
+  kBudget = 1, // gate budget exceeded (kMaxGates)
+  /** @brief Internal wiring error (emit-map gap, bad indices). */
+  kWiring = 2, // internal wiring error (emit-map gap, bad indices)
+  /** @brief Topology error inside post-cleanup. */
+  kTopo = 3,   // topology error inside post-cleanup
+  /** @brief Internal iteration bound. */
+  kIter = 4,   // internal iteration bound
+};
+
+/**
+ * @brief Loud message for a fresh-build failure mode (reported once by
+ *        optimize()).
+ *
+ * Capacity-free: messages never scale.
+ *
+ * @param[in] e Failure mode to name.
+ * @return String-literal message (zero-copy, no allocation).
+ */
+[[nodiscard]] inline const char *build_error_message(BuildError e) noexcept {
+  switch (e) {
+  case BuildError::kNone:
+    return "optimize: topology error";
+  case BuildError::kBudget:
+    return "optimize: gate budget exceeded (kMaxGates)";
+  case BuildError::kWiring:
+    return "optimize: internal wiring error";
+  case BuildError::kTopo:
+    return "optimize: topology error";
+  case BuildError::kIter:
+    return "optimize: internal iteration bound";
+  }
+  return "optimize: topology error";
+}
+
+} // namespace wengine::logic::detail

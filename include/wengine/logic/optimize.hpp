@@ -89,7 +89,7 @@
 #include "wengine/logic/optimize_o2_dedup.hpp"
 #include "wengine/logic/optimize_o2_emit.hpp"
 #include "wengine/logic/optimize_o2_build.hpp"
-#include "wengine/logic/optimize_o2_min.hpp"
+#include "wengine/logic/optimize_pass.hpp"
 #include "wengine/logic/optimize_passes.hpp"
 #include "wengine/logic/optimize_types.hpp"
 #include "wengine/logic/seq_state.hpp"
@@ -252,54 +252,33 @@ struct OptimizeScratch {
   const bool seq_net = has_sequential_gates(nl);
 
   const bool want_fuse = (opts.level == OptLevel::kO1) || (opts.level == OptLevel::kO2);
-  constexpr std::size_t kMaxItersBase = 16;
-  std::size_t iter = 0;
-  // --- O0/O1 fixpoint (canonical shape: one call per pass) ---
-  while (true) {
-    if (iter >= 2 * slot_count(nl) + kMaxItersBase) {
-      return core::Result<Netlist *>::failure("optimize: internal iteration bound", core::StatusCode::kInternal);
-    }
-    ++iter;
-    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
-      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
-    }
-    bool changed = false;
-    detail::compute_feeds_seq(nl, scr.feeds.data());
-    if (detail::bypass_pass(nl, scr.feeds.data(), scr.tie_scratch)) {
-      changed = true;
-    }
-    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
-      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
-    }
-    detail::compute_feeds_seq(nl, scr.feeds.data());
-    if (want_fuse && detail::fusion_sweep(nl, scr.feeds.data(), scr.tie_scratch)) {
-      changed = true;
-    }
-    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
-      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
-    }
-    if (detail::const_fold_pass(nl, scr.roots.data(), scr.labels, scr.tie_scratch)) {
-      changed = true;
-    }
-    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
-      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
-    }
-    if (detail::exact_simplify_pass(nl, scr.resolved, scr.gate_out, scr.topo, scr.tie_scratch)) {
-      changed = true;
-    }
-    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
-      return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
-    }
-    if (detail::dce_pass(nl, scr.roots.data(), scr.keep, scr.stack, scr.tie_scratch)) {
-      changed = true;
-    }
-    if (!changed) {
-      break;
-    }
+  // --- O0/O1 fixpoint (Pass seam: one table + run_fixpoint) ---
+  detail::PassCtx pctx{};
+  pctx.feeds = scr.feeds.data();
+  pctx.roots = scr.roots.data();
+  pctx.labels = scr.labels;
+  pctx.resolved = scr.resolved;
+  pctx.gate_out = scr.gate_out;
+  pctx.ties = scr.tie_scratch;
+  pctx.keep = scr.keep;
+  pctx.stack = scr.stack;
+  pctx.topo = scr.topo;
+  pctx.seq_net = seq_net;
+  pctx.want_fuse = want_fuse;
+  static constexpr detail::Pass kFixpoint[] = {
+      {"bypass", false, true, detail::pass_bypass},
+      {"fusion", false, true, detail::pass_fusion},
+      {"const-fold", true, false, detail::pass_const_fold},
+      {"exact", false, false, detail::pass_exact},
+      {"dce", false, false, detail::pass_dce},
+  };
+  const detail::BuildError fix_err = detail::run_fixpoint(nl, kFixpoint, 5, pctx);
+  if (fix_err != detail::BuildError::kNone) {
+    return core::Result<Netlist *>::failure(detail::build_error_message(fix_err), core::StatusCode::kInternal);
   }
 
   if (opts.level != OptLevel::kO2) {
-    if (!topo::rebuild(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
+    if (!detail::ensure_topo(nl, seq_net ? EdgeFilter::kCombOnly : EdgeFilter::kAll, scr.topo).ok()) {
       return core::Result<Netlist *>::failure("optimize: topology error", core::StatusCode::kInternal);
     }
     out = nl;

@@ -50,6 +50,7 @@
 #include "wengine/logic/optimize_o2_dedup.hpp"
 #include "wengine/logic/optimize_o2_emit.hpp"
 #include "wengine/logic/optimize_o2_min.hpp"
+#include "wengine/logic/optimize_pass.hpp"
 #include "wengine/logic/optimize_passes.hpp"
 #include "wengine/logic/optimize_types.hpp"
 #include "wengine/logic/seq_state.hpp"
@@ -65,24 +66,8 @@ namespace wengine::logic {
 
 namespace detail {
 
-/**
- * @brief Failure modes of the fresh build (mapped to loud messages
- *        once, in optimize(), so every phase stays a plain predicate).
- *
- * Capacity-free: failure modes never scale.
- */
-enum class BuildError : std::uint8_t {
-  /** @brief No failure. */
-  kNone = 0,
-  /** @brief Gate budget exceeded (kMaxGates). */
-  kBudget = 1, // gate budget exceeded (kMaxGates)
-  /** @brief Internal wiring error (emit-map gap, bad indices). */
-  kWiring = 2, // internal wiring error (emit-map gap, bad indices)
-  /** @brief Topology error inside post-cleanup. */
-  kTopo = 3,   // topology error inside post-cleanup
-  /** @brief Internal iteration bound. */
-  kIter = 4,   // internal iteration bound
-};
+// BuildError + build_error_message live in optimize_types.hpp (shared
+// vocabulary, so the Pass fixpoint driver reports the same modes).
 
 /**
  * @brief Which shared constant-pool gates the fresh build needs.
@@ -417,42 +402,30 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
       }
     }
   }
-  const bool seq_net = has_sequential_gates(nl);
-  constexpr std::size_t kPostItersBase = 16;
-  for (std::size_t it = 0; it < 2 * slot_count(out) + kPostItersBase; ++it) {
-    bool pchanged = false;
-    compute_feeds_seq(out, post_feeds.data());
-    if (seq_net) {
-      if (dedup_universal_tied_pass(out, u, post_feeds.data(), tie_survivors, buckets, bhead, bnext)) {
-        pchanged = true;
-      }
-    } else if (dedup_universal_pass(out, u, post_feeds.data(), tie_survivors, buckets, bhead, bnext)) {
-      pchanged = true;
-    }
-    if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, ts).ok()) {
-      return BuildError::kTopo;
-    }
-    compute_feeds_seq(out, post_feeds.data());
-    if (double_inv_universal_pass(out, u, post_feeds.data(), tie_survivors)) {
-      pchanged = true;
-    }
-    if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, ts).ok()) {
-      return BuildError::kTopo;
-    }
-    if (dce_pass(out, post_roots.data(), keep, stack, tie_survivors)) {
-      pchanged = true;
-    }
-    if (!topo::rebuild(out, has_sequential_gates(out) ? EdgeFilter::kCombOnly : EdgeFilter::kAll, ts).ok()) {
-      return BuildError::kTopo;
-    }
-    if (!pchanged) {
-      break;
-    }
-    if (it + 1 >= 2 * slot_count(out) + kPostItersBase) {
-      return BuildError::kIter;
-    }
-  }
-  return BuildError::kNone;
+  // Pass seam: the same fixpoint table as the O0/O1 loop (dedup +
+  // double-inv + DCE). The passes never create or remove sequential
+  // gates, so one filter probe per invocation suffices; merge_tied
+  // follows the source net (structural tying exists on sequential
+  // nets only).
+  PassCtx ctx{};
+  ctx.feeds = post_feeds.data();
+  ctx.roots = post_roots.data();
+  ctx.ties = tie_survivors;
+  ctx.keep = keep;
+  ctx.stack = stack;
+  ctx.bucket = buckets;
+  ctx.bhead = bhead;
+  ctx.bnext = bnext;
+  ctx.topo = ts;
+  ctx.seq_net = has_sequential_gates(out);
+  ctx.universe = u;
+  ctx.merge_tied = has_sequential_gates(nl);
+  static constexpr Pass kPostCleanup[] = {
+      {"dedup", false, true, pass_dedup},
+      {"double-inv", false, true, pass_double_inv},
+      {"dce", false, false, pass_dce},
+  };
+  return run_fixpoint(out, kPostCleanup, 3, ctx);
 }
 
 /**
@@ -503,31 +476,6 @@ inline void restore_masks(const Netlist &nl, Netlist &out, const bool *reach, co
     return BuildError::kTopo;
   }
   return BuildError::kNone;
-}
-
-/**
- * @brief Loud message for a fresh-build failure mode (reported once by
- *        optimize()).
- *
- * Capacity-free: messages never scale.
- *
- * @param[in] e Build error to name.
- * @return String-literal message (zero-copy, no allocation).
- */
-[[nodiscard]] inline const char *build_error_message(BuildError e) noexcept {
-  switch (e) {
-  case BuildError::kNone:
-    return "optimize: topology error";
-  case BuildError::kBudget:
-    return "optimize: gate budget exceeded (kMaxGates)";
-  case BuildError::kWiring:
-    return "optimize: internal wiring error";
-  case BuildError::kTopo:
-    return "optimize: topology error";
-  case BuildError::kIter:
-    return "optimize: internal iteration bound";
-  }
-  return "optimize: topology error";
 }
 
 } // namespace detail
