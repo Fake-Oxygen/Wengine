@@ -165,7 +165,7 @@ namespace {
     }
   }
   if (rows.gates.size() > kMaxGates) {
-    err = at_line(root["gates"], "too many gates (max 1024)");
+    err = at_line(root["gates"], "too many gates (max " + std::to_string(kMaxGates) + ")");
     return false;
   }
 

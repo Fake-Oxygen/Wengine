@@ -31,7 +31,7 @@ namespace wengine::logic::yaml::detail {
   // count at kMaxGates, so growth cannot fail — the refusal below is
   // unreachable, kept loud by construction.
   if (!ensure_slots(tmp, gate_rows.size())) {
-    err = at_line(sec, "too many gates (max 1024)");
+    err = at_line(sec, "too many gates (max " + std::to_string(kMaxGates) + ")");
     return false;
   }
   for (std::size_t i = 0; i < gate_rows.size(); ++i) {
@@ -283,7 +283,7 @@ namespace wengine::logic::yaml::detail {
   for (std::size_t i = 0; i < in.gates.size(); ++i) {
     if (in.gates[i].has_init) {
       if (i >= inits.size()) {
-        err = "too many gates (max 1024)";
+        err = "too many gates (max " + std::to_string(kMaxGates) + ")";
         return false;
       }
       inits[i] = in.gates[i].init;

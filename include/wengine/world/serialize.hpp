@@ -14,8 +14,8 @@
 
 // Versioned binary persistence for world::State (deterministic, no deps).
 //
-// Format v6, all integers little-endian, doubles as IEEE-754 bits:
-//   'W' 'E' 'N' 'G', u32 version (= 6)
+// Format v7, all integers little-endian, doubles as IEEE-754 bits:
+//   'W' 'E' 'N' 'G', u32 version (= 7)
 //   f64 sim_time, u64 step_index
 //   u32 entity_capacity, generations[u32]..., u32 freelist_size, freelist[u32]...
 //   u32 particle_capacity, per slot: u8 present + f64 x4 (fixed stride)
@@ -26,16 +26,17 @@
 //     u64 table_off, u64 table_len, u64 lua_off, u64 lua_len
 //   u32 table_store_size, f64 table_times[]..., f64 table_values[]...
 //   u32 lua_blob_size, u8 lua_text[]... (opaque script bytes)
-//   Sequential pool (v6 only, fixed stride over kCheckpointNetlistStride slots):
-//     per slot: u8 live, u8 kind, u32 counter, u8 input_count,
-//       u8 ignored_mask, u8 ignore_output, u8 ignore_nq_output,
-//       u16 drivers[8], u8 driver_inv[8], u16 tie_rep[8],
+//   Sequential pool (v7; v6 used a fixed 1024-slot stride):
+//     u32 pool_slots, then per slot: u8 live, u8 kind, u32 counter,
+//       u8 input_count, u8 ignored_mask, u8 ignore_output,
+//       u8 ignore_nq_output, u32 drivers[8] (kNoDriver = 0xFFFFFFFF),
+//       u8 driver_inv[8], u32 tie_rep[8] (leader_flat + 1, 0 = singleton),
 //       u64 propagation_delay_ps
-//     u32 next_counter[21], u16 netlist_live_count
+//     u32 next_counter[21], u32 netlist_live_count
 //     per slot: u8 seq_valid, u8 seq_q, u64 seq_serial
-//     u64 seq_next_serial, u16 seq_live_count
+//     u64 seq_next_serial, u32 seq_live_count
 //     u32 stimulus_len, u8 stimulus[]... (block-interface order, 0/1)
-//     u32 members_len, u16 members[]... (edge-flop slots)
+//     u32 members_len, u32 members[]... (edge-flop slots)
 //     u8 step_all (1 = all domains, members empty)
 //     u32 outputs_len, u8 outputs[]... (settled block outputs, 0/1)
 //   Derived data (fanouts, topo order/levels, dirty) is recomputed on
@@ -74,23 +75,23 @@
 namespace wengine::world {
 
 /**
- * @brief Current binary format version (6). Writers always emit this
+ * @brief Current binary format version (7). Writers always emit this
  *        version; readers accept 1..kStateFormatVersion with per-version
  *        fallback loaders (kind bytes stay append-only across
- *        versions).
+ *        versions). v6 files (fixed 1024-slot stride, u16 slot fields)
+ *        still load via the legacy path.
  */
-inline constexpr std::uint32_t kStateFormatVersion = 6;
+inline constexpr std::uint32_t kStateFormatVersion = 7;
 /**
  * @brief Sanity cap per count field: rejects corrupt files before huge
  *        allocations (any stored count above this fails loading).
  */
 inline constexpr std::uint32_t kMaxStateEntries = 1u << 24;
 /**
- * @brief v6 netlist stride (1024 slots): the checkpoint format stores a
- *        fixed 1024-slot netlist + sequential pool, exactly as before.
- *        The in-memory pool is dynamic, but the on-disk layout is
- *        unchanged — pools past this stride cannot be represented and
- *        fail saving loudly (never truncated, never a version bump).
+ * @brief v6 netlist stride (1024 slots, legacy): v6 checkpoints stored a
+ *        fixed 1024-slot netlist + sequential pool. Kept for the v6
+ *        fallback loader only — v7 stores the dynamic pool size (u32)
+ *        and grows to kMaxGates, so large nets round-trip exactly.
  */
 inline constexpr std::uint32_t kCheckpointNetlistStride = 1024;
 
@@ -247,7 +248,7 @@ inline bool get_f64_le(std::istream &in, double &v) {
 
 /**
  * @brief Serialize a complete world::State to the versioned binary
- *        checkpoint format (v6, little-endian).
+ *        checkpoint format (v7, little-endian).
  *
  * @param[in] s state to write; read-only, never mutated.
  * @param[in] out target binary stream (the full checkpoint is written
@@ -337,40 +338,16 @@ inline bool get_f64_le(std::istream &in, double &v) {
   if (!out) {
     return {core::StatusCode::kInternal};
   }
-  // Sequential pool (v6): fixed-stride topology + Q + stimulus + members.
-  // Derived fanouts/topo recomputed on load, never stored.
-  //
-  // The v6 layout stores exactly kCheckpointNetlistStride slots. Pools
-  // past the stride cannot be represented: loud refusal up front, never
-  // a truncated file (save the netlist via the YAML workspace instead,
-  // which has no stride bound).
-  if (logic::slot_count(s.netlist) > kCheckpointNetlistStride) {
+  // Sequential pool (v7): dynamic pool size + Q + stimulus + members.
+  // Derived fanouts/topo recomputed on load, never stored. The pool
+  // size is bounded by kMaxGates; growth past it fails loudly up front,
+  // never as a truncated file.
+  const std::size_t pool_n = logic::slot_count(s.netlist);
+  if (pool_n > logic::kMaxGates) {
     return core::Status::failure(core::StatusCode::kInvalidArgument);
   }
-  const std::size_t pool_n = logic::slot_count(s.netlist);
-  for (std::uint32_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
-    if (slot >= pool_n) {
-      // Past the pool: fresh-dead encoding (matches a fresh Gate{}:
-      // input_count 2, NQ hidden, everything else zero).
-      detail::put_u8(out, 0);
-      detail::put_u8(out, 0);
-      detail::put_u32_le(out, 0);
-      detail::put_u8(out, 2);
-      detail::put_u8(out, 0);
-      detail::put_u8(out, 0);
-      detail::put_u8(out, 1);
-      for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
-        detail::put_u16_le(out, 0);
-      }
-      for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
-        detail::put_u8(out, 0);
-      }
-      for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
-        detail::put_u16_le(out, 0);
-      }
-      detail::put_u64_le(out, 0);
-      continue;
-    }
+  detail::put_u32_le(out, static_cast<std::uint32_t>(pool_n));
+  for (std::uint32_t slot = 0; slot < static_cast<std::uint32_t>(pool_n); ++slot) {
     const logic::Gate &g = s.netlist.slots[slot];
     detail::put_u8(out, g.live ? 1 : 0);
     detail::put_u8(out, static_cast<std::uint8_t>(g.kind));
@@ -380,21 +357,21 @@ inline bool get_f64_le(std::istream &in, double &v) {
     detail::put_u8(out, g.ignore_output ? 1 : 0);
     detail::put_u8(out, g.ignore_nq_output ? 1 : 0);
     for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
-      detail::put_u16_le(out, static_cast<std::uint16_t>(g.drivers[k]));
+      detail::put_u32_le(out, g.drivers[k]);
     }
     for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
       detail::put_u8(out, s.netlist.driver_inv[static_cast<std::size_t>(slot) * logic::kMaxInputs + k]);
     }
     for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
-      detail::put_u16_le(out, static_cast<std::uint16_t>(logic::tie_rep_entry(s.netlist, static_cast<std::size_t>(slot) * logic::kMaxInputs + k)));
+      detail::put_u32_le(out, logic::tie_rep_entry(s.netlist, static_cast<std::size_t>(slot) * logic::kMaxInputs + k));
     }
     detail::put_u64_le(out, g.propagation_delay_ps);
   }
   for (std::uint32_t c : s.netlist.next_counter) {
     detail::put_u32_le(out, c);
   }
-  detail::put_u16_le(out, static_cast<std::uint16_t>(s.netlist.live_count));
-  for (std::uint32_t slot = 0; slot < kCheckpointNetlistStride; ++slot) {
+  detail::put_u32_le(out, s.netlist.live_count);
+  for (std::uint32_t slot = 0; slot < static_cast<std::uint32_t>(pool_n); ++slot) {
     const std::uint8_t valid = (slot < s.seq.valid.size()) ? s.seq.valid[slot] : 0;
     const logic::LogicValue q = (slot < s.seq.q.size()) ? s.seq.q[slot] : logic::LogicValue::kLow;
     const std::uint64_t serial = (slot < s.seq.serial.size()) ? s.seq.serial[slot] : 0;
@@ -403,14 +380,14 @@ inline bool get_f64_le(std::istream &in, double &v) {
     detail::put_u64_le(out, serial);
   }
   detail::put_u64_le(out, s.seq.next_serial);
-  detail::put_u16_le(out, static_cast<std::uint16_t>(s.seq.live_count));
+  detail::put_u32_le(out, s.seq.live_count);
   detail::put_u32_le(out, static_cast<std::uint32_t>(s.seq_inputs.size()));
   for (logic::LogicValue v : s.seq_inputs) {
     detail::put_u8(out, static_cast<std::uint8_t>(v));
   }
   detail::put_u32_le(out, static_cast<std::uint32_t>(s.seq_members.size()));
   for (logic::Slot m : s.seq_members) {
-    detail::put_u16_le(out, static_cast<std::uint16_t>(m));
+    detail::put_u32_le(out, m);
   }
   detail::put_u8(out, s.seq_members.empty() ? 1 : 0);
   detail::put_u32_le(out, static_cast<std::uint32_t>(s.seq_outputs.size()));
@@ -438,8 +415,9 @@ inline bool get_f64_le(std::istream &in, double &v) {
  *         exhaustion, invalid kinds/quantities/programs, sum operand
  *         rules, netlist topology, sequential member rules, stimulus
  *         and output lengths).
- * @note Fallback loaders: v5/v4/v3/v2/v1 files still load — the
- *       sequential pool comes back empty (v5 and older); v4 zeroes
+  * @note Fallback loaders: v6/v5/v4/v3/v2/v1 files still load — v6
+  *       via the fixed 1024-slot stride path (u16 slot fields); the
+  *       sequential pool comes back empty (v5 and older); v4 zeroes
  *       the Lua ranges and leaves the script store empty; v3 zeroes
  *       the expression/table columns and both stores; v2 synthesizes
  *       serials as slot indices and loads empty operand lists; v1
@@ -761,8 +739,264 @@ inline bool get_f64_le(std::istream &in, double &v) {
       }
     }
   }
-  // Sequential pool (v6 only). v1–v5 files load with an empty pool.
-  if (version >= 6) {
+  // Sequential pool (v7 dynamic; v6 legacy stride below). v1–v5 files
+  // load with an empty pool.
+  if (version >= 7) {
+    auto is_known_kind = [](std::uint8_t b) noexcept {
+      return b <= 7 || b == 16 || b == 17 || b == 18 || b == 19 || b == 20;
+    };
+    tmp.netlist = logic::Netlist{};
+    std::uint32_t pool_n = 0;
+    if (!detail::get_u32_le(in, pool_n) || pool_n > kMaxStateEntries || pool_n > logic::kMaxGates) {
+      return invalid();
+    }
+    if (!logic::ensure_slots(tmp.netlist, pool_n)) {
+      return invalid();
+    }
+    for (std::uint32_t slot = 0; slot < pool_n; ++slot) {
+      std::uint8_t live = 0;
+      std::uint8_t kind = 0;
+      std::uint32_t counter = 0;
+      std::uint8_t input_count = 0;
+      std::uint8_t ignored_mask = 0;
+      std::uint8_t ignore_out = 0;
+      std::uint8_t ignore_nq = 0;
+      if (!detail::get_u8(in, live) || live > 1 || !detail::get_u8(in, kind) ||
+          !is_known_kind(kind) || !detail::get_u32_le(in, counter) ||
+          !detail::get_u8(in, input_count) || input_count < 1 ||
+          input_count > logic::kMaxInputs || !detail::get_u8(in, ignored_mask) ||
+          !detail::get_u8(in, ignore_out) || ignore_out > 1 ||
+          !detail::get_u8(in, ignore_nq) || ignore_nq > 1) {
+        return invalid();
+      }
+      if (live != 0) {
+        if (counter == 0) {
+          return invalid();
+        }
+        if (!logic::valid_fanin(static_cast<logic::GateKind>(kind), input_count)) {
+          return invalid();
+        }
+      }
+      if ((ignored_mask >> input_count) != 0) {
+        return invalid();
+      }
+      logic::Gate &g = tmp.netlist.slots[slot];
+      g.live = live != 0;
+      g.kind = static_cast<logic::GateKind>(kind);
+      g.counter = counter;
+      g.input_count = input_count;
+      g.ignored_mask = ignored_mask;
+      g.ignore_output = ignore_out != 0;
+      g.ignore_nq_output = ignore_nq != 0;
+      for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
+        std::uint32_t d = 0;
+        if (!detail::get_u32_le(in, d) || (d != logic::kNoDriver && d >= pool_n)) {
+          return invalid();
+        }
+        g.drivers[k] = static_cast<logic::Slot>(d);
+      }
+      for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
+        std::uint8_t inv = 0;
+        if (!detail::get_u8(in, inv) || inv > 1) {
+          return invalid();
+        }
+        tmp.netlist.driver_inv[static_cast<std::size_t>(slot) * logic::kMaxInputs + k] = inv;
+      }
+      for (std::size_t k = 0; k < logic::kMaxInputs; ++k) {
+        std::uint32_t rep = 0;
+        if (!detail::get_u32_le(in, rep) || rep > pool_n * logic::kMaxInputs) {
+          return invalid();
+        }
+        logic::set_tie_rep_entry(tmp.netlist, static_cast<std::size_t>(slot) * logic::kMaxInputs + k, rep);
+      }
+      std::uint64_t delay = 0;
+      if (!detail::get_u64_le(in, delay)) {
+        return invalid();
+      }
+      g.propagation_delay_ps = delay;
+    }
+    for (std::size_t k = 0; k < tmp.netlist.next_counter.size(); ++k) {
+      std::uint32_t c = 0;
+      if (!detail::get_u32_le(in, c) || c == 0) {
+        return invalid();
+      }
+      tmp.netlist.next_counter[k] = c;
+    }
+    std::uint32_t nl_live = 0;
+    if (!detail::get_u32_le(in, nl_live) || nl_live > pool_n) {
+      return invalid();
+    }
+    std::uint32_t counted_live = 0;
+    for (std::uint32_t slot = 0; slot < pool_n; ++slot) {
+      if (tmp.netlist.slots[slot].live) {
+        ++counted_live;
+      }
+    }
+    if (counted_live != nl_live) {
+      return invalid();
+    }
+    tmp.netlist.live_count = nl_live;
+    for (std::uint32_t slot = 0; slot < pool_n; ++slot) {
+      const logic::Gate &g = tmp.netlist.slots[slot];
+      if (!g.live) {
+        continue;
+      }
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        const std::size_t flat = static_cast<std::size_t>(slot) * logic::kMaxInputs + i;
+        const logic::Slot drv = g.drivers[i];
+        if (drv != logic::kNoDriver && !tmp.netlist.slots[drv].live) {
+          return invalid();
+        }
+        if (tmp.netlist.driver_inv[flat] != 0) {
+          if (drv == logic::kNoDriver || !logic::is_sequential_kind(tmp.netlist.slots[drv].kind)) {
+            return invalid();
+          }
+        }
+      }
+    }
+    if (!logic::validate_ties(tmp.netlist)) {
+      return invalid();
+    }
+    for (std::uint32_t slot = 0; slot < pool_n; ++slot) {
+      tmp.netlist.slots[slot].output_fanout = 0;
+      tmp.netlist.slots[slot].nq_fanout = 0;
+    }
+    for (std::uint32_t slot = 0; slot < pool_n; ++slot) {
+      const logic::Gate &g = tmp.netlist.slots[slot];
+      if (!g.live) {
+        continue;
+      }
+      for (std::uint8_t i = 0; i < g.input_count; ++i) {
+        const logic::Slot d = g.drivers[i];
+        if (d == logic::kNoDriver) {
+          continue;
+        }
+        const std::size_t flat = static_cast<std::size_t>(slot) * logic::kMaxInputs + i;
+        if (tmp.netlist.driver_inv[flat] != 0) {
+          ++tmp.netlist.slots[d].nq_fanout;
+        } else {
+          ++tmp.netlist.slots[d].output_fanout;
+        }
+      }
+    }
+    tmp.netlist.dirty = true;
+    tmp.seq = logic::SeqState{};
+    if (!logic::ensure_seq_state(tmp.seq, pool_n)) {
+      return invalid();
+    }
+    std::uint64_t max_serial = 0;
+    bool have_serial = false;
+    for (std::uint32_t slot = 0; slot < pool_n; ++slot) {
+      std::uint8_t valid = 0;
+      std::uint8_t q = 0;
+      std::uint64_t serial = 0;
+      if (!detail::get_u8(in, valid) || valid > 1 || !detail::get_u8(in, q) || q > 1 || !detail::get_u64_le(in, serial)) {
+        return invalid();
+      }
+      const bool want = tmp.netlist.slots[slot].live && logic::is_sequential_kind(tmp.netlist.slots[slot].kind);
+      if ((valid != 0) != want) {
+        return invalid();
+      }
+      if (valid != 0) {
+        tmp.seq.valid[slot] = 1;
+        tmp.seq.q[slot] = (q != 0) ? logic::LogicValue::kHigh : logic::LogicValue::kLow;
+        tmp.seq.serial[slot] = serial;
+        for (std::uint32_t o = 0; o < slot; ++o) {
+          if (tmp.seq.valid[o] != 0 && tmp.seq.serial[o] == serial) {
+            return invalid();
+          }
+        }
+        if (!have_serial || serial > max_serial) {
+          max_serial = serial;
+          have_serial = true;
+        }
+      }
+    }
+    std::uint64_t next_serial = 0;
+    std::uint32_t seq_live = 0;
+    if (!detail::get_u64_le(in, next_serial) || !detail::get_u32_le(in, seq_live) || seq_live > pool_n) {
+      return invalid();
+    }
+    std::uint32_t counted_seq = 0;
+    for (std::uint32_t slot = 0; slot < pool_n; ++slot) {
+      if (tmp.seq.valid[slot] != 0) {
+        ++counted_seq;
+      }
+    }
+    if (counted_seq != seq_live) {
+      return invalid();
+    }
+    if (have_serial && next_serial <= max_serial) {
+      return invalid();
+    }
+    tmp.seq.next_serial = next_serial;
+    tmp.seq.live_count = seq_live;
+    std::uint32_t stim_len = 0;
+    if (!detail::get_u32_le(in, stim_len) || stim_len > kMaxStateEntries) {
+      return invalid();
+    }
+    if (stim_len != logic::block_input_count(tmp.netlist)) {
+      return invalid();
+    }
+    tmp.seq_inputs.clear();
+    tmp.seq_inputs.reserve(stim_len);
+    for (std::uint32_t k = 0; k < stim_len; ++k) {
+      std::uint8_t b = 0;
+      if (!detail::get_u8(in, b) || b > 1) {
+        return invalid();
+      }
+      tmp.seq_inputs.push_back((b != 0) ? logic::LogicValue::kHigh : logic::LogicValue::kLow);
+    }
+    std::uint32_t mem_len = 0;
+    if (!detail::get_u32_le(in, mem_len) || mem_len > pool_n) {
+      return invalid();
+    }
+    tmp.seq_members.clear();
+    tmp.seq_members.reserve(mem_len);
+    for (std::uint32_t k = 0; k < mem_len; ++k) {
+      std::uint32_t m = 0;
+      if (!detail::get_u32_le(in, m) || m >= pool_n) {
+        return invalid();
+      }
+      const logic::Gate &g = tmp.netlist.slots[m];
+      if (!g.live) {
+        return invalid();
+      }
+      const bool edge_kind = g.kind == logic::GateKind::kDff || g.kind == logic::GateKind::kJk || g.kind == logic::GateKind::kT;
+      if (!edge_kind) {
+        return invalid();
+      }
+      for (logic::Slot seen : tmp.seq_members) {
+        if (seen == m) {
+          return invalid();
+        }
+      }
+      tmp.seq_members.push_back(m);
+    }
+    std::uint8_t step_all = 0;
+    if (!detail::get_u8(in, step_all) || step_all > 1) {
+      return invalid();
+    }
+    if ((step_all != 0) == (!tmp.seq_members.empty())) {
+      return invalid();
+    }
+    std::uint32_t out_len = 0;
+    if (!detail::get_u32_le(in, out_len) || out_len > kMaxStateEntries) {
+      return invalid();
+    }
+    if (out_len != logic::block_output_count(tmp.netlist)) {
+      return invalid();
+    }
+    tmp.seq_outputs.clear();
+    tmp.seq_outputs.reserve(out_len);
+    for (std::uint32_t k = 0; k < out_len; ++k) {
+      std::uint8_t b = 0;
+      if (!detail::get_u8(in, b) || b > 1) {
+        return invalid();
+      }
+      tmp.seq_outputs.push_back((b != 0) ? logic::LogicValue::kHigh : logic::LogicValue::kLow);
+    }
+  } else if (version == 6) {
     auto is_known_kind = [](std::uint8_t b) noexcept {
       return b <= 7 || b == 16 || b == 17 || b == 18 || b == 19 || b == 20;
     };

@@ -532,7 +532,7 @@ inline void ignore_tie_class(Netlist &nl, std::size_t leader, std::span<std::siz
 
 /**
  * @brief Byte-level read of one raw tie_rep entry for checkpoint
- *        serialization (world format v6).
+ *        serialization (world format v6/v7).
  *
  * @param[in] nl Netlist holding the tie table.
  * @param[in] flat Flat pin index from tie_flat.
